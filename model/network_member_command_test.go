@@ -19,9 +19,9 @@ import (
 func TestNetworkMembersCommandArgsTakeOnlyAfter(t *testing.T) {
 	after := server.NewId()
 	for body, want := range map[string]*server.Id{
-		"":                                    nil,
-		"  ":                                  nil,
-		"{}":                                  nil,
+		"":                                     nil,
+		"  ":                                   nil,
+		"{}":                                   nil,
 		` {"after":"` + after.String() + `"} `: &after,
 	} {
 		args, err := NetworkMembersCommandArgs([]byte(body))
@@ -45,6 +45,9 @@ func TestNetworkMembersCommandArgsTakeOnlyAfter(t *testing.T) {
 		`"after"`,
 		`{"after":"` + after.String() + `"} {}`,
 		`{"after":"` + after.String() + `"}}`,
+		`{"AFTER":"` + after.String() + `"}`,
+		`{"after":"` + after.String() + `","After":"` + server.NewId().String() + `"}`,
+		`{"after":null}`,
 	} {
 		_, err := NetworkMembersCommandArgs([]byte(body))
 		if !errors.Is(err, ErrNetworkMembersCommandBody) || strings.Contains(err.Error(), "example.com") {

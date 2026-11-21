@@ -398,19 +398,27 @@ func NetworkMembersCommandArgs(body []byte) (*GetNetworkMembersArgs, error) {
 	if !strings.HasPrefix(text, "{") {
 		return nil, ErrNetworkMembersCommandBody
 	}
+	// by exact name: encoding/json would match a struct field's name in any case, so AFTER beside after could name a
+	// second cursor the consent page shows apart from the one read
 	decoder := json.NewDecoder(strings.NewReader(text))
-	decoder.DisallowUnknownFields()
-	page := &struct {
-		After *string `json:"after"`
-	}{}
-	if err := decoder.Decode(page); err != nil {
+	page := map[string]json.RawMessage{}
+	if err := decoder.Decode(&page); err != nil {
 		return nil, ErrNetworkMembersCommandBody
 	}
 	if _, err := decoder.Token(); err != io.EOF {
 		return nil, ErrNetworkMembersCommandBody
 	}
-	if page.After != nil {
-		after, err := server.ParseId(*page.After)
+	for name := range page {
+		if name != "after" {
+			return nil, ErrNetworkMembersCommandBody
+		}
+	}
+	if raw, found := page["after"]; found {
+		text := ""
+		if err := json.Unmarshal(raw, &text); err != nil {
+			return nil, ErrNetworkMembersCommandBody
+		}
+		after, err := server.ParseId(text)
 		if err != nil || after == (server.Id{}) {
 			return nil, ErrNetworkMembersCommandBody
 		}
