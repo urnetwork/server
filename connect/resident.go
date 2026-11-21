@@ -1821,7 +1821,10 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 			sendBuffer.setIOOp(header.Op)
 			pinger := newExchangePinger(self.settings)
 			defer pinger.stop()
-			batch := make([][]byte, 0, self.settings.ExchangeWriteBatchCount)
+			// grown by append to the largest batch the link writes: the
+			// gather's condition bounds it, so a sparse link keeps a few
+			// slots, not ExchangeWriteBatchCount (6 KiB) from its first write
+			var batch [][]byte
 			// gather pending messages into `batch` without blocking, bounded by
 			// the write batch limits, and write them with a single writev.
 			// returns false to end the send loop (closed channel or write error).
@@ -3361,7 +3364,10 @@ func (self *ExchangeConnection) Run() {
 
 		pinger := newExchangePinger(self.settings)
 		defer pinger.stop()
-		batch := make([][]byte, 0, self.settings.ExchangeWriteBatchCount)
+		// grown by append to the largest batch the link writes: the gather's
+		// condition bounds it, so a sparse link keeps a few slots, not
+		// ExchangeWriteBatchCount (6 KiB) from its first write
+		var batch [][]byte
 		// gather pending messages into `batch` without blocking, bounded by the
 		// write batch limits, and write them with a single writev.
 		// returns false to end the send loop (closed channel or write error).
