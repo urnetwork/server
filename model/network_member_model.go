@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"slices"
 	"strings"
@@ -366,9 +367,56 @@ type GetNetworkMembersResult struct {
 const networkMembersRefusedMessage = "Only the team's Owners and Admins may list its members."
 
 func init() {
-	// `ur admin members` reads the first page with a one-command admin token, its
-	// use spent in the read's transaction (session.RegisterAdminCommandRoute)
-	session.RegisterAdminCommandRoute(http.MethodGet, "/network/members")
+	// `ur admin members` and `ur acl push` read a page with a one-command admin
+	// token, its use spent in the read's transaction, a page past the first by
+	// the after its command's body names (QD-1162), which the body check holds
+	// to that one field before any consent shows the command
+	// (session.RegisterAdminCommandRouteWithBodyCheck)
+	session.RegisterAdminCommandRouteWithBodyCheck(http.MethodGet, "/network/members", func(body []byte) error {
+		_, err := NetworkMembersCommandArgs(body)
+		return err
+	})
+}
+
+// A page command's body that is not empty, {} or {"after": <member_id>}: the
+// error names what was refused, never a value.
+var ErrNetworkMembersCommandBody = errors.New("the members page command's body names at most after, a member_id")
+
+// The page a one-command admin token's GET /network/members reads (QD-1162).
+// Its command binds the method, the query-free path and the canonical body, so
+// a query cursor would sit outside the consented command: a page past the first
+// names the member_id to read after in the body, inside the command's digest,
+// and each further page is a command of its own. The body is empty or one JSON
+// object naming at most after, so a directory request carries nothing of a
+// policy, no email among it. An account session pages by its query, as before.
+func NetworkMembersCommandArgs(body []byte) (*GetNetworkMembersArgs, error) {
+	args := &GetNetworkMembersArgs{}
+	text := strings.TrimSpace(string(body))
+	if len(text) == 0 {
+		return args, nil
+	}
+	if !strings.HasPrefix(text, "{") {
+		return nil, ErrNetworkMembersCommandBody
+	}
+	decoder := json.NewDecoder(strings.NewReader(text))
+	decoder.DisallowUnknownFields()
+	page := &struct {
+		After *string `json:"after"`
+	}{}
+	if err := decoder.Decode(page); err != nil {
+		return nil, ErrNetworkMembersCommandBody
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return nil, ErrNetworkMembersCommandBody
+	}
+	if page.After != nil {
+		after, err := server.ParseId(*page.After)
+		if err != nil || after == (server.Id{}) {
+			return nil, ErrNetworkMembersCommandBody
+		}
+		args.After = &after
+	}
+	return args, nil
 }
 
 // GET /network/members: the members of the session's network, a team on the team
@@ -376,9 +424,10 @@ func init() {
 //
 // A member whose role holds RolePermissionMembers reads them, an Owner or an
 // Admin, as the route's role gate asks too (TEAM-M6-03). A pending member reads
-// nothing. A one-command admin token with the all scope reads the first page
-// once (`ur admin members`, TEAM-M6-08), its use spent in the read's
-// transaction, a replay answering the first read.
+// nothing. A one-command admin token with the all scope reads one page once
+// (`ur admin members`, TEAM-M6-08; `ur acl push`), the first or the one past
+// the after its command's body names (NetworkMembersCommandArgs, QD-1162), its
+// use spent in the read's transaction, a replay answering the first read.
 func GetNetworkMembers(args *GetNetworkMembersArgs, clientSession *session.ClientSession) (*GetNetworkMembersResult, error) {
 	return newNetworkTeams().getMembers(args, clientSession)
 }

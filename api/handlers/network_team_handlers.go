@@ -1,7 +1,11 @@
 package handlers
 
 import (
+	"fmt"
+	"io"
 	"net/http"
+
+	"github.com/urnetwork/sidecar"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
@@ -20,6 +24,11 @@ func CreateNetworkTeam(w http.ResponseWriter, r *http.Request) {
 
 // GET /network/members?after=<member_id>: the team's members, a page at a
 // time. A network outside the team tier is refused with a QuotaRefusal (402).
+// An account session pages by its query. A one-command admin token's request
+// carries no query, which its command does not cover (the authenticator
+// refuses one), so it names the member_id to read after in its JSON body,
+// inside the command's digest, and each further page is a command of its own
+// (model.NetworkMembersCommandArgs, QD-1162).
 func GetNetworkMembers(w http.ResponseWriter, r *http.Request) {
 	args := &model.GetNetworkMembersArgs{}
 	if value := r.URL.Query().Get("after"); value != "" {
@@ -31,7 +40,26 @@ func GetNetworkMembers(w http.ResponseWriter, r *http.Request) {
 		args.After = &after
 	}
 	impl := func(clientSession *session.ClientSession) (*model.GetNetworkMembersResult, error) {
-		return model.GetNetworkMembers(args, clientSession)
+		if clientSession.AdminCommand == nil {
+			return model.GetNetworkMembers(args, clientSession)
+		}
+		// the body the authenticator read whole, within the command's bound, and left readable
+		body := []byte{}
+		if r.Body != nil {
+			read, err := io.ReadAll(io.LimitReader(r.Body, int64(sidecar.AdminCommandMaxBodyByteCount)+1))
+			if err != nil {
+				return nil, err
+			}
+			body = read
+		}
+		if sidecar.AdminCommandMaxBodyByteCount < len(body) {
+			return nil, fmt.Errorf("%d %s", http.StatusBadRequest, "Invalid page command.")
+		}
+		commandArgs, err := model.NetworkMembersCommandArgs(body)
+		if err != nil {
+			return nil, fmt.Errorf("%d %s", http.StatusBadRequest, "Invalid page command.")
+		}
+		return model.GetNetworkMembers(commandArgs, clientSession)
 	}
 	router.WrapRequireAuth(impl, w, r)
 }
