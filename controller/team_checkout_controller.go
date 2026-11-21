@@ -13,6 +13,7 @@ import (
 	"github.com/stripe/stripe-go/v82"
 	stripecheckout "github.com/stripe/stripe-go/v82/checkout/session"
 	stripeprice "github.com/stripe/stripe-go/v82/price"
+	stripesub "github.com/stripe/stripe-go/v82/subscription"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
@@ -296,12 +297,13 @@ func stripeTeamPriceMismatch(item stripeTeamItem, price *stripe.Price, config *m
 
 // Reads each item's price from Stripe and returns why the first that differs from pro.yml does,
 // "" when none does. An error means Stripe could not be read.
-func stripeTeamVerifyPrices(ctx context.Context, items []*stripeTeamCheckoutItem, config *model.ProTeamConfig) (string, error) {
+func stripeTeamVerifyPrices(ctx context.Context, key string, items []*stripeTeamCheckoutItem, config *model.ProTeamConfig) (string, error) {
+	client := stripeprice.Client{B: stripe.GetBackend(stripe.APIBackend), Key: key}
 	for _, item := range items {
 		params := &stripe.PriceParams{}
 		params.Context = ctx
 		params.AddExpand("tiers")
-		price, err := stripeprice.Get(item.priceId, params)
+		price, err := client.Get(item.priceId, params)
 		if err != nil {
 			return "", fmt.Errorf("price %s: %w", item.priceId, err)
 		}
@@ -384,15 +386,11 @@ func TeamCheckout(
 		return teamCheckoutRefusal(PurchaseErrorCodeCheckoutUnavailable, "Checkout is not configured.")
 	}
 
-	stripe.Key = stripeApiToken()
+	key := stripeApiToken()
 
 	// a network already paying for Pro keeps Pro's refusal, and one Stripe still bills for
 	// Team is never sold a second subscription
-	customerId := ""
-	if existing, _ := model.GetStripeCustomer(clientSession); existing != nil {
-		customerId = *existing
-	}
-	if stripeNetworkHasActiveSubscription(clientSession, customerId) {
+	if stripeNetworkHasActiveSubscription(clientSession, "") {
 		glog.Infof("[stripe][team]checkout: network %s already has an active subscription\n", networkId)
 		return teamCheckoutRefusal(PurchaseErrorCodeAlreadySubscribed, stripeAlreadySubscribedMessage)
 	}
@@ -408,7 +406,7 @@ func TeamCheckout(
 		return teamCheckoutRefusal(PurchaseErrorCodeAlreadySubscribed, teamCheckoutAlreadySubscribedMessage)
 	}
 
-	mismatch, err := stripeTeamVerifyPrices(stripeCtx, items, config)
+	mismatch, err := stripeTeamVerifyPrices(stripeCtx, key, items, config)
 	if err != nil {
 		glog.Errorf("[stripe][team]checkout: could not read the team prices: %s\n", err)
 		return teamCheckoutRefusal(PurchaseErrorCodeStartFailed, "Could not start checkout. Please try again.")
@@ -419,15 +417,74 @@ func TeamCheckout(
 		return teamCheckoutRefusal(PurchaseErrorCodePlanUnavailable, teamCheckoutNotConfiguredMessage)
 	}
 
+	customerId, err := stripeCustomerIdForSessionWithKey(stripeCtx, clientSession, key)
+	if err != nil {
+		return teamCheckoutRefusal(PurchaseErrorCodeStartFailed, purchaseStartFailedMessage)
+	}
+	// A completed purchase can precede the webhook that writes its first renewal.
+	customerSubscriptions := stripesub.Client{B: stripe.GetBackend(stripe.APIBackend), Key: key}
+	subParams := &stripe.SubscriptionListParams{Customer: stripe.String(customerId), Status: stripe.String("all")}
+	subParams.Context = stripeCtx
+	subs := customerSubscriptions.List(subParams)
+	for subs.Next() {
+		if stripeSubscriptionBlocksNewPurchase(subs.Subscription()) {
+			return teamCheckoutRefusal(PurchaseErrorCodeAlreadySubscribed, teamCheckoutAlreadySubscribedMessage)
+		}
+	}
+	if subs.Err() != nil {
+		return teamCheckoutRefusal(PurchaseErrorCodeStartFailed, purchaseStartFailedMessage)
+	}
+	checkouts := stripecheckout.Client{B: stripe.GetBackend(stripe.APIBackend), Key: key}
+	current, previousId, err := stripeTeamCheckoutHistory(stripeCtx, checkouts, customerId, networkId)
+	if err != nil {
+		return teamCheckoutRefusal(PurchaseErrorCodeStartFailed, purchaseStartFailedMessage)
+	}
+	if current != nil {
+		return teamCheckoutFromSession(stripeCtx, checkouts, current, uiMode, redirectNever)
+	}
+	if previousId == "" {
+		// Early checkouts without an existing customer let Stripe assign one at
+		// completion. Look across customers for the lifetime of those old sessions.
+		recent := &stripe.CheckoutSessionListParams{CreatedRange: &stripe.RangeQueryParams{
+			GreaterThanOrEqual: teamCheckoutNow().Add(-settings.SessionTimeout).Unix(),
+		}}
+		pending, _, err := stripeNetworkCheckoutSessions(stripeCtx, checkouts, recent, networkId)
+		if err != nil {
+			return teamCheckoutRefusal(PurchaseErrorCodeStartFailed, purchaseStartFailedMessage)
+		}
+		if pending != nil {
+			return teamCheckoutFromSession(stripeCtx, checkouts, pending, uiMode, redirectNever)
+		}
+		// An older completed checkout may also be missing its first paid webhook.
+		legacy, err := stripeSearchNetworkSubscriptions(stripeCtx, networkId)
+		if err != nil {
+			return teamCheckoutRefusal(PurchaseErrorCodeStartFailed, purchaseStartFailedMessage)
+		}
+		for _, candidate := range legacy {
+			if !stripeTeamMarked(candidate.Metadata) || stripeSubscriptionTerminal(candidate.Status) {
+				continue
+			}
+			sub, err := stripeDunningFetchSubscription(stripeCtx, candidate.Id, stripeDunningSettingsFunc())
+			if err != nil || !stripeTeamMarked(sub.Metadata) || sub.Metadata[stripeMetadataNetworkId] != networkId.String() {
+				return teamCheckoutRefusal(PurchaseErrorCodeStartFailed, purchaseStartFailedMessage)
+			}
+			if !stripeSubscriptionTerminal(sub.Status) {
+				return teamCheckoutRefusal(PurchaseErrorCodeAlreadySubscribed, teamCheckoutAlreadySubscribedMessage)
+			}
+		}
+	}
+
 	expireTime := teamCheckoutNow().UTC().Add(settings.SessionTimeout)
 	anchorTime := teamCheckoutAnchorTime(expireTime)
 
 	params.Context = stripeCtx
 	params.Mode = stripe.String(string(stripe.CheckoutSessionModeSubscription))
 	params.ExpiresAt = stripe.Int64(expireTime.Unix())
-	if customerId != "" {
-		params.Customer = stripe.String(customerId)
-	}
+	params.Customer = stripe.String(customerId)
+	params.Metadata = map[string]string{stripeMetadataTeam: stripeTeamMark}
+	// One successor to each terminal session, across processes and time boundaries. A
+	// late or ambiguous response cannot open a second payable checkout.
+	params.SetIdempotencyKey("team-checkout/" + networkId.String() + "/" + previousId)
 	for _, item := range items {
 		lineItem := &stripe.CheckoutSessionLineItemParams{
 			Price: stripe.String(item.priceId),
@@ -446,8 +503,12 @@ func TeamCheckout(
 		},
 	}
 
-	checkoutSession, err := stripecheckout.New(params)
+	checkoutSession, err := checkouts.New(params)
 	if err != nil {
+		// A concurrent request can have the same predecessor but different parameters.
+		if pending, _, lookupErr := stripeTeamCheckoutHistory(stripeCtx, checkouts, customerId, networkId); lookupErr == nil && pending != nil {
+			return teamCheckoutFromSession(stripeCtx, checkouts, pending, uiMode, redirectNever)
+		}
 		glog.Errorf("[stripe][team]could not create a checkout session for network %s: %s\n", networkId, err)
 		return teamCheckoutRefusal(PurchaseErrorCodeStartFailed, "Could not start checkout. Please try again.")
 	}
@@ -456,15 +517,77 @@ func TeamCheckout(
 		checkoutSession.ID, networkId, uiMode, anchorTime.Format(time.RFC3339),
 	)
 
+	return teamCheckoutFromSession(stripeCtx, checkouts, checkoutSession, uiMode, redirectNever)
+}
+
+// A subscription checkout remains pending until Stripe closes it. For a completed
+// checkout, only a terminal subscription permits a successor. Earlier builds set
+// the network reference on subscription checkouts but only marked the subscription.
+func stripeTeamCheckoutHistory(ctx context.Context, client stripecheckout.Client, customerId string, networkId server.Id) (current *stripe.CheckoutSession, previousId string, err error) {
+	return stripeNetworkCheckoutSessions(ctx, client, &stripe.CheckoutSessionListParams{Customer: stripe.String(customerId)}, networkId)
+}
+
+func stripeNetworkCheckoutSessions(ctx context.Context, client stripecheckout.Client, params *stripe.CheckoutSessionListParams, networkId server.Id) (current *stripe.CheckoutSession, previousId string, err error) {
+	params.Context = ctx
+	params.AddExpand("data.subscription")
+	sessions := client.List(params)
+	for sessions.Next() {
+		s := sessions.CheckoutSession()
+		if s.Mode != stripe.CheckoutSessionModeSubscription || s.ClientReferenceID != networkId.String() {
+			continue
+		}
+		if previousId == "" && stripeTeamMarked(s.Metadata) {
+			previousId = s.ID
+		}
+		switch s.Status {
+		case stripe.CheckoutSessionStatusExpired:
+		case stripe.CheckoutSessionStatusComplete:
+			if s.Subscription == nil || !stripeSubscriptionTerminal(string(s.Subscription.Status)) {
+				return s, previousId, nil
+			}
+		case stripe.CheckoutSessionStatusOpen:
+			return s, previousId, nil
+		default:
+			return nil, "", fmt.Errorf("unknown checkout session status %q", s.Status)
+		}
+	}
+	return nil, previousId, sessions.Err()
+}
+
+// Returns an existing session only through its own UI, with its original redirect behavior.
+func teamCheckoutFromSession(ctx context.Context, client stripecheckout.Client, checkoutSession *stripe.CheckoutSession, uiMode string, redirectNever bool) (*TeamCheckoutResult, error) {
+	if checkoutSession.Status == stripe.CheckoutSessionStatusOpen && stripeTeamMarked(checkoutSession.Metadata) && string(checkoutSession.UIMode) == uiMode &&
+		(uiMode == StripeUiModeHosted && checkoutSession.URL == "" || uiMode == StripeUiModeEmbedded && checkoutSession.ClientSecret == "") {
+		params := &stripe.CheckoutSessionParams{}
+		params.Context = ctx
+		full, err := client.Get(checkoutSession.ID, params)
+		if err != nil || full.ID != checkoutSession.ID || full.ClientReferenceID != checkoutSession.ClientReferenceID {
+			return teamCheckoutRefusal(PurchaseErrorCodeStartFailed, purchaseStartFailedMessage)
+		}
+		checkoutSession = full
+	}
+	if checkoutSession.Status == stripe.CheckoutSessionStatusComplete {
+		return teamCheckoutRefusal(PurchaseErrorCodeAlreadySubscribed, teamCheckoutAlreadySubscribedMessage)
+	}
+	if checkoutSession.Status != stripe.CheckoutSessionStatusOpen || !stripeTeamMarked(checkoutSession.Metadata) ||
+		string(checkoutSession.UIMode) != uiMode || (checkoutSession.RedirectOnCompletion == stripe.CheckoutSessionRedirectOnCompletionNever) != redirectNever {
+		return teamCheckoutRefusal(PurchaseErrorCodeCheckoutUnavailable, "A subscription checkout is already open. Complete it or wait for it to expire.")
+	}
 	result := &TeamCheckoutResult{
 		UiMode:    uiMode,
 		SessionId: checkoutSession.ID,
 	}
 	switch uiMode {
 	case StripeUiModeEmbedded:
+		if checkoutSession.ClientSecret == "" {
+			return teamCheckoutRefusal(PurchaseErrorCodeStartFailed, purchaseStartFailedMessage)
+		}
 		result.ClientSecret = checkoutSession.ClientSecret
 		result.PublishableKey = stripePublishableKey()
 	case StripeUiModeHosted:
+		if checkoutSession.URL == "" {
+			return teamCheckoutRefusal(PurchaseErrorCodeStartFailed, purchaseStartFailedMessage)
+		}
 		result.CheckoutUrl = checkoutSession.URL
 	}
 	return result, nil

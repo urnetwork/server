@@ -59,6 +59,52 @@ func (self *TeamSubscription) LiveAt(at time.Time) bool {
 
 const teamSubscriptionColumns = `network_id, subscription_id, customer_id, anchor_time, start_time, end_time`
 
+// Orders billing decisions on a Team even before its first paid subscription exists.
+func LockTeamBillingInTx(ctx context.Context, tx server.PgTx, networkId server.Id) (found bool) {
+	if !server.SidecarMg6Linked() {
+		return false
+	}
+	rows, err := tx.Query(ctx, `SELECT network_id FROM network_team WHERE network_id = $1 FOR UPDATE`, networkId)
+	server.WithPgResult(rows, err, func() { found = rows.Next() })
+	return
+}
+
+// A rejected contract stays rejected after its original or a later subscription ends.
+func IsDuplicateTeamSubscriptionInTx(ctx context.Context, tx server.PgTx, networkId server.Id, subscriptionId string) (duplicate bool) {
+	server.Raise(tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM payment_reconciliation_event
+			WHERE network_id = $1 AND store = $2 AND action = $3 AND evidence = $4 AND NOT dry_run
+		)
+	`, networkId, SubscriptionMarketStripe, PaymentReconcileActionDuplicateTeamSubscription, subscriptionId).Scan(&duplicate))
+	return
+}
+
+// Rejected contracts still awaiting confirmation of cancellation at Stripe.
+func ListPendingDuplicateTeamSubscriptionsInConn(connOwner server.PgConn, ctx context.Context, after server.Id, limit int) (events []*PaymentReconciliationEvent) {
+	server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
+		rows, err := conn.Query(ctx, `
+			SELECT e.event_id, e.network_id, e.evidence
+			FROM payment_reconciliation_event e
+			WHERE e.store = $1 AND e.action = $2 AND NOT e.dry_run AND e.network_id IS NOT NULL AND e.event_id > $3
+				AND NOT EXISTS (
+					SELECT 1 FROM payment_reconciliation_event done
+					WHERE done.store = e.store AND done.action = $4 AND NOT done.dry_run
+						AND done.network_id = e.network_id AND done.evidence = e.evidence
+				)
+			ORDER BY e.event_id LIMIT $5
+		`, SubscriptionMarketStripe, PaymentReconcileActionDuplicateTeamSubscription, after, PaymentReconcileActionDuplicateTeamStopped, limit)
+		server.WithPgResult(rows, err, func() {
+			for rows.Next() {
+				event := &PaymentReconciliationEvent{}
+				server.Raise(rows.Scan(&event.EventId, &event.NetworkId, &event.Evidence))
+				events = append(events, event)
+			}
+		})
+	})
+	return
+}
+
 func scanTeamSubscription(row interface{ Scan(dest ...any) error }) *TeamSubscription {
 	subscription := &TeamSubscription{}
 	server.Raise(row.Scan(
@@ -182,17 +228,19 @@ func GetLiveTeamSubscriptionInConn(connOwner server.PgConn, ctx context.Context,
 		return nil
 	}
 	server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
-		subscriptions := teamSubscriptionsInConn(
-			ctx,
-			conn,
-			`SELECT `+teamSubscriptionColumns+` FROM team_subscription WHERE network_id = $1 AND end_time IS NULL`,
-			networkId,
-		)
-		if 0 < len(subscriptions) {
-			subscription = subscriptions[0]
-		}
+		subscription = GetLiveTeamSubscriptionWithQuery(ctx, conn, networkId)
 	})
 	return
+}
+
+// Reads the live contract through the caller's connection or transaction.
+func GetLiveTeamSubscriptionWithQuery(ctx context.Context, query server.PgCanQuery, networkId server.Id) *TeamSubscription {
+	subscriptions := teamSubscriptionsInConn(ctx, query,
+		`SELECT `+teamSubscriptionColumns+` FROM team_subscription WHERE network_id = $1 AND end_time IS NULL`, networkId)
+	if len(subscriptions) == 0 {
+		return nil
+	}
+	return subscriptions[0]
 }
 
 // The network's live subscription, or nil.

@@ -11,9 +11,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -33,11 +35,19 @@ const (
 )
 
 type teamStripeTestEnv struct {
-	stateLock     sync.Mutex
-	prices        map[string]map[string]any
-	invoices      map[string]map[string]any
-	subscriptions map[string]map[string]any
-	checkoutForms []url.Values
+	stateLock                sync.Mutex
+	prices                   map[string]map[string]any
+	invoices                 map[string]map[string]any
+	listedPaidInvoiceIds     []string
+	subscriptions            map[string]map[string]any
+	cancellations            map[string]int
+	rejectNextCancellation   bool
+	checkoutForms            []url.Values
+	checkouts                []map[string]any
+	checkoutKeys             map[string]int
+	afterCheckoutList        func()
+	afterSubscriptionRead    func(string)
+	loseNextCheckoutResponse bool
 
 	testServer *httptest.Server
 }
@@ -49,6 +59,8 @@ func newTeamStripeTestEnv(t testing.TB) *teamStripeTestEnv {
 		prices:        map[string]map[string]any{},
 		invoices:      map[string]map[string]any{},
 		subscriptions: map[string]map[string]any{},
+		cancellations: map[string]int{},
+		checkoutKeys:  map[string]int{},
 	}
 	writeJson := func(w http.ResponseWriter, status int, object any) {
 		w.Header().Set("Content-Type", "application/json")
@@ -59,6 +71,9 @@ func newTeamStripeTestEnv(t testing.TB) *teamStripeTestEnv {
 		writeJson(w, http.StatusNotFound, map[string]any{"error": map[string]any{"type": "invalid_request_error", "message": "not found"}})
 	}
 	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/customers", func(w http.ResponseWriter, r *http.Request) {
+		writeJson(w, http.StatusOK, map[string]any{"id": "cus_synthetic_" + r.FormValue("metadata[network_id]"), "object": "customer"})
+	})
 	mux.HandleFunc("GET /v1/prices/{priceId}", func(w http.ResponseWriter, r *http.Request) {
 		env.stateLock.Lock()
 		price, ok := env.prices[r.PathValue("priceId")]
@@ -77,23 +92,93 @@ func newTeamStripeTestEnv(t testing.TB) *teamStripeTestEnv {
 			return
 		}
 		env.stateLock.Lock()
+		defer env.stateLock.Unlock()
+		key := r.Header.Get("Idempotency-Key")
+		if index, ok := env.checkoutKeys[key]; ok {
+			if form.Encode() != env.checkoutForms[index].Encode() {
+				writeJson(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"type": "idempotency_error"}})
+				return
+			}
+			writeJson(w, http.StatusOK, env.checkouts[index])
+			return
+		}
+		env.checkoutKeys[key] = len(env.checkouts)
 		env.checkoutForms = append(env.checkoutForms, form)
 		sessionId := fmt.Sprintf("cs_synthetic_%d", len(env.checkoutForms))
-		env.stateLock.Unlock()
-		writeJson(w, http.StatusOK, map[string]any{
-			"id":            sessionId,
-			"object":        "checkout.session",
-			"url":           "https://checkout.stripe.example/c/" + sessionId,
-			"client_secret": sessionId + "_secret",
-		})
+		uiMode := form.Get("ui_mode")
+		if uiMode == "" {
+			uiMode = StripeUiModeHosted
+		}
+		expiresAt, _ := strconv.ParseInt(form.Get("expires_at"), 10, 64)
+		s := map[string]any{
+			"id":                     sessionId,
+			"object":                 "checkout.session",
+			"customer":               form.Get("customer"),
+			"mode":                   form.Get("mode"),
+			"ui_mode":                uiMode,
+			"status":                 "open",
+			"client_reference_id":    form.Get("client_reference_id"),
+			"redirect_on_completion": form.Get("redirect_on_completion"),
+			"metadata":               map[string]string{stripeMetadataTeam: form.Get("metadata[team]")},
+			"expires_at":             expiresAt,
+			"created":                teamCheckoutNow().Unix(),
+			"url":                    "https://checkout.stripe.example/c/" + sessionId,
+			"client_secret":          sessionId + "_secret",
+		}
+		env.checkouts = append(env.checkouts, s)
+		if env.loseNextCheckoutResponse {
+			env.loseNextCheckoutResponse = false
+			writeJson(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]any{"type": "api_error", "message": "synthetic lost response"}})
+			return
+		}
+		writeJson(w, http.StatusOK, s)
 	})
 	mux.HandleFunc("GET /v1/checkout/sessions", func(w http.ResponseWriter, r *http.Request) {
-		writeJson(w, http.StatusOK, map[string]any{"data": []any{}, "has_more": false})
+		env.stateLock.Lock()
+		data := []any{}
+		minCreated, _ := strconv.ParseInt(r.URL.Query().Get("created[gte]"), 10, 64)
+		for i := len(env.checkouts) - 1; 0 <= i; i-- {
+			s := env.checkouts[i]
+			if !r.URL.Query().Has("customer") || s["customer"] == r.URL.Query().Get("customer") {
+				if minCreated > 0 && s["created"].(int64) < minCreated {
+					continue
+				}
+				if s["status"] == "open" && s["expires_at"].(int64) <= teamCheckoutNow().Unix() {
+					s["status"] = "expired"
+				}
+				listed := maps.Clone(s)
+				delete(listed, "client_secret")
+				data = append(data, listed)
+			}
+		}
+		after := env.afterCheckoutList
+		env.stateLock.Unlock()
+		if after != nil && r.URL.Query().Has("created[gte]") {
+			after()
+		}
+		writeJson(w, http.StatusOK, map[string]any{"object": "list", "data": data, "has_more": false})
 	})
-	// the reconciler's listing of paid invoices: every invoice the fake holds was delivered, so
-	// none is left to repair
+	mux.HandleFunc("GET /v1/checkout/sessions/{sessionId}", func(w http.ResponseWriter, r *http.Request) {
+		env.stateLock.Lock()
+		defer env.stateLock.Unlock()
+		for _, s := range env.checkouts {
+			if s["id"] == r.PathValue("sessionId") {
+				writeJson(w, http.StatusOK, s)
+				return
+			}
+		}
+		notFound(w)
+	})
+	// Only the paid invoices selected for the reconciler appear in its store-side listing.
 	mux.HandleFunc("GET /v1/invoices", func(w http.ResponseWriter, r *http.Request) {
-		writeJson(w, http.StatusOK, map[string]any{"object": "list", "data": []any{}, "has_more": false})
+		env.stateLock.Lock()
+		defer env.stateLock.Unlock()
+		data := []any{}
+		for _, id := range env.listedPaidInvoiceIds {
+			invoice := env.invoices[id]
+			data = append(data, map[string]any{"id": id, "total": invoice["total"], "currency": invoice["currency"], "customer": "cus_synthetic_" + invoice["subscription"].(string)})
+		}
+		writeJson(w, http.StatusOK, map[string]any{"object": "list", "data": data, "has_more": false})
 	})
 	mux.HandleFunc("GET /v1/invoices/{invoiceId}", func(w http.ResponseWriter, r *http.Request) {
 		env.stateLock.Lock()
@@ -104,7 +189,7 @@ func newTeamStripeTestEnv(t testing.TB) *teamStripeTestEnv {
 		}
 		// expanded, with the subscription as it is now
 		if subscriptionId, _ := invoice["subscription"].(string); subscriptionId != "" {
-			served["subscription"] = env.subscriptions[subscriptionId]
+			served["subscription"] = maps.Clone(env.subscriptions[subscriptionId])
 		}
 		env.stateLock.Unlock()
 		if !ok {
@@ -116,15 +201,59 @@ func newTeamStripeTestEnv(t testing.TB) *teamStripeTestEnv {
 	mux.HandleFunc("GET /v1/subscriptions/{subscriptionId}", func(w http.ResponseWriter, r *http.Request) {
 		env.stateLock.Lock()
 		sub, ok := env.subscriptions[r.PathValue("subscriptionId")]
+		sub = maps.Clone(sub)
+		after := env.afterSubscriptionRead
 		env.stateLock.Unlock()
 		if !ok {
 			notFound(w)
 			return
 		}
+		if after != nil {
+			after(r.PathValue("subscriptionId"))
+		}
 		writeJson(w, http.StatusOK, sub)
 	})
+	mux.HandleFunc("DELETE /v1/subscriptions/{subscriptionId}", func(w http.ResponseWriter, r *http.Request) {
+		env.stateLock.Lock()
+		defer env.stateLock.Unlock()
+		id := r.PathValue("subscriptionId")
+		sub := env.subscriptions[id]
+		if sub == nil {
+			notFound(w)
+			return
+		}
+		if env.rejectNextCancellation {
+			env.rejectNextCancellation = false
+			writeJson(w, http.StatusServiceUnavailable, map[string]any{"error": "synthetic unavailable"})
+			return
+		}
+		env.cancellations[id]++
+		sub["status"] = "canceled"
+		writeJson(w, http.StatusOK, sub)
+	})
+	mux.HandleFunc("GET /v1/subscriptions/search", func(w http.ResponseWriter, r *http.Request) {
+		env.stateLock.Lock()
+		defer env.stateLock.Unlock()
+		data := []any{}
+		for _, sub := range env.subscriptions {
+			metadata := sub["metadata"].(map[string]any)
+			q := r.URL.Query().Get("query")
+			if q == fmt.Sprintf("metadata['network_id']:'%s'", metadata["network_id"]) || q == "metadata['team']:'1'" && metadata["team"] == stripeTeamMark {
+				data = append(data, sub)
+			}
+		}
+		writeJson(w, http.StatusOK, map[string]any{"object": "search_result", "data": data, "has_more": false})
+	})
 	mux.HandleFunc("GET /v1/subscriptions", func(w http.ResponseWriter, r *http.Request) {
-		writeJson(w, http.StatusOK, map[string]any{"object": "list", "data": []any{}, "has_more": false})
+		env.stateLock.Lock()
+		defer env.stateLock.Unlock()
+		data := []any{}
+		for _, sub := range env.subscriptions {
+			if sub["customer"] == r.URL.Query().Get("customer") {
+				data = append(data, sub)
+			}
+		}
+		writeJson(w, http.StatusOK, map[string]any{"object": "list", "data": data, "has_more": false})
 	})
 	env.testServer = httptest.NewServer(mux)
 
@@ -220,6 +349,12 @@ func (self *teamStripeTestEnv) postedCheckoutForms() []url.Values {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	return append([]url.Values{}, self.checkoutForms...)
+}
+
+func (self *teamStripeTestEnv) confirmedCancellations() map[string]int {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return maps.Clone(self.cancellations)
 }
 
 // Sets a subscription in `status`, with the network and, for a Team's, the team mark in its

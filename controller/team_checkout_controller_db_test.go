@@ -9,6 +9,8 @@ package controller
 import (
 	"context"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,6 +26,122 @@ func testSetTeamCheckoutNow(now time.Time) func() {
 	previous := teamCheckoutNow
 	teamCheckoutNow = func() time.Time { return now }
 	return func() { teamCheckoutNow = previous }
+}
+
+func TestTeamCheckoutConcurrentStartsAndPendingLifetime(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		env := newTeamStripeTestEnv(t)
+		defer model.Testing_SetEscrowDrawOrder(true)()
+		networkId, clientSession := newTeamStripeTestNetwork(t, ctx)
+		now := time.Date(2026, 11, 10, 23, 58, 0, 0, time.UTC)
+		defer testSetTeamCheckoutNow(now)()
+		ready := make(chan struct{}, 2)
+		release := make(chan struct{})
+		unblock := sync.OnceFunc(func() { close(release) })
+		defer unblock()
+		var lookups atomic.Int32
+		env.afterCheckoutList = func() {
+			if lookups.Add(1) <= 2 {
+				ready <- struct{}{}
+				<-release
+			}
+		}
+		type answer struct {
+			result *TeamCheckoutResult
+			err    error
+		}
+		answers := make(chan answer, 2)
+		for range 2 {
+			go func() {
+				result, err := TeamCheckout(&TeamCheckoutArgs{}, clientSession)
+				answers <- answer{result, err}
+			}()
+		}
+		for range 2 {
+			select {
+			case <-ready:
+			case early := <-answers:
+				t.Fatalf("checkout returned before reading pending sessions: %+v %v", early.result, early.err)
+			}
+		}
+		unblock()
+		var firstId string
+		for range 2 {
+			a := <-answers
+			if a.err != nil || a.result == nil || a.result.Error != nil || a.result.SessionId == "" {
+				t.Fatalf("concurrent checkout: %+v %v", a.result, a.err)
+			}
+			if firstId == "" {
+				firstId = a.result.SessionId
+			}
+			connect.AssertEqual(t, a.result.SessionId, firstId)
+		}
+		connect.AssertEqual(t, len(env.postedCheckoutForms()), 1)
+		customerId, err := model.GetStripeCustomer(clientSession)
+		if err != nil || customerId == nil || *customerId != env.postedCheckoutForms()[0].Get("customer") {
+			t.Fatalf("checkout used a different customer for network %s", networkId)
+		}
+		// A full 59 minutes later, across UTC midnight, the same session is still payable.
+		restore := testSetTeamCheckoutNow(now.Add(59 * time.Minute))
+		retry, err := TeamCheckout(&TeamCheckoutArgs{}, clientSession)
+		if err != nil || retry.Error != nil || retry.SessionId != firstId {
+			t.Fatalf("pending retry: %+v %v", retry, err)
+		}
+		other, err := TeamCheckout(&TeamCheckoutArgs{UiMode: StripeUiModeEmbedded}, clientSession)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, other.Error.Code, PurchaseErrorCodeCheckoutUnavailable)
+		restore()
+		// Stripe expired the first session. One new generation can now be created.
+		defer testSetTeamCheckoutNow(now.Add(time.Hour))()
+		next, err := TeamCheckout(&TeamCheckoutArgs{UiMode: StripeUiModeEmbedded}, clientSession)
+		if err != nil || next.Error != nil || next.SessionId == firstId || next.ClientSecret == "" {
+			t.Fatalf("checkout after expiry: %+v %v", next, err)
+		}
+		embeddedRetry, err := TeamCheckout(&TeamCheckoutArgs{UiMode: StripeUiModeEmbedded}, clientSession)
+		if err != nil || embeddedRetry.Error != nil || embeddedRetry.SessionId != next.SessionId || embeddedRetry.ClientSecret != next.ClientSecret {
+			t.Fatalf("retrieving an existing embedded session: %+v %v", embeddedRetry, err)
+		}
+		// Completion prevents another purchase even before the first invoice's webhook.
+		env.stateLock.Lock()
+		env.checkouts[1]["status"] = "complete"
+		env.checkouts[1]["subscription"] = map[string]any{"id": "sub_synthetic_complete", "status": "active"}
+		env.stateLock.Unlock()
+		done, err := TeamCheckout(&TeamCheckoutArgs{}, clientSession)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, done.Error.Code, PurchaseErrorCodeAlreadySubscribed)
+		connect.AssertEqual(t, len(env.postedCheckoutForms()), 2)
+
+		_, otherNetwork := newTeamStripeTestNetwork(t, ctx)
+		env.stateLock.Lock()
+		env.loseNextCheckoutResponse = true
+		env.stateLock.Unlock()
+		recovered, err := TeamCheckout(&TeamCheckoutArgs{}, otherNetwork)
+		if err != nil || recovered.Error != nil || recovered.SessionId == "" {
+			t.Fatalf("recovering a created session after losing its response: %+v %v", recovered, err)
+		}
+		connect.AssertEqual(t, len(env.postedCheckoutForms()), 3)
+
+		// A session made before checkout selected a customer and marked the session.
+		legacyId, legacy := newTeamStripeTestNetwork(t, ctx)
+		env.stateLock.Lock()
+		env.checkouts = append(env.checkouts, map[string]any{
+			"id": "cs_synthetic_legacy", "object": "checkout.session", "mode": "subscription", "ui_mode": "hosted",
+			"client_reference_id": legacyId.String(), "status": "open", "created": teamCheckoutNow().Unix(), "expires_at": teamCheckoutNow().Add(time.Hour).Unix(),
+		})
+		env.stateLock.Unlock()
+		legacyOpen, err := TeamCheckout(&TeamCheckoutArgs{}, legacy)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, legacyOpen.Error.Code, PurchaseErrorCodeCheckoutUnavailable)
+		env.stateLock.Lock()
+		env.checkouts[len(env.checkouts)-1]["status"] = "expired"
+		env.stateLock.Unlock()
+		env.setSubscription("sub_synthetic_legacy_missing_webhook", legacyId, true, "active")
+		older, err := TeamCheckout(&TeamCheckoutArgs{}, legacy)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, older.Error.Code, PurchaseErrorCodeAlreadySubscribed)
+		connect.AssertEqual(t, len(env.postedCheckoutForms()), 3)
+	})
 }
 
 // A checkout creates one subscription session: the base once, the seats and transfer overage by
@@ -79,7 +197,8 @@ func TestTeamCheckoutCreatesAnAnchoredSession(t *testing.T) {
 		}
 
 		// embedded: the client secret and the publishable key
-		result, err := TeamCheckout(&TeamCheckoutArgs{UiMode: StripeUiModeEmbedded}, clientSession)
+		_, embeddedSession := newTeamStripeTestNetwork(t, ctx)
+		result, err := TeamCheckout(&TeamCheckoutArgs{UiMode: StripeUiModeEmbedded}, embeddedSession)
 		connect.AssertEqual(t, err, nil)
 		if result.Error != nil {
 			t.Fatalf("embedded checkout refused: %+v", result.Error)
@@ -92,7 +211,8 @@ func TestTeamCheckoutCreatesAnAnchoredSession(t *testing.T) {
 		priced := testTeamPrices()
 		priced.StorageGibMonthUsd = 0.02
 		restore := model.Testing_SetTeamPrices(priced)
-		result, err = TeamCheckout(&TeamCheckoutArgs{}, clientSession)
+		_, pricedSession := newTeamStripeTestNetwork(t, ctx)
+		result, err = TeamCheckout(&TeamCheckoutArgs{}, pricedSession)
 		restore()
 		connect.AssertEqual(t, err, nil)
 		if result.Error != nil {
