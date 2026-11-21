@@ -184,6 +184,7 @@ require (
 	github.com/tklauser/go-sysconf v0.3.12 // indirect
 	github.com/tklauser/numcpus v0.6.1 // indirect
 	github.com/urnetwork/goidenticons v0.0.0 // indirect
+	github.com/urnetwork/quic-go v0.0.0 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	github.com/zeebo/xxh3 v1.1.0 // indirect
@@ -221,6 +222,11 @@ replace github.com/urnetwork/proxy => ../proxy
 replace github.com/urnetwork/sdk => ../sdk
 
 replace github.com/urnetwork/glog => ../glog
+
+// URnetwork's quic-go, its own module (../quic-go/URNETWORK.md).
+// Go ignores a dependency's replacements, so each main module that builds
+// connect selects the sibling checkout, as it does glog.
+replace github.com/urnetwork/quic-go => ../quic-go
 
 replace github.com/urnetwork/goidenticons => ../goidenticons
 
