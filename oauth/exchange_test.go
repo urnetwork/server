@@ -43,9 +43,17 @@ type exchangeFixture struct {
 	logged       []string
 }
 
+// The token-format fixture's client is admitted and holds an empty grant.
+type exchangeTestAdmission struct{}
+
+func (exchangeTestAdmission) Grant(context.Context, *ExchangeScopeRequest) (*ExchangeScopeGrant, error) {
+	return &ExchangeScopeGrant{}, nil
+}
+
 func newExchangeFixture(t testing.TB) *exchangeFixture {
 	t.Helper()
 	installTestSignerKeys(t)
+	t.Cleanup(SetExchangeScopeSource(exchangeTestAdmission{}))
 	t.Setenv("WARP_DOMAIN", "exchange.example")
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -135,7 +143,7 @@ func requireExchangeRefused(t testing.TB, name string, err error, want error) {
 
 // A sidecar's client token and the ClientKey's proof buy a 15-minute service
 // token for the audience the resource names, with the client's and its
-// sidecar's ids, no scope without a projection, and one log line.
+// sidecar's ids, the granted scopes, and one log line.
 func TestExchangeIssuesAServiceToken(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		self := newExchangeFixture(t)
@@ -333,23 +341,21 @@ func TestExchangeNeverIssuesTheApiAudience(t *testing.T) {
 	}
 }
 
-// Without a projection no scope is granted: a repo: scope, a recovery: scope and
-// any other are refused as invalid_scope. A 65th repo: scope, and what is no
-// scope-token, are refused before anything is read, whatever a source would
-// grant.
+// An issuer that cannot check admission refuses every exchange, including the
+// empty-scope tokens used at sockets.
 func TestExchangeGrantsNoScopeWithoutAProjection(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		self := newExchangeFixture(t)
+		defer SetExchangeScopeSource(nil)()
 		repoId := server.NewId()
 		memberId := server.NewId()
-		for _, scope := range []string{
-			"repo:" + repoId.String() + ":r",
-			"repo:" + repoId.String() + ":admin",
-			"recovery:" + memberId.String(),
-			"gkm:keypackages",
+		for _, request := range []struct{ audience, scope string }{
+			{audience: "sockets"},
+			{audience: "evs", scope: "repo:" + repoId.String() + ":r"},
+			{audience: "gkm", scope: "recovery:" + memberId.String()},
 		} {
-			_, err := Exchange(t.Context(), self.args("gkm", scope))
-			requireExchangeRefused(t, scope, err, ErrInvalidScope)
+			_, err := Exchange(t.Context(), self.args(request.audience, request.scope))
+			requireExchangeRefused(t, request.audience, err, ErrExchangeUnavailable)
 		}
 	})
 }

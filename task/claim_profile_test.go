@@ -199,3 +199,64 @@ func TestTaskClaimProfileDefaultKeepsUnknownTargetRetry(t *testing.T) {
 		}
 	})
 }
+
+// A general worker leaves an issuer-owned row with its old versioned name for
+// that issuer, while continuing to claim ordinary work in the same queue.
+func TestTaskClaimReservesVersionedIssuerWork(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		session := session.NewLocalClientSession(ctx, "", nil)
+		defer session.Cancel()
+		issuerTarget := &claimProfileTarget{Target: NewTaskTarget(claimProfileExcluded)}
+		ordinaryTarget := NewTaskTarget(claimProfileAllowed)
+		issuerId := ScheduleTask(claimProfileExcluded, &claimProfileArgs{}, session, RunAt(server.NowUtc().Add(-2*time.Hour)))
+		server.Tx(ctx, func(tx server.PgTx) {
+			legacy := strings.Replace(issuerTarget.TargetFunctionName(), "/server/", "/server/v37/", 1)
+			_, err := tx.Exec(ctx, "UPDATE pending_task SET function_name=$2 WHERE task_id=$1", issuerId, legacy)
+			server.Raise(err)
+		})
+		ordinaryId := ScheduleTask(claimProfileAllowed, &claimProfileArgs{}, session, RunAt(server.NowUtc().Add(-time.Hour)))
+		settings := DefaultTaskWorkerSettings()
+		settings.ExcludedClaimFunctions = []string{issuerTarget.TargetFunctionName()}
+		general := NewTaskWorker(ctx, settings)
+		defer general.Close()
+		general.AddTargets(issuerTarget, ordinaryTarget)
+		finished, retry, postRetry, err := general.EvalTasks(2)
+		if err != nil || len(finished) != 1 || finished[0] != ordinaryId || len(retry)+len(postRetry) != 0 {
+			t.Fatalf("general worker: %v finished, %v/%v retries, %v", finished, retry, postRetry, err)
+		}
+		settings = DefaultTaskWorkerSettings()
+		settings.ClaimRegisteredTargetsOnly = true
+		issuer := NewTaskWorker(ctx, settings)
+		defer issuer.Close()
+		issuer.AddTargets(issuerTarget)
+		finished, retry, postRetry, err = issuer.EvalTasks(2)
+		if err != nil || len(finished) != 1 || finished[0] != issuerId || len(retry)+len(postRetry) != 0 {
+			t.Fatalf("issuer: %v finished, %v/%v retries, %v", finished, retry, postRetry, err)
+		}
+		// A deferred post belongs to the issuer even when the ordinary worker
+		// still registers the historical target. Preserve its versioned owner.
+		issuerTarget.failPosts = true
+		postOwner := ScheduleTask(claimProfileExcluded, &claimProfileArgs{}, session, RunAt(server.NowUtc().Add(-time.Hour)))
+		finished, retry, postRetry, err = issuer.EvalTasks(1)
+		if err != nil || len(finished)+len(retry) != 0 || len(postRetry) != 1 {
+			t.Fatalf("creating an issuer post retry: %v/%v/%v, %v", finished, retry, postRetry, err)
+		}
+		issuerTarget.failPosts = false
+		server.Tx(ctx, func(tx server.PgTx) {
+			legacy := strings.Replace(issuerTarget.TargetFunctionName(), "/server/", "/server/v37/", 1)
+			_, err := tx.Exec(ctx, "UPDATE finished_task SET function_name=$2 WHERE task_id=$1", postOwner, legacy)
+			server.Raise(err)
+			_, err = tx.Exec(ctx, "UPDATE pending_task SET run_at=$1, release_time=$1", server.NowUtc().Add(-time.Minute))
+			server.Raise(err)
+		})
+		finished, retry, postRetry, err = general.EvalTasks(1)
+		if err != nil || len(finished)+len(retry)+len(postRetry) != 0 {
+			t.Fatalf("general worker claimed issuer post: %v/%v/%v, %v", finished, retry, postRetry, err)
+		}
+		finished, retry, postRetry, err = issuer.EvalTasks(1)
+		if err != nil || len(finished) != 1 || len(retry)+len(postRetry) != 0 {
+			t.Fatalf("issuer post: %v/%v/%v, %v", finished, retry, postRetry, err)
+		}
+	})
+}

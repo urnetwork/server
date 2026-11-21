@@ -5,6 +5,21 @@ package task
 
 import "fmt"
 
+// A post retry belongs to the class of its finished task. Invalid or missing
+// references stay with the general worker's existing recovery path.
+func claimPostReferencesFunctions(namesArg int) string {
+	return fmt.Sprintf(`EXISTS (
+		SELECT 1 FROM finished_task
+		WHERE finished_task.task_id = CASE
+			WHEN pg_input_is_valid(pending_task.args_json, 'jsonb')
+			THEN CASE WHEN (pending_task.args_json::jsonb ->> 'task_id') ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+				THEN (pending_task.args_json::jsonb ->> 'task_id')::uuid
+				END
+			END
+		AND regexp_replace(finished_task.function_name, '/v[0-9]+', '', 'g') = ANY($%d)
+	)`, namesArg)
+}
+
 // Retain the complete existing eligibility boundary, including versioned
 // aliases and scoped post retries, before the ordered fallback limit.
 func (self *TaskWorker) claimCandidatesQuery(nowBlock int64, candidateLimit int, includeGroupArgs ...bool) (string, []any) {
@@ -50,26 +65,25 @@ func (self *TaskWorker) taskLaneCandidatesQuery(nowBlock int64, floorBlock int64
 		}
 		// Match the same version-normalized aliases as dispatch. RunPost is a
 		// wrapper: admitting its name alone would execute excluded post hooks.
+		// The first predicate also lets sparse issuer queues use the function index.
 		// Invalid or orphaned wrappers stay available to the ordinary worker;
 		// they cannot poison this profile's queue or consume its candidate limit.
 		claimPredicate = `
-			AND CASE WHEN regexp_replace(function_name, '/v[0-9]+', '', 'g') = $4 THEN
-				EXISTS (
-					SELECT 1 FROM finished_task
-					WHERE finished_task.task_id = CASE
-						WHEN pg_input_is_valid(pending_task.args_json, 'jsonb')
-						THEN CASE WHEN (pending_task.args_json::jsonb ->> 'task_id') ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
-							THEN (pending_task.args_json::jsonb ->> 'task_id')::uuid
-							END
-						END
-					AND regexp_replace(finished_task.function_name, '/v[0-9]+', '', 'g') = ANY($3)
-				)
-			ELSE regexp_replace(function_name, '/v[0-9]+', '', 'g') = ANY($3)
-			END
+			AND regexp_replace(function_name, '/v[0-9]+', '', 'g') = ANY($3)
+			AND (regexp_replace(function_name, '/v[0-9]+', '', 'g') <> $4 OR ` + claimPostReferencesFunctions(3) + `)
 		`
 		queryArgs = append(queryArgs, functionNames, functionName(self.RunPost))
 	}
-	if excluded := self.saturatedClaimFunctionNames(); len(excluded) != 0 {
+	if reserved := self.settings.ExcludedClaimFunctions; len(reserved) != 0 {
+		namesArg := len(queryArgs) + 1
+		claimPredicate += fmt.Sprintf(`
+			AND NOT (regexp_replace(function_name, '/v[0-9]+', '', 'g') = ANY($%d))
+			AND (regexp_replace(function_name, '/v[0-9]+', '', 'g') <> $%d OR NOT %s)
+		`, namesArg, namesArg+1, claimPostReferencesFunctions(namesArg))
+		queryArgs = append(queryArgs, reserved, functionName(self.RunPost))
+	}
+	excluded := self.saturatedClaimFunctionNames()
+	if len(excluded) != 0 {
 		claimPredicate += fmt.Sprintf(`
 			AND NOT (regexp_replace(function_name, '/v[0-9]+', '', 'g') = ANY($%d))
 		`, len(queryArgs)+1)

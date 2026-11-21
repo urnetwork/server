@@ -35,6 +35,7 @@ import (
 	"github.com/urnetwork/sidecar/evsservice"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/evshost"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/quotahost"
@@ -150,10 +151,22 @@ func startEvsJobsFromVault(ctx context.Context, lifetime *sync.WaitGroup) {
 	if firstCluster, err := clusters.FirstCluster(); err == nil {
 		holdStore = model.NewAbuseHoldStore(firstCluster)
 		model.SetAbuseHoldStore(holdStore)
+		// The worker's scoped credentials sweep expired revocations. Signing
+		// and all revocation writes belong to the issuer.
+		model.SetSidecarRevStore(model.NewSidecarRevStore(firstCluster, nil, nil))
+		if server.SidecarMg2Linked() {
+			settings := model.DefaultConfigLogSettings()
+			settings.QueueTicksAtIssuer = true
+			model.SetConfigLogSequencer(controller.NewHostedConfigLogSequencer(host, firstCluster, settings))
+		}
 	}
 	startEvsJobsOnHost(ctx, lifetime, host, evsSettings, evsJobs, func() {
 		if holdStore != nil {
 			model.SetAbuseHoldStore(nil)
+			model.SetSidecarRevStore(nil)
+			if server.SidecarMg2Linked() {
+				model.SetConfigLogSequencer(nil)
+			}
 		}
 		budget.Close()
 		quota.Drain(context.Background())

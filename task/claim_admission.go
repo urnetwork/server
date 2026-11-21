@@ -19,6 +19,7 @@ func snapshotTaskWorkerSettings(settings *TaskWorkerSettings) *TaskWorkerSetting
 		settings = DefaultTaskWorkerSettings()
 	}
 	snapshot := *settings
+	snapshot.ExcludedClaimFunctions = slices.Clone(settings.ExcludedClaimFunctions)
 	snapshot.TargetClaimLimits = maps.Clone(settings.TargetClaimLimits)
 	for functionName, limit := range snapshot.TargetClaimLimits {
 		if functionName == "" || limit <= 0 {

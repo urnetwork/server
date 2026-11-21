@@ -5,6 +5,7 @@ package taskworker
 import (
 	"fmt"
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/urnetwork/server"
@@ -57,6 +58,8 @@ func TestProviderProbeClaimAdmissionIsProductionOnly(t *testing.T) {
 		t.Fatal("production fairness is missing or mutated caller settings")
 	}
 	production.FairClaimFunctions = settings.FairClaimFunctions
+	// Issuer-owned rows are reserved in both profiles, tested separately below.
+	production.ExcludedClaimFunctions = nil
 	if !reflect.DeepEqual(production, settings) {
 		t.Fatal("probe placement changed ordinary worker settings")
 	}
@@ -132,5 +135,22 @@ func TestProductionProbeClaimLimitKeepsOnePassWithoutValidSettings(t *testing.T)
 	t.Setenv("WARP_DOMAIN", "")
 	if limit := taskWorkerSettingsForProfile(task.DefaultTaskWorkerSettings(), WorkloadProfileProduction).TargetClaimLimits[name]; limit != 1 {
 		t.Fatalf("unreadable settings widened placement to %d passes", limit)
+	}
+}
+
+// Both worker profiles protect the complete issuer class, including its post hooks.
+func TestWorkerProfilesReserveAuthorizationPublication(t *testing.T) {
+	for _, profile := range []WorkloadProfile{WorkloadProfileProduction, WorkloadProfileSubnetOperator} {
+		base := task.DefaultTaskWorkerSettings()
+		base.ExcludedClaimFunctions = []string{"fixture.tasks.Other"}
+		settings := taskWorkerSettingsForProfile(base, profile)
+		if len(settings.ExcludedClaimFunctions) != len(model.AuthorizationIssuerTargets())+1 || !slices.Contains(settings.ExcludedClaimFunctions, "fixture.tasks.Other") || len(base.ExcludedClaimFunctions) != 1 {
+			t.Fatalf("%s changed the caller's claim reservations", profile)
+		}
+		for _, target := range model.AuthorizationIssuerTargets() {
+			if !slices.Contains(settings.ExcludedClaimFunctions, target.TargetFunctionName()) {
+				t.Fatalf("%s can claim issuer target %s", profile, target.TargetFunctionName())
+			}
+		}
 	}
 }

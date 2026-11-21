@@ -111,23 +111,11 @@ type ExchangeReseedScopeSource interface {
 	GrantReseed(ctx context.Context, request *ExchangeScopeRequest) (*ExchangeScopeGrant, error)
 }
 
-// The source until a projection's is installed: it grants no scope at all, so a
-// request for any is refused, and a request for none gets a token that grants
-// nothing but names its client.
-type noProjectionExchangeScopeSource struct{}
-
-func (self noProjectionExchangeScopeSource) Grant(ctx context.Context, request *ExchangeScopeRequest) (*ExchangeScopeGrant, error) {
-	if 0 < len(request.Scopes) {
-		return nil, fmt.Errorf("%w: no projection grants scopes yet", ErrInvalidScope)
-	}
-	return &ExchangeScopeGrant{}, nil
-}
-
 // The installed source, nil for none.
 var exchangeScopeSource atomic.Pointer[ExchangeScopeSource]
 
 // Installs source as the exchange's, returning a function that restores the
-// previous one. nil restores the no-projection source.
+// previous one. nil leaves the exchange unavailable until a source is installed.
 func SetExchangeScopeSource(source ExchangeScopeSource) func() {
 	var previous *ExchangeScopeSource
 	if source == nil {
@@ -144,7 +132,7 @@ func currentExchangeScopeSource() ExchangeScopeSource {
 	if source := exchangeScopeSource.Load(); source != nil {
 		return *source
 	}
-	return noProjectionExchangeScopeSource{}
+	return NewProjectionExchangeScopeSource(nil, nil)
 }
 
 // The exchange's reads of server state, which tests replace.
