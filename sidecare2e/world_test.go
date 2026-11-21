@@ -43,11 +43,29 @@
 //
 //   - the clock check (evs): chronyd on warp's services network, which no test host runs and nothing may be fetched to
 //     run; sidecartest's FakeClockCheck answers an offset of zero;
-//   - smtpedge's MX world, its resolver, PTR and dialer: sidecartest's MxWorld. Its resolver validates DNSSEC down from
-//     the release's IANA root anchors (sidecar.NewSmtpMxDnsResolver), and the world's DNS is authoritative only under
-//     its own root, so no chain from the root reaches a network's MX; and its dialer reaches public MXs from a sending
-//     address's SO_MARK. A mail scenario points MxWorld's MX at the world's lb interface instead (World.DialLb reaches
-//     mxedge's router on 25 behind the lb's PROXY header);
+//   - the DNS above the world's root: the world's DNS is authoritative only under zone.e2e.example., signed under the
+//     KSK the world made, and no chain from IANA's root keys reaches it, so the world signs ".", "example." and
+//     "e2e.example." itself, each holding its child's DS, the last its root KSK's (world_mail_dns_test.go). smtpedge's
+//     resolver validates a network's MX, its mail host's address and its TLSA from that parent chain's anchor, every
+//     answer under the root the dns edge's own, and a sending device's DANE validates under the same anchor;
+//   - smtpedge's MX world for every other name: sidecartest's MxWorld answers the sending address's HELO name and PTR,
+//     which no zone of the world serves, and dials an MX off the router's interfaces, which a sending address's
+//     SO_MARK reaches in production. An MX on the world's lb interface is mxedge's router's, which smtpedge reaches
+//     over the LAN splice to the router's LAN listener (router_interfaces, router_lan; D-SMTP-13), as production's
+//     sending host does;
+//   - a sending device's composition (world_mail_send_test.go): built as a desktop's ur daemon builds it, but its
+//     DANE anchor is the world's above, its own DoH, which TL2's and TL3's lookups and DKIM's answers take, asks the
+//     world's dns edge, since public resolvers know no .example name, and its DKIM keys' keychain is a map in the
+//     test, since a Sidecar's keychain is not reachable outside its package;
+//   - a person's approval (worldDeviceGate): §16.6's stock gate holds an alias's creation and a mail send to another
+//     network for a person's decision on another approval-capable device, and the world composes no approver, so a
+//     stand-in in front of the stock gate runs the one use as that decision would, counted;
+//   - a receiver's reception-time checks (SPF, DKIM, DMARC, PTR) go over its own DoH to public resolvers as the
+//     receiver composition builds it, with no seam a test reaches: they know no .example name and no documentation
+//     address's PTR, so every check reads none or temperror, which no deposit is refused for (D-MAIL-5);
+//   - api's smtp routes' §8 checks (worldSmtpApiGate, world_server_state_test.go): api's process installs none
+//     (model.SetSmtpApiGate is called by its handler tests alone, the mail step's finding), so the world installs one
+//     over a gate cache of its own, its mail_send the verified state's send grant;
 //   - smtpedge's proof verifier: sidecartest's FakeSmtpProofVerifier. smtpproof's Groth16 keys come from a production
 //     setup that has not run (smtpproof's SPEC.md section 12), so its real verifier holds no key set and refuses every
 //     part, as its prover does;
@@ -64,16 +82,18 @@
 //     (world_keys_test.go has the evidence, and TestE2eWorldSmokeRealKeys runs the smoke's gkm step on real keys).
 //
 // The dns edge's lb probes are real: the dns API's lb inventory is the world's one interface, whose tlsedge ports and
-// TCP 25 reach tlsedge and mxedge's router behind the lb's PROXY header (world_lb_test.go); api's sequencer and rev/
-// store spend on api's own write budget; and gkm's hint writer resolves sidecar ids through api's internal route on
-// the block's gkm bearer, as production's block does (WorldSettings.GkmHintResolver). A device's §16.6 approval gate is the stock one (World.InstallApprovalGate);
-// where it refuses a listen as an action with no effect, a product finding the smoke reports, the step carries on
-// through worldListenGate, which passes a listen alone.
+// TCP 25 reach tlsedge and mxedge's router behind the lb's PROXY header (world_lb_test.go), and a mail host's address
+// is answered only once its router interface's banner probe passed, which the mail step's resolution reads; api's
+// sequencer and rev/ store spend on api's own write budget; and gkm's hint writer resolves sidecar ids through api's
+// internal route on the block's gkm bearer, as production's block does (WorldSettings.GkmHintResolver). A device's
+// §16.6 approval gate is the stock one (World.InstallApprovalGate); where it refuses a listen as an action with no
+// effect, a product finding the smoke reports, the TLS step carries on through worldListenGate, which passes a listen
+// alone, and the mail step through worldDeviceGate, which passes it where the device's policy grants the listen.
 //
 // Process-wide state, so one world runs at a time and its Close puts each back: the T3World's (sidecar.yml, pro.yml's
 // limits, oauth's issuer and keys, WARP_DOMAIN, api's installs), pro.yml's pro: limits, api's dns.yml root, evs.yml,
-// mcp's seal secret and McpResource, and the T3Api's internal gate handler. mcp's /status latch is router's global
-// one, so the world runs one mcp.
+// mcp's seal secret and McpResource, api's smtp routes' §8 checks, and the T3Api's internal gate handler. mcp's
+// /status latch is router's global one, so the world runs one mcp.
 
 package sidecare2e
 
@@ -192,6 +212,15 @@ type WorldSettings struct {
 	LbName        string
 	LbAddress     netip.Addr
 	LbProbeSource netip.AddrPort
+	// Who reaches mxedge's LAN listener (mxedge.yml's lan_sources), smtpedge's splice to an MX on the router's own lb
+	// interface (D-SMTP-13): the loopback smtpedge's block dials it from.
+	MxLanSources []netip.Prefix
+	// The retry_after smtpedge's gate answers TRY_LATER with while a network's facts load (smtpedge.yml's
+	// gate_retry_timeout, 60 s in production): a gate's facts load at a network's first preamble, so its first send
+	// is always held once, and the world's sidecars run on real time.
+	SmtpGateRetryTimeout time.Duration
+	// How the world signs the DNS path above its root (world_mail_dns_test.go).
+	Dnssec *worldDnssecSettings
 }
 
 // §20.4's Pro column, pro.yml's pro: sidecar: keys: what a network a scenario makes Pro runs under.
@@ -258,6 +287,9 @@ func DefaultWorldSettings() *WorldSettings {
 		LbName:                      "e2e-lb-1",
 		LbAddress:                   netip.MustParseAddr("192.0.2.80"),
 		LbProbeSource:               netip.MustParseAddrPort("203.0.113.53:40053"),
+		MxLanSources:                []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")},
+		SmtpGateRetryTimeout:        2 * time.Second,
+		Dnssec:                      defaultWorldDnssecSettings(),
 	}
 }
 
@@ -310,12 +342,23 @@ type World struct {
 	statusClient *http.Client
 	// the lb's connections to the blocks
 	lbTransport *http.Transport
+	// mxedge's LAN listener's loopback address, fixed for the world's life since smtpedge's config names it
+	// (router_lan), and the DNSSEC path above the world's root (world_mail_dns_test.go)
+	mxLanAddress netip.AddrPort
+	dnssec       *worldDnssec
+	// whether api's process had installed its smtp routes' §8 checks when the world came up, before the world's
+	// stand-in (worldInstallSmtpApiGate)
+	apiSmtpGateInstalled bool
 
 	blocks []*worldBlock
 
 	// each sidecar's newest log lines, by its name, at most DumpLogLineCount
 	logLock         sync.Mutex
 	sidecarLogLines map[string][]string
+
+	// the devices whose socket component runs (StartSockets)
+	socketsLock    sync.Mutex
+	socketsStarted map[*sidecart3.T3Device]bool
 
 	stateLock sync.Mutex
 	networks  []*WorldNetwork
@@ -399,6 +442,26 @@ func NewWorld(t testing.TB, settings *WorldSettings) *World {
 	if err := self.installInternalGate(); err != nil {
 		t.Fatalf("api's internal gate: %v", err)
 	}
+	// mxedge's LAN listener on a port of its own for the world's life, which smtpedge's router_lan names before mxedge
+	// starts; the reservation is let go here, and each run of mxedge binds the port again
+	lanPorts, releaseLanPorts, err := server.ReserveTestListenPorts("tcp")
+	if err != nil {
+		t.Fatalf("mxedge's LAN port: %v", err)
+	}
+	releaseLanPorts()
+	self.mxLanAddress = netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), uint16(lanPorts[0]))
+	if self.dnssec, err = newWorldDnssec(self, settings.Dnssec); err != nil {
+		t.Fatalf("the DNSSEC path above the world's root: %v", err)
+	}
+	// api's smtp routes' §8 checks over a gate cache of the world's, in place of the install api's process lacks
+	smtpCache, closeSmtpCache, err := t3.AddGate("api-smtp")
+	if err != nil {
+		t.Fatalf("api's smtp checks: %v", err)
+	}
+	self.closes = append(self.closes, closeSmtpCache)
+	restoreSmtpGate, apiSmtpGateInstalled := worldInstallSmtpApiGate(smtpCache)
+	self.apiSmtpGateInstalled = apiSmtpGateInstalled
+	self.closes = append(self.closes, restoreSmtpGate)
 
 	for _, name := range settings.Blocks {
 		block, err := self.newBlock(name)
@@ -619,6 +682,9 @@ type worldBlock struct {
 	// UDP too
 	directPorts []int
 	directUdp   bool
+	// the loopback address a direct port binds where another block's config names it, every run on the same one; any
+	// other binds a port the OS picks
+	fixedAddresses map[int]netip.AddrPort
 	// one run of the block until ctx ends, on its listeners, which it takes
 	run func(ctx context.Context, listeners *worldBlockListeners) error
 
@@ -706,7 +772,11 @@ func (self *worldBlock) start() error {
 		done:            make(chan struct{}),
 	}
 	for _, port := range self.directPorts {
-		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		address := "127.0.0.1:0"
+		if fixed, ok := self.fixedAddresses[port]; ok {
+			address = fixed.String()
+		}
+		listener, err := net.Listen("tcp", address)
 		if err != nil {
 			closeListeners()
 			return err

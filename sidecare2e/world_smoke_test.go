@@ -28,7 +28,12 @@
 //   - sockets and tlsedge: the second network, made Pro by a paid Pro balance, saves a standing public publish of
 //     tls/443/web, and its member device publishes the name as a raw socket listener; a visitor through tlsedge's 443,
 //     behind the lb's PROXY header, completes TLS with the device's own key and is answered by the device, and a host
-//     no grant publishes is refused at the edge.
+//     no grant publishes is refused at the edge;
+//   - mail (world_smoke_mail_test.go): the first network turns mail on, its receiver serves smtp/25/mx once its TLSA
+//     is live, and an internet sender's message reaches the member's mailbox through the world's lb, mxedge's router
+//     and the receiver, held to the dns edge's signed TLSA, and is read back by the member's reader; then the second
+//     network, aged past probation at its enrollment, turns mail on and its owner's device sends to the first's alias
+//     through smtpedge, the LAN splice to mxedge's router and the receiver, and the first network's reader reads it.
 //
 // Each phase has its bound and dumps the world's progress when it stalls; the case has the conventions' 10 minutes.
 // Run it through the build's wrapper: -tags 'sidecar_e2e sidecar_pending sidecar_localstack'.
@@ -74,15 +79,16 @@ type worldSmokeSettings struct {
 	// How long the mcp call's access token lives: the issuer's own default is minted, this bounds nothing but the
 	// call's wait.
 	McpCallTimeout time.Duration
-	// The ACL document that grants the first network's members admin on the record's host, the host and the text its
-	// TXT record holds, and the text the second network's refused write names: one character-string each, so no space,
-	// which the API's presentation format reads as two.
-	DnsAclPolicy   string
+	// The grant of the first network's ACL document that gives its members admin on the record's host, beside the mail
+	// step's grants, the host and the text its TXT record holds, and the text the second network's refused write
+	// names: one character-string each, so no space, which the API's presentation format reads as two.
+	DnsAclGrant    string
 	DnsRecordHost  string
 	DnsRecordText  string
 	DnsForeignText string
 	// The second network's ACL document, given the time its tls/ grant expires: its members publish and listen on the
-	// tls/ host under the public audience in raw mode, a standing publish, which §8.5 holds to a Pro or Team document.
+	// tls/ host under the public audience in raw mode, a standing publish, which §8.5 holds to a Pro or Team document,
+	// beside the mail step's grants, since the network sends mail too.
 	// The tls/ host, the one no grant names that a visitor is refused, the grant's life, the visitor's request line,
 	// and the TLS helpers' bounds.
 	TlsAclPolicy func(expires time.Time) string
@@ -97,6 +103,8 @@ type worldSmokeSettings struct {
 	Tls                *WorldTlsSettings
 	// The gkm step's waits for each sidecar's key client.
 	Keys *worldKeysSettings
+	// The mail step's grants, addresses, message and bounds (world_smoke_mail_test.go).
+	Mail *worldSmokeMailSettings
 }
 
 func defaultWorldSmokeSettings() *worldSmokeSettings {
@@ -108,15 +116,15 @@ func defaultWorldSmokeSettings() *worldSmokeSettings {
 		McpToolsListBody:  `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`,
 		McpToolNames:      []string{"providerLocations", "fetch"},
 		McpCallTimeout:    60 * time.Second,
-		DnsAclPolicy:      `{"grants": [{"src": ["autogroup:member"], "dst": ["dns:smoke"], "allow": ["admin"]}]}`,
+		DnsAclGrant:       `{"src": ["autogroup:member"], "dst": ["dns:smoke"], "allow": ["admin"]}`,
 		DnsRecordHost:     "smoke",
 		DnsRecordText:     "e2e-world-smoke",
 		DnsForeignText:    "written-from-another-network",
 		TlsAclPolicy: func(expires time.Time) string {
-			return fmt.Sprintf(`{"grants": [
-				{"src": ["autogroup:member"], "dst": ["dns:web", "sock:tls/443/web"], "allow": ["publish", "listen"], "audience": "public", "app_mode": "raw", "expires": %q},
-				{"src": ["autogroup:member"], "dst": ["dns:about"], "allow": ["admin"]}
-			]}`, expires.UTC().Format(time.RFC3339))
+			return worldAclPolicy(append([]string{
+				fmt.Sprintf(`{"src": ["autogroup:member"], "dst": ["dns:web", "sock:tls/443/web"], "allow": ["publish", "listen"], "audience": "public", "app_mode": "raw", "expires": %q}`, expires.UTC().Format(time.RFC3339)),
+				`{"src": ["autogroup:member"], "dst": ["dns:about"], "allow": ["admin"]}`,
+			}, defaultWorldSmokeMailSettings().AclGrants...)...)
 		},
 		TlsRecordHost:      "about",
 		TlsRecordText:      "e2e-world-tls",
@@ -126,6 +134,7 @@ func defaultWorldSmokeSettings() *worldSmokeSettings {
 		TlsRequest:         "hello through tlsedge",
 		Tls:                DefaultWorldTlsSettings(),
 		Keys:               defaultWorldKeysSettings(),
+		Mail:               defaultWorldSmokeMailSettings(),
 	}
 }
 
@@ -186,6 +195,12 @@ func runWorldSmoke(t *testing.T, worldSettings *WorldSettings) {
 					t.Fatalf("%s follows no log after its admission", device.Name)
 				}
 			}
+		}
+
+		// the second network sends internet mail in the mail step, which §21.7's probation refuses a network under 7
+		// days old, so it is aged before anything reads its standing and caches it
+		if err := worldAgeNetwork(t.Context(), networks[1].NetworkId, settings.Mail.SenderNetworkAge); err != nil {
+			t.Fatal(err)
 		}
 
 		// evs: a shared repo in each network, every sidecar's write read back by every other
@@ -361,7 +376,8 @@ func runWorldSmoke(t *testing.T, worldSettings *WorldSettings) {
 		// dns: the first network's owner saves an ACL document granting its members admin on dns:smoke, writes smoke's A
 		// record through dns's api, and the dns edge answers it signed; the second network's owner writes nothing there
 		ctx, cancel = world.StepContext(t.Context(), settings.PhaseTimeout)
-		if _, err := world.SaveAclPolicy(ctx, first, first.Owner(), settings.DnsAclPolicy); err != nil {
+		// the mail step's grants in the same document, so the network saves one base for both (§7.9's one a minute)
+		if _, err := world.SaveAclPolicy(ctx, first, first.Owner(), worldAclPolicy(append([]string{settings.DnsAclGrant}, settings.Mail.AclGrants...)...)); err != nil {
 			cancel()
 			world.FailProgress(t, "the dns grant", err, nil)
 		}
@@ -433,6 +449,11 @@ func runWorldSmoke(t *testing.T, worldSettings *WorldSettings) {
 		// sockets and tlsedge: the second network, made Pro, publishes a member's raw tls/ listener on its standing
 		// grant, which a visitor reaches through tlsedge's 443
 		worldSmokeTls(t, world, settings, second)
+
+		// mail: the first network turns mail on and receives an internet sender's message through mxedge's router, then
+		// the second, verified by its Pro balance, sends to it through smtpedge
+		mailbox := worldSmokeMailInbound(t, world, settings, first, append([]string{settings.DnsAclGrant}, settings.Mail.AclGrants...))
+		worldSmokeMailOutbound(t, world, settings, second, mailbox)
 	})
 }
 

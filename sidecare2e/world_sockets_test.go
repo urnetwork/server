@@ -47,6 +47,8 @@ type WorldTlsSettings struct {
 	CertificateValidity time.Duration
 	// The most bytes a listener reads of one visit's request line.
 	RequestMaxByteCount int
+	// The name in a device's own network no listener holds, which AwaitSockets dials: an application name.
+	ProbeName string
 }
 
 func DefaultWorldTlsSettings() *WorldTlsSettings {
@@ -60,12 +62,19 @@ func DefaultWorldTlsSettings() *WorldTlsSettings {
 		VerifiedDuration:            24 * time.Hour,
 		CertificateValidity:         24 * time.Hour,
 		RequestMaxByteCount:         4096,
+		ProbeName:                   "e2e-probe/ready",
 	}
 }
 
 // Starts device's socket component, as ur daemon does once its follower stands (cli's startUrConfigFollower):
-// Sidecar.NewSocketComponent and AddComponent, what its Listen and Dial run on. The sidecar removes it at its close.
+// Sidecar.NewSocketComponent and AddComponent, what its Listen and Dial run on. Once per device: a later call finds it
+// started. The sidecar removes it at its close.
 func (self *World) StartSockets(ctx context.Context, device *sidecart3.T3Device) error {
+	self.socketsLock.Lock()
+	defer self.socketsLock.Unlock()
+	if self.socketsStarted[device] {
+		return nil
+	}
 	component, err := device.Sidecar().NewSocketComponent(ctx)
 	if err != nil {
 		return fmt.Errorf("%s's socket component: %w", device.Name, err)
@@ -74,7 +83,38 @@ func (self *World) StartSockets(ctx context.Context, device *sidecart3.T3Device)
 		component.Close()
 		return fmt.Errorf("%s's socket component: %w", device.Name, err)
 	}
+	if self.socketsStarted == nil {
+		self.socketsStarted = map[*sidecart3.T3Device]bool{}
+	}
+	self.socketsStarted[device] = true
 	return nil
+}
+
+// Waits until device's socket component stands, as a daemon's has long before its first dial: it attaches to the
+// running generation and reads its network's label after AddComponent, with no hook a test reads, so a dial of
+// ProbeName, which no listener holds, is tried every RetryInterval within Timeout while it answers the socket service
+// unavailable; any other answer, no listener above all, says the component stands.
+func (self *World) AwaitSockets(ctx context.Context, device *sidecart3.T3Device, settings *WorldTlsSettings) error {
+	if settings == nil {
+		settings = DefaultWorldTlsSettings()
+	}
+	ctx, cancel := context.WithTimeout(ctx, settings.Timeout)
+	defer cancel()
+	for {
+		conn, err := device.Sidecar().Dial(ctx, settings.ProbeName, nil)
+		if err == nil {
+			conn.Close()
+			return nil
+		}
+		if !errors.Is(err, sidecar.ErrSocketUnavailable) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("%s's sockets stayed unavailable: %w (%w)", device.Name, err, ctx.Err())
+		case <-time.After(settings.RetryInterval):
+		}
+	}
 }
 
 // Installs §16.6's approval gate behind device's Authorize, as ur daemon does over its follower (cli's
