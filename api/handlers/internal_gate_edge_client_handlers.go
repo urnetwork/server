@@ -341,6 +341,7 @@ func (self *InternalGateEdgeClientHandlers) PostEdgeClient(w http.ResponseWriter
 		ClientId:                     mint.ClientId.String(),
 		ByClientJwt:                  mint.ByClientJwt,
 		ExpireTimeMillis:             mint.ExpireTime.UnixMilli(),
+		AuthTimeMillis:               mint.AuthTime.UnixMilli(),
 		PlatformUrl:                  config.PlatformUrl(),
 		SocketsToken:                 socketsToken,
 		SocketsTokenExpireTimeMillis: socketsTokenExpireTime.UnixMilli(),
