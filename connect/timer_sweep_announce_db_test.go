@@ -18,7 +18,6 @@ import (
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/internal/timersweep"
 	"github.com/urnetwork/server/model"
-	"github.com/urnetwork/server/session"
 )
 
 // Real-time wakes beyond the sweep's own lateness: the sweep driver's and the
