@@ -47,7 +47,8 @@ type WorldTlsSettings struct {
 	CertificateValidity time.Duration
 	// The most bytes a listener reads of one visit's request line.
 	RequestMaxByteCount int
-	// The name in a device's own network no listener holds, which AwaitSockets dials: an application name.
+	// The platform name no listener holds, which AwaitSockets dials: a ur/ name, resolved in urnetwork-edge as
+	// ur/smtpedge is, so the probe takes the dial's own path, the registrar's platform admission and a Find.
 	ProbeName string
 }
 
@@ -62,7 +63,7 @@ func DefaultWorldTlsSettings() *WorldTlsSettings {
 		VerifiedDuration:            24 * time.Hour,
 		CertificateValidity:         24 * time.Hour,
 		RequestMaxByteCount:         4096,
-		ProbeName:                   "e2e-probe/ready",
+		ProbeName:                   "ur/e2e-probe",
 	}
 }
 
@@ -90,10 +91,11 @@ func (self *World) StartSockets(ctx context.Context, device *sidecart3.T3Device)
 	return nil
 }
 
-// Waits until device's socket component stands, as a daemon's has long before its first dial: it attaches to the
-// running generation and reads its network's label after AddComponent, with no hook a test reads, so a dial of
-// ProbeName, which no listener holds, is tried every RetryInterval within Timeout while it answers the socket service
-// unavailable; any other answer, no listener above all, says the component stands.
+// Waits until device's socket component can dial a platform name, as a daemon's can long before its first send: it
+// attaches to the running generation after AddComponent and takes its platform admission at its first dial, with no
+// hook a test reads, so a dial of ProbeName, which no listener holds, is tried every RetryInterval within Timeout
+// while it answers the socket service unavailable; any other answer, no listener above all, says the dial's path
+// stands.
 func (self *World) AwaitSockets(ctx context.Context, device *sidecart3.T3Device, settings *WorldTlsSettings) error {
 	if settings == nil {
 		settings = DefaultWorldTlsSettings()
