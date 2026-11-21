@@ -8,6 +8,7 @@ package model
 // counts newOrders and issues on a finalize of a ready order only once. No test reaches a real CA.
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/ecdsa"
@@ -25,6 +26,8 @@ import (
 	"time"
 
 	"github.com/urnetwork/sidecar"
+	"github.com/urnetwork/sidecar/certsservice"
+	"github.com/urnetwork/sidecar/sidecartest"
 
 	"github.com/urnetwork/server"
 )
@@ -406,10 +409,11 @@ func (testTlsCustomAlpn) Probe(ctx context.Context, host string, keyAuthorizatio
 // A world with a scripted CA, the account made by an admin's desktop through the orderer, and devices.
 type testTlsCustomSchedule struct {
 	*testTlsCustomWorld
-	ca      *testScriptedCa
-	keys    *testTlsCustomKeys
-	devices map[server.Id]*testTlsCustomDevice
-	account *sidecar.TlsCustomAccount
+	ca       *testScriptedCa
+	keys     *testTlsCustomKeys
+	devices  map[server.Id]*testTlsCustomDevice
+	account  *sidecar.TlsCustomAccount
+	settings *sidecar.TlsCustomSettings
 }
 
 func newTestTlsCustomSchedule(t testing.TB, ctx context.Context) *testTlsCustomSchedule {
@@ -442,7 +446,7 @@ func (self *testTlsCustomSchedule) orderer(t testing.TB, desktop *testTlsCustomD
 		Keys:    self.keys,
 		Alpn:    testTlsCustomAlpn{},
 		Roots:   self.store.roots,
-	}, nil)
+	}, self.settings)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -685,3 +689,73 @@ func (self testTlsCustomRepos) RollTarget(ctx context.Context, repoId sidecar.Id
 }
 
 var _ = sha256.Size
+
+// The ordering desktop polls while the requesting phone stays offline. Renewing its row reuses the
+// original signed CSR, and the second poll deposits a chain for the same device and key.
+func TestTlsCustomDesktopRenewsAnOfflinePhone(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		schedule := newTestTlsCustomSchedule(t, ctx)
+		schedule.settings = sidecar.DefaultTlsCustomSettings()
+		schedule.settings.PollInterval = time.Millisecond
+		schedule.settings.IdlePollInterval = time.Millisecond
+		schedule.settings.PollJitter = 0
+		schedule.ready(t)
+		phone := newTestTlsCustomDevice(t)
+		binding := testSidecarBindingRecord(t, schedule.networkId, phone.sidecarId, phone.identityKey.Public().(ed25519.PublicKey), 1)
+		phone.clientId = binding.ClientId
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO network_client (network_id, client_id, active, description) VALUES ($1, $2, true, $3)`, schedule.networkId, phone.clientId, "offline phone"))
+		})
+		if result, _ := BindSidecarIdentity(ctx, binding, schedule.now); result != SidecarBindAppended {
+			t.Fatalf("phone identity: %s", result)
+		}
+		schedule.devices[phone.sidecarId] = phone
+		predecessorId := schedule.queue(t, phone)
+		var successorId sidecar.Id
+		clock := sidecartest.NewFakeClock(schedule.now)
+		host := sidecartest.NewFakeHost(ctx, clock, nil, nil, nil)
+		defer host.Redis.Close()
+		settings := certsservice.DefaultCertsSettings()
+		settings.RootDomain = schedule.store.roots[0]
+		certs, err := certsservice.NewCertsService(ctx, host.ServiceHost(), NewCertsStore(nil), nil, nil, settings)
+		if err != nil {
+			t.Fatal(err)
+		}
+		desktop := schedule.orderer(t, newTestTlsCustomDevice(t), false)
+		passes := 0
+		desktop.Run(ctx, func(report *sidecar.TlsCustomPassReport, err error) {
+			if err != nil {
+				t.Fatal(err)
+			}
+			passes++
+			switch passes {
+			case 1:
+				if predecessor := schedule.row(t, predecessorId); predecessor.state != sidecar.TlsCertStateCustomIssued {
+					t.Fatalf("the phone's first order: %s", predecessor.state)
+				}
+				// The scripted CA's ARI window ends on day 31 of the 45-day chain.
+				schedule.now = schedule.now.Add(31 * 24 * time.Hour)
+				clock.AdvanceTo(schedule.now)
+				sweep, err := certs.RunCustomSweep(ctx, schedule.store, certsservice.DefaultCertsCustomSettings(), sidecar.Id{})
+				predecessor := schedule.row(t, predecessorId)
+				if err != nil || sweep.QueuedCount != 1 || predecessor.successorCertId == nil {
+					t.Fatalf("the due renewal sweep: %+v, %v", sweep, err)
+				}
+				successorId = sidecar.Id(*predecessor.successorCertId)
+			case 2:
+				original, renewed := schedule.row(t, predecessorId), schedule.row(t, successorId)
+				if renewed.state != sidecar.TlsCertStateCustomIssued || len(renewed.chain) == 0 ||
+					renewed.sidecarId != original.sidecarId || !bytes.Equal(renewed.spkiSha256, original.spkiSha256) ||
+					!bytes.Equal(renewed.csr, original.csr) || !bytes.Equal(renewed.attestation, original.attestation) {
+					t.Fatalf("the offline phone's renewal state is %s", renewed.state)
+				}
+				cancel()
+			}
+		})
+		if passes != 2 {
+			t.Fatalf("desktop poll count: %d", passes)
+		}
+	})
+}

@@ -40,8 +40,7 @@ package controller
 //	               §12.5's first need at an order. A scope device's set is its
 //	               scope's pair alone, and a member scope's only for its
 //	               member's consented devices (owner decisions 40, 58, 126),
-//	               the scope read from the state by ScopeOf, which finds none
-//	               until §7.9's rows carry TeamScopeRow
+//	               the scope read from the signed ownership rows by ScopeOf.
 //
 // Anything the projection, §21's standing or Postgres cannot answer is an
 // error, which the route answers 503: a network whose state the cache has not
@@ -160,18 +159,16 @@ type TlsCertsInstallDeps struct {
 	Names func(ctx context.Context, networkId sidecar.Id, root string, allocate bool) (label string, aliases []string, err error)
 	// The Team scope a sidecar's device holds its certificate in, read from
 	// the network's verified state, false for a network-level device
-	// (TLS-M6-03). nil: tlsCertScopeOf, which finds none, since §7.9's rows
-	// carry no TeamScopeRow yet (protos-bridge-row-fields #3).
+	// (TLS-M6-03). nil reads the signed ownership rows.
 	ScopeOf func(snapshot *sidecar.AclGateSnapshot, sidecarId sidecar.Id) (sidecar.AclScope, bool)
 }
 
-// The Team scope of a sidecar's device in the state: none. §7.9's rows carry
-// no TeamScopeRow yet (protos-bridge-row-fields #3), so no state places a
-// device in a scope, every device orders its network's set, and a scope host's
-// grant gives no set, the closed direction, until the rows carry scopes and a
-// source here reads them, as socketsservice.SocketScopeSource will.
+// The same signed ownership projection used by the device when it chooses its requested SANs.
 func tlsCertScopeOf(snapshot *sidecar.AclGateSnapshot, sidecarId sidecar.Id) (sidecar.AclScope, bool) {
-	return sidecar.AclScope{}, false
+	if snapshot == nil || snapshot.Config == nil {
+		return sidecar.AclScope{}, true
+	}
+	return snapshot.Config.TeamScopeForDevice(sidecarId)
 }
 
 // api's certs install as server.SidecarSwitchInstall drives it: nothing is
@@ -441,7 +438,7 @@ func (self *tlsCertSubjectSource) subject(ctx context.Context, principal *sideca
 	// TLS-M6-03: a Team scope's device holds only its scope's pair, and a member scope's set goes only to its member's
 	// consented devices (owner decisions 40, 58, 126); a scope device is granted nothing for the network's own set
 	scope, scoped := self.scopeOf(snapshot, sidecarId)
-	if scoped && scope.MemberId != (sidecar.Id{}) && !snapshot.Acl.ConsentedFor(sidecarId, scope.MemberId) {
+	if scoped && (scope.Label == "" || scope.MemberId != (sidecar.Id{}) && !snapshot.Acl.ConsentedFor(sidecarId, scope.MemberId)) {
 		return &TlsCertSubject{IdentityPublicKey: identityPublicKey}, nil
 	}
 	granted, err := self.granted(snapshot, networkId, sidecarId, scope, scoped, now)
@@ -561,7 +558,11 @@ func (self *tlsCertSubjectSource) granted(snapshot *sidecar.AclGateSnapshot, net
 		}
 		return nil
 	}
-	decision := self.view.MayListen(networkId, subject, sidecar.AclSocketName{PublicName: tlsCertsMailListenName}, now)
+	mailName := tlsCertsMailListenName
+	if scoped {
+		mailName += "." + scope.Label
+	}
+	decision := self.view.MayListen(networkId, subject, sidecar.AclSocketName{PublicName: mailName}, now)
 	if err := unloaded(decision); err != nil {
 		return false, err
 	}

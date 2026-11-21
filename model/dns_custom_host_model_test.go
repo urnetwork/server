@@ -206,6 +206,13 @@ func TestDnsCustomHostStrongModeVerdicts(t *testing.T) {
 		if row := world.row(ctx, www); row.State != sidecar.DnsCustomHostStateActive || !row.EffectiveCaaChainOk || !testDnsCustomHostMapped(ctx, www) {
 			t.Fatalf("after a pass the row is %+v", row)
 		}
+		zone, err := GetDnsZoneView(ctx, world.root, world.networkId)
+		if err != nil || len(zone.CustomHosts) != 2 {
+			t.Fatalf("device zone mappings: %+v, %v", zone, err)
+		}
+		if zone.CustomHosts[1].Host != www || zone.CustomHosts[1].Owner != owner || zone.CustomHosts[1].State != sidecar.DnsCustomHostStateActive {
+			t.Fatalf("device mapping after CAA activation: %+v", zone.CustomHosts)
+		}
 		if outcome := apply(www, false); outcome != DnsCustomHostOutcomeExposed {
 			t.Fatalf("a failing later check: %s", outcome)
 		}
