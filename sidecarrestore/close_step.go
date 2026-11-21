@@ -64,13 +64,15 @@ var (
 	ErrCloseTooEarly = errors.New("the close step waits for §19.10's re-seeding period")
 	// reseed is still on in sidecar.yml.
 	ErrCloseReseedOn = errors.New("reseed is on in sidecar.yml")
-	// The incident's list records no end of the hardware step, from which the period counts.
+	// The incident's list records no end of storage qualification.
 	ErrCloseNoHardwareEnd = errors.New("the incident records no end of the hardware step")
+	// The incident has not completed its API replay behind the restore hold.
+	ErrCloseNoApiEnd = errors.New("the incident records no end of the api step")
 )
 
 // The close step's tunables.
 type CloseStepSettings struct {
-	// How long re-seeding runs after the hardware step ends before the close: §19.10's 30 days.
+	// Minimum re-seeding time once both the new hardware and the held API replay are ready.
 	ReseedPeriod time.Duration
 	// How long a deleted repo stays restorable, past which an unrestored one is shredded: §11.12's 7 days.
 	RestorablePeriod time.Duration
@@ -103,20 +105,35 @@ type CloseStepDeps struct {
 	SkipMarker bool
 }
 
-// When the hardware step ended under incident, from its step-ended row.
-func hardwareStepEnd(incident *Incident) (time.Time, error) {
+// The first time both qualified hardware and the restored API could accept re-seeds.
+// Older incident lists recorded hardware after api. Both orders retain their full window.
+func reseedWindowStart(incident *Incident) (time.Time, error) {
+	var hardwareEnd, apiEnd time.Time
 	for _, row := range incident.RowsOfKind(ListKindStepEnded) {
-		if row.Table != StepHardware {
+		if row.Table != StepHardware && row.Table != StepApi {
 			continue
 		}
 		text, _, _ := strings.Cut(row.Detail, " ")
 		endTime, err := time.Parse(time.RFC3339, text)
 		if err != nil {
-			return time.Time{}, fmt.Errorf("%w: its row's time %q does not read", ErrCloseNoHardwareEnd, text)
+			return time.Time{}, fmt.Errorf("%w: invalid %s step time %q", ErrIncidentList, row.Table, text)
 		}
-		return endTime, nil
+		if row.Table == StepHardware {
+			hardwareEnd = endTime
+		} else {
+			apiEnd = endTime
+		}
 	}
-	return time.Time{}, ErrCloseNoHardwareEnd
+	if hardwareEnd.IsZero() {
+		return time.Time{}, ErrCloseNoHardwareEnd
+	}
+	if apiEnd.IsZero() {
+		return time.Time{}, ErrCloseNoApiEnd
+	}
+	if apiEnd.After(hardwareEnd) {
+		return apiEnd, nil
+	}
+	return hardwareEnd, nil
 }
 
 // Whether the log shreds the repo: deleted with now, or unrestored past its restorable period.
@@ -158,7 +175,7 @@ func readCloseRepo(ctx context.Context, blobs sidecar.BlobStore, firstCluster si
 	} else if err != nil {
 		return closeRepoBack, err
 	}
-	statements, _, err := cluster.List(ctx, "reseed/"+repoId.String()+"/", "", min(1, pageCount))
+	statements, _, err := cluster.List(ctx, "reseed/"+sidecar.EvsKeyId(repoId)+"/", "", min(1, pageCount))
 	if err != nil {
 		return closeRepoBack, err
 	}
@@ -188,11 +205,11 @@ func RunCloseStep(ctx context.Context, deps *CloseStepDeps, run *StepRun) error 
 			return err
 		}
 	}
-	hardwareEnd, err := hardwareStepEnd(incident)
+	reseedStart, err := reseedWindowStart(incident)
 	if err != nil {
 		return err
 	}
-	if closeAt := hardwareEnd.Add(settings.ReseedPeriod); now().Before(closeAt) {
+	if closeAt := reseedStart.Add(settings.ReseedPeriod); now().Before(closeAt) {
 		return fmt.Errorf("%w: re-seeding runs until %s", ErrCloseTooEarly, closeAt.UTC().Format(time.RFC3339))
 	}
 	if deps.ReseedOn() {

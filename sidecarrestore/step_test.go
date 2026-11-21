@@ -148,10 +148,12 @@ func TestFrameRefusesASiteStepInAPostgresIncident(t *testing.T) {
 	connect.AssertEqual(t, errors.Is(frame.EndStepByHand(incident, StepClose, "by hand"), ErrStepSiteOnly), true)
 	connect.AssertEqual(t, hardwareCount, 0)
 
-	// in a site incident it waits for every Postgres step first
+	// A site restores the dumps, then provisions hardware before the first cluster read.
 	site := testIncident(t, IncidentKindSite)
-	err = frame.RunStep(t.Context(), site, StepHardware, &bytes.Buffer{}, "")
-	connect.AssertEqual(t, errors.Is(err, ErrStepOutOfOrder), true)
+	connect.AssertEqual(t, errors.Is(frame.EndStepByHand(site, StepOps, "read projections"), ErrStepOutOfOrder), true)
+	connect.AssertEqual(t, frame.RunStep(t.Context(), site, StepHardware, &bytes.Buffer{}, ""), nil)
+	connect.AssertEqual(t, hardwareCount, 1)
+	connect.AssertEqual(t, frame.EndStepByHand(site, StepOps, "read projections"), nil)
 }
 
 func TestFrameRunStopsAtAnUnregisteredStep(t *testing.T) {

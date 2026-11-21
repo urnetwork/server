@@ -6,8 +6,8 @@ package sidecarrestore
 //
 // The site's store, the file clusters, is a sidecartest.FakeBlobs the test seeds before the loss. LoseSite then loses
 // everything at once: the primary, which comes back from both dumps through xops's real scripts as PostgresLossFixture
-// restores it, under a site incident; and every bucket, so the store a step sees is a new, empty one, which the
-// hardware step finds empty and answering. reseed: true goes into sidecar.yml, which limits evs and gkm to re-seed
+// restores it, under a site incident; and every bucket. No replacement store exists until the hardware step
+// provisions and qualifies one. That step sets reseed: true in sidecar.yml, which limits evs and gkm to re-seed
 // uploads and GroupForms and opens api's log upload (§19.10's hardware row), until EndReseed takes it off for the
 // close. What the devices bring back, the test writes on the new store through the fixture: a log resumed verbatim
 // (ResumeLog, what TEAM-M3-02's adoption leaves at unchanged positions) and a repo re-seeded, placed afresh with its
@@ -23,6 +23,7 @@ import (
 	"io"
 
 	"github.com/urnetwork/sidecar"
+	"github.com/urnetwork/sidecar/evsservice"
 	"github.com/urnetwork/sidecar/protocol"
 	"github.com/urnetwork/sidecar/sidecartest"
 
@@ -65,39 +66,49 @@ func (self *SiteLossFixture) SiteBlobs() *sidecartest.FakeBlobs {
 	return self.siteBlobs
 }
 
-// The new hardware's store, empty at LoseSite; nil before it.
+// The replacement store, nil until the hardware step provisions it.
 func (self *SiteLossFixture) NewBlobs() *sidecartest.FakeBlobs {
 	return self.newBlobs
 }
 
-// Sets sidecar.yml's reseed, with the test's lines beside it.
-func (self *SiteLossFixture) setReseed(on bool) {
+// Publishes the two recovery gates together, preserving the fixture's other config.
+func (self *SiteLossFixture) setGates(held bool, reseed bool) {
 	if self.popConfig != nil {
 		self.popConfig()
 	}
-	self.popConfig = server.Testing_PushSidecarConfig(fmt.Sprintf("sidecar:\n  reseed: %t\n%s", on, self.sidecarYaml))
+	self.popConfig = server.Testing_PushSidecarConfig(fmt.Sprintf("sidecar:\n  restore_hold: %t\n  reseed: %t\n%s", held, reseed, self.sidecarYaml))
 }
 
 // Loses the site under incidentId (see the file header): both dumps restored under a site incident, every bucket
-// gone, and reseed on. Answers the incident.
+// gone, with no replacement storage and reseed off. Answers the incident.
 func (self *SiteLossFixture) LoseSite(incidentId server.Id) *Incident {
 	self.t.Helper()
-	incident := self.restoreDumps(incidentId, IncidentKindSite)
-	settings := sidecartest.DefaultFakeBlobsSettings()
-	self.newBlobs = sidecartest.NewFakeBlobs(sidecartest.NewFakeClock(sidecartest.DefaultClockStart()), sidecartest.NewFaultQueue(), nil, settings)
-	self.setReseed(true)
-	return incident
+	self.newBlobs = nil
+	self.setGates(true, false)
+	return self.restoreDumps(incidentId, IncidentKindSite)
 }
 
 // Takes reseed off, as §19.10's close asks after its 30 days.
 func (self *SiteLossFixture) EndReseed() {
-	self.setReseed(false)
+	self.setGates(false, false)
 }
 
-// Whether every cluster of the new store is empty and answers a LIST: the hardware row's empty buckets.
+// Provisions the replacement store, checks every new bucket and only then enables re-seeding.
+func (self *SiteLossFixture) ProvisionStorage(ctx context.Context) error {
+	if self.newBlobs == nil {
+		self.newBlobs = sidecartest.NewFakeBlobs(sidecartest.NewFakeClock(sidecartest.DefaultClockStart()), sidecartest.NewFaultQueue(), nil, sidecartest.DefaultFakeBlobsSettings())
+	}
+	if err := self.NewStoreEmpty(ctx); err != nil {
+		return err
+	}
+	self.setGates(true, true)
+	return nil
+}
+
+// Checks that every replacement bucket answers and contains no objects.
 func (self *SiteLossFixture) NewStoreEmpty(ctx context.Context) error {
 	if self.newBlobs == nil {
-		return fmt.Errorf("the site is not lost yet")
+		return fmt.Errorf("replacement storage has not been provisioned")
 	}
 	clusterIds := append(self.newBlobs.MetadataClusterIds(), sidecartest.DefaultFakeBlobsSettings().SegmentClusterId)
 	for _, clusterId := range clusterIds {
@@ -189,7 +200,7 @@ func (self *SiteLossFixture) ReseedRepo(ctx context.Context, networkId server.Id
 	self.putOnce(ctx, first, sidecar.EvsRepoObjectKey(repoId), object)
 	if underStatement {
 		// one ref's statement, at a key fixed by the repo, so a step that runs again writes nothing more
-		self.putOnce(ctx, first, "reseed/"+repoId.String()+"/"+repoId.String(), []byte("a Signed EvsReseed"))
+		self.putOnce(ctx, first, evsservice.ReseedKey(repoId, repoId), []byte("a Signed EvsReseed"))
 	}
 }
 

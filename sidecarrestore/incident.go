@@ -27,7 +27,7 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// The kinds of recovery §19.10 runs. A site loss runs every Postgres step and then its own.
+// Recovery of a primary or of a whole site, including its storage.
 type IncidentKind string
 
 const (
