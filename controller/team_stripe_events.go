@@ -515,14 +515,15 @@ func reconcileStripeTeamSubscriptions(run *paymentReconcileRun) (complete bool, 
 	store := model.SubscriptionMarketStripe
 	dunningSettings := stripeDunningSettingsFunc()
 	settings := stripeTeamReconcileSettingsFunc()
-	if !stripeReconcileRejectedTeamSubscriptions(run, settings.PageCount) {
+	rejected := map[string]bool{}
+	if !stripeReconcileRejectedTeamSubscriptions(run, settings.PageCount, rejected) {
 		return false, nil
 	}
 	var after *server.Id
 	for {
 		page := model.ListLiveTeamSubscriptionsInConn(run.connOwner, ctx, after, settings.PageCount)
 		if after == nil && len(page) > 0 {
-			complete, err := stripeReconcileOtherTeamSubscriptions(run)
+			complete, err := stripeReconcileOtherTeamSubscriptions(run, rejected)
 			if err != nil {
 				run.record(store, model.PaymentReconcileActionError, nil, "", map[string]any{"leg": "team_duplicates", "error": err.Error()})
 			}

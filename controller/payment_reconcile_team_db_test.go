@@ -44,8 +44,6 @@ func TestReconcileEndsATeamSubscriptionWhoseDeletionWasLost(t *testing.T) {
 		if deliveryErr == nil {
 			t.Fatal("the unconfirmed cancellation was acknowledged")
 		}
-		env.setSubscriptionStatus(orphanRetained, "canceled")
-		env.deliverSubscriptionDeleted(t, orphanSession, orphanRetained)
 		// Stripe ended it, and the event was lost
 		env.setSubscriptionStatus(subscriptionId, "canceled")
 
@@ -72,9 +70,12 @@ func TestReconcileEndsATeamSubscriptionWhoseDeletionWasLost(t *testing.T) {
 		connect.AssertEqual(t, countPaymentReconciliationEventRows(t, ctx, model.SubscriptionMarketStripe, model.PaymentReconcileActionCreditUnfulfillable, orphanInvoice), 2)
 		connect.AssertEqual(t, model.GetLiveTeamSubscription(ctx, networkId) != nil, true)
 		connect.AssertEqual(t, len(env.confirmedCancellations()), 0)
-		connect.AssertEqual(t, model.GetLiveTeamSubscription(ctx, orphanNet) == nil, true)
+		connect.AssertEqual(t, countPaymentReconciliationEventRows(t, ctx, model.SubscriptionMarketStripe, model.PaymentReconcileActionWouldEnd, orphan), 1)
 		connect.AssertEqual(t, countPaymentReconciliationEventRows(t, ctx, model.SubscriptionMarketStripe, model.PaymentReconcileActionWouldEnd, duplicate), 1)
 
+		env.setSubscriptionStatus(orphanRetained, "canceled")
+		env.deliverSubscriptionDeleted(t, orphanSession, orphanRetained)
+		connect.AssertEqual(t, model.GetLiveTeamSubscription(ctx, orphanNet) == nil, true)
 		run(false)
 		connect.AssertEqual(t, env.confirmedCancellations()[duplicate], 1)
 		connect.AssertEqual(t, env.confirmedCancellations()[orphan], 1)
