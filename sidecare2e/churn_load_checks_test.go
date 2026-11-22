@@ -589,20 +589,21 @@ func (self *churnLoadCase) finish() {
 			self.world.FailProgress(t, name+"'s restart for its drain", err, nil)
 		}
 	}
-	self.checkLedgers(ctx, phase, mxByteCounts, smtpByteCounts)
-	self.checkWriteBudgets(ctx, phase)
-	controlPlaneCheckApiBudget(t, ctx, self.world, settings.Ledger)
-	dnsCertsCheckCertsBudget(t, ctx, self.stack, self.publishers)
-	dnsCertsCheckChallengeCounts(t, ctx, self.stack, settings.Dns, &dnsCertsRecords{Root: self.dnsRecords.Root})
-	self.logRefusals(phase)
-	// last, since its reconciliation closes every network of the world: the bridge's oracle over every attempt, its
-	// sidecar clients, and its ledger
+	// the bridge's oracle over every attempt, its sidecar clients and its ledger, which reads the debit journal's
+	// relay rows of its contracts before any ledger read's flush applies them, and which closes every network
 	if self.bridge != nil {
 		self.bridge.CheckSidecarClients(ctx, t)
 		self.bridge.Check(t)
 		self.bridge.Reconcile(ctx, t)
 		self.bridge.Summarize(t)
 	}
+	// then every ledger of the case's own networks, which reads no device
+	self.checkLedgers(ctx, phase, mxByteCounts, smtpByteCounts)
+	self.checkWriteBudgets(ctx, phase)
+	controlPlaneCheckApiBudget(t, ctx, self.world, settings.Ledger)
+	dnsCertsCheckCertsBudget(t, ctx, self.stack, self.publishers)
+	dnsCertsCheckChallengeCounts(t, ctx, self.stack, settings.Dns, &dnsCertsRecords{Root: self.dnsRecords.Root})
+	self.logRefusals(phase)
 }
 
 // No certificate row of a publisher's is left queued, ordering or waiting on dns: every order the case began ended.

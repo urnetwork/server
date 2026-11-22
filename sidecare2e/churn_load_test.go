@@ -99,9 +99,10 @@
 // the metadata cluster's write budget holding a report, and nothing in flight or queued there; the certs budget at LE
 // against the case's first orders (dnsCertsCheckCertsBudget); the challenge names' journal rows against the certs
 // worker's writes (dnsCertsCheckChallengeCounts); and the mail sends' outcomes, the internet MX's transactions and
-// every mailbox's copies (mailCheckMailbox, mailCheckInternetMx, mailCheckOutbox); and last, since it closes every
-// network, the bridge's oracle over every attempt the case made, its sidecar clients and its ledger (ItBridgeWorld's
-// Check, CheckSidecarClients and Reconcile). Nothing is left in flight: no send unended, no certificate row unissued,
+// every mailbox's copies (mailCheckMailbox, mailCheckInternetMx, mailCheckOutbox); and once every check that reads a
+// device has run and the blocks drained, the bridge's oracle over every attempt the case made, its sidecar clients and
+// its ledger (ItBridgeWorld's Check, CheckSidecarClients and Reconcile, which closes every network and must read its
+// contracts' relay rows in the debit journal before a ledger read's flush applies them), then the case's own ledgers. Nothing is left in flight: no send unended, no certificate row unissued,
 // no budget in flight. Each phase has its bound and a progress dump on a stall (World.FailProgress), and the whole
 // case is bounded by CaseTimeout, 10 minutes by default.
 //
@@ -134,8 +135,6 @@
 //   - an evs writer's second write of a path refused 409 PATH_CONFLICT 48 ms after its first was answered, no other
 //     push to the repo between: a write plans its first attempt on evs's cache (EvsPlanArgs.Fresh false), which its own
 //     push had not reached, and a file-mode 409 on an update goes back to the caller (the blog writer's own article);
-//   - the bridge's relayed contracts that closed across an api restart journaled no relay debit, their settled bytes
-//     on no meter (ItBridgeWorld.Reconcile), where a run with no api restart reconciled the bridge's ledger exactly.
 //
 // Run it through the build's wrapper: -tags 'sidecar_e2e sidecar_pending sidecar_localstack' -run TestE2eChurnLoad.
 
