@@ -259,16 +259,22 @@ func (self *t3WorldKeys) groupClient() (*sidecar.GkmGroupClient, error) {
 		return nil, err
 	}
 	groupArgs.ReaderPrivateKey = self.readerPrivateKey
+	upkeep := func() *sidecar.GkmUpkeep {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		return self.upkeep
+	}
 	groupArgs.ReaderKeySha256 = func() []byte {
-		upkeep := func() *sidecar.GkmUpkeep {
-			self.stateLock.Lock()
-			defer self.stateLock.Unlock()
-			return self.upkeep
-		}()
-		if upkeep == nil {
-			return nil
+		if upkeep := upkeep(); upkeep != nil {
+			return upkeep.CurrentReaderKeySha256()
 		}
-		return upkeep.CurrentReaderKeySha256()
+		return nil
+	}
+	// a late ask with no ReaderKey at gkm asks the upkeep for a pass, as ur daemon's composition does
+	groupArgs.PublishReaderKey = func() {
+		if upkeep := upkeep(); upkeep != nil {
+			upkeep.Refresh()
+		}
 	}
 	groupArgs.ReaderRepoIds = self.readerRepoIds
 	group, err = sidecar.NewGkmGroupClient(groupArgs)
