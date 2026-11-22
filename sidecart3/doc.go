@@ -50,8 +50,10 @@
 //     from their owners' auth keys, the first bootstrapping its network and admitting the rest, each
 //     following its log, with api's sequencer and token exchange installed over a gate cache and a
 //     throwaway svc- key; world_evs.go serves evshost's block at the world's evs origin, built as the evs
-//     tier builds it, on the networks' real verified state. world_evs_e2e_test.go, under sidecar_e2e,
-//     runs full sidecars' concurrent pushes and verified reads there.
+//     tier builds it, on the networks' real verified state. world_evs_e2e_test.go, under sidecar_e2e
+//     and sidecar_pending, runs full sidecars' concurrent pushes and verified reads there. A _test.go
+//     file installs the signer of each network's owner credential (Testing_SetT3WorldOwnerSigner), since
+//     no non-test file calls session's fixture signer.
 //   - disruption.go, §22.8's disruptions beyond the schedules (TEST-M2-15): RedisRestart and
 //     PostgresRestart on the test's own database, ResidentKill on server's exchange, and LbFixture, nginx
 //     from warp's directives (local/sidecar-lb-fixture) whose Drain cuts an upstream block; their rows
