@@ -111,7 +111,14 @@ type T3Api struct {
 	serviceHostHandlers map[string]http.Handler
 	// what serves api's internal gate surface in place of api's own routes there (ServeInternalGate), nil for api's
 	internalGateHandler http.Handler
+	// what a test puts in front of api's own answer to each request to api (SetApiHook), nil for none
+	apiHook T3ApiHook
 }
+
+// What a test puts in front of api's handling of each request to api, never a service origin's: given the request and
+// serve, which hands it to api's handler and answers api's response, it answers what the caller gets, so a test can
+// hold a request, lose it before api sees it, or lose api's answer after api acted, as a dying api host does.
+type T3ApiHook func(request *http.Request, serve func() (*http.Response, error)) (*http.Response, error)
 
 // Server's api over api's and oauth's routes, its credentials handed to net's capture. settings nil takes the defaults.
 func NewT3Api(ctx context.Context, net *sidecartest.Net, settings *T3SidecarSettings) *T3Api {
@@ -179,6 +186,20 @@ func (self *T3Api) ServeInternalGate(handler http.Handler) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	self.internalGateHandler = handler
+}
+
+// Puts hook in front of api's handling of every request to api from now on (T3ApiHook); nil takes it away.
+func (self *T3Api) SetApiHook(hook T3ApiHook) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.apiHook = hook
+}
+
+// The hook set, nil for none.
+func (self *T3Api) currentApiHook() T3ApiHook {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.apiHook
 }
 
 // The handler api serves request with: the internal gate's for a path under its prefix while one is set, else api's
@@ -295,16 +316,24 @@ func (self *t3ApiTransport) RoundTrip(request *http.Request) (*http.Response, er
 			return nil, err
 		}
 	}
-	served := httptest.NewRequestWithContext(request.Context(), request.Method, request.URL.RequestURI(), bytes.NewReader(body))
-	served.Header = request.Header.Clone()
-	served.RemoteAddr = settings.RemoteAddr
-	recorder := httptest.NewRecorder()
-	self.api.apiHandler(request).ServeHTTP(recorder, served)
-	route := request.Method + " " + request.URL.Path
-	self.api.addAnswerSecrets(route, recorder.Body.Bytes())
-	response := recorder.Result()
-	response.Request = request
-	return response, nil
+	serve := func() (*http.Response, error) {
+		served := httptest.NewRequestWithContext(request.Context(), request.Method, request.URL.RequestURI(), bytes.NewReader(body))
+		served.Header = request.Header.Clone()
+		served.RemoteAddr = settings.RemoteAddr
+		recorder := httptest.NewRecorder()
+		self.api.apiHandler(request).ServeHTTP(recorder, served)
+		route := request.Method + " " + request.URL.Path
+		self.api.addAnswerSecrets(route, recorder.Body.Bytes())
+		response := recorder.Result()
+		response.Request = request
+		return response, nil
+	}
+	if hook := self.api.currentApiHook(); hook != nil {
+		// the hook reads the body again from its own copy
+		request.Body = io.NopCloser(bytes.NewReader(body))
+		return hook(request, serve)
+	}
+	return serve()
 }
 
 // One request through api as a scenario sends it: its status and body. authorization "" sends none.
@@ -519,16 +548,24 @@ func (self *T3SidecarExchange) PlatformUrl() string {
 	return self.platform.platformUrl
 }
 
-// One sidecar on T3: its Sidecar, its instance and what ends them.
+// One sidecar on T3: its Sidecar, its instance and what ends them, and the store and key store its instance keeps,
+// which Restart starts a new Sidecar on.
 type T3Sidecar struct {
 	Name     string
 	Settings *sidecar.SidecarSettings
 
 	t3Settings *T3SidecarSettings
-	running    *sidecar.Sidecar
-	instance   *sidecar.SidecarInstance
-	cancel     context.CancelFunc
-	closeOnce  sync.Once
+	// the context each run of the sidecar derives from
+	ctx       context.Context
+	backend   sidecar.SidecarStoreBackend
+	keyStore  sidecar.SidecarKeyStore
+	closeOnce sync.Once
+
+	stateLock sync.Mutex
+	running   *sidecar.Sidecar
+	instance  *sidecar.SidecarInstance
+	cancel    context.CancelFunc
+	closed    bool
 }
 
 // A running sidecar named name on a memory instance of its own, Unenrolled, its api T3Api and its clients on exchange.
@@ -554,34 +591,94 @@ func StartT3Sidecar(ctx context.Context, net *sidecartest.Net, name string, t3Ap
 	settings.KeychainSettings.AutoLockTimeout = 0
 	settings.Connect.Platform = &t3SidecarPlatform{api: t3Api, exchange: exchange.platform}
 
-	runCtx, cancel := context.WithCancel(ctx)
-	keyStore := sidecar.NewSidecarMemoryKeyStore()
+	started := &T3Sidecar{
+		Name:       name,
+		Settings:   settings,
+		t3Settings: t3Settings,
+		ctx:        ctx,
+		backend:    sidecar.NewSidecarMemoryBackend(),
+		keyStore:   sidecar.NewSidecarMemoryKeyStore(),
+	}
+	running, instance, cancel, err := started.start()
+	if err != nil {
+		return nil, err
+	}
+	started.running, started.instance, started.cancel = running, instance, cancel
+	return started, nil
+}
+
+// One run: an instance on the kept store and key store, unlocked, and a Sidecar on it.
+func (self *T3Sidecar) start() (*sidecar.Sidecar, *sidecar.SidecarInstance, context.CancelFunc, error) {
+	runCtx, cancel := context.WithCancel(self.ctx)
 	instance, err := sidecar.NewSidecarInstance(runCtx, &sidecar.SidecarInstanceArgs{
-		Backend:  sidecar.NewSidecarMemoryBackend(),
-		KeyStore: keyStore,
-		Settings: settings,
+		Backend:  self.backend,
+		KeyStore: self.keyStore,
+		Settings: self.Settings,
 	})
 	if err != nil {
 		cancel()
-		return nil, err
+		return nil, nil, nil, err
 	}
 	if err := instance.Unlock(nil); err != nil {
 		instance.Close()
 		cancel()
-		return nil, err
+		return nil, nil, nil, err
 	}
-	running, err := sidecar.NewSidecar(runCtx, &t3SidecarHost{store: instance.Store(nil), keyStore: keyStore}, nil, settings)
+	running, err := sidecar.NewSidecar(runCtx, &t3SidecarHost{store: instance.Store(nil), keyStore: self.keyStore}, nil, self.Settings)
 	if err != nil {
 		instance.Close()
 		cancel()
-		return nil, err
+		return nil, nil, nil, err
 	}
-	return &T3Sidecar{Name: name, Settings: settings, t3Settings: t3Settings, running: running, instance: instance, cancel: cancel}, nil
+	return running, instance, cancel, nil
 }
 
 // The running Sidecar.
 func (self *T3Sidecar) Sidecar() *sidecar.Sidecar {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
 	return self.running
+}
+
+// Ends the running Sidecar and its instance, as a crash or a restart of its host ends a daemon, and starts a new one on
+// the same store and key store, which keep its enrollment, keys and anchor, waiting until it is Online again: a
+// device restart keeping its store. Nothing else may use the sidecar meanwhile. Refused once Close ran.
+func (self *T3Sidecar) Restart(ctx context.Context) error {
+	running, instance, cancel, closed := func() (*sidecar.Sidecar, *sidecar.SidecarInstance, context.CancelFunc, bool) {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		return self.running, self.instance, self.cancel, self.closed
+	}()
+	if closed {
+		return fmt.Errorf("%s has closed", self.Name)
+	}
+	closeCtx, closeCancel := context.WithTimeout(ctx, self.t3Settings.CloseTimeout)
+	running.CloseAndWait(closeCtx)
+	closeCancel()
+	instance.Close()
+	cancel()
+	nextRunning, nextInstance, nextCancel, err := self.start()
+	if err != nil {
+		return fmt.Errorf("%s's restart: %w", self.Name, err)
+	}
+	restarted := func() bool {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		if self.closed {
+			return false
+		}
+		self.running, self.instance, self.cancel = nextRunning, nextInstance, nextCancel
+		return true
+	}()
+	if !restarted {
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), self.t3Settings.CloseTimeout)
+		defer closeCancel()
+		nextRunning.CloseAndWait(closeCtx)
+		nextInstance.Close()
+		nextCancel()
+		return fmt.Errorf("%s closed during its restart", self.Name)
+	}
+	return self.AwaitState(ctx, sidecar.SidecarStateOnline)
 }
 
 // Waits until the sidecar's state is state, or StateTimeout passes.
@@ -590,7 +687,8 @@ func (self *T3Sidecar) AwaitState(ctx context.Context, state sidecar.SidecarStat
 	defer cancel()
 	changed := make(chan struct{}, 1)
 	// subscribed before the read, so a move between them wakes the wait
-	remove := self.running.AddEventCallback(func(event sidecar.SidecarEvent) {
+	running := self.Sidecar()
+	remove := running.AddEventCallback(func(event sidecar.SidecarEvent) {
 		if event.Kind != sidecar.SidecarEventState {
 			return
 		}
@@ -601,7 +699,7 @@ func (self *T3Sidecar) AwaitState(ctx context.Context, state sidecar.SidecarStat
 	})
 	defer remove()
 	for {
-		status := self.running.Status()
+		status := running.Status()
 		if status.State == state {
 			return nil
 		}
@@ -618,7 +716,7 @@ func (self *T3Sidecar) EnrollOnline(ctx context.Context, credential *sidecar.Sid
 	if err := self.AwaitState(ctx, sidecar.SidecarStateUnenrolled); err != nil {
 		return err
 	}
-	if err := self.running.Enroll(ctx, credential); err != nil {
+	if err := self.Sidecar().Enroll(ctx, credential); err != nil {
 		return fmt.Errorf("%s did not enroll: %w", self.Name, err)
 	}
 	return self.AwaitState(ctx, sidecar.SidecarStateOnline)
@@ -627,10 +725,16 @@ func (self *T3Sidecar) EnrollOnline(ctx context.Context, credential *sidecar.Sid
 // Ends the sidecar, waiting for its generation, and its instance. Safe to call again.
 func (self *T3Sidecar) Close() {
 	self.closeOnce.Do(func() {
+		running, instance, cancel := func() (*sidecar.Sidecar, *sidecar.SidecarInstance, context.CancelFunc) {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			self.closed = true
+			return self.running, self.instance, self.cancel
+		}()
 		closeCtx, closeCancel := context.WithTimeout(context.Background(), self.t3Settings.CloseTimeout)
 		defer closeCancel()
-		self.running.CloseAndWait(closeCtx)
-		self.instance.Close()
-		self.cancel()
+		running.CloseAndWait(closeCtx)
+		instance.Close()
+		cancel()
 	})
 }

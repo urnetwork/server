@@ -341,6 +341,12 @@ type T3World struct {
 	gkm           *sidecartest.FakeGkm
 	// api's own write budget with ApiWriteBudget, nil otherwise
 	apiBudget *evsservice.WriteBudgetClient
+	// api's host, its budget api's, and its first cluster, which each run of api's installs is over (startApi)
+	apiHost  *sidecar.ServiceHost
+	apiFirst sidecar.BlobCluster
+	// api's current process state (startApi), nil once stopped
+	apiLock sync.Mutex
+	apiRun  *t3WorldApiRun
 
 	stateLock sync.Mutex
 	gates     []*t3WorldGate
@@ -425,11 +431,6 @@ func NewT3World(t testing.TB, settings *T3WorldSettings) (world *T3World, return
 	if settings.SidecarLimits != nil {
 		self.closes = append(self.closes, installT3WorldSidecarLimits(settings.SidecarLimits))
 	}
-	// api's log and exchange, as its process installs them over its first cluster
-	apiGate, err := self.addGate("api")
-	if err != nil {
-		return nil, err
-	}
 	first, err := host.Blobs.FirstCluster()
 	if err != nil {
 		return nil, err
@@ -445,14 +446,15 @@ func NewT3World(t testing.TB, settings *T3WorldSettings) (world *T3World, return
 		apiHost.Budget = budget
 		self.apiBudget = budget
 	}
-	configLogSettings := model.NewApiConfigLogSettings()
-	if settings.AdjustConfigLog != nil {
-		settings.AdjustConfigLog(configLogSettings)
+	self.apiHost = &apiHost
+	self.apiFirst = first
+	// api's log and exchange, as its process installs them over its first cluster
+	apiRun, err := self.startApi()
+	if err != nil {
+		return nil, err
 	}
-	model.SetConfigLogSequencer(controller.NewHostedConfigLogSequencer(&apiHost, first, configLogSettings))
-	self.closes = append(self.closes, func() { model.SetConfigLogSequencer(nil) })
-	self.closes = append(self.closes, oauth.SetExchangeScopeSource(oauth.NewProjectionExchangeScopeSource(apiGate.cache, &oauth.ExchangeScopeSettings{Clock: host.Clock})))
-	self.closes = append(self.closes, installT3WorldApi(ctx, &apiHost, first, apiGate.cache))
+	self.apiRun = apiRun
+	self.closes = append(self.closes, self.stopApi)
 
 	self.api = NewT3Api(ctx, self.net, sidecarSettings)
 	exchange, err := NewT3SidecarExchange(ctx, t, settings.Exchange)
@@ -826,15 +828,22 @@ type T3Network struct {
 	// the owner's own credential, a network jwt as a signed-in owner holds
 	root  string
 	heads *sidecartest.FakeConfigHeads
+	// a team's first Owner's member_id (AddNetworkOf), zero in a personal network, whose owner member is its user
+	ownerMemberId sidecar.Id
 
 	stateLock sync.Mutex
 	devices   []*T3Device
 	owner     *T3Device
 	genesis   *[sha256.Size]byte
+	// the devices Sync no longer waits on (Retire)
+	retired map[*T3Device]bool
 }
 
-// The network's owner member, its owner user in a personal network (§7.5).
+// The network's owner member: its owner user in a personal network (§7.5), a team's first Owner's member_id.
 func (self *T3Network) MemberId() sidecar.Id {
+	if self.ownerMemberId != (sidecar.Id{}) {
+		return self.ownerMemberId
+	}
 	return sidecar.Id(self.OwnerUserId)
 }
 
@@ -862,16 +871,27 @@ func (self *T3Network) close() {
 
 // A one-use auth key the owner makes through POST /network/auth-keys, as `ur network auth-key` does.
 func (self *T3Network) authKey(ctx context.Context) (string, error) {
-	status, answer, err := self.world.api.Call(ctx, http.MethodPost, "/network/auth-keys", self.root, &model.CreateAuthKeyArgs{
+	return self.authKeyAs(ctx, self.root, nil)
+}
+
+// A one-use auth key made through POST /network/auth-keys with root, a person's network credential, carrying tags (tag
+// ids, 32 lowercase hex each; none for an untagged key).
+func (self *T3Network) authKeyAs(ctx context.Context, root string, tags []string) (string, error) {
+	status, answer, err := self.world.api.Call(ctx, http.MethodPost, "/network/auth-keys", root, &model.CreateAuthKeyArgs{
 		DurationSeconds: int64(self.world.settings.AuthKeyDuration / time.Second),
 		MaxUses:         1,
+		Tags:            tags,
 	})
 	if err != nil {
 		return "", err
 	}
 	result := &model.CreateAuthKeyResult{}
 	if status != http.StatusOK || json.Unmarshal(answer, result) != nil || result.AuthKey == "" {
-		return "", fmt.Errorf("POST /network/auth-keys: %d", status)
+		message := ""
+		if result.Error != nil {
+			message = result.Error.Message
+		}
+		return "", fmt.Errorf("POST /network/auth-keys: %d %s", status, message)
 	}
 	return result.AuthKey, nil
 }
@@ -881,6 +901,40 @@ func (self *T3Network) authKey(ctx context.Context) (string, error) {
 // settings past the defaults; nil for none. A failure closes what it enrolled and answers every error. One call at a
 // time per network, so the names stay apart.
 func (self *T3Network) AddSidecars(ctx context.Context, count int, settings func(name string, sidecarSettings *sidecar.SidecarSettings)) ([]*T3Device, error) {
+	return self.AddSidecarsWith(ctx, &T3EnrollArgs{Count: count, Settings: settings})
+}
+
+// How AddSidecarsWith enrolls: whose credential makes each one-use auth key, the member its devices are, and the
+// key's tags.
+type T3EnrollArgs struct {
+	// "Bearer <jwt>", the person's network credential each auth key is made with: "" for the network's owner's.
+	Root string
+	// The member the devices are, whose credential Root is: zero for the network's owner member. Unread for tagged
+	// devices, which are no member's.
+	MemberId sidecar.Id
+	// Tag ids on each auth key, 32 lowercase hex each (§7.8): tagged devices. None for untagged ones.
+	Tags []string
+	// How many devices.
+	Count int
+	// Called for each, adjusting its settings past the defaults; nil for none.
+	Settings func(name string, sidecarSettings *sidecar.SidecarSettings)
+}
+
+// AddSidecars under args: each device enrolled from an auth key args' credential makes, carrying args' tags, so a
+// team's member enrolls its own devices and a tag owner its tagged ones. One call at a time per network.
+func (self *T3Network) AddSidecarsWith(ctx context.Context, args *T3EnrollArgs) ([]*T3Device, error) {
+	count, settings := args.Count, args.Settings
+	root := args.Root
+	if root == "" {
+		root = self.root
+	}
+	memberId := args.MemberId
+	if memberId == (sidecar.Id{}) && args.Root == "" {
+		memberId = self.MemberId()
+	}
+	if 0 < len(args.Tags) {
+		memberId = sidecar.Id{}
+	}
 	start := len(self.Devices())
 	added := make([]*T3Device, count)
 	errs := make([]error, count)
@@ -892,7 +946,7 @@ func (self *T3Network) AddSidecars(ctx context.Context, count int, settings func
 			tickets <- struct{}{}
 			defer func() { <-tickets }()
 			name := fmt.Sprintf("%s-%d", self.Name, start+index)
-			added[index], errs[index] = self.enroll(ctx, name, settings)
+			added[index], errs[index] = self.enroll(ctx, name, root, memberId, args.Tags, settings)
 		})
 	}
 	group.Wait()
@@ -910,10 +964,10 @@ func (self *T3Network) AddSidecars(ctx context.Context, count int, settings func
 	return added, nil
 }
 
-// One sidecar named name enrolled from a fresh auth key, Online. It runs until the world closes, ctx bounding only its
-// enrollment.
-func (self *T3Network) enroll(ctx context.Context, name string, settings func(name string, sidecarSettings *sidecar.SidecarSettings)) (*T3Device, error) {
-	authKey, err := self.authKey(ctx)
+// One sidecar named name enrolled from a fresh auth key root makes with tags, Online, the device of memberId (zero
+// for a tagged one). It runs until the world closes, ctx bounding only its enrollment.
+func (self *T3Network) enroll(ctx context.Context, name string, root string, memberId sidecar.Id, tags []string, settings func(name string, sidecarSettings *sidecar.SidecarSettings)) (*T3Device, error) {
+	authKey, err := self.authKeyAs(ctx, root, tags)
 	if err != nil {
 		return nil, err
 	}
@@ -937,27 +991,47 @@ func (self *T3Network) enroll(ctx context.Context, name string, settings func(na
 		running.Close()
 		return nil, fmt.Errorf("%s enrolled in no network of %s's", name, self.Name)
 	}
-	device := &T3Device{T3Sidecar: running, Network: self}
-	if self.world.settings.RealKeys {
+	device := &T3Device{T3Sidecar: running, Network: self, MemberId: memberId, TagIds: slices.Clone(tags)}
+	if err := device.buildKeys(); err != nil {
+		running.Close()
+		return nil, err
+	}
+	return device, nil
+}
+
+// The device's key client on its current Sidecar (the file's keys row): its real one with RealKeys, else FakeGkm's
+// for its identity. At enrollment, and again at each Restart, whose new Sidecar the old clients no longer reach.
+func (self *T3Device) buildKeys() error {
+	running := self.T3Sidecar
+	network := self.Network
+	identity := running.Sidecar().Identity()
+	if identity == nil {
+		return fmt.Errorf("%s holds no identity", self.Name)
+	}
+	device := self
+	if network.world.settings.RealKeys {
 		keys, err := newT3WorldKeys(running.Sidecar(), running.Settings.Log, func(ctx context.Context, signedType bridge.SignedType, body proto.Message) error {
-			_, err := self.FileStatement(ctx, device, signedType, body)
+			_, err := network.FileStatement(ctx, device, signedType, body)
 			return err
 		})
 		if err != nil {
-			running.Close()
-			return nil, err
+			return err
 		}
-		device.keys = keys
-		device.Gkm = keys.gkm
-		return device, nil
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.keys = keys
+		self.Gkm = keys.gkm
+		return nil
 	}
-	device.Gkm = &t3WorldGkmClient{
-		GkmClient: self.world.gkm.Client(identity.SidecarId, func(purpose string, signedType bridge.SignedType, body []byte, agentId *sidecar.Id) (*bridge.Signed, error) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.Gkm = &t3WorldGkmClient{
+		GkmClient: network.world.gkm.Client(identity.SidecarId, func(purpose string, signedType bridge.SignedType, body []byte, agentId *sidecar.Id) (*bridge.Signed, error) {
 			return running.Sidecar().Sign(purpose, signedType, body, agentId)
 		}),
 		device: device,
 	}
-	return device, nil
+	return nil
 }
 
 // FakeGkm's client for one device (the file's keys row), which also stores the GroupForm gkm's KF1 stores (gkm-1, §10.6),
@@ -1129,9 +1203,13 @@ func (self *T3Network) Admit(ctx context.Context, devices []*T3Device) error {
 	}
 	for _, device := range devices {
 		identity := device.Sidecar().Identity()
+		memberId := device.MemberId
+		if memberId == (sidecar.Id{}) {
+			memberId = self.MemberId()
+		}
 		approvalId, err := owner.Sidecar().OpenAdmission(&sidecar.SidecarAdmissionRequest{
 			SidecarId:         identity.SidecarId,
-			MemberId:          self.MemberId(),
+			MemberId:          memberId,
 			IdentityPublicKey: identity.IdentityPublicKey,
 		})
 		if err != nil {
@@ -1158,7 +1236,7 @@ func (self *T3Network) Admit(ctx context.Context, devices []*T3Device) error {
 }
 
 // Waits until every gate of the world and every following device of the network hold its log at version or past
-// it, so each key client holds the state there (SidecarConfigFollowerArgs.Gkm).
+// it, so each key client holds the state there (SidecarConfigFollowerArgs.Gkm). A retired device is not waited on.
 func (self *T3Network) Sync(ctx context.Context, version uint64) error {
 	if err := self.world.SyncGates(ctx, self.NetworkId, version); err != nil {
 		return err
@@ -1167,7 +1245,7 @@ func (self *T3Network) Sync(ctx context.Context, version uint64) error {
 	defer cancel()
 	for _, device := range self.Devices() {
 		follower := device.Follower()
-		if follower == nil {
+		if follower == nil || self.Retired(device) {
 			continue
 		}
 		if _, err := follower.Client().WaitFor(ctx, version); err != nil {
@@ -1289,6 +1367,10 @@ func (self *T3Network) Grant(ctx context.Context, admin *T3Device, repoId sideca
 type T3Device struct {
 	*T3Sidecar
 	Network *T3Network
+	// The member whose credential enrolled it (T3EnrollArgs), zero for a tagged device.
+	MemberId sidecar.Id
+	// The tag ids its auth key carried, 32 lowercase hex each; none for a member's device.
+	TagIds []string
 	// Its key client: FakeGkm's client for its identity, signing by its identity key (the file's keys row), or with
 	// RealKeys its real one (keys).
 	Gkm sidecar.GkmClient
