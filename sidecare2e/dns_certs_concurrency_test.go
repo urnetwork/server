@@ -39,7 +39,11 @@
 //     of the set's newest row at or below the later serial, and no row of the set lies between that row and the
 //     earlier serial; no reader sees the root's serial go back, across both restarts;
 //   - once the edge serves the root's serial, every set answers its newest row's values, signed as §12.6 says; and
-//     each zone's version, read through dns's api, is the serial of the zone's newest row.
+//     each zone's version, read through dns's api, is the serial of the zone's newest row;
+//   - the edge's addresses (§12.7's * edge records, owner decision 335, which api's sync after the document's base
+//     wrote): each network's tls/ name's owner, which holds a TXT set of its own and so answers through its copy of
+//     *'s records (QD-1190), and a host no write names answer A and AAAA with the world's lb interfaces, exactly and
+//     signed, and the apex, which no grant publishes, answers no address.
 //
 // The certificates phase: each network's first CertDeviceCount sidecars, two by default, run a tls component and ask
 // for their network's certificate, all at once, as `ur bridge public-tls` does: POST /tls/cert-order through api's certs
@@ -105,7 +109,8 @@
 //     its claim recovered its receipt and its serial;
 //   - each account's newOrder spends are the newOrders its desktops' passes granted;
 //   - the host's TXT, asked of the resolver, answers through its customer's CNAME its owner's newest TXT commit, signed
-//     under the root's zone keys (what its addresses answer, the owner holding a TXT set of its own, is logged).
+//     under the root's zone keys, and its A and AAAA answer through the same CNAME the world's lb interfaces, exactly
+//     and signed, though its owner holds a TXT set of its own.
 //
 // The delegated value at the acme name is not removed when the order ends: DESIGN-DETAILS 17.2.9's step 5 has it lapse
 // in its hour, and its receipt go once that hour from its capture has passed, which the case does not wait out.
@@ -667,7 +672,7 @@ func dnsCertsRecordsPhase(t testing.TB, world *World, settings *dnsCertsSettings
 	}
 	records.addReaders(readers...)
 	dnsCertsCheckRecords(t, ctx, world, settings, networks, records)
-	dnsCertsLogOwnerAddresses(t, ctx, world, settings, networks)
+	dnsCertsCheckOwnerAddresses(t, ctx, world, keys, settings, networks)
 	return records
 }
 
@@ -702,20 +707,39 @@ func dnsCertsHoldBlockStop(stack *dnsCertsStack, block string, name string) *dns
 	})
 }
 
-// What the edge answers A with at each network's tls/ name's owner, web.<label>.<root>, which publishes on a grant and
-// now holds a TXT set of its own, beside a host no write names, which the zone's wildcard answers (§12.7's edge records
-// at *): logged, since RFC 4592 has an owner of its own block the wildcard, and §12.7 copies *'s records only to empty
-// non-terminals and canary-only owners (question e2e-dns-certs-concurrency-user-records-hide-edge-addresses); the
-// world's zones answer no address at * at all.
-func dnsCertsLogOwnerAddresses(t testing.TB, ctx context.Context, world *World, settings *dnsCertsSettings, networks []*dnsCertsNetwork) {
+// The edge's addresses in each network's zone (§12.7's edge records, owner decision 335): the publish of tls/443/web,
+// whose base api synced to the zone's * edge records, has the tls/ name's owner, web.<label>.<root>, answer A and AAAA
+// with the world's lb interfaces, though it holds a TXT set of its own, through its copy of *'s records (QD-1190), and
+// a host no write names, which the wildcard answers, the same, each RRset signed under the root's zone keys; and the
+// apex, which no grant publishes, answers no address. Each asked until it answers so within the dns settings' Timeout,
+// since the edge's probes run on their own interval and the edge restarted in the phase.
+func dnsCertsCheckOwnerAddresses(t testing.TB, ctx context.Context, world *World, keys *dnsCertsZoneKeys, settings *dnsCertsSettings, networks []*dnsCertsNetwork) {
 	t.Helper()
 	for _, network := range networks {
-		lines := []string{}
 		for _, host := range []string{settings.TlsHost, settings.UnwrittenHost} {
-			answer, err := world.DnsQuery(ctx, network.OwnerName(host), dns.TypeA, settings.Dns)
-			lines = append(lines, fmt.Sprintf("%s A: %s %v", network.OwnerName(host), dnsCertsDescribeAnswer(answer), err))
+			owner := network.OwnerName(host)
+			for _, rrType := range []uint16{dns.TypeA, dns.TypeAAAA} {
+				want := dnsCertsLbAddresses(world, rrType)
+				answer, err := world.AwaitDnsAnswer(ctx, owner, rrType, func(answer *dns.Msg) bool {
+					return answer.Rcode == dns.RcodeSuccess && slices.Equal(dnsCertsAnswerAddresses(answer, owner, rrType), want)
+				}, settings.Dns)
+				if err != nil {
+					t.Errorf("%s %s at the edge answered %s, not the lb's %v: %v", owner, dns.TypeToString[rrType], dnsCertsDescribeAnswer(answer), want, err)
+					continue
+				}
+				if err := keys.Verify(answer, owner, rrType, time.Now()); err != nil {
+					t.Errorf("%s %s at the edge: %v", owner, dns.TypeToString[rrType], err)
+				}
+			}
 		}
-		t.Logf("the edge's addresses in %s: %s", network.Name, strings.Join(lines, "; "))
+		for _, rrType := range []uint16{dns.TypeA, dns.TypeAAAA} {
+			answer, err := world.AwaitDnsAnswer(ctx, network.Apex, rrType, func(answer *dns.Msg) bool {
+				return answer.Rcode == dns.RcodeSuccess
+			}, settings.Dns)
+			if err != nil || 0 < len(dnsCertsAnswerAddresses(answer, network.Apex, rrType)) {
+				t.Errorf("%s %s, which no grant publishes, answered %s: %v", network.Apex, dns.TypeToString[rrType], dnsCertsDescribeAnswer(answer), err)
+			}
+		}
 	}
 }
 

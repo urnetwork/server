@@ -637,9 +637,10 @@ func dnsCertsCheckCustomDomain(t testing.TB, ctx context.Context, stack *dnsCert
 }
 
 // The custom host answers through its customer's CNAME what its owner answers at the edge (§12.8 step 2's weak mode):
-// the resolver's answer to the host's TXT holds the CNAME to the owner and the owner's newest TXT commit in rows,
-// signed under the root's zone keys, asked until it does within the dns settings' Timeout, since the edge restarted
-// in the phase; and what the host's addresses answer, its owner holding a TXT set of its own, is logged.
+// the resolver's answer to the host's TXT holds the CNAME to the owner and the owner's newest TXT commit in rows, and
+// its answers to the host's A and AAAA the CNAME and the world's lb interfaces of the family, though the owner holds a
+// TXT set of its own (§12.7's * edge records through the owner's copy, QD-1190), each RRset signed under the root's
+// zone keys, each asked until it answers so within the dns settings' Timeout, since the edge restarted in the phase.
 func dnsCertsCheckCustomHostRecords(t testing.TB, ctx context.Context, stack *dnsCertsStack, custom *dnsCertsCustomDomain, rows []dnsservice.DnsJournalRow) {
 	t.Helper()
 	settings := stack.settings.Dns
@@ -665,34 +666,44 @@ func dnsCertsCheckCustomHostRecords(t testing.TB, ctx context.Context, stack *dn
 		t.Errorf("%s's owner %s holds no TXT, which the records phase wrote", custom.Host, custom.Owner)
 		return
 	}
-	set := dnsCertsSetKey{Owner: custom.Owner, Type: dns.TypeTXT}
-	waitCtx, cancel := context.WithTimeout(ctx, settings.Timeout)
-	defer cancel()
-	for {
-		answer, err := stack.Resolver.exchange(waitCtx, custom.Host, dns.TypeTXT)
-		cnamed := false
-		if err == nil {
-			for _, record := range answer.Answer {
-				if cname, ok := record.(*dns.CNAME); ok && dns.CanonicalName(cname.Hdr.Name) == dns.CanonicalName(custom.Host) && dns.CanonicalName(cname.Target) == custom.Owner {
-					cnamed = true
+	// the host's rrType through the resolver until its answer holds the CNAME to the owner and holds is true of it
+	awaitCnamed := func(rrType uint16, holds func(answer *dns.Msg) bool, wanted string) {
+		waitCtx, cancel := context.WithTimeout(ctx, settings.Timeout)
+		defer cancel()
+		for {
+			answer, err := stack.Resolver.exchange(waitCtx, custom.Host, rrType)
+			cnamed := false
+			if err == nil {
+				for _, record := range answer.Answer {
+					if cname, ok := record.(*dns.CNAME); ok && dns.CanonicalName(cname.Hdr.Name) == dns.CanonicalName(custom.Host) && dns.CanonicalName(cname.Target) == custom.Owner {
+						cnamed = true
+					}
 				}
 			}
-		}
-		if err == nil && cnamed && slices.Equal(dnsCertsAnswerValues(answer, set), want) {
-			if err := stack.Keys.Verify(answer, custom.Owner, dns.TypeTXT, time.Now()); err != nil {
-				t.Errorf("%s's TXT through its customer's CNAME: %v", custom.Host, err)
+			if err == nil && cnamed && holds(answer) {
+				if err := stack.Keys.Verify(answer, custom.Owner, rrType, time.Now()); err != nil {
+					t.Errorf("%s's %s through its customer's CNAME: %v", custom.Host, dns.TypeToString[rrType], err)
+				}
+				return
 			}
-			break
-		}
-		select {
-		case <-waitCtx.Done():
-			t.Errorf("%s's TXT through its customer's CNAME never answered %s's newest %v: %v, %v", custom.Host, custom.Owner, want, answer, err)
-			return
-		case <-time.After(settings.RetryInterval):
+			select {
+			case <-waitCtx.Done():
+				t.Errorf("%s's %s through its customer's CNAME never answered %s's %s: %s, %v", custom.Host, dns.TypeToString[rrType], custom.Owner, wanted, dnsCertsDescribeAnswer(answer), err)
+				return
+			case <-time.After(settings.RetryInterval):
+			}
 		}
 	}
-	addresses, err := stack.Resolver.exchange(ctx, custom.Host, dns.TypeA)
-	t.Logf("%s's A through its customer's CNAME, its owner %s holding a TXT set of its own: %s, %v", custom.Host, custom.Owner, dnsCertsDescribeAnswer(addresses), err)
+	set := dnsCertsSetKey{Owner: custom.Owner, Type: dns.TypeTXT}
+	awaitCnamed(dns.TypeTXT, func(answer *dns.Msg) bool {
+		return slices.Equal(dnsCertsAnswerValues(answer, set), want)
+	}, fmt.Sprintf("newest %v", want))
+	for _, rrType := range []uint16{dns.TypeA, dns.TypeAAAA} {
+		addresses := dnsCertsLbAddresses(stack.World, rrType)
+		awaitCnamed(rrType, func(answer *dns.Msg) bool {
+			return slices.Equal(dnsCertsAnswerAddresses(answer, custom.Owner, rrType), addresses)
+		}, fmt.Sprintf("lb addresses %v", addresses))
+	}
 }
 
 // answer's rcode and records, one line, for a log.

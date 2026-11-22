@@ -533,7 +533,7 @@ func (self *World) dnsSettings() (*dnsservice.DnsSettings, error) {
 }
 
 // The dns API's run on the world's Postgres and Redis, releasing the credentials' key window, with the edge's bearer
-// digests, the world's one lb interface as its inventory (world_lb_test.go), and the log through api's internal gate on
+// digests, the world's lb interfaces as its inventory (world_lb_test.go), and the log through api's internal gate on
 // its own bearer (HostDeps.Projection).
 func (self *World) dnsApiRun() (func(ctx context.Context, listeners *worldBlockListeners) error, error) {
 	dnsSettings, err := self.dnsSettings()

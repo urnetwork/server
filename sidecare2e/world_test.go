@@ -89,9 +89,11 @@
 //     (World.IssueTlsCertificateRow), on the device's own key, and no chain is issued, so a visitor to a published name
 //     is shown the device's self-signed leaf on that key.
 //
-// The dns edge's lb probes are real: the dns API's lb inventory is the world's one interface, whose tlsedge ports and
-// TCP 25 reach tlsedge and mxedge's router behind the lb's PROXY header (world_lb_test.go), and a mail host's address
-// is answered only once its router interface's banner probe passed, which the mail step's resolution reads; api's
+// The dns edge's lb probes are real: the dns API's lb inventory is the world's router interface, whose tlsedge ports
+// and TCP 25 reach tlsedge and mxedge's router behind the lb's PROXY header, and an IPv6 interface off the router list,
+// whose tlsedge ports reach tlsedge (world_lb_test.go); a published name's A and AAAA answer the interfaces whose
+// probes pass, once api's sync after the publish wrote its zone's * edge records (§12.7), and a mail host's address is
+// answered only once its router interface's banner probe passed, which the mail step's resolution reads; api's
 // sequencer and rev/ store spend on api's own write budget; and gkm's hint writer resolves sidecar ids through api's
 // internal route on the block's gkm bearer, as production's block does (WorldSettings.GkmHintResolver). A device's
 // §16.6 approval gate is the stock one (World.InstallApprovalGate), which takes a tls/ or smtp/ listen under a standing
@@ -223,11 +225,17 @@ type WorldSettings struct {
 	// network a scenario makes Pro runs under Pro's numbers: §20.4's Pro column. nil leaves the process's, where every
 	// Pro limit reads zero. sidecar_abuse:'s keys are every tier's and the T3World's.
 	ProSidecarLimits map[string]int64
-	// The world's one lb interface (world_lb_test.go): its inventory name and its address, a documentation address, and
-	// the source the dns edge's probes come from as the lb's PROXY header names it.
+	// The world's router lb interface (world_lb_test.go): its inventory name and its address, a documentation address,
+	// and the source the dns edge's probes come from as the lb's PROXY header names it.
 	LbName        string
 	LbAddress     netip.Addr
 	LbProbeSource netip.AddrPort
+	// The world's second lb interface, IPv6 alone and off §19.5's router list, so a published name's AAAA answers an
+	// address the edge's probes reach and the mx hosts' answers stay the router's: its inventory name, its address, a
+	// documentation address, and the IPv6 source the probes come from. A zero address leaves it out.
+	LbIpv6Name        string
+	LbIpv6Address     netip.Addr
+	LbIpv6ProbeSource netip.AddrPort
 	// Who reaches mxedge's LAN listener (mxedge.yml's lan_sources), smtpedge's splice to an MX on the router's own lb
 	// interface (D-SMTP-13): the loopback smtpedge's block dials it from.
 	MxLanSources []netip.Prefix
@@ -314,6 +322,9 @@ func DefaultWorldSettings() *WorldSettings {
 		LbName:                      "e2e-lb-1",
 		LbAddress:                   netip.MustParseAddr("192.0.2.80"),
 		LbProbeSource:               netip.MustParseAddrPort("203.0.113.53:40053"),
+		LbIpv6Name:                  "e2e-lb-2",
+		LbIpv6Address:               netip.MustParseAddr("2001:db8::80"),
+		LbIpv6ProbeSource:           netip.MustParseAddrPort("[2001:db8:53::53]:40053"),
 		MxLanSources:                []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")},
 		SmtpGateRetryTimeout:        2 * time.Second,
 		SmtpMxRetryTimeout:          2 * time.Second,

@@ -27,6 +27,7 @@ import (
 	mathrand "math/rand/v2"
 	"net"
 	"net/http"
+	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
@@ -348,6 +349,44 @@ func dnsCertsAnswerValues(answer *dns.Msg, set dnsCertsSetKey) []string {
 	}
 	slices.Sort(values)
 	return values
+}
+
+// The addresses answer holds at name, canonical, of rrType, A or AAAA, sorted; none for an empty answer.
+func dnsCertsAnswerAddresses(answer *dns.Msg, name string, rrType uint16) []netip.Addr {
+	addresses := []netip.Addr{}
+	if answer == nil {
+		return addresses
+	}
+	for _, record := range answer.Answer {
+		if dns.CanonicalName(record.Header().Name) != name || record.Header().Rrtype != rrType {
+			continue
+		}
+		var ip net.IP
+		switch typed := record.(type) {
+		case *dns.A:
+			ip = typed.A
+		case *dns.AAAA:
+			ip = typed.AAAA
+		}
+		if address, ok := netip.AddrFromSlice(ip); ok {
+			if rrType == dns.TypeA {
+				address = address.Unmap()
+			}
+			addresses = append(addresses, address)
+		}
+	}
+	slices.SortFunc(addresses, netip.Addr.Compare)
+	return addresses
+}
+
+// The world's lb addresses a published name's rrType, A or AAAA, answers while every probe passes
+// (World.LbEdgeAddresses).
+func dnsCertsLbAddresses(world *World, rrType uint16) []netip.Addr {
+	ipv4s, ipv6s := world.LbEdgeAddresses()
+	if rrType == dns.TypeA {
+		return ipv4s
+	}
+	return ipv6s
 }
 
 // The values of a journal row's RRset, from their presentation form, in the form a write names them.
