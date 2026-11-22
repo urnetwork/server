@@ -1,8 +1,9 @@
 //go:build sidecar_e2e && sidecar_pending && sidecar_localstack
 
 // The control-plane case's chaos (control_plane_concurrency_test.go's fifth part; the end-to-end plan's
-// e2e-control-plane-concurrency): api's host and a member's device restarted mid-save and mid-invite, each keeping its
-// stores, on a personal network of ChaosDeviceCount devices and a team of its Owner's devices and an Admin's.
+// e2e-control-plane-concurrency): api's host and a member's device restarted mid-save, mid-invite, mid-removal and
+// mid-statement, each keeping its stores, on a personal network of ChaosDeviceCount devices and a team of its Owner's
+// devices and an Admin's.
 //
 // api's restart is sidecart3's: its sequencer with its caches, its gate cache and the installs over it dropped and
 // built again on the same stores (T3World.RestartApi), at a request a chaos hook in front of api matches
@@ -19,22 +20,22 @@
 // A device's restart is T3Device.Restart: its Sidecar and instance end and a new one starts on the same store and key
 // store, keeping its enrollment, keys and anchor, with new key clients and a follower from its kept anchor.
 //
-// What must hold, after each chaos and its retry where the sender has one: nothing acknowledged is lost, and nothing
-// is applied twice. An accept whose answer was lost made one membership, which a retry finds (§7.5: the invite is
-// spent); an accept lost unseen made none, and its retry makes one; an invite whose answer was lost is a row nobody
-// holds the bearer of (api keeps only its secret's hash), left to expire beside the one the inviter makes again, as
-// §7.5's lost answer is, and the person joins once by the one it holds; a removal whose answer was lost denied the
-// member once, the retry refused as finding no such member, and one lost unseen denies it at the retry, one denial
-// logged either way, and the admin device's MemberRevoke lands once; a statement whose answer was lost stands once,
-// and the same signed bytes posted again are refused as a replay or answered at the entry already holding them, never
-// a second entry; a statement a device's own act signed, its post held while the device restarts, lands once from the
-// act's pending records (§5.9: a signed statement is kept before it is posted, and the device's next generation posts
-// the same bytes again), whether or not the held post is then served; a base whose answer was lost, or whose publish
-// was lost unseen or given up by a restarting device, leaves every device of the network converged on one pin whose
-// head holds the saved document, the document saved once more planning no change; and a restarted inviting device
-// still signs, its kept identity's MemberAdmit landing once. At the end api's write budget reconciles exactly with the
-// objects it wrote across every restart (control_plane_concurrency_harness_test.go). Each step is bounded by the
-// case's PhaseTimeout.
+// What must hold, after each chaos and its retry where the sender has one: nothing acknowledged is lost, and nothing is
+// applied twice. An accept whose answer was lost made one membership, which a retry finds (§7.5: the invite is spent);
+// an accept lost unseen made none, and its retry makes one; an invite whose answer was lost is a row nobody holds the
+// bearer of, since api keeps only its secret's hash (§7.5), left to expire beside the one the inviter makes again, as
+// the invite route says of a lost answer (model's network_invite_model.go), and the person joins once by the one it
+// holds; a removal whose answer was lost denied the member once, the retry refused as finding no such member, and one
+// lost unseen denies it at the retry, one denial logged either way, and the admin device's MemberRevoke lands once; a
+// statement whose answer was lost stands once, and the same signed bytes posted again are refused as a replay or
+// answered at the entry already holding them, never a second entry; a statement a device's own act signed, its post
+// held while the device restarts, lands once from the act's pending records (§5.9: a signed statement is kept before it
+// is posted, and the device's next generation posts the same bytes again), whether or not the held post is then served;
+// a base whose answer was lost, or whose publish was lost unseen or given up by a restarting device, leaves every
+// device of the network converged on one pin whose head holds the saved document, the document saved once more planning
+// no change; and a restarted inviting device still signs, its kept identity's MemberAdmit landing once. At the end
+// api's write budget reconciles exactly with the objects it wrote across every restart
+// (control_plane_concurrency_harness_test.go). Each step is bounded by the case's PhaseTimeout.
 
 package sidecare2e
 
