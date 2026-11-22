@@ -10,10 +10,14 @@ package api
 //
 // A route the table does not map asks RolePermissionOwner: owner-only, failing
 // closed (D-TEAM-3), and TestEveryAdminRouteHasAPermission fails until it is
-// mapped. A personal network's owner carries no member_id and passes, as do a
-// personal network's API keys within their scopes; the strict_exp allowlist
-// still refuses a sidecar's token on every route here, and the client token
-// gate every client token on a Network route.
+// mapped. Where what a route may do depends on its request, the gate asks the
+// least the route serves and the route's model asks the rest: POST
+// /network/auth-keys asks RolePermissionOwnDevices, which every role holds,
+// and its model takes a tagged or pre-approved key only from a role holding
+// RolePermissionKeys. A personal network's owner carries no member_id and
+// passes, as do a personal network's API keys within their scopes; the
+// strict_exp allowlist still refuses a sidecar's token on every route here,
+// and the client token gate every client token on a Network route.
 //
 // The gate decides on the credential's claims as sent, before the handler
 // authenticates it: a refusal answers 403 at once, and a credential the gate
@@ -113,12 +117,17 @@ var routePermissionByRoute = map[string]model.RolePermission{
 	"POST /network/dns/custom-host-add":    model.RolePermissionPolicy,
 	"POST /network/dns/custom-host-remove": model.RolePermissionPolicy,
 
+	// a key for the caller's own devices, which every role makes (§7.5's
+	// Member: own devices); the auth key model takes a tagged or pre-approved
+	// key only from a caller whose role holds RolePermissionKeys
+	// (network_auth_key_model.go's authKeyReachOf)
+	"POST /network/auth-keys": model.RolePermissionOwnDevices,
+
 	// keys and OAuth clients
 	"GET /account/api-keys":             model.RolePermissionKeys,
 	"POST /account/api-key":             model.RolePermissionKeys,
 	"POST /account/api-key/remove":      model.RolePermissionKeys,
 	"GET /network/auth-keys":            model.RolePermissionKeys,
-	"POST /network/auth-keys":           model.RolePermissionKeys,
 	"POST /network/auth-key-revoke":     model.RolePermissionKeys,
 	"GET /network/oauth-clients":        model.RolePermissionKeys,
 	"POST /network/oauth-clients":       model.RolePermissionKeys,

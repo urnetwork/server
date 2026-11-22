@@ -23,6 +23,14 @@ package model
 // admitting devices until that Delegation ends by a customer-signed
 // DelegationRevoke, so the revoke answer says so (D-TEAM-22, D-TEAM-31).
 //
+// Who makes which key (§7.5's roles, authKeyReachOf): a personal network's
+// owner and a team member whose role, cut by its credential's scopes, holds
+// the keys permission make any key; every other member, a Member above all,
+// only a key for its own devices, untagged and not pre-approved, so the device
+// it enrolls is one that member owns (network_client_owner_model.go's
+// ownerRow). The route's gate asks own devices of every caller first
+// (api/route_permission.go).
+//
 // Creating and revoking a key owe the auth key security notice
 // (security_notice_auth_key.go) and an admin event (§7.11), in the change's
 // transaction. A row is deleted when its key is revoked, or within the hour
@@ -223,11 +231,68 @@ func init() {
 // The scope an admin token needs to create a key (§7.8's OAuth client scopes).
 const authKeysAdminScope = "auth_keys"
 
+// What a caller's credential may create at POST /network/auth-keys (§7.5).
+type authKeyReach int
+
+const (
+	// no key: a member whose role cannot be read, or a role and scopes that
+	// reach neither permission
+	authKeyReachNone authKeyReach = iota
+	// a key for the caller's own devices alone: untagged and not pre-approved
+	authKeyReachOwnDevices
+	// any key the route takes
+	authKeyReachAny
+)
+
+// The refusals of a caller's role, each a 403 as the route's role gate answers.
+const (
+	authKeyRoleRefusedMessage       = "Your role in this network does not permit auth keys."
+	authKeyOwnDevicesRefusedMessage = "Your role in this network makes auth keys for your own devices only: untagged and not pre-approved."
+)
+
+// What the session's credential may create (§7.5's roles): a personal
+// network's owner, who carries no member_id, whatever its credential's scopes
+// reach; a team member whose role, cut by those scopes, holds
+// RolePermissionKeys, any key; one whose role holds only
+// RolePermissionOwnDevices, a key for its own devices. Such a key is untagged,
+// so the device it enrolls is owned by the member (ownerRow), never tagged; and
+// not pre-approved, since a pre-approved key's enrollment lands whatever
+// admission its bundle's Delegation signed, which may name another member or a
+// tag, and a Delegation is signed only by an owner, an admin or a tag-owning
+// network admin (§7.9's Delegation row). A member whose role cannot be read
+// creates none.
+func authKeyReachOf(clientSession *session.ClientSession) authKeyReach {
+	scopes := clientSession.CredentialScopes()
+	byJwt := clientSession.ByJwt
+	permits := func(permission RolePermission) bool {
+		return ScopesPermit(scopes, permission)
+	}
+	if byJwt.MemberId != nil {
+		role, ok := MemberRole(clientSession.Ctx, byJwt.NetworkId, *byJwt.MemberId)
+		if !ok {
+			return authKeyReachNone
+		}
+		permits = func(permission RolePermission) bool {
+			return RoleAndScopesPermit(role, scopes, permission)
+		}
+	}
+	switch {
+	case permits(RolePermissionKeys):
+		return authKeyReachAny
+	case permits(RolePermissionOwnDevices):
+		return authKeyReachOwnDevices
+	}
+	return authKeyReachNone
+}
+
 // Creates an auth key for the session's network, its creator the session's
 // user, and owes the notice and the admin event in the same transaction. A
-// session an admin token authenticated spends the token's use in that same
-// transaction, and a replay of the token answers the first use's result and
-// creates nothing (admin_token_use_model.go).
+// caller whose role reaches only its own devices creates only an untagged key
+// that is not pre-approved, and one whose role reaches no key none, each
+// refusal a 403 (authKeyReachOf). A session an admin token authenticated
+// spends the token's use in that same transaction, and a replay of the token
+// answers the first use's result and creates nothing
+// (admin_token_use_model.go).
 func CreateAuthKey(createAuthKey *CreateAuthKeyArgs, clientSession *session.ClientSession) (*CreateAuthKeyResult, error) {
 	return createAuthKeyAt(createAuthKey, clientSession, DefaultNetworkAuthKeySettings(), server.NowUtc())
 }
@@ -244,6 +309,14 @@ func createAuthKeyAt(
 	adminCommand := clientSession.AdminCommand
 	if adminCommand != nil && !slices.Contains(adminCommand.Scopes, authKeysAdminScope) {
 		return nil, fmt.Errorf("%d %s", http.StatusForbidden, "The admin token does not carry the auth_keys scope.")
+	}
+	switch authKeyReachOf(clientSession) {
+	case authKeyReachNone:
+		return nil, fmt.Errorf("%d %s", http.StatusForbidden, authKeyRoleRefusedMessage)
+	case authKeyReachOwnDevices:
+		if 0 < len(createAuthKey.Tags) || createAuthKey.PreApproved {
+			return nil, fmt.Errorf("%d %s", http.StatusForbidden, authKeyOwnDevicesRefusedMessage)
+		}
 	}
 	refuse := func(message string) (*CreateAuthKeyResult, error) {
 		return &CreateAuthKeyResult{

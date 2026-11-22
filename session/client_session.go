@@ -243,6 +243,10 @@ type ClientSession struct {
 	// from the key through an auth code carries the key's id as a claim, and a
 	// client token this session mints must not end with the key.
 	ApiKeyId *server.Id
+	// The scopes of the API key that authenticated the request (§7.8), set with
+	// ApiKeyAuthenticated: nil for a legacy key, which keeps its creator's whole
+	// reach. CredentialScopes reads them with every other credential's.
+	ApiKeyScopes []string
 	// OAuth/MCP request identities and admin tokens are unsigned and cannot be
 	// renewed as logins.
 	UnsignedIdentity bool
@@ -259,6 +263,30 @@ type ClientSession struct {
 	// request, which an admin event records (§7.11). It names nothing but the
 	// request, and a session not made from a request has none.
 	RequestId *server.Id
+}
+
+// The scopes of the credential the request authenticated with (§7.8), which
+// cut its creator's role (model.RoleAndScopesPermit): an admin token's, a
+// network OAuth client token's or an API key's; nil for a signed token or a
+// legacy API key, which reach what their role does. A scoped credential that
+// names no scope reaches nothing, so its scopes are never nil.
+func (self *ClientSession) CredentialScopes() []string {
+	scoped := func(scopes []string) []string {
+		if scopes == nil {
+			return []string{}
+		}
+		return scopes
+	}
+	switch {
+	case self.AdminCommand != nil:
+		return scoped(self.AdminCommand.Scopes)
+	case self.OauthClient != nil:
+		return scoped(self.OauthClient.Scopes)
+	case self.ApiKeyAuthenticated:
+		// a legacy key's nil keeps its whole reach
+		return self.ApiKeyScopes
+	}
+	return nil
 }
 
 // Drops the request's cookie headers (cookies.go) and resolves the
@@ -467,6 +495,7 @@ func (self *ClientSession) authenticate(ctx context.Context, req *http.Request, 
 	// only a resolved API key sets them, below
 	self.ApiKeyAuthenticated = false
 	self.ApiKeyId = nil
+	self.ApiKeyScopes = nil
 	self.AdminCommand = nil
 	self.OauthClient = nil
 	if auth := req.Header.Get("Authorization"); auth != "" {
@@ -556,6 +585,7 @@ func (self *ClientSession) authenticate(ctx context.Context, req *http.Request, 
 				self.ByJwt.MemberId = network.MemberId
 				self.ApiKeyAuthenticated = true
 				self.ApiKeyId = &network.ApiKeyId
+				self.ApiKeyScopes = network.Scopes
 				if glog.V(2) {
 					glog.Infof("[session]authed via api key as (%s %s)\n", network.NetworkName, network.NetworkId)
 				}
