@@ -5,9 +5,10 @@
 // (QD-1028's layout move will move sidecar's model code): a person's sign-up, which no route the world serves makes; a
 // person's credentials, signed as POST /auth/network-switch would mint them; the team tier, by the team grant
 // invoice.paid writes; the counts and rows the case reconciles: a network's clients, its members, its unspent invites,
-// its admin events and its owner of record; and the quota case's parts (control_plane_concurrency_quota_test.go): a network's limit rows
-// (§20.5), its dns_entries count, its connected sidecar set, its stored count and api's over-limit list, with the two
-// nightly jobs taskworker runs and the world does not, §20.7's ReconcileSidecarCounters and evs's nightly count.
+// its admin events and its owner of record; and the quota case's parts (control_plane_concurrency_quota_test.go): a
+// network's limit rows (§20.5), its dns_entries count, its connected sidecar set, its stored count and api's over-limit
+// list, with the two nightly jobs taskworker runs and the world does not, §20.7's ReconcileSidecarCounters and evs's
+// nightly count.
 
 package sidecare2e
 

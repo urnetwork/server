@@ -4,8 +4,9 @@
 // enrollment and churn phases), which findings A and B kept out of the case as it landed:
 //
 //   - a Member's keys: a Member makes auth keys for its own devices alone (§7.5's Member: own devices;
-//     team-member-own-auth-key), so its key for a tag autogroup:admin owns is refused 403. What a Member may not do yet,
-//     list or revoke its own keys or make keys for a tag it owns, waits on team-key-reach-followups and is not asserted
+//     team-member-own-auth-key), so its key for a tag autogroup:admin owns is refused 403. What a Member may not do
+//     yet, list or revoke its own keys or make keys for a tag it owns, waits on team-key-reach-followups and is not
+//     asserted
 //   - a tagged agent at api: a team's tagged sidecar is the network's, never its sponsor's (owner decision 83), so its
 //     credential names the team's owner of record with no member_id (QD-1194; team-tagged-enroll) and keeps working at
 //     api past its sponsor's removal: the state check, its refresh, a window client of its own, and the exchange

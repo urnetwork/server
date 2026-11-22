@@ -807,8 +807,8 @@ func (self *controlPlaneCase) chaosRestartMidSave(ctx context.Context, chaos *co
 	self.checkSaved(ctx, network, device, source, before, fmt.Sprintf("%s restarted mid-save (the save answered %v, its held publish %v)", device.Name, saveErr, heldErr))
 }
 
-// After api's last restart: every gate of the world, api's own among them, holds each of networks at its tip, every live
-// device of each on one pin, and each takes the config's read through api's exchange on its own token.
+// After api's last restart: every gate of the world, api's own among them, holds each of networks at its tip, every
+// live device of each on one pin, and each takes the config's read through api's exchange on its own token.
 func (self *controlPlaneCase) chaosConverged(ctx context.Context, networks []*WorldNetwork) {
 	t := self.t
 	for _, network := range networks {

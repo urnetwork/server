@@ -16,17 +16,17 @@
 //     PersonalEnrollCount owner's devices in each personal network, a tagged sidecar in b; in the team,
 //     TeamOwnerEnrollCount Owner's devices, TeamAdminEnrollCount Admin's devices and TeamMemberEnrollCount devices of
 //     each setup member, each from an auth key its own member made (§7.5's Member: own devices), and
-//     TeamTaggedEnrollCount tagged sidecars of TeamTag, their keys the Admin's; then each is admitted (an owner's devices
-//     by its first, a member's first by the inviting device once its invite join's MAC verifies, with the invited mark,
-//     the rest by that first device, a tagged one by its tag owner) and follows, the networks' and the team's members'
-//     and tagged admissions at once. What must hold: every enrollment lands once (api holds exactly the devices'
-//     clients, each id once); each device gets exactly the scopes §7.8 and §8 give it at evs and gkm
-//     (controlPlaneExpectedScopes); each refusal names the design's reason: a spent one-use key (auth_key_invalid), a
-//     tagged key before base 1 (no_genesis), a network outside preview_networks (not_preview), an enrolled device no
-//     statement admitted (invalid_grant at the exchange), and a Member's key for a tag autogroup:admin owns (403: a
-//     Member makes keys for its own devices alone); and each of the team's tagged sidecars works at api on its own
-//     credential, which names the team's owner of record with no member (QD-1194; control_plane_concurrency_team_test.go):
-//     the state check, a refresh, a window client and the exchange
+//     TeamTaggedEnrollCount tagged sidecars of TeamTag, their keys the Admin's; then each is admitted (an owner's
+//     devices by its first, a member's first by the inviting device once its invite join's MAC verifies, with the
+//     invited mark, the rest by that first device, a tagged one by its tag owner) and follows, every network's
+//     admissions, the team's members' and tagged sidecars' among them, at once. What must hold: every enrollment lands
+//     once (api holds exactly the devices' clients, each id once); each device gets exactly the scopes §7.8 and §8 give
+//     it at evs and gkm (controlPlaneExpectedScopes); each refusal names the design's reason: a spent one-use key
+//     (auth_key_invalid), a tagged key before base 1 (no_genesis), a network outside preview_networks (not_preview), an
+//     enrolled device no statement admitted (invalid_grant at the exchange), and a Member's key for a tag
+//     autogroup:admin owns (403: a Member makes keys for its own devices alone); and each of the team's tagged sidecars
+//     works at api on its own credential, which names the team's owner of record with no member (QD-1194;
+//     control_plane_concurrency_team_test.go): the state check, a refresh, a window client and the exchange
 //   - saves racing: in a personal network and in the team at once, RacerCount config writers race exact-head ACL saves
 //     in rounds (every racer previews at one verified head, all save at once, each signing EXACT_HEAD on what it
 //     previewed). What must hold: one winner per round, every other save refused as the head having moved, every
@@ -58,9 +58,9 @@
 //     removal of the case (control_plane_concurrency_harness_test.go)
 //
 // A failure from a product bug stays failing, and the case runs on so one finding does not hide the next. As the case
-// landed (e2e-control-plane-concurrency, 2026-11-22) it failed on two findings, which kept the team's members to
-// devices of an Owner's and the Admin's and its tagged sidecars out of the case: a Member's own auth key refused 403
-// (finding A) and a tagged enrollment in a team answered 500 (finding B). Both fixes have landed,
+// landed (e2e-control-plane-concurrency, 2026-11-22) it failed on two findings, which kept every team device but the
+// Owner's and the Admin's out of it: a Member's own auth key refused 403 (finding A) and a tagged enrollment in a team
+// answered 500 (finding B). Both fixes have landed,
 // team-member-own-auth-key (server c5579f826 to 927a07e0d) and team-tagged-enroll (server c730a0441 to e9b9598d1,
 // QD-1194), and the case now runs what they blocked; e2e-control-plane-verify (2026-11-22) widened it so. Three parts
 // are cases of their own: the chaos, api and a member device restarted mid-save, mid-invite, mid-removal and
@@ -99,8 +99,8 @@ type controlPlaneSettings struct {
 	PersonalNetworkCount int
 	// The plain members who join the team by invite at setup.
 	PlainMemberCount int
-	// EnrollCount, the devices the first phase enrolls at once: PersonalEnrollCount in each personal network, one tagged
-	// sidecar in b, and in the team TeamOwnerEnrollCount of the Owner's, TeamAdminEnrollCount of the Admin's,
+	// EnrollCount, the devices the first phase enrolls at once: PersonalEnrollCount in each personal network, one
+	// tagged sidecar in b, and in the team TeamOwnerEnrollCount of the Owner's, TeamAdminEnrollCount of the Admin's,
 	// TeamMemberEnrollCount of each setup member's and TeamTaggedEnrollCount tagged sidecars of TeamTag.
 	EnrollCount           int
 	PersonalEnrollCount   int
