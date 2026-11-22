@@ -7,11 +7,14 @@ package server
 // a slot the key admits; and PlatformClientSource asks api for each index at start, holds each client's
 // id for its life, keeps each client's sockets token beside its jwt, refreshes both at the refresh point of the
 // shorter-lived, rides an api outage on the jwt and the token it holds until each ends, refuses an answer with no
-// sockets token, presents each client's token, never its jwt, to sockets, and never puts the bearer, a jwt or a token
-// in an error. api is an httptest server and time a fake clock: nothing sleeps.
+// sockets token, presents each client's token, never its jwt, to sockets, answers each client's identity seed, the same
+// across restarts, and never puts the bearer, a jwt or a token in an error. api is an httptest server and time a fake
+// clock: nothing sleeps.
 
 import (
 	"context"
+	"crypto/hkdf"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -605,6 +608,63 @@ func TestPlatformClientSourceReservesRangesAcrossSlotRestart(t *testing.T) {
 			previous = idRange
 		}
 		source.Close()
+	}
+}
+
+// Each client's identity seed is the same across a restart of its slot on the same bearer, as its id is, so the pool
+// presents the same connect identity (QD-1174); it differs between clients and on another bearer, is the file header's
+// derivation, and is answered only for the client the index's answers named.
+func TestPlatformClientSourceKeepsEachClientsIdentitySeedAcrossRestarts(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	clock := sidecartest.NewFakeClock(sidecartest.DefaultClockStart())
+	api := newPlatformClientTestApi(t, clock)
+	clientCount := 2
+	seeds := func() ([]Id, [][]byte) {
+		source := api.newSource(ctx, clientCount)
+		defer source.Close()
+		awaitPlatformClientAnswers(t, ctx, source, uint64(clientCount))
+		clientIds := platformClientIds(t, ctx, source, clientCount)
+		indexSeeds := [][]byte{}
+		for index, clientId := range clientIds {
+			seed, err := source.EdgeClientIdentitySeed(ctx, index, sidecar.Id(clientId))
+			if err != nil || len(seed) != sidecar.EdgeClientIdentitySeedByteCount {
+				t.Fatalf("index %d's seed: %d bytes, %v", index, len(seed), err)
+			}
+			indexSeeds = append(indexSeeds, seed)
+			// another client's id is answered nothing
+			if _, err := source.EdgeClientIdentitySeed(ctx, index, sidecar.Id(NewId())); !errors.Is(err, ErrPlatformClientSource) {
+				t.Errorf("index %d answered another client's seed: %v", index, err)
+			}
+		}
+		if _, err := source.EdgeClientIdentitySeed(ctx, clientCount, sidecar.Id(clientIds[0])); !errors.Is(err, ErrPlatformClientSource) {
+			t.Errorf("an index past the source's answered a seed: %v", err)
+		}
+		return clientIds, indexSeeds
+	}
+	firstClientIds, firstSeeds := seeds()
+	restartedClientIds, restartedSeeds := seeds()
+	for index := range clientCount {
+		if firstClientIds[index] != restartedClientIds[index] || string(firstSeeds[index]) != string(restartedSeeds[index]) {
+			t.Errorf("index %d's seed changed across a restart", index)
+		}
+		want, err := hkdf.Key(sha256.New, []byte(api.bearer), nil, "urnetwork-edge-client-identity-v1\x00"+string(firstClientIds[index][:]), 32)
+		if err != nil || string(firstSeeds[index]) != string(want) {
+			t.Errorf("index %d's seed is not the header's derivation", index)
+		}
+		otherBearer, err := DeriveEdgeClientIdentitySeed("another-edge-bearer", sidecar.Id(firstClientIds[index]))
+		if err != nil || string(otherBearer) == string(firstSeeds[index]) {
+			t.Errorf("index %d's seed is the same on another bearer", index)
+		}
+	}
+	if string(firstSeeds[0]) == string(firstSeeds[1]) {
+		t.Error("two clients share a seed")
+	}
+	if _, err := DeriveEdgeClientIdentitySeed("", sidecar.Id(firstClientIds[0])); !errors.Is(err, ErrPlatformClientSource) {
+		t.Errorf("no bearer derived a seed: %v", err)
+	}
+	if _, err := DeriveEdgeClientIdentitySeed(api.bearer, sidecar.Id{}); !errors.Is(err, ErrPlatformClientSource) {
+		t.Errorf("no client derived a seed: %v", err)
 	}
 }
 

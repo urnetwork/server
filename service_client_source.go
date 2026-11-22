@@ -42,12 +42,26 @@ package server
 // smtpedge's ur/smtpedge registrations each on its own client's (SocketPlatformRegistrationsArgs). A removed
 // edge client is refused at sockets by its client rev/ object (model's edge client removal effect).
 //
-// A jwt, a sockets token and the bearer are secrets: none is logged (I-7), and log lines name a client by its
-// slot and index alone (I-13).
+// Each client also has an identity seed (sidecar.EdgeClientIdentitySource; QD-1174), from which sidecar.EdgeClientPool
+// derives the client's connect identity: its client key, its sequence certificate and its Service provide key. A
+// restart in its slot, or a later process's deploy into it, reuses the client's id, so it must present the same
+// identity, or every listener's contract to the id is the earlier process's and the restarted client refuses them all.
+// The seed needs no state on the edge: it is
+//
+//	HKDF-SHA256(secret = the edge bearer, salt = none, info = "urnetwork-edge-client-identity-v1" 0x00 <client id, 16 bytes>)
+//
+// 32 bytes, which only the block can make, since api holds the bearer only as its SHA-256. The bearer is already
+// what the clients are minted on, so the seed adds no root of trust. A rotated bearer is a new identity for each
+// client: the first start after a rotation is a fresh one, which listeners' contracts from before it miss, so it
+// recovers on connect's own timeouts.
+//
+// A jwt, a sockets token, the bearer and an identity seed are secrets: none is logged (I-7), and log lines name a
+// client by its slot and index alone (I-13).
 
 import (
 	"bytes"
 	"context"
+	"crypto/hkdf"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -80,6 +94,9 @@ const (
 	edgeClientIdLabel = "urnetwork-edge-client-v1"
 	edgeDeviceIdLabel = "urnetwork-edge-device-v1"
 )
+
+// The identity seed's label: a change to it is a new connect identity for every edge client.
+const edgeClientIdentityLabel = "urnetwork-edge-client-identity-v1"
 
 // The environment value warp hands each process its deploy slot in, beside WARP_BLOCK (QD-873).
 const EdgeClientSlotEnvName = "WARP_SLOT"
@@ -755,6 +772,37 @@ func (self *PlatformClientSource) ReserveStreamIdRange(ctx context.Context, inde
 			return 0, fmt.Errorf("%w: mint did not supply stream IDs", ErrPlatformClientSource)
 		}
 	}
+}
+
+// The identity seed of the index's client (see the file header; sidecar.EdgeClientIdentitySource): the same for the
+// client at every start of the block on the same bearer, and for no other client. Only the client the index's
+// answers named has one, so a pool asks for it after the index's first credential. A fresh slice, which the caller
+// clears; a secret, never logged.
+func (self *PlatformClientSource) EdgeClientIdentitySeed(ctx context.Context, index int, clientId sidecar.Id) ([]byte, error) {
+	if index < 0 || len(self.indexes) <= index || self.ctx.Err() != nil {
+		return nil, ErrPlatformClientSource
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	heldClientId := func() connect.Id {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		return self.indexes[index].clientId
+	}()
+	if heldClientId == (connect.Id{}) || heldClientId != connect.Id(clientId) {
+		return nil, fmt.Errorf("%w: no credential for this client", ErrPlatformClientSource)
+	}
+	return DeriveEdgeClientIdentitySeed(self.args.Bearer, clientId)
+}
+
+// The identity seed of the edge client clientId on the block's edge bearer (see the file header). A secret.
+func DeriveEdgeClientIdentitySeed(bearer string, clientId sidecar.Id) ([]byte, error) {
+	if bearer == "" || clientId == (sidecar.Id{}) {
+		return nil, fmt.Errorf("%w: no bearer or client for an identity", ErrPlatformClientSource)
+	}
+	info := append(append([]byte(edgeClientIdentityLabel), 0), clientId[:]...)
+	return hkdf.Key(sha256.New, []byte(bearer), nil, string(info), sidecar.EdgeClientIdentitySeedByteCount)
 }
 
 // The index's service token of audience sockets (QD-1054), as current answers it, an outage ridden on the held

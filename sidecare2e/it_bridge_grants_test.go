@@ -30,7 +30,10 @@
 // the client's table needs an entry of the subnet's prefix linked to the subnet's device, and that device's rows a
 // route row of the client's under the grant (rule 6). After a grant ends, past LeaveBound, nothing reaches the subnet
 // from the client: the oracle (ItBridgeWorld.Check) holds every answer and arrival to the document's grants and the
-// grants' timelines.
+// grants' timelines. Beside the forwarding role, the save's side of QD-1164 (§8.8's Saving): the owner's `ur acl test`
+// over the document with an ip: accept and an ip: deny of the grant's prefix for its client judges the activated grant
+// by its sealed detail, so before the grants the accept fails and the deny passes, and while a grant is in force the
+// accept passes and the deny fails: an accept the save counts is then one the forwarding role must serve.
 
 package sidecare2e
 
@@ -38,6 +41,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -174,46 +178,10 @@ func (self *ItBridgeWorld) ActivateRouteGrant(ctx context.Context, grant *itBrid
 	if err != nil {
 		return fmt.Errorf("%s's action: %w", grant.name, err)
 	}
-	newAction := func() (*sidecar.SidecarAction, error) {
-		action, err := sidecar.NewSidecarAction(stored, sidecar.SidecarRiskNormal, sidecar.SidecarRiskNormal, nil, nil)
-		if err != nil {
-			return nil, err
-		}
-		action.Effect = client.grants.Effect(stored)
-		return action, nil
-	}
-	action, err := newAction()
+	grantId, err := self.spendGrant(ctx, client, self.owner, stored)
 	if err != nil {
-		return err
+		return fmt.Errorf("%s: %w", grant.name, err)
 	}
-	err = running.Authorize(ctx, action, nil)
-	var pending *sidecar.ApprovalPendingError
-	if !errors.As(err, &pending) {
-		return fmt.Errorf("%s: the gate answered %v, not a request pending a decision", grant.name, err)
-	}
-	ledger, err := running.ApprovalLedger()
-	if err != nil {
-		return err
-	}
-	approval, err := ledger.State(pending.ApprovalId)
-	if err != nil || approval.Request == nil {
-		return fmt.Errorf("%s: the client's ledger holds no request %s: %v", grant.name, pending.ApprovalId, err)
-	}
-	decision, err := self.approve(self.owner, approval.Request)
-	if err != nil {
-		return fmt.Errorf("%s's approval: %w", grant.name, err)
-	}
-	action, err = newAction()
-	if err != nil {
-		return err
-	}
-	if err := running.Authorize(ctx, action, decision); err != nil {
-		return fmt.Errorf("%s's spend: %w", grant.name, err)
-	}
-	if action.Outcome == nil || action.Outcome.State != sidecar.ApprovalOutcomeDone || len(action.Outcome.EffectRef) == 0 {
-		return fmt.Errorf("%s's spend answered %+v", grant.name, action.Outcome)
-	}
-	grantId := bytes.Clone(action.Outcome.EffectRef)
 	landedAt := time.Now()
 	func() {
 		grant.stateLock.Lock()
@@ -239,6 +207,59 @@ func (self *ItBridgeWorld) ActivateRouteGrant(ctx context.Context, grant *itBrid
 		incarnation.AdoptedAt = time.Now()
 	})
 	return nil
+}
+
+// A grant's action asked and spent on requester's gate, as its grant component spends a decision: requester's
+// Authorize of the action with its grant effect answers it pending, approver signs the decision on the request the
+// requester's ledger stored (approveRequest), and Authorize of the same action with that decision spends it, its effect
+// filing the GrantActivate. Answers the grant's id.
+func (self *ItBridgeWorld) spendGrant(ctx context.Context, requester *itBridgeDevice, approver *itBridgeDevice, stored *sidecar.StoredCanonicalAction) ([]byte, error) {
+	running := requester.t3.Sidecar()
+	newAction := func() (*sidecar.SidecarAction, error) {
+		action, err := sidecar.NewSidecarAction(stored, sidecar.SidecarRiskNormal, sidecar.SidecarRiskNormal, nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		action.Effect = requester.grants.Effect(stored)
+		return action, nil
+	}
+	action, err := newAction()
+	if err != nil {
+		return nil, err
+	}
+	err = running.Authorize(ctx, action, nil)
+	var pending *sidecar.ApprovalPendingError
+	if !errors.As(err, &pending) {
+		return nil, fmt.Errorf("the gate answered %v, not a request pending a decision", err)
+	}
+	decision, err := self.approveRequest(approver, requester, pending.ApprovalId)
+	if err != nil {
+		return nil, fmt.Errorf("the approval: %w", err)
+	}
+	action, err = newAction()
+	if err != nil {
+		return nil, err
+	}
+	if err := running.Authorize(ctx, action, decision); err != nil {
+		return nil, fmt.Errorf("the spend: %w", err)
+	}
+	if action.Outcome == nil || action.Outcome.State != sidecar.ApprovalOutcomeDone || len(action.Outcome.EffectRef) == 0 {
+		return nil, fmt.Errorf("the spend answered %+v", action.Outcome)
+	}
+	return bytes.Clone(action.Outcome.EffectRef), nil
+}
+
+// approver's decision (approve) on requester's request approvalId, as requester's ledger stores it.
+func (self *ItBridgeWorld) approveRequest(approver *itBridgeDevice, requester *itBridgeDevice, approvalId sidecar.Id) (*bridge.Signed, error) {
+	ledger, err := requester.t3.Sidecar().ApprovalLedger()
+	if err != nil {
+		return nil, err
+	}
+	approval, err := ledger.State(approvalId)
+	if err != nil || approval.Request == nil {
+		return nil, fmt.Errorf("%s's ledger holds no request %s: %v", requester.name, approvalId, err)
+	}
+	return self.approve(approver, approval.Request)
 }
 
 // The device decision `ur approve` signs on request once its person confirms (ApprovalApprover.Decide): approve, at
@@ -354,6 +375,11 @@ func (self *ItBridgeWorld) RevokeRouteGrant(ctx context.Context, grant *itBridge
 // error.
 func (self *ItBridgeWorld) RouteGrantCycle(ctx context.Context, t testing.TB) {
 	t.Helper()
+	for _, grant := range self.routeGrants {
+		for _, err := range self.routeGrantSaveTests(ctx, grant, false) {
+			t.Errorf("%s before it: %v", grant.name, err)
+		}
+	}
 	var group sync.WaitGroup
 	errs := make([]error, len(self.routeGrants))
 	for index, grant := range self.routeGrants {
@@ -366,6 +392,14 @@ func (self *ItBridgeWorld) RouteGrantCycle(ctx context.Context, t testing.TB) {
 		self.FailProgress(t, "the route grants' activations", err, nil)
 	}
 	for _, grant := range self.routeGrants {
+		if errs := self.routeGrantSaveTests(ctx, grant, true); 0 < len(errs) {
+			for _, err := range errs {
+				t.Errorf("%s in force: %v", grant.name, err)
+			}
+		} else {
+			t.Logf("%s: the owner's ur acl test counts it, an ip: accept of %s for %s passing and a deny failing (QD-1164)",
+				grant.name, grant.subnet.prefix, grant.client.name)
+		}
 		for _, err := range self.routeGrantRows(grant) {
 			t.Errorf("%s: %v", grant.name, err)
 		}
@@ -486,6 +520,54 @@ func (self *ItBridgeWorld) routeGrantRows(grant *itBridgeRouteGrant) []error {
 		errs = append(errs, fmt.Errorf("%s's rows give %s no route row of %s under the grant, so its forwarding role refuses the grant's flows "+
 			"(rule 6; bridge_compile_rows.go's reachRows reads an activated grant's prefixes from the head's local policy, which holds none for it, so "+
 			"routeRowPrefixes gives it none), %d route rows", router.name, grant.client.name, prefix, len(rows)))
+	}
+	return errs
+}
+
+// The save's side of QD-1164 for grant (the file's header): the owner's `ur acl test` (Sidecar.TestAclPolicy, a config
+// writer's plan over the verified base) of the document with test 0 accepting, and test 1 denying, the grant's prefix by
+// route for its client. With inForce the accept must pass and the deny fail, the grant counted by its sealed detail;
+// without, the accept must fail and the deny pass, the document alone. One error for each that does not.
+func (self *ItBridgeWorld) routeGrantSaveTests(ctx context.Context, grant *itBridgeRouteGrant, inForce bool) []error {
+	document := map[string]any{}
+	if err := json.Unmarshal([]byte(self.policy), &document); err != nil {
+		return []error{err}
+	}
+	src := "sidecar:" + grant.client.SidecarId().String()
+	check := "ip:" + grant.subnet.prefix.String() + "#route"
+	document["tests"] = []map[string]any{{"src": src, "accept": []string{check}}, {"src": src, "deny": []string{check}}}
+	source, err := json.Marshal(document)
+	if err != nil {
+		return []error{err}
+	}
+	report, err := self.owner.t3.Sidecar().TestAclPolicy(ctx, source)
+	if err != nil {
+		return []error{fmt.Errorf("the owner's ur acl test: %w", err)}
+	}
+	failed := func(test int) *sidecar.AclPolicyTestFailure {
+		for index := range report.Failures {
+			if report.Failures[index].Test == test {
+				return &report.Failures[index]
+			}
+		}
+		return nil
+	}
+	errs := []error{}
+	accept, deny := failed(0), failed(1)
+	switch {
+	case inForce && accept != nil:
+		errs = append(errs, fmt.Errorf("the owner's ur acl test fails an accept of %s for %s, which the grant routes (QD-1164): %+v", check, grant.client.name, *accept))
+	case !inForce && accept == nil:
+		errs = append(errs, fmt.Errorf("the owner's ur acl test passes an accept of %s for %s, which the document denies", check, grant.client.name))
+	}
+	switch {
+	case inForce && deny == nil:
+		errs = append(errs, fmt.Errorf("the owner's ur acl test passes a deny of %s for %s, which the grant routes (QD-1164)", check, grant.client.name))
+	case !inForce && deny != nil:
+		errs = append(errs, fmt.Errorf("the owner's ur acl test fails a deny of %s for %s, which the document denies: %+v", check, grant.client.name, *deny))
+	}
+	if report.DocumentAlone {
+		errs = append(errs, errors.New("the owner's ur acl test ran over the document alone, no state of the network's"))
 	}
 	return errs
 }

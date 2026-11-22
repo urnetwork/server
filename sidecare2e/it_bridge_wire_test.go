@@ -15,7 +15,9 @@
 //	           server's exchange, its out-of-band control server's controller in process, as the world sidecars'
 //	           own clients have it; device.NewBridgeLinkGenerator signs each one's WindowDelegation through
 //	           Sidecar.SignWindowDelegation and holds its contracts to the target's binding, which GET
-//	           /sidecar/identity answers and the role verifies against the identity key the rules pin
+//	           /sidecar/identity answers and the role verifies against the identity key the rules pin; a share link
+//	           (it_bridge_shares_test.go) is FriendsAndFamily to another network's host, carrying only its aliases, and
+//	           its delegations the share's signer signs
 //	stack      a userspace connect.Tun on gVisor whose every packet the role routes (Bridge.Route): a link's, a
 //	           reject's or the resolver's client, or the default route, which goes nowhere here and is counted; the
 //	           links' replies and the role's rejects are written back into it, an ICMP echo reply to one of the
@@ -331,17 +333,23 @@ func (self *itBridgeWire) sign(ctx context.Context, delegation *bridge.WindowDel
 		}
 		ids = append(ids, id)
 	}
-	if 0 < len(delegation.GetShareId()) {
-		return nil, fmt.Errorf("%w: the case runs no share", sidecar.ErrBridgeDelegationRefused)
-	}
-	return self.device.t3.Sidecar().SignWindowDelegation(&sidecar.BridgeDelegationRequest{
+	request := &sidecar.BridgeDelegationRequest{
 		NetworkId:             ids[0],
 		SubjectSidecarId:      ids[1],
 		WindowClientId:        ids[2],
 		WindowClientPublicKey: delegation.GetWindowClientPublicKey(),
 		TargetSidecarId:       ids[3],
 		NotAfter:              time.UnixMilli(delegation.GetNotAfterMs()),
-	})
+	}
+	if shareIdBytes := delegation.GetShareId(); 0 < len(shareIdBytes) {
+		// a share link's: the Sidecar signs it with the share's signer, never the identity key (§17.9's sign row)
+		shareId, err := sidecar.IdFromBytes(shareIdBytes)
+		if err != nil {
+			return nil, fmt.Errorf("%w: a delegation's share", sidecar.ErrBridgeDelegationRefused)
+		}
+		request.ShareId = shareId
+	}
+	return self.device.t3.Sidecar().SignWindowDelegation(request)
 }
 
 // device.BridgeTargetKeyFunction: the binding api answers for the target client, which the link verifies against the
@@ -579,7 +587,9 @@ type itBridgeLinkHost struct {
 	windowClients []*itBridgeWindowClient
 	// what the links' own local NATs were asked to dial, which a bridged packet never reaches
 	localDials []string
-	closed     bool
+	// how many of the links were share links (it_bridge_shares_test.go)
+	shareLinkCount int
+	closed         bool
 	// the window clients' closes in flight
 	closing sync.WaitGroup
 }
@@ -612,14 +622,13 @@ func (self *itBridgeLinkHost) sourcePath() connect.TransferPath {
 	return connect.TransferPath{}
 }
 
-// device.BridgeHost: one link to target, a fixed window of one window client whose delegation sign returns. The case
-// runs no share, so a share link is refused.
+// device.BridgeHost: one link to target, a fixed window of one window client whose delegation sign returns, in
+// ProvideMode_Network; or for a share link, whose shareAliases are not nil, in ProvideMode_FriendsAndFamily with the
+// aliases as SharePrivateDestinations, C18's source half, as cli's urBridgeLinkSettings builds it, so no other private
+// destination leaves through it.
 func (self *itBridgeLinkHost) NewBridgeLink(ctx context.Context, target connect.Id, subject connect.Id, shareAliases []netip.Prefix,
 	sign func(windowClientId connect.Id, windowClientPublicKey []byte, notAfter time.Time) ([]byte, error),
 ) (connect.UserNatClient, error) {
-	if shareAliases != nil {
-		return nil, errors.New("the case runs no share link")
-	}
 	generation := self.currentGeneration()
 	if generation == nil {
 		return nil, errors.New("no client generation")
@@ -627,6 +636,16 @@ func (self *itBridgeLinkHost) NewBridgeLink(ctx context.Context, target connect.
 	multiClientSettings := device.BridgeLinkMultiClientSettings(self.settings)
 	if err := device.CheckBridgeLinkMultiClientSettings(multiClientSettings, self.settings.LinkAllowDirect); err != nil {
 		return nil, err
+	}
+	provideMode := protocol.ProvideMode_Network
+	if shareAliases != nil {
+		multiClientSettings.SharePrivateDestinations = slices.Clone(shareAliases)
+		provideMode = protocol.ProvideMode_FriendsAndFamily
+		func() {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			self.shareLinkCount += 1
+		}()
 	}
 	// the multi client's own local NAT, which a bridged packet must never reach (TCP/25's rule)
 	multiClientSettings.LocalDialContextSettings = &connect.DialContextSettings{
@@ -647,7 +666,14 @@ func (self *itBridgeLinkHost) NewBridgeLink(ctx context.Context, target connect.
 		clients:           map[*connect.Client]*itBridgeWindowClient{},
 	}
 	return connect.NewRemoteUserNatMultiClient(ctx, device.NewBridgeLinkGenerator(ctx, generator, sign), self.wire.receive,
-		protocol.ProvideMode_Network, multiClientSettings), nil
+		provideMode, multiClientSettings), nil
+}
+
+// How many share links the role asked this host for.
+func (self *itBridgeLinkHost) ShareLinkCount() int {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.shareLinkCount
 }
 
 // What the links' own local NATs were asked to dial.

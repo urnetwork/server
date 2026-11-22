@@ -8,7 +8,9 @@
 //	subnets   S subnets join and leave the network concurrently, each behind its own forwarding device: a subnet joins
 //	          by its device's BridgeRoute under the document's standing route rule (§17.7), and leaves by a reset
 //	          BridgeWithdraw of it (§17.8's revocation row); a route grant that activates and expires or is revoked is
-//	          §17's next way in and out, which TestE2eItBridgeRouteGrants runs (it_bridge_grants_test.go)
+//	          §17's next way in and out, which TestE2eItBridgeRouteGrants runs (it_bridge_grants_test.go), and a bridge
+//	          share another network accepts and the sharing network revokes is the last, which TestE2eItBridgeShares runs
+//	          (it_bridge_shares_test.go)
 //	forwards  P port forwards are set up and removed concurrently on H other devices: each a BridgeMap of its host's
 //	          overlay address's port to a service on the host's loopback (§17.6's rule 1), removed by a reset
 //	          BridgeWithdraw; every host claimed its overlay address first
@@ -28,7 +30,8 @@
 //     answer names its owner, and each destination checks the address it was sent to), the longest prefix the client
 //     routes winning, and only from a client the document grants that prefix, port and protocol: a denied source never
 //     reaches a denied range or port, and a subnet's address its clients route never falls back to the campus around
-//     it;
+//     it; a route grant in force grants as the document does, and a share's reacher in another network reaches only the
+//     share's targets, through their aliases, while the share is in force;
 //   - nothing reaches a subnet or a forward before its filing began, nor later than LeaveBound after its withdrawal
 //     returned, not even over a TCP stream opened before it: past the bound it is refused or unreachable, never
 //     delivered to a stale or wrong owner;
@@ -37,13 +40,14 @@
 //   - no link's own NAT dialed anything locally;
 //   - the transfer balance reconciles exactly at the end: every byte drawn from the network's balances is a debit on a
 //     meter, the relay meter's debits are exactly each relayed contract's settled count recomputed from its close
-//     reports, none overdraws, and they cover at least the bytes the clients moved.
+//     reports, none overdraws, and they cover at least the bytes the clients moved; every network of the case alike.
 //
 // Run it through the build's wrapper: -tags 'sidecar_e2e sidecar_pending sidecar_localstack' -run TestE2eItBridge.
 
 package sidecare2e
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -124,6 +128,74 @@ func TestE2eItBridgeRouteGrants(t *testing.T) {
 		world.LogBridges(t)
 		world.Reconcile(ctx, t)
 		world.Summarize(t)
+	})
+}
+
+// A bridge share between two networks of the case (it_bridge_shares_test.go): X, the case's network, shares its host's
+// forward and its router's subnet with Y, a second network whose document lets its first client reach X; Y's owner
+// accepts, X's owner activates the share as its preview showed it, and the alias tables are checked at both ends and in
+// each compile; while the share is in force Y's first client must reach each target through its alias, by every
+// protocol the target takes, and Y's second client never; once X revokes the share and Y releases its aliases, past
+// LeaveBound, nothing reaches X's targets from Y. Then a sweep of X, the oracle of both networks and their ledgers. The
+// case runs seven config bases, at one a minute (§7.9's config_bases_per_min), so its bound is past the conventions' 10
+// minutes.
+func TestE2eItBridgeShares(t *testing.T) {
+	e2eTestEnv().Run(t, func(t testing.TB) {
+		settings := DefaultItBridgeSettings()
+		settings.SubnetCount = 1
+		settings.ForwardCount = 1
+		settings.ForwardHostCount = 1
+		settings.ClientCount = 1
+		settings.CampusPrefix = netip.Prefix{}
+		settings.ShareTargets = true
+		worldSettings := DefaultWorldSettings()
+		worldSettings.AclContractGate = true
+		worldSettings.Hosts.CaseTimeout = 25 * time.Minute
+		settings.World = worldSettings
+		x := NewItBridgeWorld(t, settings)
+		ctx, cancel := x.world.StepContext(t.Context(), x.world.HostsSettings().CaseTimeout)
+		defer cancel()
+		// X past §21.7's probation, which gives no outbound share, before anything api runs reads its standing; then what
+		// api's process installs at its start and the World's api does not, an invite's standing among it
+		if err := worldAgeNetwork(ctx, x.network.NetworkId, settings.ShareNetworkAge); err != nil {
+			t.Fatal(err)
+		}
+		x.world.T3().OnClose(itBridgeInstallAbuseStanding(x.world.T3().Context()))
+		if err := x.JoinAll(ctx); err != nil {
+			x.FailProgress(t, "the joins", err, nil)
+		}
+		for _, err := range x.Sweep(ctx, "sweep") {
+			t.Errorf("sweep: %v", err)
+		}
+		zone, err := worldDeviceZone(ctx, x.owner.t3)
+		if err != nil {
+			t.Fatalf("X's label: %v", err)
+		}
+		ySettings := DefaultItBridgeSettings()
+		ySettings.NetworkName = "itc"
+		ySettings.DeviceNamePrefix = "y-"
+		ySettings.SubnetCount = 0
+		ySettings.ForwardCount = 0
+		ySettings.ForwardHostCount = 0
+		ySettings.ClientCount = 2
+		ySettings.CampusPrefix = netip.Prefix{}
+		ySettings.Block = netip.MustParsePrefix("100.90.0.0/16")
+		ySettings.Seed = settings.Seed + 1
+		y := x.AddPeer(t, ySettings)
+		// Y's first client reaches X: the share's one reacher
+		share := x.NewShare(y, []*itBridgeTarget{x.forwards[0], x.subnets[0]}, y.clients[:1])
+		share.SaveAcceptingDocument(ctx, t, zone.Label)
+		share.Cycle(ctx, t)
+		for _, err := range x.Sweep(ctx, "last sweep") {
+			t.Errorf("last sweep: %v", err)
+		}
+		x.Check(t)
+		y.Check(t)
+		x.LogBridges(t)
+		y.LogBridges(t)
+		x.Reconcile(ctx, t)
+		x.Summarize(t)
+		y.Summarize(t)
 	})
 }
 
@@ -449,7 +521,10 @@ func (self *ItBridgeWorld) Check(t testing.TB) {
 			where := fmt.Sprintf("%s's %s request to %s at %s", arrival.Client, arrival.Network, arrival.Destination, arrival.At.Format(time.RFC3339Nano))
 			client := self.clientNamed(arrival.Client)
 			if client == nil {
-				t.Errorf("%s reached %s from no client of the case", where, target.name)
+				// another network's client, which only a share this network gave lets in (it_bridge_shares_test.go)
+				if err := self.checkShareArrival(target, arrival); err != nil {
+					t.Errorf("%s reached %s: %v", where, target.name, err)
+				}
 				continue
 			}
 			if !self.grantedOver(client, target, arrival.Network, arrival.At, arrival.At) {
@@ -589,25 +664,48 @@ func itBridgeTime(at time.Time) string {
 	return at.Format("15:04:05.000")
 }
 
-// The ledgers at the end (the file's header's last row): every bridge and every sidecar ended, so each relayed
-// contract is closed by both its parties, then the network's relayed contracts with their close reports and the relay
-// meter's rows, read before the flush moves them, then the World's ledgers, flushed.
+// The ledgers at the end (the file's header's last row): every bridge and every sidecar of this network and its peers
+// ended, so each relayed contract is closed by both its parties, then each network's relayed contracts with their close
+// reports and the relay meter's rows, all read before the flush moves them, then the World's ledgers, flushed, each
+// network's reconciled on its own.
 func (self *ItBridgeWorld) Reconcile(ctx context.Context, t testing.TB) {
 	t.Helper()
-	networkId := self.network.NetworkId
-	self.stopWires()
+	self.stateLock.Lock()
+	networks := append([]*ItBridgeWorld{self}, self.peers...)
+	self.stateLock.Unlock()
+	for _, network := range networks {
+		network.stopWires()
+	}
 	self.world.T3().CloseNetworks()
 	ledgerCtx, cancel := context.WithTimeout(ctx, self.settings.LedgerTimeout)
 	defer cancel()
-	// every relayed contract closed, or past the bound the ones that stayed open reported and left out: the ledgers
-	// still reconcile the closed ones, since an open contract's reservation debits nothing until it settles
+	contracts := make([][]*ItBridgeRelayedContract, len(networks))
+	stayedOpenCounts := make([]int, len(networks))
+	for index, network := range networks {
+		contracts[index], stayedOpenCounts[index] = network.closedContracts(ledgerCtx, t)
+	}
+	ledgers, err := self.world.ReadLedgers(ctx, time.Time{})
+	if err != nil {
+		t.Fatalf("the ledgers: %v", err)
+	}
+	for index, network := range networks {
+		network.reconcileLedgers(t, ledgers, contracts[index], stayedOpenCounts[index])
+	}
+}
+
+// The network's relayed contracts once every one closed, or past the bound the ones that stayed open reported and left
+// out, with how many did: the ledgers still reconcile the closed ones, since an open contract's reservation debits
+// nothing until it settles.
+func (self *ItBridgeWorld) closedContracts(ledgerCtx context.Context, t testing.TB) ([]*ItBridgeRelayedContract, int) {
+	t.Helper()
+	networkId := self.network.NetworkId
 	var contracts []*ItBridgeRelayedContract
 	stayedOpenCount := 0
 	for {
 		var err error
 		contracts, err = itBridgeRelayedContracts(ledgerCtx, networkId)
 		if err != nil {
-			t.Fatalf("the relayed contracts: %v", err)
+			t.Fatalf("%s's relayed contracts: %v", self.settings.NetworkName, err)
 		}
 		open := 0
 		for _, contract := range contracts {
@@ -622,10 +720,12 @@ func (self *ItBridgeWorld) Reconcile(ctx context.Context, t testing.TB) {
 		case <-ledgerCtx.Done():
 			for _, contract := range contracts {
 				if contract.Open {
-					t.Errorf("relayed contract %s from %s is still open, close reports %v, checkpoints %v", contract.ContractId, contract.SourceId, contract.CloseReports, contract.CheckpointReports)
+					t.Errorf("%s's relayed contract %s from %s is still open, close reports %v, checkpoints %v", self.settings.NetworkName,
+						contract.ContractId, contract.SourceId, contract.CloseReports, contract.CheckpointReports)
 				}
 			}
-			t.Errorf("%d of %d relayed contracts stayed open past the ledgers' bound of %s: %v", open, len(contracts), self.settings.LedgerTimeout, ledgerCtx.Err())
+			t.Errorf("%d of %s's %d relayed contracts stayed open past the ledgers' bound of %s: %v", open, self.settings.NetworkName, len(contracts),
+				self.settings.LedgerTimeout, ledgerCtx.Err())
 			stayedOpenCount = open
 		case <-time.After(self.settings.LedgerPollInterval):
 		}
@@ -633,13 +733,17 @@ func (self *ItBridgeWorld) Reconcile(ctx context.Context, t testing.TB) {
 			break
 		}
 	}
-	contracts = slices.DeleteFunc(contracts, func(contract *ItBridgeRelayedContract) bool {
+	return slices.DeleteFunc(contracts, func(contract *ItBridgeRelayedContract) bool {
 		return contract.Open
-	})
-	ledgers, err := self.world.ReadLedgers(ctx, time.Time{})
-	if err != nil {
-		t.Fatalf("the ledgers: %v", err)
-	}
+	}), stayedOpenCount
+}
+
+// The network's ledgers against its closed relayed contracts (Reconcile): the balances lost exactly what its meters
+// debited, the relay meter exactly what the contracts settle, nothing overdrawn, and the contracts covering what the
+// network's clients moved.
+func (self *ItBridgeWorld) reconcileLedgers(t testing.TB, ledgers *WorldLedgers, contracts []*ItBridgeRelayedContract, stayedOpenCount int) {
+	t.Helper()
+	networkId := self.network.NetworkId
 	ledger := ledgers.Networks[networkId]
 	settled := int64(0)
 	for _, contract := range contracts {
@@ -652,13 +756,13 @@ func (self *ItBridgeWorld) Reconcile(ctx context.Context, t testing.TB) {
 	relay := ledgers.Meters.ByteCount(networkId, sidecar.QuotaMeterRelay)
 	metered := ledgers.Meters.TotalByteCount(networkId)
 	if ledger.DebitedByteCount() != metered {
-		t.Errorf("the network's balances lost %d B, and its meters debited %d B: %s", ledger.DebitedByteCount(), metered, ledgers.Meters.Describe(networkId))
+		t.Errorf("%s's balances lost %d B, and its meters debited %d B: %s", self.settings.NetworkName, ledger.DebitedByteCount(), metered, ledgers.Meters.Describe(networkId))
 	}
 	if relay != settled {
-		t.Errorf("the relay meter debited %d B, and the relayed contracts settle %d B", relay, settled)
+		t.Errorf("%s's relay meter debited %d B, and the relayed contracts settle %d B", self.settings.NetworkName, relay, settled)
 	}
 	if ledger.BalanceByteCount < 0 {
-		t.Errorf("the network's balances are overdrawn: %d B left", ledger.BalanceByteCount)
+		t.Errorf("%s's balances are overdrawn: %d B left", self.settings.NetworkName, ledger.BalanceByteCount)
 	}
 	payload := 0
 	for _, attempt := range self.Attempts() {
@@ -667,12 +771,12 @@ func (self *ItBridgeWorld) Reconcile(ctx context.Context, t testing.TB) {
 		}
 	}
 	if 0 < stayedOpenCount {
-		t.Logf("the relayed contracts' cover of the clients' bytes goes unchecked, since %d contracts stayed open", stayedOpenCount)
+		t.Logf("%s's relayed contracts' cover of the clients' bytes goes unchecked, since %d contracts stayed open", self.settings.NetworkName, stayedOpenCount)
 	} else if settled < int64(payload) {
-		t.Errorf("the relayed contracts settle %d B, under the %d B of requests and answers the clients moved", settled, payload)
+		t.Errorf("%s's relayed contracts settle %d B, under the %d B of requests and answers the clients moved", self.settings.NetworkName, settled, payload)
 	}
-	t.Logf("ledgers: %d relayed contracts settle %d B, the relay meter %d B, every meter %d B, the balances lost %d B; the clients' reached attempts moved %d B",
-		len(contracts), settled, relay, metered, ledger.DebitedByteCount(), payload)
+	t.Logf("%s's ledgers: %d relayed contracts settle %d B, the relay meter %d B, every meter %d B, the balances lost %d B; the clients' reached attempts moved %d B",
+		self.settings.NetworkName, len(contracts), settled, relay, metered, ledger.DebitedByteCount(), payload)
 }
 
 // Logs what the case did: attempts by phase, protocol and outcome, arrivals by destination, and each device's wires.
@@ -702,6 +806,24 @@ func (self *ItBridgeWorld) Summarize(t testing.TB) {
 	}
 	for _, grant := range self.routeGrants {
 		t.Logf("%s: grant %x, expires %t, %s", grant.name, grant.GrantId(), grant.expires, describeItBridgeTimeline(grant.timeline))
+	}
+	self.stateLock.Lock()
+	shares := slices.Clone(self.shares)
+	self.stateLock.Unlock()
+	for _, share := range shares {
+		if share.x != self {
+			continue
+		}
+		aliases := []string{}
+		for _, shareTarget := range share.targets {
+			aliases = append(aliases, shareTarget.target.name+" at "+shareTarget.alias.String())
+		}
+		share.stateLock.Lock()
+		grantId := bytes.Clone(share.grantId)
+		inviteRefusedCount := share.inviteRefusedCount
+		share.stateLock.Unlock()
+		t.Logf("%s: share %s, grant %x, aliases %v, %d invites refused 403 first, %s", share.name, share.ShareId(), grantId, aliases,
+			inviteRefusedCount, describeItBridgeTimeline(share.timeline))
 	}
 	self.stateLock.Lock()
 	chaos := slices.Clone(self.chaos)
