@@ -763,16 +763,36 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 		}
 		server.Tx(clientSession.Ctx, func(tx server.PgTx) {
 			server.Raise(session.LockSessionLifecycle(clientSession.Ctx, tx, clientSession.ByJwt.NetworkId, false))
-			if !validateParent {
-				server.Raise(session.ValidateByJwtStateInTx(clientSession.Ctx, tx, clientSession.ByJwt, false))
-			}
 			// reset in case the tx is retried on a transient error: only the
 			// attempt that commits may answer or leave a proxy to publish
 			authClientResult = nil
 			authClientError = nil
 			proxyDeviceConfigJson = nil
 			proxyClient = nil
+			if enrollment != nil {
+				enrollment.authKey = nil
+				enrollment.refusal = nil
+			}
 
+			if !validateParent {
+				if err := session.ValidateByJwtStateInTx(clientSession.Ctx, tx, clientSession.ByJwt, false); err != nil {
+					// an enrollment's credential is its key creator's sign-in,
+					// read before this transaction: one that ended since, its
+					// membership removed or past its reauth_deadline, ended the
+					// creator's keys with it (§7.10), so the key is refused, never
+					// the server's error. Any other caller's stays an error
+					if enrollment == nil || errors.Is(err, session.ErrAuthUnavailable) {
+						server.Raise(err)
+					}
+					enrollment.refusal = ErrAuthKeyRefused
+					authClientResult = &AuthNetworkClientResult{
+						Error: &AuthNetworkClientError{
+							Message: networkEnrollAuthKeyInvalidMessage,
+						},
+					}
+					return
+				}
+			}
 			if validateParent {
 				if err := session.ValidateByJwtStateInTx(clientSession.Ctx, tx, clientSession.ByJwt, true); err != nil {
 					if errors.Is(err, session.ErrAuthUnavailable) {
