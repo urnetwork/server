@@ -39,6 +39,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -92,6 +93,11 @@ const (
 	// any other local port, or a ClientHello with no local address
 	tlsQuicPortOther = "other"
 )
+
+// The interface label of a QUIC ClientHello whose local address is no route
+// table interface's, or that has none. Every other ClientHello is labeled
+// with its interface's name.
+const tlsQuicInterfaceOther = "other"
 
 // Every served name's certificate and key. Read-only once loaded, so safe
 // for concurrent use.
@@ -427,12 +433,13 @@ func quicNegotiableNextProtos(offeredNextProtos []string) []string {
 //
 // quicTlsConfig counts every ClientHello it reads in metrics'
 // quicClientHellos, once each, since crypto/tls calls GetConfigForClient once
-// per handshake, a HelloRetryRequest's included: by the port kind its local
+// per handshake, a HelloRetryRequest's included: by the interface whose
+// address its local address is among interfaces, by the port kind its local
 // port is among listen's ports, by its name's class, and by whether it offered
 // h3. A failed handshake of a name the front doesn't serve is counted only
 // there: quic-go accepts a connection once the client's transport parameters
 // are read, after GetConfigForClient, so connect's dispatch never sees it.
-// The name never reaches a label.
+// Neither the name nor an address ever reaches a label.
 //
 // Early data stays off (D9): Go's TLS never accepts it over TCP, and on QUIC
 // tickets carry it only when connect's public quic.Config allows 0-RTT,
@@ -448,6 +455,7 @@ func newTlsConfigs(
 	matcher *nameMatcher,
 	defaultName string,
 	listen *RouteListen,
+	interfaces []*RouteInterface,
 	settings *TlsSettings,
 	metrics *frontMetrics,
 	now func() time.Time,
@@ -549,24 +557,43 @@ func newTlsConfigs(
 		},
 	}
 
-	// the port kind of a QUIC ClientHello, by the local port quic-go reports
-	// for it: the socket group's, so the listen port it was bound to
-	quicPortKind := func(clientHello *tls.ClientHelloInfo) string {
-		if clientHello.Conn == nil || listen == nil {
-			return tlsQuicPortOther
+	// the interface of each address the route table binds, so a ClientHello
+	// is labeled by the name, never the address
+	addressInterfaceNames := map[netip.Addr]string{}
+	for _, routeInterface := range interfaces {
+		for _, address := range []string{routeInterface.Ipv4, routeInterface.Ipv6} {
+			if parsedAddress, err := netip.ParseAddr(address); err == nil {
+				addressInterfaceNames[parsedAddress.Unmap()] = routeInterface.Name
+			}
+		}
+	}
+	// the interface and port kind of a QUIC ClientHello, by the local address
+	// quic-go reports for it: the socket group's, so the interface address
+	// and listen port it was bound to
+	quicLocalLabels := func(clientHello *tls.ClientHelloInfo) (interfaceName string, portKind string) {
+		interfaceName, portKind = tlsQuicInterfaceOther, tlsQuicPortOther
+		if clientHello.Conn == nil {
+			return
 		}
 		localAddr, ok := clientHello.Conn.LocalAddr().(*net.UDPAddr)
 		if !ok {
-			return tlsQuicPortOther
+			return
+		}
+		if address, ok := netip.AddrFromSlice(localAddr.IP); ok {
+			if addressInterfaceName, ok := addressInterfaceNames[address.Unmap()]; ok {
+				interfaceName = addressInterfaceName
+			}
+		}
+		if listen == nil {
+			return
 		}
 		switch localAddr.Port {
 		case listen.QuicPort:
-			return tlsQuicPortQuic
+			portKind = tlsQuicPortQuic
 		case listen.WhodisPort:
-			return tlsQuicPortWhodis
-		default:
-			return tlsQuicPortOther
+			portKind = tlsQuicPortWhodis
 		}
+		return
 	}
 	// the config for a QUIC ClientHello's server name among nameTlsConfigs,
 	// nil for none, and the class it is counted under: a served name's, or
@@ -603,7 +630,8 @@ func newTlsConfigs(
 				nameTlsConfigs = quicH3NameTlsConfigs
 			}
 			nameTlsConfig, nameClass := quicNameTlsConfig(clientHello.ServerName, nameTlsConfigs)
-			metrics.quicClientHellos.WithLabelValues(quicPortKind(clientHello), nameClass, strconv.FormatBool(h3Offered)).Inc()
+			interfaceName, portKind := quicLocalLabels(clientHello)
+			metrics.quicClientHellos.WithLabelValues(interfaceName, portKind, nameClass, strconv.FormatBool(h3Offered)).Inc()
 			if nameTlsConfig == nil {
 				return nil, ErrTlsNoCertificate
 			}

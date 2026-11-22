@@ -239,7 +239,7 @@ func (self *testTlsVault) newTlsConfigsWithMetrics(t *testing.T, settings *TlsSe
 // As newTlsConfigsWithMetrics, the shared ticket keys' days read from now.
 func (self *testTlsVault) newTlsConfigsAt(t *testing.T, settings *TlsSettings, metrics *frontMetrics, now func() time.Time) (tlsConfig *tls.Config, quicTlsConfig *tls.Config) {
 	t.Helper()
-	return newTlsConfigs(self.load(t), newNameMatcher(self.routeTable), self.routeTable.Lb.Names[0], self.routeTable.Listen, settings, metrics, now)
+	return newTlsConfigs(self.load(t), newNameMatcher(self.routeTable), self.routeTable.Lb.Names[0], self.routeTable.Listen, self.routeTable.Interfaces, settings, metrics, now)
 }
 
 // A client session cache that reports each session it stores, so a test

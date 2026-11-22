@@ -15,14 +15,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 	quic "github.com/urnetwork/quic-go"
 	"github.com/urnetwork/quic-go/qlogwriter"
 
 	"github.com/urnetwork/connect"
 )
 
-// The whodis defaults: no pace and a 10 s handshake idle timeout. A group's
-// translation takes the pace and the route table's tlds.
+// The whodis defaults: no pace, a 10 s handshake idle timeout, and the
+// handshake trace on. A group's translation takes the pace and the route
+// table's tlds.
 func TestFrontWhodisSettingsDefaults(t *testing.T) {
 	settings := DefaultFrontServerSettings()
 	if settings.WhodisWritePacketsPerSecond != 0 {
@@ -30,6 +34,9 @@ func TestFrontWhodisSettingsDefaults(t *testing.T) {
 	}
 	if settings.WhodisHandshakeIdleTimeout != 10*time.Second {
 		t.Fatalf("WhodisHandshakeIdleTimeout = %s, want 10s", settings.WhodisHandshakeIdleTimeout)
+	}
+	if !settings.WhodisHandshakeTrace {
+		t.Fatal("the whodis handshake trace is off by default")
 	}
 	if pace := connect.DefaultPacketTranslationSettings().WritePacketsPerSecond; pace == 0 {
 		t.Fatal("connect's translation is unpaced by default, so the front's setting shows nothing")
@@ -54,9 +61,11 @@ func TestFrontWhodisSettingsDefaults(t *testing.T) {
 }
 
 // The whodis transports' QUIC config is the quic port's with only the
-// handshake idle timeout changed; the quic port's config keeps connect's
+// handshake idle timeout changed, and the handshake trace beside whatever
+// tracer the quic port's had; the quic port's config keeps connect's
 // timeout, and the established connection's idle timeout and keepalive stay
-// connect's on both. A non-positive timeout keeps connect's.
+// connect's on both. A non-positive timeout keeps connect's, and with the
+// trace off the tracer is the quic port's.
 func TestFrontWhodisQuicConfigChangesOnlyTheHandshakeIdleTimeout(t *testing.T) {
 	var baseTraces atomic.Int64
 	baseTracer := func(context.Context, bool, quic.ConnectionID) qlogwriter.Trace {
@@ -73,7 +82,7 @@ func TestFrontWhodisQuicConfigChangesOnlyTheHandshakeIdleTimeout(t *testing.T) {
 			Tracer:               baseTracer,
 		}
 	}
-	// the fields of a config apart from the one the whodis config changes;
+	// the fields of a config apart from the two the whodis config may change;
 	// a function compares only as nil
 	unchanged := func(config *quic.Config) *quic.Config {
 		copied := config.Clone()
@@ -97,22 +106,56 @@ func TestFrontWhodisQuicConfigChangesOnlyTheHandshakeIdleTimeout(t *testing.T) {
 	if !reflect.DeepEqual(unchanged(whodisQuicConfig), unchanged(quicConfig)) {
 		t.Fatalf("the whodis config changed more than the handshake: %+v, against %+v", whodisQuicConfig, quicConfig)
 	}
-	if whodisQuicConfig.Tracer(context.Background(), false, quic.ConnectionID{}) != nil || baseTraces.Load() != 1 {
-		t.Fatal("the whodis config's tracer is not the quic port's")
+	// the whodis tracer hands quic-go a traced connection's trace, and asks
+	// the quic port's tracer for its own
+	handshakeTrace := &frontQuicHandshakeTrace{}
+	traceCtx := context.WithValue(context.Background(), frontQuicHandshakeTraceKey{}, handshakeTrace)
+	if trace := whodisQuicConfig.Tracer(traceCtx, false, quic.ConnectionID{}); trace != qlogwriter.Trace(handshakeTrace) || baseTraces.Load() != 1 {
+		t.Fatalf("the whodis tracer gave %T, asking the quic port's %d times", trace, baseTraces.Load())
 	}
 
 	keepEnv := newUnstartedTestFrontEnv(t, func(env *testFrontEnv) {
 		env.settings.WhodisHandshakeIdleTimeout = 0
+		env.settings.WhodisHandshakeTrace = false
 	})
 	keptQuicConfig := keepEnv.frontServer.newWhodisQuicConfig(newQuicConfig())
 	if keptQuicConfig.HandshakeIdleTimeout != 30*time.Second {
 		t.Fatalf("a non-positive whodis timeout gave %s, want connect's 30s", keptQuicConfig.HandshakeIdleTimeout)
 	}
+	if keptQuicConfig.Tracer(traceCtx, false, quic.ConnectionID{}) != nil || baseTraces.Load() != 2 {
+		t.Fatal("with the trace off the whodis config's tracer is not the quic port's")
+	}
+}
+
+// Finds the transport conn the fake handler was given for a whodis group's
+// translation: the translation, timed.
+func (self *testFrontEnv) whodisTimedConn(quicGroup *frontQuicGroup) *frontWhodisTimedConn {
+	self.t.Helper()
+	translation := quicGroup.currentRun().translation
+	for _, transportConn := range self.connectQuic.builtTransportConns() {
+		if timedConn, ok := transportConn.(*frontWhodisTimedConn); ok && timedConn.PacketConn == translation {
+			return timedConn
+		}
+	}
+	self.t.Fatalf("no transport reads the translation of %s through its timing", quicGroup)
+	return nil
+}
+
+// The count of observations of one series of a histogram vector.
+func testFrontHistogramCount(t testing.TB, histogram *prometheus.HistogramVec, labelValues ...string) uint64 {
+	t.Helper()
+	metric := &dto.Metric{}
+	if err := histogram.WithLabelValues(labelValues...).(prometheus.Metric).Write(metric); err != nil {
+		t.Fatal(err)
+	}
+	return metric.GetHistogram().GetSampleCount()
 }
 
 // A whodis group's translation writes its responses unpaced: 400 packets of
-// one response each take well under the 2 s the old pace of 200 a second
-// sleeps on average, which the same writes with that pace exceed.
+// one response each, through the conn its transport writes, take well under
+// the 2 s the old pace of 200 a second sleeps on average, which the same
+// writes with that pace exceed. Each response is counted by the group's
+// interface and family, and each write's wait observed.
 func TestFrontWhodisTranslationWritesUnpaced(t *testing.T) {
 	const packetCount = 400
 	// one response each: a response carries 191 - 18 + 160 bytes, less the
@@ -132,7 +175,8 @@ func TestFrontWhodisTranslationWritesUnpaced(t *testing.T) {
 		})
 		env.waitSocketsUp(len(env.frontServer.sockets))
 		address, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
-		translation := env.quicGroup(address, frontPortWhodis).currentRun().translation
+		quicGroup := env.quicGroup(address, frontPortWhodis)
+		timedConn := env.whodisTimedConn(quicGroup)
 		destination := env.clientPacketConn(address)
 		go func() {
 			b := make([]byte, frontWhodisMaxDatagramByteCount)
@@ -142,13 +186,23 @@ func TestFrontWhodisTranslationWritesUnpaced(t *testing.T) {
 				}
 			}
 		}()
+		responses := frontWhodisResponsesCounter.WithLabelValues(testFrontInterfaceA, frontFamilyIpv4)
+		responsesBefore := testutil.ToFloat64(responses)
+		writesBefore := testFrontHistogramCount(t, frontWhodisWriteSecondsHistogram, testFrontInterfaceA, frontFamilyIpv4)
 		startTime := time.Now()
 		for range packetCount {
-			if _, err := translation.WriteTo(packet, destination.LocalAddr()); err != nil {
+			if _, err := timedConn.WriteTo(packet, destination.LocalAddr()); err != nil {
 				t.Fatal(err)
 			}
 		}
-		return time.Since(startTime)
+		elapsed := time.Since(startTime)
+		if count := testutil.ToFloat64(responses) - responsesBefore; count != packetCount {
+			t.Fatalf("pace %d: %v responses counted, want %d", pace, count, packetCount)
+		}
+		if count := testFrontHistogramCount(t, frontWhodisWriteSecondsHistogram, testFrontInterfaceA, frontFamilyIpv4) - writesBefore; count != packetCount {
+			t.Fatalf("pace %d: %d writes observed, want %d", pace, count, packetCount)
+		}
+		return elapsed
 	}
 	if elapsed := writeAll(DefaultFrontServerSettings().WhodisWritePacketsPerSecond); bound <= elapsed {
 		t.Fatalf("the default wrote %d responses in %s, as slow as a pace", packetCount, elapsed)
@@ -162,10 +216,10 @@ func TestFrontWhodisTranslationWritesUnpaced(t *testing.T) {
 // front's handshake idle timeout ends its connection: the front held the
 // only state of it, the client never having heard the front, so the
 // client's next Initial, on its PTO, makes a new connection, and the
-// client's one dial completes on it. The front counts the first as a failed
-// handshake, then the completed handshake, both on the whodis port. The
-// whodis handshake idle timeout is 1 s here, and the client's handshake idle
-// timeout 30 s.
+// client's one dial completes on it. The front counts the first as a failure
+// of class reply_unacked, then the completed handshake, both on the whodis
+// port. The whodis handshake idle timeout is 1 s here, and the client's
+// handshake idle timeout 30 s.
 func TestFrontWhodisLostReplyCostsTheClientNothing(t *testing.T) {
 	var results chan testFrontConnectionResult
 	var handshakes chan testFrontQuicHandshake
@@ -182,9 +236,8 @@ func TestFrontWhodisLostReplyCostsTheClientNothing(t *testing.T) {
 	dialed := env.dialWhodisShaped(address, shaper, tlsConfig)
 
 	env.nextDispatch()
-	failed := nextTestFrontObserved(t, results, "the connection whose replies were lost")
-	timeouts := []string{frontQuicHandshakeReasonIdleTimeout, frontQuicHandshakeReasonHandshakeTimeout}
-	if failed.portKind != frontPortWhodis || failed.result != frontQuicResultHandshakeFailed || !slices.Contains(timeouts, failed.reason) {
+	failed := nextTestFrontWhodisResult(t, results, "the connection whose replies were lost")
+	if failed.result != frontQuicResultHandshakeFailed || failed.class != frontQuicHandshakeClassReplyUnacked {
 		t.Fatalf("the connection whose replies were lost was counted as %+v", failed)
 	}
 	shaper.dropReads.Store(false)
@@ -193,7 +246,7 @@ func TestFrontWhodisLostReplyCostsTheClientNothing(t *testing.T) {
 	if handshake := nextTestFrontObserved(t, handshakes, "the next connection's handshake"); handshake.portKind != frontPortWhodis {
 		t.Fatalf("the next handshake was counted as %+v", handshake)
 	}
-	if served := nextTestFrontObserved(t, results, "the next connection"); served.portKind != frontPortWhodis || served.result != frontQuicResultConnect {
+	if served := nextTestFrontWhodisResult(t, results, "the next connection"); served.result != frontQuicResultConnect {
 		t.Fatalf("the next connection was counted as %+v", served)
 	}
 	env.nextHandled()
@@ -217,8 +270,8 @@ type testFrontWhodisClientShaper struct {
 	// set once the client read a datagram from the front
 	received atomic.Bool
 	// what the client sends of each datagram, given whether it read one
-	// from the front by then and how many it wrote before; nil sends
-	// nothing. Nil sends every datagram unchanged
+	// from the front by then and how many it wrote before: a nil result
+	// sends nothing. When unset, every datagram goes unchanged
 	shapeWrite func(p []byte, received bool, writeIndex int64) []byte
 	writeCount atomic.Int64
 }

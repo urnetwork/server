@@ -105,6 +105,11 @@ type FrontServerSettings struct {
 	//     flight. 10 s takes 6 tries at 100 ms, 4 at 300 ms, 3 at 500 ms; 30 s
 	//     took 7, 6 and 5.
 	WhodisHandshakeIdleTimeout time.Duration
+	// whether the whodis transports trace each handshake for the class of
+	// its failure (front_quic_trace.go): one small object a connection, and
+	// quic-go's construction of each event of a traced connection, for its
+	// whole life. true. The quic port never traces.
+	WhodisHandshakeTrace bool
 	// binds one public udp socket, when set, in place of
 	// listenFrontPacket's SO_REUSEPORT bind to the exact address. Tests use
 	// it to observe, hold and fail binds, as the extender's
@@ -131,13 +136,14 @@ type FrontServerSettings struct {
 	// Nil outside package tests. Called with the name and class an accepted
 	// QUIC connection was dispatched by, before its front is entered.
 	dispatchObserverForTest func(serverName string, nameClass nginx.NameClass)
-	// Nil outside package tests. Called with the port kind, result and reason
-	// each accepted QUIC connection is counted with, as it is counted.
-	connectionResultObserverForTest func(portKind string, result string, reason string)
-	// Nil outside package tests. Called with the port kind, QUIC version and
-	// resumption each completed QUIC handshake is counted with, as it is
-	// counted, before the connection's result.
-	quicHandshakeObserverForTest func(portKind string, version string, resumed string)
+	// Nil outside package tests. Called with the interface, port kind,
+	// result, reason and class each accepted QUIC connection is counted with,
+	// as it is counted.
+	connectionResultObserverForTest func(interfaceName string, portKind string, result string, reason string, class string)
+	// Nil outside package tests. Called with the interface, port kind, QUIC
+	// version and resumption each completed QUIC handshake is counted with, as
+	// it is counted, before the connection's result.
+	quicHandshakeObserverForTest func(interfaceName string, portKind string, version string, resumed string)
 	// Nil outside package tests. Called with the version, resumption and
 	// application protocol each completed TLS handshake on a public TCP
 	// socket is counted with, as it is counted, before the connection is
@@ -178,6 +184,7 @@ func DefaultFrontServerSettings() *FrontServerSettings {
 		// unpaced: the front's replies are bounded by QUIC
 		WhodisWritePacketsPerSecond: 0,
 		WhodisHandshakeIdleTimeout:  10 * time.Second,
+		WhodisHandshakeTrace:        true,
 	}
 }
 

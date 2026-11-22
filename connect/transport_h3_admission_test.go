@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/quic-go"
@@ -346,11 +347,15 @@ func TestConnectHandlerBuildsUnvalidatedHandshakeLimitFromSettings(t *testing.T)
 
 // The limit counts a handshake from an unvalidated address until it completes
 // or closes, whichever comes first, never one from an address a Retry token
-// validated, and asks a new source for a Retry at the maximum. A maximum that
-// is not positive builds no limit.
+// validated, and asks a new source for a Retry at the maximum. The process's
+// gauge follows the count. A maximum that is not positive builds no limit.
 func TestConnectQuicHandshakeLimitCountsUnvalidatedHandshakes(t *testing.T) {
 	if newConnectQuicHandshakeLimit(0) != nil || newConnectQuicHandshakeLimit(-1) != nil {
 		t.Fatal("a maximum that is not positive built a limit")
+	}
+	gaugeBefore := testutil.ToFloat64(connectQuicUnvalidatedHandshakesGauge)
+	gaugeCount := func() int64 {
+		return int64(testutil.ToFloat64(connectQuicUnvalidatedHandshakesGauge) - gaugeBefore)
 	}
 	limit := newConnectQuicHandshakeLimit(2)
 	open := func(addrVerified bool) (context.Context, context.CancelFunc) {
@@ -381,8 +386,8 @@ func TestConnectQuicHandshakeLimitCountsUnvalidatedHandshakes(t *testing.T) {
 	completedCtx, closeCompleted := open(false)
 	closedCtx, closeClosed := open(false)
 	defer closeClosed()
-	if count := limit.count.Load(); count != 2 {
-		t.Fatalf("count = %d after two unvalidated handshakes", count)
+	if count := limit.count.Load(); count != 2 || gaugeCount() != 2 {
+		t.Fatalf("count = %d, gauge %d after two unvalidated handshakes", count, gaugeCount())
 	}
 	if !limit.verifySourceAddress(nil) {
 		t.Fatal("at the maximum a source was not asked for a Retry")
@@ -392,8 +397,8 @@ func TestConnectQuicHandshakeLimitCountsUnvalidatedHandshakes(t *testing.T) {
 	release(completedCtx)
 	release(completedCtx)
 	closeCompleted()
-	if count := limit.count.Load(); count != 1 {
-		t.Fatalf("count = %d after one handshake completed", count)
+	if count := limit.count.Load(); count != 1 || gaugeCount() != 1 {
+		t.Fatalf("count = %d, gauge %d after one handshake completed", count, gaugeCount())
 	}
 	if limit.verifySourceAddress(nil) {
 		t.Fatal("below the maximum again a source was asked for a Retry")
@@ -405,8 +410,8 @@ func TestConnectQuicHandshakeLimitCountsUnvalidatedHandshakes(t *testing.T) {
 	defer cancel()
 	waitForConnectQuicTestHandshakeCount(ctx, t, limit, 0)
 	release(closedCtx)
-	if count := limit.count.Load(); count != 0 {
-		t.Fatalf("count = %d after a release that followed the close", count)
+	if count := limit.count.Load(); count != 0 || gaugeCount() != 0 {
+		t.Fatalf("count = %d, gauge %d after a release that followed the close", count, gaugeCount())
 	}
 }
 

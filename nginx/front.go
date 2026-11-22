@@ -207,7 +207,7 @@ func NewFront(ctx context.Context, routeTable *RouteTable, revision string, cert
 	}
 
 	matcher := newNameMatcher(routeTable)
-	tlsConfig, quicTlsConfig := newTlsConfigs(certificateStore, matcher, routeTable.Lb.Names[0], routeTable.Listen, settings.Tls, defaultFrontMetrics, time.Now)
+	tlsConfig, quicTlsConfig := newTlsConfigs(certificateStore, matcher, routeTable.Lb.Names[0], routeTable.Listen, routeTable.Interfaces, settings.Tls, defaultFrontMetrics, time.Now)
 	bodyStore := newBodyStore(settings.Body)
 	serviceForwarders := map[string]serviceForwarder{}
 	for _, service := range routeTable.Services {
@@ -354,7 +354,7 @@ func (self *Front) TlsConfig() *tls.Config {
 // connect and api names, with alt's ALPN rule (the client's offer intersected
 // with [h3], so raw-QUIC connect without ALPN still passes). The public QUIC
 // config that uses it sets Allow0RTT false. It counts each ClientHello by
-// port kind, the class of its name and whether it offered h3, in
+// interface, port kind, the class of its name and whether it offered h3, in
 // urnetwork_front_quic_client_hellos_total (newTlsConfigs).
 func (self *Front) QuicTlsConfig() *tls.Config {
 	return self.quicTlsConfig

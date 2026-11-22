@@ -29,10 +29,12 @@ package connect
 //     quic-go never accepts the connection. That config counts every
 //     ClientHello by the class of its name
 //     (urnetwork_front_quic_client_hellos_total);
-//   - the dispatch counts each accepted connection's handshake once: a
-//     completed one by QUIC version and resumption, and a failed one as
-//     handshake_failed with its reason, read from quic-go's typed errors
-//     (frontQuicHandshakeReason);
+//   - the dispatch counts each accepted connection's handshake once, by the
+//     group's interface: a completed one by QUIC version and resumption, and
+//     a failed one as handshake_failed with its reason, read from quic-go's
+//     typed errors (frontQuicHandshakeReason), and on the whodis port with
+//     its class, how far it got, from the connection's handshake trace
+//     (front_quic_trace.go);
 //   - the whodis transports have settings of their own: the translation's
 //     pace (FrontServerSettings.WhodisWritePacketsPerSecond, unpaced) and
 //     quic-go's handshake idle timeout (WhodisHandshakeIdleTimeout, 10 s).
@@ -185,7 +187,11 @@ func (self *frontServer) openQuicRun(group *frontQuicGroup) (*frontQuicRun, erro
 	var servedConn net.PacketConn
 	quicConfig := self.quicConfig
 	if group.key.portKind == frontPortWhodis {
-		run.whodisFanIn = newFrontWhodisFanIn(localAddr, self.settings)
+		run.whodisFanIn = newFrontWhodisFanIn(
+			localAddr,
+			self.settings,
+			frontWhodisResponsesCounter.WithLabelValues(group.key.interfaceName, group.key.family),
+		)
 		// the translation outlives the transport, so it can't end the
 		// transport under live connections: only close ends it
 		translationCtx, translationCancel := context.WithCancel(context.Background())
@@ -202,13 +208,20 @@ func (self *frontServer) openQuicRun(group *frontQuicGroup) (*frontQuicRun, erro
 		}
 		run.translation = translation
 		run.translationCancel = translationCancel
-		servedConn = translation
+		servedConn = &frontWhodisTimedConn{
+			PacketConn:   translation,
+			writeSeconds: frontWhodisWriteSecondsHistogram.WithLabelValues(group.key.interfaceName, group.key.family),
+		}
 		quicConfig = self.whodisQuicConfig
 	} else {
 		run.connGroup = quic.NewConnGroup(localAddr)
 		servedConn = run.connGroup
 	}
 	run.quicTransport = self.connectQuic.NewQuicTransport(servedConn)
+	if group.key.portKind == frontPortWhodis && self.settings.WhodisHandshakeTrace {
+		traceFrontQuicHandshakes(run.quicTransport)
+	}
+	countFrontQuicRetries(run.quicTransport, group.key)
 	listener, err := run.quicTransport.ListenEarly(self.quicTlsConfig, quicConfig)
 	if err != nil {
 		run.quicTransport.Close()
@@ -229,15 +242,36 @@ func (self *frontServer) whodisTranslationSettings() *connect.PacketTranslationS
 }
 
 // The QUIC config of the whodis transports: a copy of quicConfig, the quic
-// port's, with the whodis handshake idle timeout. Every other field, the
-// established connection's idle timeout and keepalive included, is
-// quicConfig's.
+// port's, with the whodis handshake idle timeout, and with the handshake
+// trace when the whodis transports trace, beside any tracer quicConfig had.
+// Every other field, the established connection's idle timeout and
+// keepalive included, is quicConfig's.
 func (self *frontServer) newWhodisQuicConfig(quicConfig *quic.Config) *quic.Config {
 	whodisQuicConfig := quicConfig.Clone()
 	if 0 < self.settings.WhodisHandshakeIdleTimeout {
 		whodisQuicConfig.HandshakeIdleTimeout = self.settings.WhodisHandshakeIdleTimeout
 	}
+	if self.settings.WhodisHandshakeTrace {
+		whodisQuicConfig.Tracer = newFrontQuicHandshakeTracer(quicConfig.Tracer)
+	}
 	return whodisQuicConfig
+}
+
+// Counts the Retries transport's handshake limit asks for, by the group's
+// interface and port kind. A transport without the limit asks for none.
+func countFrontQuicRetries(transport *quic.Transport, key frontSocketKey) {
+	verifySourceAddress := transport.VerifySourceAddress
+	if verifySourceAddress == nil {
+		return
+	}
+	retries := frontQuicRetriesCounter.WithLabelValues(key.interfaceName, key.portKind)
+	transport.VerifySourceAddress = func(addr net.Addr) bool {
+		if !verifySourceAddress(addr) {
+			return false
+		}
+		retries.Inc()
+		return true
+	}
 }
 
 // Adds a bound socket to the transport's fan-in.
@@ -391,20 +425,23 @@ func (self *frontQuicRun) refuseUnknownName(conn *quic.Conn) {
 
 // Waits for an accepted connection's handshake (AwaitQuicHandshake) and counts
 // it: a completed one by QUIC version and whether it resumed a session, and a
-// failed one as handshake_failed, by its reason, closing the connection.
-// Reports whether the handshake completed.
+// failed one as handshake_failed, by its reason and, on a traced transport,
+// its class, closing the connection. Reports whether the handshake completed.
 func (self *frontQuicRun) awaitHandshake(conn *quic.Conn) bool {
+	// nil on a transport that doesn't trace
+	handshakeTrace := frontQuicHandshakeTraceOf(conn)
 	if err := AwaitQuicHandshake(self.frontServer.ctx, conn); err != nil {
-		self.countConnectionReason(frontQuicResultHandshakeFailed, frontQuicHandshakeReason(err))
+		self.countConnectionLabels(frontQuicResultHandshakeFailed, frontQuicHandshakeReason(err), handshakeTrace.class(err))
 		conn.CloseWithError(0, "")
 		return false
 	}
+	handshakeTrace.settle()
 	connectionState := conn.ConnectionState()
 	version := frontQuicVersionLabel(connectionState.Version)
 	resumed := strconv.FormatBool(connectionState.TLS.DidResume)
-	frontQuicHandshakesCounter.WithLabelValues(self.group.key.portKind, version, resumed).Inc()
+	frontQuicHandshakesCounter.WithLabelValues(self.group.key.interfaceName, self.group.key.portKind, version, resumed).Inc()
 	if observer := self.frontServer.settings.quicHandshakeObserverForTest; observer != nil {
-		observer(self.group.key.portKind, version, resumed)
+		observer(self.group.key.interfaceName, self.group.key.portKind, version, resumed)
 	}
 	return true
 }
@@ -742,18 +779,20 @@ func closeFrontApiServers(apiServers []*http3.Server, timeout time.Duration) {
 	}
 }
 
-// Counts one accepted connection's result, which has no reason.
+// Counts one accepted connection's result, which has no reason or class.
 func (self *frontQuicRun) countConnection(result string) {
-	self.countConnectionReason(result, frontQuicResultReasonNone)
+	self.countConnectionLabels(result, frontQuicResultReasonNone, frontQuicHandshakeClassNone)
 }
 
-// Counts one accepted connection's result and its reason: why the handshake
-// failed for handshake_failed, - for every other result; and its result by
-// the group's address family.
-func (self *frontQuicRun) countConnectionReason(result string, reason string) {
-	frontQuicConnectionsCounter.WithLabelValues(self.group.key.portKind, result, reason).Inc()
-	frontQuicConnectionsByFamilyCounter.WithLabelValues(self.group.key.portKind, self.group.key.family, result).Inc()
+// Counts one accepted connection's result, by the group's interface, with its
+// reason and class: why the handshake failed and how far it got for
+// handshake_failed, - for every other result; and its result by the group's
+// address family.
+func (self *frontQuicRun) countConnectionLabels(result string, reason string, class string) {
+	key := self.group.key
+	frontQuicConnectionsCounter.WithLabelValues(key.interfaceName, key.portKind, result, reason, class).Inc()
+	frontQuicConnectionsByFamilyCounter.WithLabelValues(key.interfaceName, key.portKind, key.family, result).Inc()
 	if observer := self.frontServer.settings.connectionResultObserverForTest; observer != nil {
-		observer(self.group.key.portKind, result, reason)
+		observer(key.interfaceName, key.portKind, result, reason, class)
 	}
 }

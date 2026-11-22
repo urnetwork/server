@@ -286,7 +286,8 @@ type frontServer struct {
 	tlsConfig     *tls.Config
 	quicTlsConfig *tls.Config
 	quicConfig    *quic.Config
-	// quicConfig with the whodis handshake idle timeout
+	// quicConfig with the whodis handshake idle timeout and, when the whodis
+	// transports trace, the handshake trace
 	whodisQuicConfig *quic.Config
 	httpServers      []*http.Server
 
