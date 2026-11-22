@@ -440,6 +440,11 @@ func newProviderIntentTestServer(t testing.TB, ctx context.Context) *providerInt
 	settings.EnableProxyProtocol = false
 	settings.TransportTlsSettings.EnableSelfSign = true
 	settings.TransportTlsSettings.DefaultHostName = "127.0.0.1"
+	// the self-signed test identity, not the environment's tls.yml, which a
+	// test host need not have
+	settings.transportTlsLoader = func(tlsSettings *server.TransportTlsSettings) (*server.TransportTls, error) {
+		return server.NewTransportTls(map[string]bool{}, tlsSettings), nil
+	}
 	handler := NewConnectHandlerWithPacketConns(ctx, handlerId, exchange, settings, ConnectHandlerPacketConns{
 		H3: h3PacketConn,
 	})

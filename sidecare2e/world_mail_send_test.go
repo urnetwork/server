@@ -45,6 +45,9 @@ type WorldMailSenderSettings struct {
 	HeadByteCount         uint64
 	HeaderRecordByteCount uint64
 	EnvelopeGroupCount    uint64
+	// Changes to sidecar.DefaultSmtpSenderSettings the composition takes: a scenario on real time shortens the
+	// retries' minutes and hours and the outbox's takeover there. nil takes the defaults.
+	Sender func(settings *sidecar.SmtpSenderSettings)
 }
 
 func DefaultWorldMailSenderSettings() *WorldMailSenderSettings {
@@ -59,18 +62,22 @@ func DefaultWorldMailSenderSettings() *WorldMailSenderSettings {
 	}
 }
 
-// A logger that keeps each line among name's newest (World.SidecarLogLines), so a stalled step's dump shows what the
-// composition said: info, warnings and errors, and the guarded levels up to Level.
+// A logger that keeps each line among each of names' newest (World.SidecarLogLines), so a stalled step's dump shows
+// what the composition said: info, warnings and errors, and the guarded levels up to Level.
 type worldTeeLogger struct {
 	world *World
-	name  string
+	// the device's name, whose lines a stall's dump shows, and the composition's own (WorldMailSender.LogLines), which
+	// the device's other lines do not crowd out
+	names []string
 	level int32
 }
 
 var _ sidecar.Logger = (*worldTeeLogger)(nil)
 
 func (self *worldTeeLogger) keep(line string) {
-	self.world.keepSidecarLogLine(self.name, strings.TrimRight(line, "\n"))
+	for _, name := range self.names {
+		self.world.keepSidecarLogLine(name, strings.TrimRight(line, "\n"))
+	}
 }
 
 func (self *worldTeeLogger) Info(args ...any) {
@@ -114,7 +121,7 @@ func (self *worldTeeVerbose) Infof(format string, args ...any) {
 	}
 }
 
-// One sending device's composition (the file's header), running until the world closes.
+// One sending device's composition (the file's header), running until the world closes or Stop.
 type WorldMailSender struct {
 	Device *sidecart3.T3Device
 	Prover *sidecartest.FakeSmtpProver
@@ -124,6 +131,10 @@ type WorldMailSender struct {
 	Runner *sidecar.SmtpOutboxRunner
 
 	wake chan struct{}
+	// the DKIM keys' keychain, which a restart's composition keeps, as the device's own keychain outlives its daemon
+	secrets *worldMemorySecrets
+	stop    sync.Once
+	end     func()
 
 	stateLock sync.Mutex
 	// every mail_send event the sender raised
@@ -134,6 +145,25 @@ type WorldMailSender struct {
 // closes, once its socket component stands, since the sender dials ur/smtpedge through it and a send that cannot is
 // held for the sender's first retry, 30 minutes on.
 func (self *World) StartMailSender(ctx context.Context, device *sidecart3.T3Device, client *sidecar.MailClient, settings *WorldMailSenderSettings) (*WorldMailSender, error) {
+	return self.startMailSender(ctx, device, client, settings, &worldMemorySecrets{values: map[string][]byte{}})
+}
+
+// Stops sender's composition, as a daemon's restart stops it: its runner and host end, and its sender cancels every
+// send in flight and returns once they have ended. Its stores stay: the device's local store, the member's mailbox and
+// the DKIM keys' keychain. Safe to call again.
+func (self *WorldMailSender) Stop() {
+	self.stop.Do(self.end)
+}
+
+// Stops sender (Stop) and composes its device's prover host again over client on the same stores and DKIM keychain,
+// as a daemon's restart does: the new composition reads the member's o/ and or/ where the old one left them.
+func (self *World) RestartMailSender(ctx context.Context, sender *WorldMailSender, client *sidecar.MailClient, settings *WorldMailSenderSettings) (*WorldMailSender, error) {
+	sender.Stop()
+	return self.startMailSender(ctx, sender.Device, client, settings, sender.secrets)
+}
+
+// StartMailSender with the DKIM keys in secrets.
+func (self *World) startMailSender(ctx context.Context, device *sidecart3.T3Device, client *sidecar.MailClient, settings *WorldMailSenderSettings, secrets *worldMemorySecrets) (*WorldMailSender, error) {
 	if settings == nil {
 		settings = DefaultWorldMailSenderSettings()
 	}
@@ -158,8 +188,11 @@ func (self *World) StartMailSender(ctx context.Context, device *sidecart3.T3Devi
 		return nil, err
 	}
 	senderSettings := sidecar.DefaultSmtpSenderSettings()
+	if settings.Sender != nil {
+		settings.Sender(senderSettings)
+	}
 	clock := sidecar.RealClock{}
-	log := &worldTeeLogger{world: self, name: device.Name, level: settings.LogLevel}
+	log := &worldTeeLogger{world: self, names: []string{device.Name, worldMailSenderLogName(device)}, level: settings.LogLevel}
 	anchors, err := self.dnssec.Anchors()
 	if err != nil {
 		return nil, err
@@ -180,7 +213,7 @@ func (self *World) StartMailSender(ctx context.Context, device *sidecart3.T3Devi
 		HeaderRecordByteCount: settings.HeaderRecordByteCount,
 		EnvelopeGroupCount:    settings.EnvelopeGroupCount,
 	}
-	sender := &WorldMailSender{Device: device, Prover: sidecartest.NewFakeSmtpProver(proverSettings), wake: make(chan struct{}, 1)}
+	sender := &WorldMailSender{Device: device, Prover: sidecartest.NewFakeSmtpProver(proverSettings), wake: make(chan struct{}, 1), secrets: secrets}
 	sender.Host, err = sidecar.NewSmtpProverHost(&sidecar.SmtpProverHostArgs{
 		Prover: sender.Prover, Mailbox: mailbox, SidecarId: identity.SidecarId, MailEnabled: func() bool { return true },
 		Settings: senderSettings, Clock: clock, Log: log,
@@ -192,7 +225,7 @@ func (self *World) StartMailSender(ctx context.Context, device *sidecart3.T3Devi
 	if err := sender.Host.Idle(ctx); err != nil {
 		return nil, fmt.Errorf("%s's p/: %w", device.Name, err)
 	}
-	sender.Dkim = sidecar.NewSmtpDkimKeys(&worldMemorySecrets{values: map[string][]byte{}}, &worldDkimPublisher{world: self, device: device}, senderSettings, clock, log)
+	sender.Dkim = sidecar.NewSmtpDkimKeys(secrets, &worldDkimPublisher{world: self, device: device}, senderSettings, clock, log)
 	sender.Dkim.SetDomainAnswers(&sidecar.SmtpDkimDomainAnswers{Doh: self.dnssec, Root: strings.TrimSuffix(zone.Root, ".")})
 	memberKey := func(sidecarId sidecar.Id) ed25519.PublicKey {
 		return worldConsentedMemberKey(device, sidecarId)
@@ -234,11 +267,12 @@ func (self *World) StartMailSender(ctx context.Context, device *sidecart3.T3Devi
 	var workers sync.WaitGroup
 	workers.Go(func() { sender.Host.Run(runCtx) })
 	workers.Go(func() { sender.Runner.Run(runCtx, sender.wake) })
-	self.t3.OnClose(func() {
+	sender.end = func() {
 		cancel()
 		sender.Sender.Close()
 		workers.Wait()
-	})
+	}
+	self.t3.OnClose(sender.Stop)
 	return sender, nil
 }
 
@@ -248,6 +282,17 @@ func (self *WorldMailSender) Wake() {
 	case self.wake <- struct{}{}:
 	default:
 	}
+}
+
+// The name a device's prover host's compositions keep their log lines under, beside the device's.
+func worldMailSenderLogName(device *sidecart3.T3Device) string {
+	return device.Name + " smtp"
+}
+
+// The newest lines the device's prover host's compositions logged, this one's and any before it on the device, oldest
+// first.
+func (self *WorldMailSender) LogLines(world *World) []string {
+	return world.SidecarLogLines(worldMailSenderLogName(self.Device))
 }
 
 // Every mail_send event the sender raised so far.

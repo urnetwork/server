@@ -4334,9 +4334,9 @@ type Resident struct {
 	// the client's §7.4 marks, read with the profile while push is on; a
 	// strict_exp client's resident hosts a publisher (sidecar_publisher.go)
 	sidecarPushMarks model.SidecarPushMarks
-	// set when the client is a sidecar's, strict_exp, and sidecar clients are
-	// counted (model.SidecarClientCountingOn) as the resident is built: its
-	// network, whose connected sidecar set the poll heartbeats it in
+	// set when the client is a sidecar's own and sidecar clients are counted
+	// (model.CountsAsSidecarClient) as the resident is built: its network,
+	// whose connected sidecar set the poll heartbeats it in
 	sidecarCountNetworkId *server.Id
 
 	// the client id in the resident is always `connect.ControlId`
@@ -4528,9 +4528,11 @@ func newResidentDuringAdmission(
 	resident.sidecarPushMarks = pushMarks
 	if networkId != (server.Id{}) {
 		resident.sessionNetworkId = &networkId
-		// every marked client counts toward sidecar_clients, child or
-		// top-level, whatever its category (DESIGN.md 20.8)
-		if pushMarks.StrictExp && model.SidecarClientCountingOn() {
+		// a sidecar's own client counts toward sidecar_clients, child or
+		// top-level, whatever its category; its window and forwarding
+		// clients, strict_exp by inheritance, never do, so the sidecar
+		// counts once (DESIGN.md 20.8)
+		if pushMarks.StrictExp && model.CountsAsSidecarClient(cancelCtx, clientId) {
 			resident.sidecarCountNetworkId = &networkId
 		}
 	}
