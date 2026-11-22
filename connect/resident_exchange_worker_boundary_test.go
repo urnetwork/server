@@ -58,12 +58,10 @@ func TestExchangeQueueRefusalWorkerContainsCanceledTransportRun(t *testing.T) {
 		transport.sendAdmission.done()
 		t.Error("canceled Run did not close producer admission")
 	}
-	select {
-	case _, ok := <-transport.receive:
-		if ok {
-			t.Error("canceled Run left receive ownership queued")
-		}
-	default:
+	switch _, result := transport.receive.tryReceive(); result {
+	case messageQueueReceived:
+		t.Error("canceled Run left receive ownership queued")
+	case messageQueueEmpty:
 		t.Error("canceled Run did not close its receive queue before joining")
 	}
 }

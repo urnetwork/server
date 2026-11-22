@@ -74,7 +74,7 @@ func connectH1FramedPayloadsPoolEntryIsClear() bool {
 // reuses it.
 func TestConnectH1UserReadyBatchFramedWriterPoolsItsPayloadIndex(t *testing.T) {
 	writer := &connectH1FramedTestWriter{}
-	receive := make(chan []byte, 8)
+	receive := newMessageQueue(8)
 	identities := []byte{1, 2, 3, 4, 5}
 	messages := [][]byte{}
 	witnesses := [][]byte{}
@@ -89,7 +89,7 @@ func TestConnectH1UserReadyBatchFramedWriterPoolsItsPayloadIndex(t *testing.T) {
 		witnesses = append(witnesses, clientconnect.MessagePoolShareReadOnly(message))
 	}
 	for _, message := range messages[1:] {
-		receive <- message
+		receive.sendForTest(message)
 	}
 	sentByteCounts := []ByteCount{}
 	open, err := writeConnectH1UserReadyBatch(
@@ -149,7 +149,7 @@ func TestConnectH1UserReadyBatchFramedWriterPoolsItsPayloadIndex(t *testing.T) {
 func TestConnectH1UserReadyBatchFramedWriteErrorReturnsOwnership(t *testing.T) {
 	writeErr := errors.New("injected framed write error")
 	writer := &connectH1FramedTestWriter{writeErr: writeErr}
-	receive := make(chan []byte, 4)
+	receive := newMessageQueue(4)
 	messages := [][]byte{}
 	witnesses := [][]byte{}
 	for identity := byte(1); identity <= 3; identity++ {
@@ -158,7 +158,7 @@ func TestConnectH1UserReadyBatchFramedWriteErrorReturnsOwnership(t *testing.T) {
 		witnesses = append(witnesses, clientconnect.MessagePoolShareReadOnly(message))
 	}
 	for _, message := range messages[1:] {
-		receive <- message
+		receive.sendForTest(message)
 	}
 	sentCount := 0
 	_, err := writeConnectH1UserReadyBatch(
@@ -196,12 +196,12 @@ func TestConnectH1UserReadyBatchFramedWriterDoesNotAllocate(t *testing.T) {
 		t.Skip("the race detector's pool drops puts, so pooled objects are reallocated")
 	}
 	writer := &connectH1FramedTestWriter{discard: true}
-	receive := make(chan []byte, 4)
+	receive := newMessageQueue(4)
 	ctx := context.Background()
 	write := func() {
 		first := clientconnect.MessagePoolGet(64)
-		receive <- clientconnect.MessagePoolGet(64)
-		receive <- clientconnect.MessagePoolGet(64)
+		receive.sendForTest(clientconnect.MessagePoolGet(64))
+		receive.sendForTest(clientconnect.MessagePoolGet(64))
 		if _, err := writeConnectH1UserReadyBatch(ctx, writer, nil, receive, first, true, 5*time.Second, nil); err != nil {
 			t.Fatal(err)
 		}
@@ -218,13 +218,13 @@ func TestConnectH1UserReadyBatchFramedWriterDoesNotAllocate(t *testing.T) {
 // The same measurement as a benchmark, for the before and after numbers.
 func BenchmarkConnectH1UserReadyBatchFramedWriter(b *testing.B) {
 	writer := &connectH1FramedTestWriter{discard: true}
-	receive := make(chan []byte, 4)
+	receive := newMessageQueue(4)
 	ctx := context.Background()
 	b.ReportAllocs()
 	for b.Loop() {
 		first := clientconnect.MessagePoolGet(64)
-		receive <- clientconnect.MessagePoolGet(64)
-		receive <- clientconnect.MessagePoolGet(64)
+		receive.sendForTest(clientconnect.MessagePoolGet(64))
+		receive.sendForTest(clientconnect.MessagePoolGet(64))
 		if _, err := writeConnectH1UserReadyBatch(ctx, writer, nil, receive, first, true, 5*time.Second, nil); err != nil {
 			b.Fatal(err)
 		}

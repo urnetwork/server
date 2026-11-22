@@ -542,18 +542,17 @@ func (self *p2OriginFixture) link(source, destination *p2OriginEndpoint) {
 	go func() {
 		defer self.workers.Done()
 		for {
-			select {
-			case <-self.ctx.Done():
+			wire, result := forward.send.receiveWait(self.ctx.Done())
+			if result != messageQueueReceived {
 				return
-			case wire := <-forward.send:
-				shared := clientconnect.MessagePoolShareReadOnly(wire)
-				forward.releasePayload(wire)
-				select {
-				case destination.incomingForward <- shared:
-				case <-self.ctx.Done():
-					clientconnect.MessagePoolReturn(shared)
-					return
-				}
+			}
+			shared := clientconnect.MessagePoolShareReadOnly(wire)
+			forward.releasePayload(wire)
+			select {
+			case destination.incomingForward <- shared:
+			case <-self.ctx.Done():
+				clientconnect.MessagePoolReturn(shared)
+				return
 			}
 		}
 	}()

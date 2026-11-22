@@ -90,9 +90,9 @@ func TestLocalTransportReadOnlyShareUnmodifiedByH1Writer(t *testing.T) {
 	defer serverWs.Close()
 
 	set := newLocalTransportShareSet(localTransportShareByteCounts...)
-	receive := make(chan []byte, len(set.shares))
+	receive := newMessageQueue(len(set.shares))
 	for _, share := range set.shares[1:] {
-		receive <- share
+		receive.sendForTest(share)
 	}
 	writeBatch := connectH1WriteBatchForConn(serverWs.UnderlyingConn())
 	if writeBatch == nil {
@@ -131,9 +131,9 @@ func TestLocalTransportReadOnlyShareUnmodifiedByH1PlusWriter(t *testing.T) {
 	}
 
 	set := newLocalTransportShareSet(localTransportShareByteCounts...)
-	receive := make(chan []byte, len(set.shares))
+	receive := newMessageQueue(len(set.shares))
 	for _, share := range set.shares[1:] {
-		receive <- share
+		receive.sendForTest(share)
 	}
 	writeDone := make(chan error, 1)
 	go func() {
@@ -291,9 +291,9 @@ func TestLocalTransportReadOnlyShareUnmodifiedByH1DelayWriter(t *testing.T) {
 	defer server.ws.Close()
 
 	set := newLocalTransportShareSet(localTransportShareByteCounts...)
-	receive := make(chan []byte, len(set.shares))
+	receive := newMessageQueue(len(set.shares))
 	for _, share := range set.shares[1:] {
-		receive <- share
+		receive.sendForTest(share)
 	}
 	writeBatch := connectH1WriteBatchForConn(server.ws.UnderlyingConn())
 	if writeBatch == nil {

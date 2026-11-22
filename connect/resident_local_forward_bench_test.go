@@ -74,9 +74,7 @@ func BenchmarkForwardFrameLocalVsTcpLoop(b *testing.B) {
 				for range count {
 					frame := clientconnect.MessagePoolGet(1000)
 					frame[0] = 0xff
-					select {
-					case f.forward.send <- frame:
-					case <-f.ctx.Done():
+					if f.forward.send.sendWait(frame, f.ctx.Done(), nil, nil) != messageQueueSent {
 						clientconnect.MessagePoolReturn(frame)
 						b.Fatal("the forward ended")
 					}

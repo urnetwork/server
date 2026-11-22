@@ -121,7 +121,7 @@ func TestConnectHeartbeatBackpressureH1WriterTimeoutReturnsOwner(t *testing.T) {
 		done := make(chan error, 1)
 		sent := 0
 		go func() {
-			_, err := writeConnectH1UserReadyBatch(context.Background(), framed, nil, make(chan []byte), message, true, 2*time.Second, func(ByteCount) { sent++ })
+			_, err := writeConnectH1UserReadyBatch(context.Background(), framed, nil, newMessageQueue(0), message, true, 2*time.Second, func(ByteCount) { sent++ })
 			done <- err
 		}()
 		synctest.Wait()

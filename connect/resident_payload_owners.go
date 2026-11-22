@@ -189,12 +189,11 @@ func (f *ResidentForward) releasePayload(message []byte) {
 
 func (f *ResidentForward) drainPayloads() {
 	for {
-		select {
-		case message := <-f.send:
-			f.releasePayload(message)
-		default:
+		message, result := f.send.tryReceive()
+		if result != messageQueueReceived {
 			return
 		}
+		f.releasePayload(message)
 	}
 }
 

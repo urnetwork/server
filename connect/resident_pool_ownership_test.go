@@ -271,8 +271,8 @@ func newTestingExchangeConnection(
 		conn:          localConn,
 		sendBuffer:    NewDefaultExchangeBuffer(settings),
 		receiveBuffer: NewReceiveOnlyExchangeBuffer(settings),
-		send:          make(chan []byte, 8),
-		receive:       make(chan []byte, 8),
+		send:          newMessageQueue(8),
+		receive:       newMessageQueue(8),
 		settings:      settings,
 		header:        ExchangeHeader{Op: op},
 	}
@@ -317,7 +317,7 @@ func TestSendPooledMessageReturnsOnCanceledLifecycle(t *testing.T) {
 		} else {
 			peerCancel()
 		}
-		destination := make(chan []byte, 1)
+		destination := newMessageQueue(1)
 		timer := time.NewTimer(time.Hour)
 		if !timer.Stop() {
 			<-timer.C
@@ -338,7 +338,7 @@ func TestSendPooledMessageReturnsOnCanceledLifecycle(t *testing.T) {
 		if result != pooledMessageSendDone {
 			t.Fatalf("case %d canceled send result=%d", caseIndex, result)
 		}
-		if len(destination) != 0 {
+		if destination.len() != 0 {
 			t.Fatalf("case %d canceled send transferred a message", caseIndex)
 		}
 		requireResidentPoolOwnerReturned(
@@ -362,26 +362,33 @@ func TestSendPooledMessageTimeoutAndDeliveryOwnership(t *testing.T) {
 	}
 	defer timer.Stop()
 
-	blockedDestination := make(chan []byte)
-	timedOutMessage := clientconnect.MessagePoolGet(128)
-	timedOutWitness := retainResidentPoolWitness(timedOutMessage)
-	result := sendPooledMessage(
-		ctx.Done(),
-		peerCtx.Done(),
-		blockedDestination,
-		timedOutMessage,
-		timer,
-		time.Millisecond,
-	)
-	if result != pooledMessageSendDropped {
-		t.Fatalf("timeout send result=%d", result)
+	// an unbuffered queue with no receiver, and a full queue that keeps its
+	// messages after the first in its ring
+	fullDestination := newMessageQueue(2)
+	fullDestination.sendForTest(clientconnect.MessagePoolGet(1))
+	fullDestination.sendForTest(clientconnect.MessagePoolGet(1))
+	defer returnQueuedPooledMessages(fullDestination)
+	for _, blockedDestination := range []*messageQueue{newMessageQueue(0), fullDestination} {
+		timedOutMessage := clientconnect.MessagePoolGet(128)
+		timedOutWitness := retainResidentPoolWitness(timedOutMessage)
+		result := sendPooledMessage(
+			ctx.Done(),
+			peerCtx.Done(),
+			blockedDestination,
+			timedOutMessage,
+			timer,
+			time.Millisecond,
+		)
+		if result != pooledMessageSendDropped {
+			t.Fatalf("bound %d timeout send result=%d", blockedDestination.capacity(), result)
+		}
+		requireResidentPoolOwnerReturned(t, timedOutWitness, "timed-out send")
 	}
-	requireResidentPoolOwnerReturned(t, timedOutWitness, "timed-out send")
 
-	destination := make(chan []byte, 1)
+	destination := newMessageQueue(1)
 	deliveredMessage := clientconnect.MessagePoolGet(128)
 	deliveredWitness := retainResidentPoolWitness(deliveredMessage)
-	result = sendPooledMessage(
+	result := sendPooledMessage(
 		ctx.Done(),
 		peerCtx.Done(),
 		destination,
@@ -392,7 +399,8 @@ func TestSendPooledMessageTimeoutAndDeliveryOwnership(t *testing.T) {
 	if result != pooledMessageSendDelivered {
 		t.Fatalf("delivery send result=%d", result)
 	}
-	if clientconnect.MessagePoolReturn(<-destination) {
+	delivered, _ := destination.receiveForTest()
+	if clientconnect.MessagePoolReturn(delivered) {
 		t.Fatal("destination return bypassed the retained delivery witness")
 	}
 	requireResidentPoolOwnerReturned(t, deliveredWitness, "delivered send")
@@ -430,14 +438,14 @@ func TestResidentTransportCloseDrainsQueuedSendOwnership(t *testing.T) {
 	transport := &ResidentTransport{
 		ctx:     ctx,
 		cancel:  cancel,
-		send:    make(chan []byte, 4),
-		receive: make(chan []byte, 4),
+		send:    newMessageQueue(4),
+		receive: newMessageQueue(4),
 	}
 	witnesses := make([][]byte, 0, 3)
 	for range 3 {
 		message := clientconnect.MessagePoolGet(128)
 		witnesses = append(witnesses, retainResidentPoolWitness(message))
-		transport.send <- message
+		transport.send.sendForTest(message)
 	}
 	transport.Close()
 	requireResidentPoolOwnersReturned(t, witnesses, "resident transport close")
@@ -477,8 +485,8 @@ func TestExchangeConnectionCloseDrainsQueuedReceiveOwnership(t *testing.T) {
 		t.Fatal(err)
 	}
 	connection.Close()
-	if len(connection.receive) != 0 {
-		t.Fatalf("exchange close left %d receive messages", len(connection.receive))
+	if connection.receive.len() != 0 {
+		t.Fatalf("exchange close left %d receive messages", connection.receive.len())
 	}
 	requireResidentPoolOwnersReturned(t, witnesses, "exchange receive close")
 }
@@ -498,7 +506,7 @@ func TestExchangeConnectionCloseDrainsQueuedSendOwnership(t *testing.T) {
 	for range 3 {
 		message := clientconnect.MessagePoolGet(128)
 		witnesses = append(witnesses, retainResidentPoolWitness(message))
-		connection.send <- message
+		connection.send.sendForTest(message)
 	}
 	go connection.Run()
 	select {
@@ -507,8 +515,8 @@ func TestExchangeConnectionCloseDrainsQueuedSendOwnership(t *testing.T) {
 		t.Fatal("exchange writer did not take its queued batch")
 	}
 	connection.Close()
-	if len(connection.send) != 0 {
-		t.Fatalf("exchange close left %d send messages", len(connection.send))
+	if connection.send.len() != 0 {
+		t.Fatalf("exchange close left %d send messages", connection.send.len())
 	}
 	requireResidentPoolOwnersReturned(t, witnesses, "exchange send close")
 }
@@ -534,15 +542,15 @@ func TestExchangeConnectionCloseJoinsDelayedProducer(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("exchange close did not cancel the connection")
 	}
-	connection.send <- message
+	connection.send.sendForTest(message)
 	connection.sendAdmission.done()
 	select {
 	case <-closeDone:
 	case <-time.After(time.Second):
 		t.Fatal("exchange close did not join the delayed producer")
 	}
-	if len(connection.send) != 0 {
-		t.Fatalf("exchange close left %d delayed messages", len(connection.send))
+	if connection.send.len() != 0 {
+		t.Fatalf("exchange close left %d delayed messages", connection.send.len())
 	}
 	requireResidentPoolOwnerReturned(t, witness, "exchange delayed producer")
 }
@@ -553,7 +561,7 @@ func TestExchangeConnectionCloseJoinsDelayedProducer(t *testing.T) {
 func TestResidentCloseJoinsDelayedProducer(t *testing.T) {
 	for caseIndex := range 2 {
 		ctx, cancel := context.WithCancel(context.Background())
-		send := make(chan []byte, 1)
+		send := newMessageQueue(1)
 		var admission *pooledMessageSendAdmission
 		var closeOwner func()
 		if caseIndex == 0 {
@@ -561,7 +569,7 @@ func TestResidentCloseJoinsDelayedProducer(t *testing.T) {
 				ctx:     ctx,
 				cancel:  cancel,
 				send:    send,
-				receive: make(chan []byte, 1),
+				receive: newMessageQueue(1),
 			}
 			admission = &transport.sendAdmission
 			closeOwner = transport.Close
@@ -590,15 +598,15 @@ func TestResidentCloseJoinsDelayedProducer(t *testing.T) {
 		case <-time.After(time.Second):
 			t.Fatalf("case %d close did not cancel the resident owner", caseIndex)
 		}
-		send <- message
+		send.sendForTest(message)
 		admission.done()
 		select {
 		case <-closeDone:
 		case <-time.After(time.Second):
 			t.Fatalf("case %d close did not join the delayed producer", caseIndex)
 		}
-		if len(send) != 0 {
-			t.Fatalf("case %d close left %d delayed messages", caseIndex, len(send))
+		if send.len() != 0 {
+			t.Fatalf("case %d close left %d delayed messages", caseIndex, send.len())
 		}
 		requireResidentPoolOwnerReturned(
 			t,

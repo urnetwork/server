@@ -59,8 +59,8 @@ func runExchangeIOCallsBenchmark(b *testing.B, burstCount int, frameByteCount in
 		conn:          writerConn,
 		sendBuffer:    sendBuffer,
 		receiveBuffer: NewReceiveOnlyExchangeBuffer(settings),
-		send:          make(chan []byte, settings.ExchangeBufferSize),
-		receive:       make(chan []byte),
+		send:          newMessageQueue(settings.ExchangeBufferSize),
+		receive:       newMessageQueue(0),
 		settings:      settings,
 		header:        ExchangeHeader{Op: ExchangeOpForward},
 	}
@@ -68,27 +68,26 @@ func runExchangeIOCallsBenchmark(b *testing.B, burstCount int, frameByteCount in
 	defer connection.Close()
 
 	// the bridge: a resident forward's queue to the connection's admission
-	upstream := make(chan []byte, settings.ForwardBufferSize)
+	upstream := newMessageQueue(settings.ForwardBufferSize)
 	bridgeDone := make(chan struct{})
 	go func() {
 		defer close(bridgeDone)
 		writeTimer := time.NewTimer(0)
 		defer writeTimer.Stop()
 		for {
-			select {
-			case <-ctx.Done():
+			message, result := upstream.receiveWait(ctx.Done())
+			if result != messageQueueReceived {
 				return
-			case message := <-upstream:
-				if result := connection.sendMessage(ctx.Done(), message, writeTimer, time.Hour); result != pooledMessageSendDelivered {
-					return
-				}
+			}
+			if result := connection.sendMessage(ctx.Done(), message, writeTimer, time.Hour); result != pooledMessageSendDelivered {
+				return
 			}
 		}
 	}()
 	defer func() {
 		cancel()
 		<-bridgeDone
-		returnReadyPooledMessages(upstream)
+		returnQueuedPooledMessages(upstream)
 	}()
 
 	readBuffer := NewReceiveOnlyExchangeBuffer(settings)
@@ -99,7 +98,7 @@ func runExchangeIOCallsBenchmark(b *testing.B, burstCount int, frameByteCount in
 		for i := range burstCount {
 			message := connectlib.MessagePoolGet(frameByteCount)
 			message[0] = byte(i)
-			upstream <- message
+			upstream.sendForTest(message)
 		}
 		for range burstCount {
 			message, err := readBuffer.ReadMessage(readerConn)

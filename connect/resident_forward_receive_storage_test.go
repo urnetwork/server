@@ -122,19 +122,17 @@ func TestForwardReceiveStorageOperationAndCapacity(t *testing.T) {
 				if op == ExchangeOpForward {
 					expectedReceive, expectedReader = 0, 4*1024
 				}
-				if cap(c.send) != capacity || cap(c.receive) != expectedReceive || c.receiveBuffer.reader.Size() != expectedReader {
-					t.Fatalf("unexpected storage: send=%d receive=%d reader=%d", cap(c.send), cap(c.receive), c.receiveBuffer.reader.Size())
+				if c.send.capacity() != capacity || c.receive.capacity() != expectedReceive || c.receiveBuffer.reader.Size() != expectedReader {
+					t.Fatalf("unexpected storage: send=%d receive=%d reader=%d", c.send.capacity(), c.receive.capacity(), c.receiveBuffer.reader.Size())
 				}
 				if c.settings.ExchangeBufferSize != capacity || c.settings.ExchangeReadBufferByteCount != 64*1024 {
 					t.Fatal("shared settings changed")
 				}
 				if op == ExchangeOpForward {
-					select {
-					case _, ok := <-c.receive:
-						if ok {
-							t.Fatal("forward receive emitted a value")
-						}
-					case <-time.After(time.Second):
+					switch _, result := c.receive.receiveWithinForTest(time.Second); result {
+					case messageQueueReceived:
+						t.Fatal("forward receive emitted a value")
+					case messageQueueReceiveCanceled:
 						t.Fatal("forward receive did not close")
 					}
 				}
@@ -167,15 +165,14 @@ func TestForwardReceiveStorageReadAheadAndOwners(t *testing.T) {
 					if len(want) == 0 {
 						continue
 					}
-					select {
-					case got := <-p.connection.receive:
-						equal := bytes.Equal(got, want)
-						clientconnect.MessagePoolReturn(got)
-						if !equal {
-							t.Fatal("transport payload or order changed")
-						}
-					case <-time.After(time.Second):
+					got, result := p.connection.receive.receiveWithinForTest(time.Second)
+					if result != messageQueueReceived {
 						t.Fatal("transport payload was lost")
+					}
+					equal := bytes.Equal(got, want)
+					clientconnect.MessagePoolReturn(got)
+					if !equal {
+						t.Fatal("transport payload or order changed")
 					}
 				}
 			}
@@ -187,12 +184,10 @@ func TestForwardReceiveStorageReadAheadAndOwners(t *testing.T) {
 				t.Fatal("coalesced frames were not fully consumed")
 			}
 			if op == ExchangeOpForward {
-				select {
-				case _, ok := <-p.connection.receive:
-					if ok {
-						t.Fatal("forward retained unexpected payload")
-					}
-				default:
+				switch _, result := p.connection.receive.tryReceive(); result {
+				case messageQueueReceived:
+					t.Fatal("forward retained unexpected payload")
+				case messageQueueEmpty:
 					t.Fatal("forward receive remains open")
 				}
 			}

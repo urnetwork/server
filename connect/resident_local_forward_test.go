@@ -123,7 +123,7 @@ func (self *localForwardPumpFixture) enqueue(message []byte) {
 	if ledger := self.exchange.residentPayloadLedger(); ledger != nil {
 		ledger.update(residentPayloadForwardOutput, self.forward.clientId[15], payloadCharge(message), true)
 	}
-	self.forward.send <- message
+	self.forward.send.sendForTest(message)
 }
 
 // Attaches the forward through the production attach after its checks.
@@ -900,7 +900,7 @@ func TestLocalForwardAttachRefusals(t *testing.T) {
 		hasPending := false
 		runDone <- forward.runLocal(link, &pending, &hasPending)
 	}()
-	forward.send <- newLocalTransportTestMessage(1, 64)
+	forward.send.sendForTest(newLocalTransportTestMessage(1, 64))
 	for received.Load() == 0 {
 		select {
 		case <-ctx.Done():
@@ -1074,11 +1074,11 @@ func TestLocalForwardKillSwitchPacedDetach(t *testing.T) {
 		if drops, _ := snapshotLocalTransportDrops(receiveQueueBoundaryLocalForwardSend); drops-dropsBefore != 1 {
 			t.Errorf("drops = %v, want the one held message", drops-dropsBefore)
 		}
-		if len(base.forward.send) != 3 {
-			t.Fatalf("the forward queue holds %d, want the 3 messages for the next link", len(base.forward.send))
+		if base.forward.send.len() != 3 {
+			t.Fatalf("the forward queue holds %d, want the 3 messages for the next link", base.forward.send.len())
 		}
 		for messageIndex := 1; messageIndex <= 3; messageIndex++ {
-			message := <-base.forward.send
+			message, _ := base.forward.send.receiveForTest()
 			if localTransportTestMessageIndex(message) != messageIndex {
 				t.Errorf("forward queue message %d out of order", messageIndex)
 			}

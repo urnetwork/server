@@ -516,7 +516,7 @@ func testExchangeConnectionWritevTerminalBatchWithFailure(
 		t.Fatalf("expected header, singleton, then bounded native batches: batches=%d deadlines=%d fallback writes=%d",
 			dequeuedBatches, socket.deadlines.Load(), socket.writes.Load()-writesBeforeBatch)
 	}
-	if len(connection.send) != 0 || len(connection.receive) != 0 {
+	if connection.send.len() != 0 || connection.receive.len() != 0 {
 		t.Fatal("joined connection retained queued messages")
 	}
 	if err := owner.close(); err != nil {
