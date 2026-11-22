@@ -154,7 +154,7 @@
       "id": 55,
       "type": "timeseries",
       "title": "decoded score page cache events / s",
-      "description": "Rates of the real lookup and eviction counters across selected API processes. Lookup result is bounded hit/miss; an eviction is a cache event, not a provider failure. Manifest lookups are the native snapshot manifest cache's: a hit is a pointer this process verified before, read with no manifest round trip; a miss reads and verifies the slot's manifest.",
+      "description": "Rates of the real lookup and eviction counters across selected API processes. Lookup result is bounded hit/miss; an eviction is a cache event, not a provider failure. Manifest lookups are the native snapshot manifest cache's: a hit is a pointer this process verified before, read with no manifest round trip; a miss reads and verifies the slot's manifest. Page decodes are the misses' decodes by page format, gob or typed (CPUOPT8), and result: typed decodes appear once the export writes typed pages, and any error is a page this process could not read.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -198,6 +198,11 @@
           "refId": "C",
           "expr": "sum by (result) (rate(urnetwork_client_score_native_manifest_cache_lookups_total{env=\"$env\",service=\"api\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
           "legendFormat": "manifest lookup {{result}}"
+        },
+        {
+          "refId": "D",
+          "expr": "sum by (format, result) (rate(urnetwork_client_score_page_decodes_total{env=\"$env\",service=\"api\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "page decode {{format}} {{result}}"
         }
       ]
     },

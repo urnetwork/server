@@ -71,11 +71,11 @@ func newUpdateClientScoresPhaseMetricSet(now func() time.Time) *updateClientScor
 		}, []string{"phase"}),
 		items: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "urnetwork_update_client_scores_phase_work_items_total",
-			Help: "Deterministic UpdateClientScores work units: source rows, target passes, map/filter inputs inspected, gob values encoded, or Redis SET attempts",
+			Help: "Deterministic UpdateClientScores work units: source rows, target passes, map/filter inputs inspected, gob values or typed score pages encoded, or Redis SET attempts",
 		}, []string{"phase"}),
 		bytes: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "urnetwork_update_client_scores_phase_work_bytes_total",
-			Help: "Deterministic bytes produced by gob encoding or submitted in Redis SET attempts; zero for phases without a byte unit",
+			Help: "Deterministic bytes produced by gob or typed score page encoding or submitted in Redis SET attempts; zero for phases without a byte unit",
 		}, []string{"phase"}),
 		now: now,
 	}

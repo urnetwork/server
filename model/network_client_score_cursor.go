@@ -351,15 +351,35 @@ func mergeClientScoreSample(scores map[server.Id]*ClientScore, sample []*ClientS
 	}
 }
 
+// The scores of a page, typed or gob (network_client_score_page_codec.go).
 func decodeClientScoreSample(data []byte) ([]*ClientScore, error) {
-	var sample []*ClientScore
-	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&sample); err != nil {
-		return nil, err
+	sample, _, err := decodeClientScorePageBytes(data)
+	return sample, err
+}
+
+// The scores of a page, typed or gob, and the estimated heap they retain: a
+// typed decode's own estimate, or clientScorePageDecodedBytesPerByte of a gob
+// page's bytes.
+func decodeClientScorePageBytes(data []byte) (sample []*ClientScore, size int64, returnErr error) {
+	typed := isTypedClientScorePage(data)
+	defer func() {
+		clientScorePageDecodeCounter(typed, returnErr == nil).Inc()
+	}()
+	if typed {
+		sample, size, returnErr = decodeClientScorePageTyped(data)
+		if returnErr != nil {
+			return nil, 0, returnErr
+		}
+	} else {
+		if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&sample); err != nil {
+			return nil, 0, err
+		}
+		size = clientScorePageDecodedBytesPerByte * int64(len(data))
 	}
 	if err := validateClientScoreSample(sample); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return sample, nil
+	return sample, size, nil
 }
 
 func validateClientScoreSample(sample []*ClientScore) error {

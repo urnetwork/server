@@ -5653,6 +5653,9 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	// A client added between the two queries must receive evidence as well.
 	egressTestEnabled := providerEgressTestEnabled()
 	egressSettings := egressIndexSettings()
+	// one format for every page of the pass (network_client_score_page_codec.go)
+	pageFormat := egressSettings.scorePageFormat()
+	glog.Infof("[nclm]client score pages are %s\n", pageFormat)
 	pendingScores := []clientScoreSourceRow{}
 	cohort := map[server.Id]bool{}
 	knownLocationGroupIds := []server.Id{}
@@ -6172,7 +6175,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 										excludeLocationNetworkIds,
 										keys,
 										func(clientScores map[server.Id]*ClientScore) clientScoreExportPayload {
-											return exportClientScores(forceMinimum, rankMode, clientScores)
+											return exportClientScoresInFormat(forceMinimum, rankMode, clientScores, pageFormat)
 										},
 										writeLegacyUnchanged,
 										writeUnfacetedPayload,

@@ -31,8 +31,10 @@ import (
 // The bound on the decoded pages one process retains, by their estimated heap.
 const clientScorePageCacheMaxBytes = 64 * 1024 * 1024
 
-// A decoded page retains about 5.3 to 5.8 times its gob bytes (scores with one
+// A decoded gob page retains about 5.3 to 5.8 times its bytes (scores with one
 // to four lookbacks, measured), mostly in small maps. The estimate rounds up.
+// A typed page's decode estimates its own heap
+// (network_client_score_page_codec.go).
 const clientScorePageDecodedBytesPerByte = 6
 
 var clientScorePageCacheLookups = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -57,7 +59,9 @@ type clientScorePageCacheItem struct {
 // A bounded LRU of decoded pages by checksum. Cached scores, their maps and
 // their lookback scores are never modified: decodeClientScorePage gives each
 // reader its own copy of every score, and a cursor read copies each score it
-// keeps (mergeClientScorePage).
+// keeps (mergeClientScorePage). A typed page's equal maps are one map shared
+// by its scores (network_client_score_page_codec.go), which this rule keeps
+// safe.
 type clientScorePageCache struct {
 	lock     sync.Mutex
 	maxBytes int64
@@ -130,8 +134,9 @@ func (self *clientScorePageCache) size() (pages int, bytes int64) {
 
 // The scores of a page whose bytes hash to checksum, decoded once per process
 // and copied for this reader. A reader may set any field of its copies, but
-// the maps and pointers are the cached page's: a reader that changes a map
-// replaces it with a changed clone (filterPool).
+// the maps and pointers are the cached page's, and a typed page's equal maps
+// are shared by its scores: a reader that changes a map replaces it with a
+// changed clone (filterPool).
 func decodeClientScorePage(data []byte, checksum [sha256.Size]byte) ([]*ClientScore, error) {
 	sample, err := decodeClientScorePageShared(data, checksum)
 	if err != nil {
@@ -150,11 +155,11 @@ func decodeClientScorePageShared(data []byte, checksum [sha256.Size]byte) ([]*Cl
 		return sample, nil
 	}
 	clientScorePageCacheMisses.Inc()
-	sample, err := decodeClientScoreSample(data)
+	sample, size, err := decodeClientScorePageBytes(data)
 	if err != nil {
 		return nil, err
 	}
-	clientScorePages.put(checksum, sample, clientScorePageDecodedBytesPerByte*int64(len(data)))
+	clientScorePages.put(checksum, sample, size)
 	return sample, nil
 }
 
