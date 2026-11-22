@@ -102,12 +102,17 @@ func TestGetProvideRelationshipDetailsLifecycle(t *testing.T) {
 			name        string
 			source      server.Id
 			destination server.Id
-			want        ProvideRelationshipDetails
+			// each end's network, nil for a client the server does not have
+			sourceNetwork      *server.Id
+			destinationNetwork *server.Id
+			want               ProvideRelationshipDetails
 		}{
 			{
-				name:        "same network derived destination",
-				source:      activeTop,
-				destination: activeDerived,
+				name:               "same network derived destination",
+				source:             activeTop,
+				destination:        activeDerived,
+				sourceNetwork:      &networkA,
+				destinationNetwork: &networkA,
 				want: ProvideRelationshipDetails{
 					Mode:                 ProvideModeNetwork,
 					SourceLifecycle:      NetworkClientLifecycleActiveTop,
@@ -117,9 +122,11 @@ func TestGetProvideRelationshipDetailsLifecycle(t *testing.T) {
 				},
 			},
 			{
-				name:        "cross network inactive destination",
-				source:      activeTop,
-				destination: inactiveDerived,
+				name:               "cross network inactive destination",
+				source:             activeTop,
+				destination:        inactiveDerived,
+				sourceNetwork:      &networkA,
+				destinationNetwork: &networkB,
 				want: ProvideRelationshipDetails{
 					Mode:                 ProvideModePublic,
 					SourceLifecycle:      NetworkClientLifecycleActiveTop,
@@ -129,9 +136,11 @@ func TestGetProvideRelationshipDetailsLifecycle(t *testing.T) {
 				},
 			},
 			{
-				name:        "inactive source and top destination",
-				source:      inactiveDerived,
-				destination: inactiveTop,
+				name:               "inactive source and top destination",
+				source:             inactiveDerived,
+				destination:        inactiveTop,
+				sourceNetwork:      &networkB,
+				destinationNetwork: &networkB,
 				want: ProvideRelationshipDetails{
 					Mode:                 ProvideModeNetwork,
 					SourceLifecycle:      NetworkClientLifecycleInactiveDerived,
@@ -141,9 +150,10 @@ func TestGetProvideRelationshipDetailsLifecycle(t *testing.T) {
 				},
 			},
 			{
-				name:        "missing destination",
-				source:      activeTop,
-				destination: server.NewId(),
+				name:          "missing destination",
+				source:        activeTop,
+				destination:   server.NewId(),
+				sourceNetwork: &networkA,
 				want: ProvideRelationshipDetails{
 					Mode:                 ProvideModePublic,
 					SourceLifecycle:      NetworkClientLifecycleActiveTop,
@@ -153,9 +163,11 @@ func TestGetProvideRelationshipDetailsLifecycle(t *testing.T) {
 				},
 			},
 			{
-				name:        "self",
-				source:      activeTop,
-				destination: activeTop,
+				name:               "self",
+				source:             activeTop,
+				destination:        activeTop,
+				sourceNetwork:      &networkA,
+				destinationNetwork: &networkA,
 				want: ProvideRelationshipDetails{
 					Mode:                 ProvideModeNetwork,
 					SourceLifecycle:      NetworkClientLifecycleActiveTop,
@@ -165,9 +177,11 @@ func TestGetProvideRelationshipDetailsLifecycle(t *testing.T) {
 				},
 			},
 			{
-				name:        "ordinary source",
-				source:      inactiveTop,
-				destination: activeTop,
+				name:               "ordinary source",
+				source:             inactiveTop,
+				destination:        activeTop,
+				sourceNetwork:      &networkB,
+				destinationNetwork: &networkA,
 				want: ProvideRelationshipDetails{
 					Mode:                 ProvideModePublic,
 					SourceLifecycle:      NetworkClientLifecycleInactiveTop,
@@ -177,9 +191,11 @@ func TestGetProvideRelationshipDetailsLifecycle(t *testing.T) {
 				},
 			},
 			{
-				name:        "nested prober descendant after root rotation",
-				source:      activeGrandchild,
-				destination: inactiveTop,
+				name:               "nested prober descendant after root rotation",
+				source:             activeGrandchild,
+				destination:        inactiveTop,
+				sourceNetwork:      &networkA,
+				destinationNetwork: &networkB,
 				want: ProvideRelationshipDetails{
 					Mode:                 ProvideModePublic,
 					SourceLifecycle:      NetworkClientLifecycleActiveDerived,
@@ -189,9 +205,10 @@ func TestGetProvideRelationshipDetailsLifecycle(t *testing.T) {
 				},
 			},
 			{
-				name:        "missing source remains unknown",
-				source:      missingSource,
-				destination: activeTop,
+				name:               "missing source remains unknown",
+				source:             missingSource,
+				destination:        activeTop,
+				destinationNetwork: &networkA,
 				want: ProvideRelationshipDetails{
 					Mode:                 ProvideModePublic,
 					SourceLifecycle:      NetworkClientLifecycleMissing,
@@ -201,9 +218,11 @@ func TestGetProvideRelationshipDetailsLifecycle(t *testing.T) {
 				},
 			},
 			{
-				name:        "ordinary source to nested prober descendant",
-				source:      inactiveTop,
-				destination: activeGrandchild,
+				name:               "ordinary source to nested prober descendant",
+				source:             inactiveTop,
+				destination:        activeGrandchild,
+				sourceNetwork:      &networkB,
+				destinationNetwork: &networkA,
 				want: ProvideRelationshipDetails{
 					Mode:                 ProvideModePublic,
 					SourceLifecycle:      NetworkClientLifecycleInactiveTop,
@@ -213,7 +232,13 @@ func TestGetProvideRelationshipDetailsLifecycle(t *testing.T) {
 				},
 			},
 		} {
-			if got := GetProvideRelationshipDetails(ctx, test.source, test.destination); got != test.want {
+			got := GetProvideRelationshipDetails(ctx, test.source, test.destination)
+			// the networks by value: C13's seal reads them on every leg (a1a62b6a0)
+			if !equalProvideRelationshipTestNetworkIds(got.SourceNetworkId, test.sourceNetwork) || !equalProvideRelationshipTestNetworkIds(got.DestinationNetworkId, test.destinationNetwork) {
+				t.Fatalf("%s: GetProvideRelationshipDetails() networks = (%v, %v), want (%v, %v)", test.name, got.SourceNetworkId, got.DestinationNetworkId, test.sourceNetwork, test.destinationNetwork)
+			}
+			got.SourceNetworkId, got.DestinationNetworkId = nil, nil
+			if got != test.want {
 				t.Fatalf("%s: GetProvideRelationshipDetails() = %+v, want %+v", test.name, got, test.want)
 			}
 			if got := GetProvideRelationship(ctx, test.source, test.destination); got != test.want.Mode {
@@ -235,6 +260,14 @@ func TestGetProvideRelationshipDetailsLifecycle(t *testing.T) {
 			t.Fatalf("missing prober singleton endpoint owners = (%q, %q), want unknown", got.SourceOwner, got.DestinationOwner)
 		}
 	})
+}
+
+// Whether two optional network ids name the same network, or are both absent.
+func equalProvideRelationshipTestNetworkIds(a *server.Id, b *server.Id) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 // A handler's lifecycle: a connection under it, its heartbeat, expiry once its
