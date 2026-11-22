@@ -40,8 +40,10 @@ import (
 // removal's own write (DeleteSmtpDkimKeysForClientInTx), and §19.10's replay applies it again.
 //
 // The two §8 checks, mail_send for a publish and read on the repo that holds the network mail key for the reports
-// (plan-SMTP-small-readings#16), are api's gate cache's (C-09), which the process installs as SmtpApiGate: with
-// none installed both routes answer 503, so no publish or report read passes an unmade check.
+// (plan-SMTP-small-readings#16), are api's gate cache's (C-09): SmtpApiGateOf over that cache
+// (smtp_api_gate_model.go), which api's process installs as SmtpApiGate where its projection publishes the cache
+// (controller.installApiProjection). With none installed both routes answer 503, so no publish or report read passes
+// an unmade check.
 //
 // Every DKIM write locks the network's label, then its zones in root order (lockSmtpDkimNetworkZonesInTx), then
 // its quota, then its selector rows, as key expiry and the removal effect do. No recipient, client IP or key

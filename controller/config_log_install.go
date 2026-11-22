@@ -151,6 +151,8 @@ func installApiProjection(ctx context.Context, host *sidecar.ServiceHost) (func(
 	model.SetConfigLogSequencer(NewHostedConfigLogSequencer(host, first, model.NewApiConfigLogSettings()))
 	restoreApprovals := model.SetApprovalGateStates(model.ApprovalGateStatesOf(cache))
 	restoreDnsScopes := model.SetDnsScopeLabelSource(model.DnsScopeLabelSourceOf(cache))
+	// §14.14's mail_send and report read, without which POST /smtp/dkim-keys and GET /smtp/reports answer 503
+	restoreSmtpChecks := model.SetSmtpApiGate(model.SmtpApiGateOf(cache))
 	apiAclCache.Store(cache)
 	oauth.SetEdgeLoginSource(oauth.NewProjectionEdgeLoginSource(cache))
 	closeContracts := installContractGateWhenEnabled(ctx, cache)
@@ -160,6 +162,7 @@ func installApiProjection(ctx context.Context, host *sidecar.ServiceHost) (func(
 		closeContracts()
 		oauth.SetEdgeLoginSource(nil)
 		apiAclCache.CompareAndSwap(cache, nil)
+		restoreSmtpChecks()
 		restoreDnsScopes()
 		restoreApprovals()
 		model.SetConfigLogSequencer(nil)

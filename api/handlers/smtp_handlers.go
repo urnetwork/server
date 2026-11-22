@@ -39,8 +39,10 @@ import (
 //	                       wrong with it (controller.LiftAbuseSmtpHaltOnRecheck); §21 reviews the rest (ABUSE-M9-01)
 //
 // Each answers 503 with Retry-After, before the body is read or the caller authenticated, while the binary does
-// not link its groups, as a closed gate does; a §8 check this process has not installed (model.SetSmtpApiGate)
-// answers 503 too. No recipient or client IP is logged (I-13).
+// not link its groups, as a closed gate does; a §8 check this process has not installed answers 503 too. api's
+// process installs them over its gate cache (model.SmtpApiGateOf, where controller.installApiProjection publishes the
+// cache), so a process serving these routes without that install publishes and reads nothing. No recipient or client
+// IP is logged (I-13).
 
 // Whether the binary links what the DKIM route writes: MG2's labels, MG5's zones and MG9's keys, and serves a dns
 // root.

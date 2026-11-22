@@ -12,11 +12,11 @@ package sidecart3
 //	          (controller.InstallApiAuthorization and its projection part): server's sequencer over the Net's first
 //	          metadata cluster (controller.NewHostedConfigLogSequencer), a gate cache over it, the exchange's scopes
 //	          from that cache (oauth.NewProjectionExchangeScopeSource), so a service token carries exactly what §8's
-//	          table grants at the log's newest state, the approval gate's states, the dns scopes' labels, the edge
-//	          logins' source, rev/'s store on the first cluster and the issuer's worker that claims its tasks, and the
-//	          contract gate when sidecar.yml's acl_contract_gate is on as the world starts; the sequencer and rev/'s store
-//	          spend on the Net's fake write budget, or with ApiWriteBudget on api's own over the world's Redis, which
-//	          reports its spend beside the blocks' as api's process does
+//	          table grants at the log's newest state, the approval gate's states, the dns scopes' labels, the smtp
+//	          routes' §8 checks, the edge logins' source, rev/'s store on the first cluster and the issuer's worker that
+//	          claims its tasks, and the contract gate when sidecar.yml's acl_contract_gate is on as the world starts; the
+//	          sequencer and rev/'s store spend on the Net's fake write budget, or with ApiWriteBudget on api's own over
+//	          the world's Redis, which reports its spend beside the blocks' as api's process does
 //	limits    §7.9's append limits and §20.4's caps run, on the numbers SidecarLimits gives pro.yml's sidecar keys for
 //	          the world's life (§20.4's Community column by default), since the test stack's pro.yml carries none;
 //	          AdjustConfigLog may still take them off for a test that needs it
@@ -448,13 +448,15 @@ func NewT3World(t testing.TB, settings *T3WorldSettings) (world *T3World, return
 
 // What api's process installs over its gate cache beside the sequencer and the exchange's scopes
 // (controller.InstallApiAuthorization, installApiProjection), on the world's host and its first cluster, until the
-// returned pop: the approval gate's states, the dns scopes' labels, the edge logins' source, rev/'s store signing under
-// the world's svc- key, the issuer's worker that claims its tasks (revocations, due ticks and their hooks), and the
-// contract gate when sidecar.yml's acl_contract_gate is on now, as the install reads the switch at api's start.
+// returned pop: the approval gate's states, the dns scopes' labels, the smtp routes' §8 checks, the edge logins' source,
+// rev/'s store signing under the world's svc- key, the issuer's worker that claims its tasks (revocations, due ticks and
+// their hooks), and the contract gate when sidecar.yml's acl_contract_gate is on now, as the install reads the switch
+// at api's start.
 func installT3WorldApi(ctx context.Context, host *sidecar.ServiceHost, first sidecar.BlobCluster, cache *sidecar.AclGateCache) func() {
 	pops := []func(){}
 	pops = append(pops, model.SetApprovalGateStates(model.ApprovalGateStatesOf(cache)))
 	pops = append(pops, model.SetDnsScopeLabelSource(model.DnsScopeLabelSourceOf(cache)))
+	pops = append(pops, model.SetSmtpApiGate(model.SmtpApiGateOf(cache)))
 	oauth.SetEdgeLoginSource(oauth.NewProjectionEdgeLoginSource(cache))
 	pops = append(pops, func() { oauth.SetEdgeLoginSource(nil) })
 	revSettings := model.DefaultSidecarRevSettings()

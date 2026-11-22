@@ -506,7 +506,9 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		router.NewRoute("POST", "/mail/direct-mx", handlers.PutMailDirectMx),
 		router.NewRoute("DELETE", "/mail/direct-mx", handlers.DeleteMailDirectMx),
 		// §14.14's smtpedge routes: a sidecar's DKIM selectors, the network's status and reports, and an admin's
-		// appeal of its halts; dark until MG9 (SMTP-M9-19)
+		// appeal of its halts; dark until MG9 (SMTP-M9-19). A publish's mail_send and the reports' read are §8's
+		// checks over api's gate cache, which controller.InstallApiAuthorization's projection installs
+		// (model.SmtpApiGateOf); a process without that install answers both 503
 		router.NewRoute("POST", "/smtp/dkim-keys", handlers.SmtpDkimKeys),
 		router.NewRoute("GET", "/smtp/status", handlers.GetSmtpStatus),
 		router.NewRoute("GET", "/smtp/reports", handlers.GetSmtpReports),
