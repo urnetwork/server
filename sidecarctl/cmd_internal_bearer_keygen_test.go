@@ -487,7 +487,8 @@ func TestInternalBearerKeygenRefusesUnknownClasses(t *testing.T) {
 	for _, class := range server.InternalGateCallers() {
 		known = append(known, string(class))
 	}
-	for _, class := range []string{"dns", "EDGE", "edge ", "../pg", "verify", ""} {
+	// api hosts the gate and is never its caller; dns has been a class since d2e25bbb8
+	for _, class := range []string{"api", "EDGE", "edge ", "../pg", "verify", ""} {
 		code, stdout, stderr := runInternalBearerKeygenTest("--class="+class, "--out="+outPath, "--verify="+verifyPath)
 		if code != 2 || stdout != "" {
 			t.Errorf("--class=%q: exit %d, stdout %q", class, code, stdout)
@@ -650,7 +651,8 @@ func TestInternalBearerKeygenRefusesFilesItCannotUse(t *testing.T) {
 		{
 			name: "a verify file api's verifier refuses",
 			setup: func(t *testing.T, directory string, outPath string, verifyPath string) {
-				writeInternalBearerKeygenTestFiles(t, outPath, credentialFile, verifyPath, verifyFile+"dns: {class: dns, sha256: ["+edgeDigest+"]}\n")
+				// a class the gate does not take
+				writeInternalBearerKeygenTestFiles(t, outPath, credentialFile, verifyPath, verifyFile+"api: {class: api, sha256: ["+edgeDigest+"]}\n")
 			},
 			wantStderr: "is refused by api's verifier",
 		},
