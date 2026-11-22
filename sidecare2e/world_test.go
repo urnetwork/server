@@ -60,9 +60,12 @@
 //   - a person's approval (worldDeviceGate): §16.6's stock gate holds an alias's creation and a mail send to another
 //     network for a person's decision on another approval-capable device, and the world composes no approver, so a
 //     stand-in in front of the stock gate runs the one use as that decision would, counted;
-//   - a receiver's reception-time checks (SPF, DKIM, DMARC, PTR) go over its own DoH to public resolvers as the
-//     receiver composition builds it, with no seam a test reaches: they know no .example name and no documentation
-//     address's PTR, so every check reads none or temperror, which no deposit is refused for (D-MAIL-5);
+//   - a receiver's lookups (World.StartMail): its reception-time checks (SPF, DKIM, DMARC, PTR) and mail.strict's
+//     chain ask the world's DNS above through MailReceiveSettings.ResolverFactory, under the same anchor, where
+//     production's receiver asks public resolvers over a DohCache of its own, which a receiver in a test binary refuses
+//     (ErrMailReceiverPublicResolver), so no test queries them from the test host. A name under the world's root is
+//     answered as the dns edge signs it; an internet sender's domain and its documentation address's PTR, which no zone
+//     of the world serves, get no answer, so their checks read temperror, which refuses no mail (§15.5, D-MAIL-14);
 //   - api's smtp routes' §8 checks (worldSmtpApiGate, world_server_state_test.go): api's process installs none
 //     (model.SetSmtpApiGate is called by its handler tests alone, the mail step's finding), so the world installs one
 //     over a gate cache of its own, its mail_send the verified state's send grant;

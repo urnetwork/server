@@ -88,11 +88,17 @@ const worldMailPort = 25
 // device's mail as ur daemon composes it once its follower stands: its socket component, which a receiver's listen and
 // a sender's dial of ur/smtpedge run on (StartSockets), the evs component on the device's EvsClient, which mail binds
 // on (cli's daemon_clients.go), then its MailClient on the world's mail settings and the mail component
-// (Sidecar.StartMail). receive false keeps the device from running a receiver even where policy grants it the listen
-// on smtp/25/mx. The sidecar removes the components at its close.
+// (Sidecar.StartMail). A receiver's lookups, its reception-time checks and mail.strict's chain, ask the world's own
+// signed DNS under the world's anchor (MailReceiveSettings.ResolverFactory; world_mail_dns_test.go), never the public
+// resolvers a receiver asks by default, which a test binary refuses. receive false keeps the device from running a
+// receiver even where policy grants it the listen on smtp/25/mx. The sidecar removes the components at its close.
 func (self *World) StartMail(ctx context.Context, device *sidecart3.T3Device, receive bool, settings *WorldMailSettings) (*sidecar.MailClient, error) {
 	if settings == nil {
 		settings = DefaultWorldMailSettings()
+	}
+	anchors, err := self.dnssec.Anchors()
+	if err != nil {
+		return nil, fmt.Errorf("the world's DNSSEC anchor: %w", err)
 	}
 	if err := self.StartSockets(ctx, device); err != nil {
 		return nil, err
@@ -111,6 +117,11 @@ func (self *World) StartMail(ctx context.Context, device *sidecart3.T3Device, re
 	mailSettings.CheckInterval = settings.CheckInterval
 	mailSettings.UnboundCheckInterval = settings.UnboundCheckInterval
 	mailSettings.Receive.Enabled = receive
+	// each receiver's resolver over the world's DNS, which holds no cache or admission of its own to share (CODESTYLE's
+	// DoH rule), so every receiver may ask it, and which nothing releases
+	mailSettings.Receive.ResolverFactory = func() (*sidecar.MailReceiverResolver, error) {
+		return &sidecar.MailReceiverResolver{Doh: self.dnssec, Anchors: anchors}, nil
+	}
 	receiver := mailSettings.Receive.Receiver
 	receiver.TlsaTtl = settings.TlsaTtl
 	receiver.TlsaLiveTtlCount = settings.TlsaLiveTtlCount
