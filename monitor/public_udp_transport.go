@@ -19,12 +19,13 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
-	"github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/http3"
 	connectcore "github.com/urnetwork/connect"
+	"github.com/urnetwork/quic-go"
+	"github.com/urnetwork/quic-go/http3"
 )
 
 const (
@@ -48,6 +49,9 @@ type publicUdpPacketConn struct {
 	net.PacketConn
 	peer     netip.AddrPort
 	settings *PublicUdpProbeSettings
+	// One full UDP datagram retained between reads. Concurrent readers each
+	// own their scratch until the payload has been copied.
+	readBuffer atomic.Pointer[[65535]byte]
 
 	stateLock       sync.Mutex
 	sentPackets     int
@@ -66,6 +70,13 @@ func publicUdpAddress(addr net.Addr) (netip.AddrPort, bool) {
 	if addr == nil {
 		return netip.AddrPort{}, false
 	}
+	if udp, ok := addr.(*net.UDPAddr); ok {
+		if udp == nil || udp.Zone != "" || udp.Port < 0 || udp.Port > 65535 {
+			return netip.AddrPort{}, false
+		}
+		peer := udp.AddrPort()
+		return netip.AddrPortFrom(peer.Addr().Unmap(), peer.Port()), peer.IsValid()
+	}
 	parsed, err := netip.ParseAddrPort(addr.String())
 	if err != nil || parsed.Addr().Zone() != "" {
 		return netip.AddrPort{}, false
@@ -77,7 +88,11 @@ func (self *publicUdpPacketConn) ReadFrom(buffer []byte) (int, net.Addr, error) 
 	// Read the whole bounded UDP payload even when QUIC asks for a smaller
 	// buffer. Otherwise oversized unsolicited datagrams could evade byte
 	// accounting through socket truncation. No payload escapes this method.
-	var datagram [65535]byte
+	datagram := self.readBuffer.Swap(nil)
+	if datagram == nil {
+		datagram = new([65535]byte)
+	}
+	defer self.readBuffer.CompareAndSwap(nil, datagram)
 	for {
 		n, address, err := self.PacketConn.ReadFrom(datagram[:])
 		if err != nil {

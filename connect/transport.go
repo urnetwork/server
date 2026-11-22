@@ -23,7 +23,7 @@ import (
 	"sync/atomic"
 
 	"github.com/gorilla/websocket"
-	quic "github.com/quic-go/quic-go"
+	quic "github.com/urnetwork/quic-go"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/urnetwork/glog"
@@ -81,6 +81,20 @@ var h3ListenerFailuresCounter = prometheus.NewCounterVec(
 		Help:      "QUIC listener failures by transport and lifecycle stage",
 	},
 	[]string{"transport", "stage"},
+)
+
+// The handshakes the connect handlers' QUIC listeners hold from addresses not
+// yet validated, the count their unvalidated-handshake limit bounds
+// (connectQuicHandshakeLimit), across every handler of the process: one in
+// production. Past the limit a new source must answer a Retry
+// (urnetwork_connect_front_quic_retries_total).
+var connectQuicUnvalidatedHandshakesGauge = prometheus.NewGauge(
+	prometheus.GaugeOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "quic_unvalidated_handshakes",
+		Help:      "QUIC handshakes the connect handler's listeners, its own and the lb_alt front's, hold from source addresses not yet validated: past H3MaxUnvalidatedHandshakeCount a new source must first answer a Retry",
+	},
 )
 
 var defaultConnectH3DatagramStats = &connect.H3DatagramStats{}
@@ -250,6 +264,18 @@ const (
 	connectH3WriteBatchMaxByteCount    = 64 * 1024
 )
 
+// The payload index of one ready batch on a framed writer. It escaped to the
+// heap on every write, passed through the writer's interface: 768 bytes a
+// write, 6% of connect's allocation in a production profile (LBALTOPT2.md
+// §3.5, R23). The framed writer copies each payload into its own scratch and
+// keeps no reference to the index (FramedMessageConn.WriteMessages), so an
+// index returns to the pool, cleared, when its write returns.
+var connectH1FramedPayloadsPool = sync.Pool{
+	New: func() any {
+		return new([connectH1WriteBatchMaxMessageCount][]byte)
+	},
+}
+
 func connectH1WriteBatchCanDrain(messageCount int, messageByteCount int) bool {
 	return messageCount < connectH1WriteBatchMaxMessageCount &&
 		messageByteCount < connectH1WriteBatchDrainByteCount
@@ -396,7 +422,12 @@ func writeConnectH1UserReadyBatch(
 		return open, err
 	}
 	if framed {
-		var payloads [connectH1WriteBatchMaxMessageCount][]byte
+		payloads := connectH1FramedPayloadsPool.Get().(*[connectH1WriteBatchMaxMessageCount][]byte)
+		// runs before the deferred return of the messages it indexes
+		defer func() {
+			clear(payloads[:])
+			connectH1FramedPayloadsPool.Put(payloads)
+		}()
 		n := 0
 		for _, message := range messageStorage[:messageCount] {
 			if len(message) > 16 {
@@ -456,6 +487,7 @@ func init() {
 	prometheus.MustRegister(h3ListenerUpGauge)
 	prometheus.MustRegister(h3ListenerRestartsCounter)
 	prometheus.MustRegister(h3ListenerFailuresCounter)
+	prometheus.MustRegister(connectQuicUnvalidatedHandshakesGauge)
 	prometheus.MustRegister(newConnectH3DatagramCollector(defaultConnectH3DatagramStats))
 }
 
@@ -800,7 +832,7 @@ func (self *connectQuicHandshakeLimit) verifySourceAddress(net.Addr) bool {
 // quic.Transport.ConnContext. quic-go cancels ctx when the connection closes.
 // The returned context carries the release AwaitQuicHandshake runs once the
 // handshake completes; the close runs it otherwise, and only the first of the
-// two counts.
+// two counts. The process's gauge follows the count.
 func (self *connectQuicHandshakeLimit) connContext(
 	ctx context.Context,
 	info *quic.ClientInfo,
@@ -809,10 +841,15 @@ func (self *connectQuicHandshakeLimit) connContext(
 		return ctx, nil
 	}
 	self.count.Add(1)
-	stop := context.AfterFunc(ctx, func() { self.count.Add(-1) })
+	connectQuicUnvalidatedHandshakesGauge.Inc()
+	stop := context.AfterFunc(ctx, func() {
+		self.count.Add(-1)
+		connectQuicUnvalidatedHandshakesGauge.Dec()
+	})
 	release := func() {
 		if stop() {
 			self.count.Add(-1)
+			connectQuicUnvalidatedHandshakesGauge.Dec()
 		}
 	}
 	return context.WithValue(ctx, connectQuicHandshakeReleaseKey{}, release), nil
@@ -1092,6 +1129,13 @@ func newConnectHandlerWithPacketConns(
 	// The exchange flag is the single drain-excuse switch: the exchange side
 	// writes the markers on drain, the announce side consumes them.
 	settings.ConnectionAnnounceSettings.EnableDrainExcuse = exchange.settings.EnableDrainExcuse
+	// One timer sweep per process: the announcements' and the authorization
+	// leases' logical timers share the exchange's (LBALTOPT2.md §8.1).
+	settings.ConnectionAnnounceSettings.timerSweep = exchange.timerSweep
+	// One batcher per handler: its announcements' sync round reads and stats
+	// writes, verify egress lease refreshes and measurement writes that come
+	// due together share their round trips (LBALTOPT2.md R18).
+	settings.ConnectionAnnounceSettings.batcher = newConnectionAnnounceBatcher(&settings.ConnectionAnnounceSettings.Batch)
 
 	h := &ConnectHandler{
 		ctx:                   cancelCtx,
@@ -1772,7 +1816,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	}
 	// the lease's final check before admission is one of the handshake's queries
 	lease, leaseErr := session.StartConnectionAuthorizationLease(
-		session.WithStateQuerySource(handleCtx, session.StateQueryConnectH1), byJwt, connectionId, auth.StreamLeaseVersion, closeAuthorization)
+		session.WithStateQuerySource(handleCtx, session.StateQueryConnectH1), byJwt, connectionId, auth.StreamLeaseVersion, self.exchange.timerSweep, closeAuthorization)
 	if leaseErr != nil {
 		h1Observation.result = connectH1ResultStateRefused
 		status := http.StatusUnauthorized
@@ -1905,7 +1949,6 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			clientId,
 			clientAddress,
 			ipFamilyIntent,
-			egressProxyFromHeader(r.Header),
 			auth.AppVersion,
 			self.handlerId,
 			self.connectionReconcile,
@@ -2822,7 +2865,7 @@ func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier Resi
 			}
 			// the lease's final check before admission is one of the handshake's queries
 			lease, leaseErr = session.StartConnectionAuthorizationLease(
-				session.WithStateQuerySource(handleCtx, session.StateQueryConnectH3), byJwt, connectionId, auth.StreamLeaseVersion, closeAuthorization)
+				session.WithStateQuerySource(handleCtx, session.StateQueryConnectH3), byJwt, connectionId, auth.StreamLeaseVersion, self.exchange.timerSweep, closeAuthorization)
 			if leaseErr != nil {
 				if !connectAuthDependencyUnavailable(leaseErr) {
 					return refused(leaseErr)
@@ -2918,8 +2961,6 @@ func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier Resi
 			clientId,
 			clientAddress,
 			ipFamilyIntent,
-			// h3 never carries a proxied transport (transport_egress_proxy.go)
-			false,
 			appVersion,
 			self.handlerId,
 			self.connectionReconcile,

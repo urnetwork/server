@@ -35,9 +35,9 @@ import (
 	"testing"
 	"time"
 
-	quic "github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/http3"
-	"github.com/quic-go/quic-go/qlogwriter"
+	quic "github.com/urnetwork/quic-go"
+	"github.com/urnetwork/quic-go/http3"
+	"github.com/urnetwork/quic-go/qlogwriter"
 
 	"github.com/urnetwork/connect"
 
@@ -284,7 +284,8 @@ type testFront struct {
 	tlsConfig       *tls.Config
 	quicTlsConfig   *tls.Config
 
-	// connections admitted per (interface, address); zero is no cap
+	// connections admitted per (interface, address, class), each class
+	// counted apart as the nginx front counts them; zero is no cap
 	connectionCap int
 	// replace the default handlers when set
 	httpsHandler func(interfaceName string) http.Handler
@@ -303,7 +304,7 @@ type testFront struct {
 
 	stateLock        sync.Mutex
 	connectionCounts map[string]int
-	// "<interface> <address>" of every AcquireQuicConnection
+	// "<interface> <address> <class>" of every AcquireQuicConnection
 	acquiredKeys []string
 	events       []string
 	// every server ConfigureServer was given, in order
@@ -447,8 +448,8 @@ func (self *testFront) H3ApiHandler(interfaceName string) http.Handler {
 }
 
 // nginxFront
-func (self *testFront) AcquireQuicConnection(interfaceName string, addr netip.Addr) (func(), bool) {
-	key := interfaceName + " " + addr.String()
+func (self *testFront) AcquireQuicConnection(interfaceName string, addr netip.Addr, nameClass nginx.NameClass) (func(), bool) {
+	key := interfaceName + " " + addr.String() + " " + nameClass.String()
 	admitted := func() bool {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
@@ -478,7 +479,7 @@ func (self *testFront) AcquireQuicConnection(interfaceName string, addr netip.Ad
 	}, true
 }
 
-// "<interface> <address>" of every AcquireQuicConnection so far.
+// "<interface> <address> <class>" of every AcquireQuicConnection so far.
 func (self *testFront) acquired() []string {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -532,8 +533,14 @@ type testFrontConnectQuic struct {
 	// signaled after each handshake the limit counted
 	counted chan struct{}
 	tracer  func(context.Context, bool, quic.ConnectionID) qlogwriter.Trace
-	handled chan testFrontHandledQuic
-	release chan struct{}
+	// replaces the config's handshake idle timeout when positive
+	handshakeIdleTimeout time.Duration
+	// when set, given the context of every connection a transport creates,
+	// accepted or not, which quic-go cancels with the connection's close
+	// cause
+	connContexts chan context.Context
+	handled      chan testFrontHandledQuic
+	release      chan struct{}
 	// refuses each connection while set, as a closing handler does
 	refusing atomic.Bool
 	// the connections whose window grants the front returned so far
@@ -586,9 +593,21 @@ func (self *testFrontConnectQuic) NewQuicTransport(conn net.PacketConn) *quic.Tr
 		self.transportConns = append(self.transportConns, conn)
 	}()
 	transport := &quic.Transport{Conn: conn}
-	if limit := self.handshakeLimit; limit != nil {
+	limit := self.handshakeLimit
+	if limit != nil {
 		transport.VerifySourceAddress = limit.verifySourceAddress
+	}
+	if limit != nil || self.connContexts != nil {
 		transport.ConnContext = func(ctx context.Context, info *quic.ClientInfo) (context.Context, error) {
+			if self.connContexts != nil {
+				select {
+				case self.connContexts <- ctx:
+				default:
+				}
+			}
+			if limit == nil {
+				return ctx, nil
+			}
 			ctx, err := limit.connContext(ctx, info)
 			if !info.AddrVerified {
 				self.counted <- struct{}{}
@@ -630,8 +649,12 @@ func (self *testFrontConnectQuic) builtTransportConns() []net.PacketConn {
 
 // frontConnectQuic
 func (self *testFrontConnectQuic) NewQuicConfig() *quic.Config {
+	handshakeIdleTimeout := testFrontProgressTimeout
+	if 0 < self.handshakeIdleTimeout {
+		handshakeIdleTimeout = self.handshakeIdleTimeout
+	}
 	return &quic.Config{
-		HandshakeIdleTimeout: testFrontProgressTimeout,
+		HandshakeIdleTimeout: handshakeIdleTimeout,
 		MaxIdleTimeout:       time.Minute,
 		Allow0RTT:            true,
 		EnableDatagrams:      true,
@@ -652,6 +675,9 @@ type testFrontBinds struct {
 	listeners   map[string][]net.Listener
 	failCounts  map[string]int
 	holds       map[string]*testFrontBindHold
+	// addresses whose udp binds take a free port of the address instead, so
+	// a test can reach each socket of the group on its own
+	ephemeralAddresses map[string]bool
 }
 
 // A barrier on the binds of one address.
@@ -671,7 +697,17 @@ func newTestFrontBinds() *testFrontBinds {
 		listeners:   map[string][]net.Listener{},
 		failCounts:  map[string]int{},
 		holds:       map[string]*testFrontBindHold{},
+
+		ephemeralAddresses: map[string]bool{},
 	}
+}
+
+// Binds each later udp socket of address to a free port of its address,
+// recorded under address.
+func (self *testFrontBinds) bindEphemerally(address string) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.ephemeralAddresses[address] = true
 }
 
 // Fails the next count binds of address.
@@ -728,7 +764,16 @@ func (self *testFrontBinds) listenPacket(network string, address string) (net.Pa
 	if err := self.beforeBind(network, address); err != nil {
 		return nil, err
 	}
-	packetConn, err := listenFrontPacket(network, address)
+	bindAddress := address
+	ephemeral := func() bool {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		return self.ephemeralAddresses[address]
+	}()
+	if ephemeral {
+		bindAddress = netip.AddrPortFrom(netip.MustParseAddrPort(address).Addr(), 0).String()
+	}
+	packetConn, err := listenFrontPacket(network, bindAddress)
 	if err != nil {
 		return nil, err
 	}
@@ -1035,6 +1080,29 @@ func (self *testFrontEnv) dialQuicFrom(
 	portKind string,
 	tlsConfig *tls.Config,
 ) (*quic.Conn, error) {
+	target := net.UDPAddrFromAddrPort(netip.MustParseAddrPort(self.bindAddress(address, portKind)))
+	return self.dialQuicTo(packetConn, target, portKind, tlsConfig)
+}
+
+// Dials QUIC to target from packetConn, as dialQuicFrom dials a port kind's
+// socket.
+func (self *testFrontEnv) dialQuicTo(
+	packetConn net.PacketConn,
+	target *net.UDPAddr,
+	portKind string,
+	tlsConfig *tls.Config,
+) (*quic.Conn, error) {
+	return self.dialQuicToWithConfig(packetConn, target, portKind, tlsConfig, testFrontClientQuicConfig())
+}
+
+// As dialQuicTo, with the client's QUIC config.
+func (self *testFrontEnv) dialQuicToWithConfig(
+	packetConn net.PacketConn,
+	target *net.UDPAddr,
+	portKind string,
+	tlsConfig *tls.Config,
+	quicConfig *quic.Config,
+) (*quic.Conn, error) {
 	if portKind == frontPortWhodis {
 		ptSettings := connect.DefaultPacketTranslationSettings()
 		ptSettings.DnsTlds = [][]byte{[]byte(testFrontWhodisTld)}
@@ -1052,10 +1120,9 @@ func (self *testFrontEnv) dialQuicFrom(
 	}
 	quicTransport := &quic.Transport{Conn: packetConn}
 	self.t.Cleanup(func() { quicTransport.Close() })
-	udpAddr := net.UDPAddrFromAddrPort(netip.MustParseAddrPort(self.bindAddress(address, portKind)))
 	ctx, cancel := context.WithTimeout(self.ctx, testFrontProgressTimeout)
 	defer cancel()
-	return quicTransport.Dial(ctx, udpAddr, tlsConfig, testFrontClientQuicConfig())
+	return quicTransport.Dial(ctx, target, tlsConfig, quicConfig)
 }
 
 // Dials QUIC from a new client socket.

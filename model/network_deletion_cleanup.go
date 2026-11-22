@@ -65,6 +65,7 @@ import (
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/session"
 )
 
 // A deleted network and the users it had, as the deletion hands them to the
@@ -412,6 +413,7 @@ var deletedNetworkKeptTables = map[string]string{
 	"network_wallet_mapping_challenge":    deletedNetworkKeepSettlement,
 	"network_wallet_mapping_consent":      deletedNetworkKeepSettlement,
 	"provider_client_verdict":             deletedNetworkKeepSettlement,
+	"provider_egress_exit_day":            deletedNetworkKeepSettlement,
 	"provider_work_owner":                 deletedNetworkKeepSettlement,
 	"provider_work_request":               deletedNetworkKeepSettlement,
 	"provider_work_session_event":         deletedNetworkKeepSettlement,
@@ -1085,7 +1087,7 @@ func deactivateDeletedNetworkClients(
 			return
 		}
 		var err2 error
-		batchCount, deactivatedCount, err2 = deactivateLockedNetworkClientsCountedInTx(ctx, tx, clientIds, networkId)
+		batchCount, deactivatedCount, err2 = deactivateLockedNetworkClientsCountedInTx(withSessionFreePath(ctx, session.SessionFreePathNetworkDeletion), tx, clientIds, networkId)
 		server.Raise(err2)
 	}, server.TxReadCommitted, server.TxLockTimeout(settings.LockTimeout))
 	return

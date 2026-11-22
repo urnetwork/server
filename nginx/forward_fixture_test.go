@@ -408,6 +408,12 @@ func attemptCount(serviceName string, blockName string, result string) float64 {
 	return testutil.ToFloat64(upstreamAttemptsCounter.WithLabelValues(serviceName, blockName, result))
 }
 
+// The connections attempts took for a service, counted by how they got
+// them.
+func connectionCount(serviceName string, result string) float64 {
+	return testutil.ToFloat64(upstreamConnectionsCounter.WithLabelValues(serviceName, result))
+}
+
 // The D7 retries counted for a service and reason.
 func retryCount(serviceName string, reason string) float64 {
 	return testutil.ToFloat64(upstreamRetriesCounter.WithLabelValues(serviceName, reason))

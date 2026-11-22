@@ -152,6 +152,17 @@ func validateSourceBuildRequest(request reviewedSourceBuildRequest) error {
 	if !instrument && request.TrustedInstrument != nil {
 		return errors.New("reviewed product build cannot reuse trusted instrument authority")
 	}
+	// Only the exact approved successor uses the independently admitted
+	// epoch-two Go security image. Keep the original evaluated identity in
+	// the proposal and published source lineage.
+	if request.ExecutionBaseImageDigest != "" && (instrument || proposal.Staging ||
+		request.ExecutionBaseImageDigest != epochThreeSecurityBuildImage || request.SourceGeneration != 2 ||
+		proposal.ReviewId.String() != "01a1f43d-6832-bad1-1fc9-182ce6e21d6e" ||
+		proposal.JobId.String() != "01a1e7b9-0b4e-cec4-3fad-526342ab01ac" ||
+		proposal.PatchSha256 != "0003acfa8aad9a102264a2bae94e76f8bd2c1ce78445dcd717254d3c39cae4f6" ||
+		proposal.EvaluatedImageDigest != "sha256:5e5dfa2715c980d7ec037b6f15208e1d240a6bc80668aabc3335c1f71b2b92d9") {
+		return errors.New("source build security base does not match the exact approved epoch-three successor")
+	}
 	if proposal.CandidatePathBase != "" && proposal.CandidatePathBase != "mono_root_v1" {
 		return errors.New("source build candidate path base is unsupported")
 	}

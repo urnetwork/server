@@ -125,6 +125,7 @@ func (self *keyEventSubscriber) patterns(db int) []string {
 	patterns := []string{
 		model.NetworkPeerKeyEventPattern(db),
 		sessionEventPattern(db),
+		sessionRevocationEventPattern(db),
 		model.StreamHopsKeyEventPattern(db),
 		model.ClientRemovedKeyEventPattern(db),
 		model.ClientCloseKeyEventPattern(db),
@@ -344,7 +345,14 @@ func (self *keyEventSubscriber) dispatch(channel string, event string) {
 		return
 	}
 	if networkId, ok := parseSessionEvent(channel); ok {
-		self.kickSession(networkId)
+		self.kickSessionHints(networkId)
+		return
+	}
+	if networkId, ok := parseSessionRevocationEvent(channel); ok {
+		// the increment is the report; its ttl's expiry is not
+		if event == "incrby" {
+			self.recheckSessionListeners(networkId)
+		}
 		return
 	}
 	if clientId, ok := model.ParseClientRemovedKeyEvent(channel); ok {

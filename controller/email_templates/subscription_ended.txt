@@ -1,11 +1,18 @@
-{{define "headline"}}UR PRO SUBSCRIPTION ENDED{{end}}
-{{define "why"}}Sent to the address on your URnetwork account when its UR Pro
+{{define "headline"}}{{if .DataOnly}}DATA SUBSCRIPTION ENDED{{else}}UR PRO SUBSCRIPTION ENDED{{end}}{{end}}
+{{define "why"}}Sent to the address on your URnetwork account when its {{if .DataOnly}}data{{else}}UR Pro{{end}}
 subscription through Google Play ends without renewing.{{end}}
 {{define "content"}}
+{{if .DataOnly -}}
+Your URnetwork data subscription through Google Play was not renewed, so
+it has ended.
+
+If you think this is a mistake, check your subscriptions in Google Play,
+or contact support@ur.io.
+{{else -}}
 Your UR Pro subscription through Google Play was not renewed, so it has
 ended.
 
 To keep UR Pro, subscribe again in the URnetwork app. If you think this
 is a mistake, check your subscriptions in Google Play, or contact
 support@ur.io.
-{{end}}
+{{end}}{{end}}

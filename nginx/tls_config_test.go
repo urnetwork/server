@@ -14,6 +14,9 @@ import (
 	"slices"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 // A served SNI gets its own certificate, and ALPN by class: http/1.1 for
@@ -400,7 +403,8 @@ func TestNewTlsConfigsPinsTheSettingsInConfigsBuiltOnce(t *testing.T) {
 
 // A served name the store has no certificate for, from a store of another
 // table, is served as an unknown name: the default server on TCP, nothing on
-// QUIC. Without the default server's certificate, TCP has nothing either.
+// QUIC, whose ClientHello count calls it unknown. Without the default
+// server's certificate, TCP has nothing either.
 func TestNewTlsConfigsServesANameTheStoreLacksAsUnknown(t *testing.T) {
 	vault := newTestTlsVault(t)
 	certificateStore := vault.load(t)
@@ -415,7 +419,8 @@ func TestNewTlsConfigsServesANameTheStoreLacksAsUnknown(t *testing.T) {
 	if _, ok := certificateStore.certificate("extra-api.service.example"); ok {
 		t.Fatal("the store covers extra-api.service.example, so the test shows nothing")
 	}
-	tlsConfig, quicTlsConfig := newTlsConfigs(certificateStore, newNameMatcher(matcherTable), matcherTable.Lb.Names[0], DefaultTlsSettings())
+	metrics := newFrontMetrics(prometheus.NewRegistry())
+	tlsConfig, quicTlsConfig := newTlsConfigs(certificateStore, newNameMatcher(matcherTable), matcherTable.Lb.Names[0], matcherTable.Listen, matcherTable.Interfaces, DefaultTlsSettings(), metrics, time.Now)
 
 	config, err := tlsConfig.GetConfigForClient(&tls.ClientHelloInfo{ServerName: "extra-api.service.example"})
 	if err != nil {
@@ -431,8 +436,11 @@ func TestNewTlsConfigsServesANameTheStoreLacksAsUnknown(t *testing.T) {
 	if _, err := quicTlsConfig.GetConfigForClient(&tls.ClientHelloInfo{ServerName: "extra-api.service.example", SupportedProtos: []string{"h3"}}); err == nil {
 		t.Fatalf("quic served a name without a certificate")
 	}
+	if count := testutil.ToFloat64(metrics.quicClientHellos.WithLabelValues(tlsQuicInterfaceOther, tlsQuicPortOther, tlsQuicNameClassUnknown, "true")); count != 1 {
+		t.Fatalf("the ClientHello of a name without a certificate counted %v times as unknown", count)
+	}
 
-	noDefaultTlsConfig, _ := newTlsConfigs(certificateStore, newNameMatcher(vault.routeTable), "absent.example", DefaultTlsSettings())
+	noDefaultTlsConfig, _ := newTlsConfigs(certificateStore, newNameMatcher(vault.routeTable), "absent.example", vault.routeTable.Listen, vault.routeTable.Interfaces, DefaultTlsSettings(), newFrontMetrics(prometheus.NewRegistry()), time.Now)
 	if _, err := noDefaultTlsConfig.GetConfigForClient(&tls.ClientHelloInfo{ServerName: "unknown.example"}); err == nil {
 		t.Fatalf("an unknown name got a config with no default certificate")
 	}

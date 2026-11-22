@@ -2902,6 +2902,15 @@ failures. Require bounded original-event/source/artifact evidence for historical
 attribution and independent outcome controls for impact or recovery; an empty
 frame, a later reachable target or a quiet log window is not that evidence.
 
+For a Taskworker `connection-refused` alert, an INFO record from
+`extender_probe_diagnostics.go` can retain the first refusal exemplar’s
+IP family and producer failure class in the alert sample. The reducer requires
+the matching Taskworker stream and Warp service, the complete reviewed
+`[extenderprobe]diagnostic` record, and refusal text in its quoted detail.
+The aggregate still counts every matching diagnostic in the service window.
+Build identity, remote listener state, other lines’ sources and completed
+operations require independent evidence.
+
 The monitor tails the logs of ALL services AT ALL TIMES, classifying lines
 against the section 4 signatures. This is a standing collector, not a
 sampled probe: `warpctl logs <env> <service> -f` streams a service's logs
@@ -2943,6 +2952,37 @@ the shape, omit the whole Warp identity prefix from the sample, and redact
 UUID-shaped or explicitly named customer/entity identifiers in both. Otherwise
 two unrelated failures in one window can render a correct top shape beside
 misleading or private evidence from another shape.
+
+For a Taskworker top shape reporting TLS `completeHandshake failed: context
+canceled`, the Taskworker stats pusher exposes a process counter in builds
+carrying the cancellation-source collector. Query the same UTC interval and
+local role as the retained sample. For the server-role companion cohort:
+
+```promql
+sum by (source) (
+  increase(urnetwork_taskworker_tls_handshake_cancellations_total{
+    env="main", job="taskworker", role="server", companion="true"
+  }[5m])
+)
+```
+
+Each process reports all seven sources for both roles and companion flags.
+`parent_lifetime` means cancellation inherited from outside the encryption
+manager. The other source names identify explicit manager, session or epoch
+retirement, rejected control enqueue, a recovered worker, or `unknown` when
+the canceled result lacks a canceled context at completion. The counter
+tracks coalesced current-epoch diagnostics and preserves their failure
+streaks. A quiet zero requires a fresh, complete same-artifact process cohort.
+An absent family, a missing process or a window too short for two samples
+leaves visibility unknown. `increase` estimates changes over the query
+window, including across counter resets.
+
+The source mix can distinguish a cleanup-heavy interval from a rise in local
+control rejection. Exact attribution still requires the same-attempt event,
+caller intent, terminal identity proof and independent flow outcome. An
+intentional shutdown can interrupt a live handshake; sampling and coalescing
+can also hide failures of intended flows. Keep alert #131 open until the
+corresponding attempt and outcome have been established.
 
 False-positive qualifier for `novel`: the prober's per-provider egress-health
 result record, `egress-health: provider=<id> ok=48/50 ... failed=cachefly,reddit`
@@ -7978,9 +8018,10 @@ measurement, and neither this section nor §2.4b closes the disk-runway gap.
 
 The 2026-10-19 explicit future policy is WARN at **48 hours or less** to the
 100,000,000,000-byte safety line after two qualified observations. Qualification
-requires **six complete hourly intervals** of aligned filesystem, resident
-temp, WAL and recovery/vacuum history. The fitting rule and full producer
-contract still need qualification; a raw free-space slope or hourly maxima
+requires **six complete hourly intervals** pairing root availability, temp
+bytes physically allocated on that filesystem, WAL occupancy and retention,
+and recovery/vacuum state at their original collection times. The producer and
+fitting rule still need qualification. A raw free-space slope or hourly maxima
 alone cannot establish net growth. Fresh current SQL rows cannot backfill
 missing historical temp or WAL samples. Cumulative `temp_bytes` counts bytes
 written rather than resident temp allocation, and relation size omits retained
@@ -8000,15 +8041,15 @@ Storage additions, retention changes and workload changes remain owner actions.
 
 2026-10-22: this coverage WARN was open from 10-13 to 10-22 while edge-2's root
 filesystem fell from about 700 GB to 145 GB, and it never became a forecast.
-§2.4f now selects the estimator and thresholds so the forecast can exist;
-replace this visibility-only observation with it. A perfect net-growth model is
-not a precondition for warning: the raw max-of-windows decline would have
-warned from 10-20 and paged at about 15:00Z on 10-21.
-`storage-runway` (§2.4f) now measures that raw max-of-windows runway for the
-database root against the same 100,000,000,000-byte line. This
-visibility-only observation still reports the qualified net-growth forecast of
-this section (temp, WAL and vacuum netted out) as unknown; retiring it in favor
-of §2.4f is an owner decision.
+§2.4f selected an estimator and thresholds for raw runway and proposed
+replacing the visibility-only warning. The raw max-of-windows decline would
+have warned from 10-20 and paged at about 15:00Z on 10-21.
+
+The coverage warning directs operators to `pg-disk-space` (§2.4b) for current
+root headroom and `storage-runway` (§2.4f) for estimated time to the same
+100,000,000,000-byte line at the fastest raw decline over 1, 6 and 24 hours.
+The qualified net-growth forecast remains unknown. Retiring this warning in
+favor of §2.4f remains an owner decision.
 
 ### 2.4d Configured freeze-age risk
 Probe: `pg-freeze-age`
@@ -12507,6 +12548,26 @@ response body does not prove a nonempty picker. The deprecated
 `/network/find-locations` endpoint is not included. Empty-picker user reports
 remain actionable below any metric volume floor; the floor is not a dismissal
 of an individual report.
+
+For instrumented API processes, `urnetwork_provider_picker_search_empty_total{stage}`
+breaks down successful empty search POSTs. A blank or whitespace-only POST
+reads the browse document and counts as `blank_query`. For nonblank text,
+`no_index_matches` means the search returned zero IDs. An index match with
+no loaded location records counts as `no_location_metadata`. Loaded records
+with no positive caller/rank filter entry count as `no_positive_filter`.
+A positive entry followed by an empty model result under the shared SDK's
+row rules counts as `positive_filter_no_rendered_rows`. A successful empty
+search outside the measured path counts as `unobserved`. All six counters
+start at zero. Initial GETs, direct IDs and model errors keep their existing
+outcomes. The API dashboard shows this breakdown alongside the parent outcome.
+
+These counts describe the inputs available to that request. Missing metadata,
+caller exclusions, rank policy and an unmatched term can all yield a valid
+empty result. Filter freshness, expected matches for that caller, HTTP
+delivery and app rendering require separate evidence. Compare the breakdown
+with `search/empty` on the same continuously observed instrumented processes.
+An older producer lacks the breakdown. The standing eleven-field query and
+its initial-empty and request-error thresholds continue to cover mixed builds.
 
 Latency needs the same route distinction. The shared SDK's empty browse filter
 uses the initial GET; a nonempty text filter uses the search POST. The Android
@@ -20682,6 +20743,15 @@ markers remain unknown when the bounded intake discards stderr; absence is not
 proof that no remote work ran. A later diagnostic must not be joined to the
 original joined gateway errors without same-attempt authority.
 
+The URL warning includes `ssh_diagnostic=selected-address-connect-timeout`
+when a gateway's bounded native SSH child returns exit 255 with empty stdout
+and its stderr matches the existing selected-address diagnostic while the
+caller and command contexts are live. A joined warning can carry this field
+for any qualifying attempt. Its order, the gateway identity and whether the
+loopback HTTP request began remain unknown. A remote command can reproduce the
+same text and status. A command deadline alone supplies no such diagnostic.
+An accepted fallback still reports its own census.
+
 A local route lookup and up selected VPN link are point metadata, not a current
 peer/session, packet-delivery or remote-listener control. Preserve unknown
 namespace, UID-rule, source-address, mark and VRF equivalence. Prioritize the
@@ -23011,6 +23081,18 @@ dashboard's "store notifications" panels show both.
   can escape before the marker. Classify the original attempt in its emitting
   build, then match its delivery receipt and any applicable entitlement
   decision. A store-wide accepted outcome can come from a different attempt.
+  The Play producer appends `stage=token_info` to its existing Google error
+  line when token information lookup or decoding fails before the publisher
+  and audience checks. It appends `stage=verified_processing` when processing
+  a verified push returns an error. The monitor retains a recognized stage on
+  the frame's first sampled line. Its rate counts every matching Google error
+  line across stages and producer versions. Legacy, unknown or malformed
+  suffixes leave the sample stage unknown. The parser accepts a bare message
+  or a complete glog or warpctl warning header naming the notification
+  recorder. A line from another logger quoting the recorder still counts
+  toward the Google error frame and leaves its sample stage unknown. HTTP
+  delivery, redelivery and entitlement require separate receipts. Panics can
+  escape before the outcome.
 - `store-notification-unverified` (WARN, from the log tail at five lines a
   minute): the same line for `refused_auth`, `refused_signature` or
   `refused_malformed`. Anyone can post to the routes, so these alone are not
@@ -29650,6 +29732,26 @@ immutable identity/catalog faults still page. Synthetic public-path controls
 exercise complete older predicates, a replaced artifact, independent immutable
 fault and unchanged real numeric lag without changing global source catalogs.
 
+The epoch-three runtime correction at source version 1003 replaces the source
+readiness trigger function and two intake functions that validate runtime and
+baseline readiness. Through 1002 their previous bodies are required. From
+publication, 1003 owns all three exact replacements, the new receipt validator
+and insert guard, and the journal's columns, keys, canonical JSON and digest
+checks, and insert, update/delete and truncate triggers. The original v844
+readiness trigger wiring and atomic outbox checks remain active, as do the
+v1002 source recovery and intake grading checks. A pre-1003 function restored
+at 1003 is immediate schema drift. A newer unrecognized head remains
+`cannot-observe`. These catalog reads establish the installed schema. Approval,
+worker readiness and activation each require their own evidence.
+
+Version 1004 changes only the executor control amendment insert function. Its
+previous body remains required through 1003. From 1004 the exact guard admits
+the scoped builder correction and keeps the existing lease, job-start and
+qualification evidence checks. Its original owner still checks the enabled
+insert trigger and amendment journal. Restoring the previous guard at 1004
+pages even if the trigger is wired correctly. The independent runtime
+correction checks published at 1003 continue to apply.
+
 The unresolved-predicate statistics migration (currently version 926, resolved
 from its position in the server list) has an explicit artifact contract in this
 catalog. It requires `public.transfer_contract_unresolved_predicate` on
@@ -35076,6 +35178,16 @@ independent operational consumer. Source availability is not deployment
 evidence: identify the running artifacts and verify the five `_bucket`
 families stop receiving samples while `_sum`, `_count`, and the paired maximum
 families remain fresh.
+
+On 2026-11-20 `urnetwork_http_request_duration_seconds` became a classic
+histogram again, with 10 bucket bounds and the route as its only label, for
+api's per-route percentiles (server LBALTOPT1.md R10). Its `_sum` and `_count`
+are the summary's series, so the route signals that read them are unchanged.
+The buckets add 11 series per route and instance, about 27.7k series over the
+2,515 `_count` series at the change. Mimir's per-user limit was then 2,000,000,
+with about 356k series in memory on an ingester against its local limit of
+1,000,000, and no `per_user_series_limit` discards. The other four families
+stay sum/count-only.
 
 The 2026-09-15 series-limit incident isolated another steady-growth branch.
 At 05:21:07Z one unchanged Mimir child began rejecting series and eventually
@@ -51267,12 +51379,12 @@ taskworker's uptime probe) posts a webrtc offer to the extender client's
 Redis offer set. The connect process holding the client's resident takes
 it and relays it to the client as exchange signals. The client's extender
 answerer (connect net_extender_webrtc_signal.go) answers on the same
-exchange, and the resident posts the answer for the prober (server
-connect/extender_webrtc_relay.go). The prober offers only to extenders
-whose builds serve the carrier: an activation tests webrtc only for an
-extender that offers the carrier (under S8's rules, only when tcp failed or
-was not offered), and the uptime task probes webrtc only on addresses
-accepted on it.
+exchange. The resident then tries to write the answer to Redis for the
+waiting prober (server connect/extender_webrtc_relay.go). The prober offers
+only to extenders whose builds serve the carrier: an activation tests webrtc
+only for an extender that offers the carrier (under S8's rules, only when
+tcp failed or was not offered), and the uptime task probes webrtc only on
+addresses accepted on it.
 
 Source: `urnetwork_extender_webrtc_relay_offers_total`, the offers each
 connect process's residents took for their clients, by outcome. Every
@@ -51281,8 +51393,8 @@ reads its increase over the trailing hour, summed over the processes by
 outcome, at one-minute evaluations of one bounded Mimir range read (the §26
 history read), every 5 minutes. The total counts every outcome:
 
-- `answered`: the client answered, and the answer was posted for the
-  prober;
+- `answered` records a relay outcome with no error, before the resident
+  attempts the Redis answer write.
 - `no_answer`: the client sent no answer before the offer's deadline, or
   its answer failed;
 - `expired`: the prober's deadline had passed when the offer was taken;
@@ -51299,11 +51411,11 @@ sum(increase(urnetwork_extender_webrtc_relay_offers_total{env="main",outcome="bu
   / sum(increase(urnetwork_extender_webrtc_relay_offers_total{env="main"}[1h]))
 ```
 
-Healthy: no history yet. As designed, nearly every offer is answered,
-since the prober offers only to builds that serve the carrier, and `busy`
-is about zero: the prober holds far fewer offers open than the bound (the
-uptime pass probes 16 addresses at a time per taskworker, and a client may
-have at most two offers pending).
+Healthy: no history yet. The relay should record `answered` for nearly
+every offer, since the prober offers only to builds that serve the carrier.
+The `busy` share should be about zero. The prober holds far fewer offers
+open than the bound (the uptime pass probes 16 addresses at a time per
+taskworker, and a client may have at most two offers pending).
 
 Thresholds (each judged at every one-minute evaluation of its hold, with at
 least 20 offers in the trailing hour):
@@ -51340,6 +51452,10 @@ False-negative qualifiers:
   nowhere, so the relay reads as idle, under the minimum. The webrtc step
   of the extenders dashboard's activation panels shows those probes
   failing.
+- **An answer the prober misses.** A failed Redis answer write or an
+  expired prober wait can leave `answered` high while probes time out.
+  Check the prober's answer-wait result for the same offer to confirm
+  receipt.
 - **A prober the failures quieted.** If deactivating the addresses accepted
   on webrtc alone leaves the prober fewer than 20 offers an hour, the relay
   reads as healthy again. `extender-supply-falling` (§28.5) and the

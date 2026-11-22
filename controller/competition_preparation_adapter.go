@@ -180,15 +180,29 @@ func checkCompetitionPreparationLiveness(ctx context.Context, settings *Settings
 	return captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.Raise(checkCompetitionPreparationLivenessInTx(ctx, tx, settings, request))
-		})
+		}, server.OptReadOnly(), server.OptNoRetry())
 	})
+}
+
+// Retry one observation timeout, never a negative authority decision.
+// The supervisor's independent lease-expiry fence still bounds the child.
+func checkCompetitionPreparationLivenessWithRetry(ctx context.Context, check func(context.Context) error) error {
+	for attempt := 0; ; attempt++ {
+		probeCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		err := check(probeCtx)
+		cancel()
+		if attempt != 0 || ctx.Err() != nil || !errors.Is(err, context.DeadlineExceeded) ||
+			errors.Is(err, ErrConflict) || errors.Is(err, ErrLeaseLost) || errors.Is(err, ErrAutomationHeld) {
+			return err
+		}
+	}
 }
 
 // Read only lifecycle facts on the caller's transaction, without advisory or
 // row locks, so the monitor cannot cancel healthy authorization by contention.
 func checkCompetitionPreparationLivenessInTx(ctx context.Context, tx server.PgTx, settings *Settings, request CompetitionPreparationRequest) error {
 	store := PostgresStore{}
-	if err := store.requireAutomationLeaseInTx(ctx, tx, settings, request.Lease); err != nil {
+	if err := store.observeAutomationLeaseInTx(ctx, tx, settings, request.Lease); err != nil {
 		return err
 	}
 	if err := ensureAutomationNotHeldInTx(ctx, tx, settings, "source_activation"); err != nil {
@@ -295,9 +309,9 @@ func RunCompetitionPreparation(ctx context.Context, settings *Settings, config C
 				return
 			case <-time.After(5 * time.Second):
 			}
-			probeCtx, probeCancel := context.WithTimeout(operationCtx, 5*time.Second)
-			err := checkCompetitionPreparationLiveness(probeCtx, settings, request)
-			probeCancel()
+			err := checkCompetitionPreparationLivenessWithRetry(operationCtx, func(ctx context.Context) error {
+				return checkCompetitionPreparationLiveness(ctx, settings, request)
+			})
 			if err != nil {
 				stop(err)
 				return
@@ -362,7 +376,11 @@ func (self *competitionPreparationAdapter) run(ctx context.Context, request Comp
 	if err != nil {
 		return nil, err
 	}
-	if err := sourcePreparationReceiptsMatch(intent, readiness); err != nil {
+	correction, err := readEpochThreeRuntimeCorrection(ctx, intent)
+	if err != nil {
+		return nil, err
+	}
+	if err := sourcePreparationReceiptsMatchWithCorrection(intent, readiness, correction); err != nil {
 		return nil, err
 	}
 	for _, role := range readiness {

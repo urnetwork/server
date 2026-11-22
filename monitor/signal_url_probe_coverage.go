@@ -159,7 +159,11 @@ func (self urlProbeCoverageProbe) check(ctx context.Context, env *probeEnv) ([]f
 			return nil, err
 		}
 		observation.CensusReason = "transport_unavailable"
-		return []finding{urlProbeCoverageUnknown("bounded Mimir observation unavailable " + observationFailureDetails(err, classifyObservationError(err)))}, nil
+		details := observationFailureDetails(err, classifyObservationError(err))
+		if errors.Is(err, errMimirSshConnectTimeoutDiagnostic) {
+			details += " ssh_diagnostic=selected-address-connect-timeout"
+		}
+		return []finding{urlProbeCoverageUnknown("bounded Mimir observation unavailable " + details)}, nil
 	}
 	now = env.now()
 	observation.ObservedAt = now

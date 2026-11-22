@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/http3"
+	"github.com/urnetwork/quic-go"
+	"github.com/urnetwork/quic-go/http3"
 
 	connectcore "github.com/urnetwork/connect"
 

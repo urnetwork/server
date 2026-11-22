@@ -16,6 +16,41 @@ identify production source.
 
 - [Production epoch 1 — initial baseline](#production-epoch-1--initial-baseline)
 - [Production epoch 2 — intake and two-host evaluations open](#production-epoch-2--intake-and-two-host-evaluations-open)
+- [Production epoch 3 — source checkpoint](#production-epoch-3--source-checkpoint)
+
+## Production epoch 3 — source checkpoint
+
+Published and checked against origin on 2026-11-19. The public API verified
+that intake opened at 17:47 UTC with grading paused.
+
+| Identity | Value |
+|---|---|
+| Season | `sim-latency-production-20261028-r2` |
+| Round | `01a1f4d0-47c9-ac2d-ce45-55ef159a9b41` |
+| Submission window (UTC) | `2026-11-19T17:47:04.058929Z` to `2026-11-26T17:47:04.058929Z` |
+| Source generation / activation generation | `2` / `3` |
+| Canonical [source lock](launch/EPOCH-3-SOURCE-LOCK.json) SHA-256 | `cb47696e96a0906cc6f3055bee1f623813ee433b1ee0874c658477fd703643f5` |
+| Evaluator image (Go 1.27.4) | `sha256:4eb3d0a38e0d5b2b895eb1abc517d4d141ad5a94d99101002e0fda32241d7180` |
+| Takeover margin | `0.269` (26.9%) |
+| G2 | Requests and bytes each at least 95% of baseline; no upper bounds |
+| G7 | Expected pages and bytes each at least 95% of same-epoch baseline coverage |
+
+This checkpoint includes the approved epoch-2 winner. Use the immutable
+commits below, not the moving `sim-latency` branch head. The linked JSON
+reproduces the source-lock digest advertised by the live API.
+
+| Repository | Exact commit |
+|---|---|
+| [server](https://github.com/urnetwork/server) | `43d6eff5f54dda1d7319460bca722313ef22e4ce` |
+| [connect](https://github.com/urnetwork/connect) | `86e5878f829ffbecc2a10f4e0cb7a2edcfef0605` |
+| [sdk](https://github.com/urnetwork/sdk) | `a1565493f0e73fb5ac84f4ef576da6f47453c24a` |
+| [proxy](https://github.com/urnetwork/proxy) | `af1d364fe34b807c31936642bff7d3fd849ab2a4` |
+| [glog](https://github.com/urnetwork/glog) | `1c4954b017d9e8140a4e7020f914eb27410a41c6` |
+| [goidenticons](https://github.com/urnetwork/goidenticons) | `39ccec1b69db3a6f67e7346d6f44863499e6241d` |
+| [userwireguard](https://github.com/urnetwork/userwireguard) | `f9a92f0e5f5577a80d358065c4d39ca21f971a1c` |
+| [sn](https://github.com/urfoundation/sn) | `6e686aabd53b7c45b154051fd268138988224eba` |
+| [warp](https://github.com/urnetwork/warp) | `8dfa405ec380a60307952778921f05bba1c59a33` |
+| [gvisor](https://github.com/urnetwork/gvisor) | `57c9e137f7407ad6cd41dcca1ba304a446e09c79` |
 
 ## Production epoch 2 — intake and two-host evaluations open
 

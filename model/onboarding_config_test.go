@@ -508,6 +508,21 @@ func TestCountryCodeFromStorefront(t *testing.T) {
 	connect.AssertEqual(t, true, 245 <= len(countryAlpha3ToAlpha2))
 }
 
+// A country signal is a country: every ISO 3166-1 alpha-2 code and Kosovo's
+// XK, in any case, and no other two letters.
+func TestIsCountryCode(t *testing.T) {
+	for _, code := range []string{"US", "in", " br ", "XK", "gb"} {
+		connect.AssertEqual(t, true, IsCountryCode(code))
+	}
+	for _, code := range []string{"", "EU", "A1", "ZZ", "UK", "USA", "1A"} {
+		connect.AssertEqual(t, false, IsCountryCode(code))
+	}
+	for code := range isoCountryNames {
+		connect.AssertEqual(t, true, IsCountryCode(code))
+	}
+	connect.AssertEqual(t, len(isoCountryNames)+1, len(countryAlpha2Codes))
+}
+
 func TestAssignExperimentsPausedOverlay(t *testing.T) {
 	inApp := testExperiment("offer_screen", map[string]float64{"control": 50, "warm": 50}, "control", "warm")
 	c := &OnboardingConfig{Experiments: []*OnboardingExperiment{inApp}}

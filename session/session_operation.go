@@ -206,8 +206,14 @@ func EnforceSessionOperation(ctx context.Context, networkId, operationId server.
 			}
 			receipt, err = enforceSessionRevoke(ctx, networkId, operationId, op.Action, op.Target, op.Keep, op.Epoch)
 			if err != nil {
+				// A definitive refusal of the script never changes on retry: the
+				// target is gone, or the session sign out other sessions keeps is
+				// no longer live (revoked from another device, or expired). Left
+				// prepared, the journal would hold every other session of the
+				// network unavailable until recovery, which could never apply it
+				// (S2 N1).
 				var refusal *SessionError
-				if errors.As(err, &refusal) && refusal.Code == "session_not_found" {
+				if errors.As(err, &refusal) && (refusal.Code == "session_not_found" || refusal.Code == "current_session_required") {
 					_, sqlErr := tx.Exec(ctx, `UPDATE network_session_operation SET status='failed',quota_reserved=false,update_time=$3 WHERE network_id=$1 AND operation_id=$2`, networkId, operationId, server.NowUtc())
 					if sqlErr != nil {
 						return sqlErr
@@ -221,9 +227,11 @@ func EnforceSessionOperation(ctx context.Context, networkId, operationId server.
 		// Every revocation record of the network refuses the targets before the
 		// operation is enforced; a failure leaves it prepared for the same
 		// replay, which reads the saved receipt.
-		if err = RevokeSessionRecords(ctx, networkId, receipt.TargetSessionIds); err != nil {
+		if err = revokeOperationSessionRecords(ctx, networkId, op.Action, receipt.TargetSessionIds); err != nil {
 			return err
 		}
+		// only now can a recheck read the refusal (session_revocation_event.go)
+		announceSessionRevocation(ctx, networkId)
 		receipt.SessionId = op.Target
 		receipt.KeptSessionId = op.Keep
 		receipt.State = "enforced"
@@ -296,9 +304,10 @@ func GetSessionOperation(clientSession *ClientSession, operationId server.Id) (r
 			if receipt != nil {
 				// Enforced means every revocation record refuses the targets,
 				// which an interrupted enforcement may not have finished.
-				if err := RevokeSessionRecords(clientSession.Ctx, clientSession.ByJwt.NetworkId, receipt.TargetSessionIds); err != nil {
+				if err := revokeOperationSessionRecords(clientSession.Ctx, clientSession.ByJwt.NetworkId, op.Action, receipt.TargetSessionIds); err != nil {
 					return err
 				}
+				announceSessionRevocation(clientSession.Ctx, clientSession.ByJwt.NetworkId)
 				receipt.SessionId = op.Target
 				receipt.KeptSessionId = op.Keep
 				receipt.State = "enforced"
@@ -368,6 +377,16 @@ func JournalSessionRetirementInTx(ctx context.Context, tx server.PgTx, networkId
 	}
 	_, err := tx.Exec(ctx, `INSERT INTO network_session_operation(network_id,operation_id,action,fingerprint,actor,credential_epoch,status,quota_reserved,create_time,update_time,retain_until) VALUES($1,$2,$3,$3,'{}',$4,'prepared',false,$4,$4,$5) ON CONFLICT(network_id,operation_id) DO NOTHING`, networkId, operationId, action, cutoff, cutoff.Add(24*time.Hour))
 	return err
+}
+
+// DeferSessionOperation moves a pending operation that recovery could not
+// advance behind every other pending one (PendingSessionOperations reads them
+// oldest update first).
+func DeferSessionOperation(ctx context.Context, networkId, operationId server.Id) error {
+	return sessionTx(ctx, func(tx server.PgTx) error {
+		_, err := tx.Exec(ctx, `UPDATE network_session_operation SET update_time=$3 WHERE network_id=$1 AND operation_id=$2 AND status IN ('prepared','enforced')`, networkId, operationId, server.NowUtc())
+		return err
+	})
 }
 
 // Bounded deletion only for terminal operations/receipts. Unfinished work is

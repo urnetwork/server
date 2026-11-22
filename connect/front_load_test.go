@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"io"
@@ -221,6 +222,70 @@ func TestLbAltStartServesTheRealFrontFromTheEnv(t *testing.T) {
 	} {
 		if got := header.Get(name); got != want {
 			t.Errorf("%s: %q, want %q", name, got, want)
+		}
+	}
+}
+
+// The vault's lbalt_session_tickets.yml turns the shared session ticket keys
+// on only with enabled and usable secrets, which it gives in its order;
+// without the file, or with enabled false, the front keeps Go's per-process
+// keys; and a file that sets enabled with secrets the front can't use, or
+// that names another field, fails the start without quoting a secret
+// (LBALTOPT2 R22 (a)).
+func TestLoadFrontSessionTicketSecrets(t *testing.T) {
+	secret := func(fill byte, length int) (string, []byte) {
+		secretBytes := []byte(strings.Repeat(string([]byte{fill}), length))
+		return base64.StdEncoding.EncodeToString(secretBytes), secretBytes
+	}
+	firstEncoded, first := secret('a', 32)
+	secondEncoded, second := secret('b', 48)
+	shortEncoded, _ := secret('c', 31)
+
+	secrets, err := loadFrontSessionTicketSecrets()
+	if err != nil || secrets != nil {
+		t.Fatalf("without the file: %d secrets, %v; want none", len(secrets), err)
+	}
+
+	for _, c := range []struct {
+		what    string
+		content string
+		want    [][]byte
+		refused bool
+	}{
+		{what: "enabled with two secrets", content: "enabled: true\nsecrets:\n  - " + firstEncoded + "\n  - " + secondEncoded + "\n", want: [][]byte{first, second}},
+		{what: "enabled false", content: "enabled: false\nsecrets:\n  - " + firstEncoded + "\n"},
+		{what: "secrets without enabled", content: "secrets:\n  - " + firstEncoded + "\n"},
+		{what: "empty", content: ""},
+		{what: "enabled without secrets", content: "enabled: true\n", refused: true},
+		{what: "a secret shorter than 32 bytes", content: "enabled: true\nsecrets:\n  - " + firstEncoded + "\n  - " + shortEncoded + "\n", refused: true},
+		{what: "a secret that isn't base64", content: "enabled: true\nsecrets:\n  - " + firstEncoded + "!\n", refused: true},
+		{what: "more secrets than the front takes", content: "enabled: true\nsecrets: [" + strings.Repeat(firstEncoded+", ", 4) + firstEncoded + "]\n", refused: true},
+		{what: "another field", content: "enabled: true\nsecret: " + firstEncoded + "\n", refused: true},
+		{what: "a second document", content: "enabled: false\n---\nenabled: true\n", refused: true},
+	} {
+		pop := server.Vault.PushSimpleResource(frontSessionTicketsResource, []byte(c.content))
+		secrets, err := loadFrontSessionTicketSecrets()
+		pop()
+		if refused := err != nil; refused != c.refused {
+			t.Errorf("%s: refused %t (%v), want %t", c.what, refused, err, c.refused)
+			continue
+		}
+		if err != nil {
+			for _, encoded := range []string{firstEncoded, secondEncoded, shortEncoded} {
+				if strings.Contains(err.Error(), encoded) || strings.Contains(err.Error(), encoded[:16]) {
+					t.Errorf("%s: the error quotes a secret: %v", c.what, err)
+				}
+			}
+			continue
+		}
+		if len(secrets) != len(c.want) {
+			t.Errorf("%s: %d secrets, want %d", c.what, len(secrets), len(c.want))
+			continue
+		}
+		for i := range secrets {
+			if string(secrets[i]) != string(c.want[i]) {
+				t.Errorf("%s: secret %d differs", c.what, i)
+			}
 		}
 	}
 }

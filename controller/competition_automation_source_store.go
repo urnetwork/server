@@ -130,6 +130,13 @@ func (self PostgresStore) renewAutomationLeaseInTx(ctx context.Context, tx serve
 // Source writers hold season scope; renewers hold the exact lease row instead.
 // Neither path acquires another connection or revives an expired owner.
 func (self PostgresStore) requireAutomationLeaseInTx(ctx context.Context, tx server.PgTx, settings *Settings, lease model.CompetitionSupervisorLease) error {
+	if err := self.observeAutomationLeaseInTx(ctx, tx, settings, lease); err != nil {
+		return err
+	}
+	return setAutomationLeaseGuardsInTx(ctx, tx, settings, lease)
+}
+
+func (self PostgresStore) observeAutomationLeaseInTx(ctx context.Context, tx server.PgTx, settings *Settings, lease model.CompetitionSupervisorLease) error {
 	if !settings.AutomationPolicy.Enabled {
 		return ErrAutomationDisabled
 	}
@@ -144,7 +151,7 @@ func (self PostgresStore) requireAutomationLeaseInTx(ctx context.Context, tx ser
 	if !valid {
 		return ErrLeaseLost
 	}
-	return setAutomationLeaseGuardsInTx(ctx, tx, settings, lease)
+	return nil
 }
 
 // Both the fenced writer and read-only worker observer install the same
@@ -480,7 +487,9 @@ func (self PostgresStore) RecordSourceReadiness(ctx context.Context, settings *S
 			if intent.AbandonedAt != nil {
 				panic(ErrConflict)
 			}
-			if receipt.TargetRoundId != intent.TargetRoundId || receipt.ManifestCommit != intent.ManifestCommit || receipt.ManifestSha256 != intent.ManifestSha256 || receipt.SourceLockSha256 != intent.SourceLockSha256 || receipt.QualificationSha256 != intent.HostQualificationSha256 {
+			correction, err := loadEpochThreeRuntimeCorrection(ctx, tx, intent)
+			server.Raise(err)
+			if !sourcePreparationReceiptMatchesCorrection(intent, receipt, correction) {
 				panic(ErrConflict)
 			}
 			receipt.RecordedAt = time.Time{}

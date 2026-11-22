@@ -12,10 +12,12 @@ import (
 )
 
 // The Redis revocation record's reads and writes chart beside the other
-// credential state signals, and each panel explains its outcomes: a read the
-// record cannot answer refuses the credential, readers stay off until vault
-// auth.yml sets revocation_record_enabled while writers always write, and a
-// failed revocation write fails the revocation itself. promtool evaluates the
+// credential state signals, and each panel explains its outcomes: a read that
+// cannot reach Redis accepts the credential unchecked and counts it (owner
+// decision 3 of 2026-11-18, session/REVOKE-FINAL.md §15; it refused the
+// credential before), readers stay off until vault auth.yml sets
+// revocation_record_enabled while writers always write, and a failed
+// revocation write fails the revocation itself. promtool evaluates the
 // charted expressions over synthetic counters.
 func TestRevocationRecordPanelsChartReadAndWriteOutcomes(t *testing.T) {
 	dashboard := readTestDashboard(t, "signals.json")
@@ -37,11 +39,12 @@ func TestRevocationRecordPanelsChartReadAndWriteOutcomes(t *testing.T) {
 		words  []string
 	}{
 		{checks, `sum by (service, outcome) (rate(urnetwork_jwt_state_record_checks_total{env="$env"}[$__rate_interval]))`, "{{service}} {{outcome}}",
-			[]string{"record_valid", "record_refused", "record_miss", "record_unavailable", "refused the credential as unavailable",
-				"Readers stay off", "auth.yml", "revocation_record_enabled"}},
+			[]string{"record_valid", "record_refused", "record_miss", "record_unavailable", "accepts it unchecked",
+				"urnetwork_session_check_unavailable_total", "decision 3", "Readers stay off", "auth.yml", "revocation_record_enabled"}},
 		{writes, `sum by (service, kind, outcome) (rate(urnetwork_session_revocation_record_writes_total{env="$env"}[$__rate_interval]))`, "{{service}} {{kind}} {{outcome}}",
 			[]string{"client", "session", "credential", "network", "projection", "failure", "stale",
-				"fails the revocation itself", "because Redis was unavailable", "Writers always write", "revocation_record_enabled"}},
+				"fails the revocation itself", "because Redis was unavailable", "Writers always write", "revocation_record_enabled",
+				"SessionRevocationWritesFailing", "more than 1%"}},
 	} {
 		if len(chart.panel.Targets) != 1 || chart.panel.Targets[0].Expr != chart.expr || chart.panel.Targets[0].LegendFormat != chart.legend {
 			t.Errorf("%s does not chart %s", chart.panel.Title, chart.expr)

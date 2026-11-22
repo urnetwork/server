@@ -240,7 +240,9 @@ fi
 
 install -m 0400 "$patch_path" "$build_context/canonical.patch"
 install -m 0400 "$policy_path" "$build_context/policy.json"
-install -m 0555 "$trusted_validator" "$build_context/competitionpatch"
+if [[ "$subevaluation_scoped" != true ]]; then
+    install -m 0555 "$trusted_validator" "$build_context/competitionpatch"
+fi
 printf '%s\n' "$builder_identity" > "$build_context/builder-identity.json"
 
 # Authenticate the freshly materialized checkout independently of the

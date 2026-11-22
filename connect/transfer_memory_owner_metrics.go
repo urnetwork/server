@@ -11,6 +11,11 @@ func (self *Exchange) residentClientSettings() *connectcore.ClientSettings {
 	settings := connectcore.DefaultClientSettingsWithBufferSize(self.settings.ExchangeBufferSize)
 	settings.MemoryOwnerLedger = self.memoryOwnerLedger
 	settings.PayloadOwnerLedger = self.sdkPayloadOwnerLedger
+	// A resident's client never hears a device's network quality change, and
+	// the process-wide listener list it would join is cloned on every add and
+	// remove: with tens of thousands of residents a process, that was 13% of
+	// connect's allocation (LBALTOPT2 §3.5, R13).
+	settings.SkipNetworkQualityListener = true
 	return settings
 }
 

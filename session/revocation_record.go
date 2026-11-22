@@ -151,6 +151,7 @@ const (
 	revocationNoActiveRow
 	revocationRotated
 	revocationSessionRevoked
+	revocationNetworkDeleted
 )
 
 // The fields one check reads, in a fixed order.
@@ -210,7 +211,7 @@ func (self *revocationRecordQuery) verdict(byJwt *ByJwt, values []any) (revocati
 		return revocationSessionRevoked, time.Time{}
 	}
 	if _, ok := value(2); ok {
-		return revocationNoActiveRow, time.Time{}
+		return revocationNetworkDeleted, time.Time{}
 	}
 	user, userOk := value(0)
 	credential, credentialOk := value(self.credentialIdx)
@@ -326,18 +327,24 @@ func injectedRevocationRecordWriteFailure() error {
 }
 
 // Answers a tagged credential's state check from its record, or through the
-// SQL fallback when the record cannot answer. A Redis failure is unavailable:
-// the record is the authority, so nothing is accepted without it.
+// SQL fallback when the record cannot answer. When Redis does not answer the
+// read within its check budget (revocationCheckBudget: two seconds on the
+// hosted path, else RevocationCheckBudget), the credential is accepted
+// unchecked (decision 3, revocation_check.go): SQL is not asked instead, so an
+// outage of Redis does not move every tagged check onto PgBouncer. The record
+// is never read inside a transaction (ValidateByJwtStateInTx asks SQL).
 func validateByJwtStateRecord(ctx context.Context, byJwt *ByJwt, parentClientId *server.Id) error {
 	if err := refuseRememberedByJwtState(ctx, byJwt, parentClientId); err != nil {
 		return err
 	}
 	lineage, _ := revocationRecordLineage(byJwt)
 	query := newRevocationRecordQuery(byJwt, lineage, parentClientId)
-	values, err := readRevocationRecord(ctx, query.key, query.fields)
+	readCtx, cancelRead := context.WithTimeout(ctx, revocationCheckBudget(ctx))
+	values, err := readRevocationRecord(readCtx, query.key, query.fields)
+	cancelRead()
 	if err != nil {
 		observeRevocationRecordCheck(ctx, byJwt, "record_unavailable")
-		return errors.Join(ErrAuthUnavailable, ErrSessionStoreUnavailable)
+		return acceptUncheckedRevocation(ctx, byJwt)
 	}
 	verdict, credentialChangeTime := query.verdict(byJwt, values)
 	switch verdict {
@@ -353,12 +360,48 @@ func validateByJwtStateRecord(ctx context.Context, byJwt *ByJwt, parentClientId 
 		// refusal ttl. The record answers again for one read.
 		observeRevocationRecordCheck(ctx, byJwt, "record_refused")
 		return rejectNoActiveRow(byJwt)
-	case revocationRotated:
-		observeRevocationRecordCheck(ctx, byJwt, "record_refused")
-		return rejectRotated(byJwt, credentialChangeTime)
+	case revocationRotated, revocationNetworkDeleted:
+		return confirmNetworkRevocation(ctx, byJwt, lineage, parentClientId, verdict, credentialChangeTime)
 	}
 	observeRevocationRecordCheck(ctx, byJwt, "record_miss")
 	return validateByJwtStateRecordFallback(ctx, byJwt, lineage, parentClientId)
+}
+
+// A network-wide revocation, a credential cutoff (n:cred) or a deletion
+// (n:del), is written to every shard before its change commits. A change that
+// then fails to commit leaves a spurious one, which no projection lowers: an
+// n:cred lasts as long as the network's records are used, signing out every
+// earlier credential without a password change, and an n:del lasts 25 hours
+// (S2 N4). The SQL state query, which the change commits to, confirms the
+// refusal: a refusal SQL does not confirm was never committed, and is
+// overruled. Such refusals are rare (resets and deletions), so confirming
+// them costs little. When SQL cannot answer, the record's refusal stands, as
+// before.
+func confirmNetworkRevocation(ctx context.Context, byJwt *ByJwt, lineage server.Id, parentClientId *server.Id, verdict revocationVerdict, credentialChangeTime time.Time) error {
+	err := func() (returnErr error) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				failure, ok := recovered.(error)
+				if !ok || !authDependencyUnavailable(failure) {
+					panic(recovered)
+				}
+				returnErr = errors.Join(ErrAuthUnavailable, failure)
+			}
+		}()
+		return validateByJwtStateRecordFallback(ctx, byJwt, lineage, parentClientId)
+	}()
+	if err == nil {
+		observeRevocationRecordCheck(ctx, byJwt, "record_overruled")
+		return nil
+	}
+	observeRevocationRecordCheck(ctx, byJwt, "record_refused")
+	if !authDependencyUnavailable(err) {
+		return err
+	}
+	if verdict == revocationRotated {
+		return rejectRotated(byJwt, credentialChangeTime)
+	}
+	return rejectNoActiveRow(byJwt)
 }
 
 // What a valid fallback read, for the projection.
@@ -374,12 +417,21 @@ type revocationRecordFacts struct {
 // session credential first passes its network revocation marker and the
 // session operation journal, which outlives the marker through every
 // affected credential's horizon, so lost Redis state cannot revive it.
+//
+// A marker Redis does not answer within the check budget is skipped
+// (decision 3): the journal and the state query still decide, the acceptance
+// is counted, and nothing is projected, since the projection would say the
+// session is not revoked. The marker is read before the state query takes its
+// connection, so the hosted path's longer budget holds none.
 func validateByJwtStateRecordFallback(ctx context.Context, byJwt *ByJwt, lineage server.Id, parentClientId *server.Id) (returnErr error) {
 	observed := server.NowUtc()
+	markerUnchecked := false
 	if byJwt.SessionId != nil {
-		if err := CheckSession(ctx, byJwt.NetworkId, *byJwt.SessionId); err != nil {
+		unchecked, err := checkSessionWithinBudget(ctx, byJwt, revocationCheckBudget(ctx))
+		if err != nil {
 			return err
 		}
+		markerUnchecked = unchecked
 	}
 	key, rememberable := newStateRefusalKey(byJwt, parentClientId)
 	source := stateQuerySourceFromContext(ctx)
@@ -406,8 +458,15 @@ func validateByJwtStateRecordFallback(ctx context.Context, byJwt *ByJwt, lineage
 		stateRefusals.remember(key, time.Now())
 		stateRefusalCounters[source][stateRefusalStored].Inc()
 	}
-	if returnErr != nil || facts == nil {
+	if returnErr != nil {
 		return
+	}
+	if markerUnchecked {
+		noteUncheckedAcceptance(ctx, byJwt, revocationCheckPathFromContext(ctx))
+		return nil
+	}
+	if facts == nil {
+		return nil
 	}
 	// The answer is already valid; a projection that cannot be written only
 	// leaves the next check to SQL.
@@ -644,6 +703,18 @@ func addClientTombstones(keyFields map[string][]string, networkId server.Id, cli
 	}
 }
 
+// A client whose ancestor chain no longer reaches a top-level row, because an
+// ancestor's row was deleted first (the stale-child reap deletes a parent in
+// an earlier batch than its child), resolves no root. A projection made while
+// the chain was whole sits in the shard of the root it had, which is no
+// longer known, and kept accepting the client for up to an hour (S2 N5). Its
+// tombstone goes into every shard of its network.
+func addUnrootedClientTombstones(keyFields map[string][]string, networkId server.Id, clientId server.Id) {
+	for _, key := range revocationRecordNetworkKeys(networkId) {
+		keyFields[key] = append(keyFields[key], revocationClientField(clientId))
+	}
+}
+
 // Tombstones clients the caller is deactivating in tx, before it commits. The
 // caller holds the clients' row locks. A failure must fail the transaction: a
 // committed deactivation without its tombstone could leave a projection
@@ -675,6 +746,8 @@ func RevokeNetworkClientRecordsInTx(ctx context.Context, tx server.PgCanQuery, c
 	for clientId, networkId := range clientNetworkIds {
 		if rootId, ok := roots[clientId]; ok {
 			addClientTombstones(keyFields, networkId, clientId, rootId)
+		} else {
+			addUnrootedClientTombstones(keyFields, networkId, clientId)
 		}
 	}
 	return writeRevocationTombstones(ctx, keyFields)
@@ -744,6 +817,8 @@ func RevokeRetiredClientRecordsInTx(ctx context.Context, tx server.PgCanQuery, r
 		}
 		if rootId, ok := roots[*survivor]; ok {
 			addClientTombstones(keyFields, client.NetworkId, client.ClientId, rootId)
+		} else {
+			addUnrootedClientTombstones(keyFields, client.NetworkId, client.ClientId)
 		}
 	}
 	return writeRevocationTombstones(ctx, keyFields)
@@ -766,6 +841,30 @@ func RevokeSessionRecords(ctx context.Context, networkId server.Id, sessionIds [
 		keyFields[key] = fields
 	}
 	return writeRevocationTombstones(ctx, keyFields)
+}
+
+// The session tombstones a revocation operation's targets need before it is
+// enforced (F4, approved 2026-11-18).
+//
+// A single revoke and a revoke of the other sessions tombstone every target
+// in every shard: a session's client credentials read s:<session> in their
+// own root's shard, where their fallback projected it positive, and an
+// explicit re-auth leaves a client's earlier tokens carrying the session after
+// the client is bound to another, so no smaller set of shards is known to
+// cover them.
+//
+// A password reset (or sign-out-all) and a network deletion write none. The
+// transaction that journaled them already wrote, to every shard of the
+// network, the credential cutoff (n:cred) or the deletion mark (n:del), and
+// those refuse every target: each credential of a session carries the lineage
+// time its session was created with, and a reset retires only sessions
+// created before its cutoff. One field per shard does what a field per
+// target per shard did.
+func revokeOperationSessionRecords(ctx context.Context, networkId server.Id, action string, sessionIds []server.Id) error {
+	if action == "reset" || action == "delete" {
+		return nil
+	}
+	return RevokeSessionRecords(ctx, networkId, sessionIds)
 }
 
 // Raises the credential cutoff of every network the user administers, in tx,

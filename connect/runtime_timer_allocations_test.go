@@ -71,6 +71,73 @@ func timerCreator(stack []uintptr) string {
 	}
 }
 
+// Profiles every allocation while work runs and returns the number of sweep
+// timers (internal/timersweep) that function created itself.
+func countSweepTimersCreated(t testing.TB, function string, work func()) int64 {
+	t.Helper()
+	rate := runtime.MemProfileRate
+	runtime.MemProfileRate = 1
+	defer func() {
+		runtime.MemProfileRate = rate
+	}()
+	before := allocationsBy(function, sweepTimerCreator)
+	work()
+	return allocationsBy(function, sweepTimerCreator) - before
+}
+
+// The allocations so far whose creator, by the given rule, is function. Read
+// after three collections, as timersCreatedBy is.
+func allocationsBy(function string, creator func([]uintptr) string) int64 {
+	for range 3 {
+		runtime.GC()
+	}
+	records := []runtime.MemProfileRecord{}
+	for {
+		n, ok := runtime.MemProfile(records, true)
+		if ok {
+			records = records[:n]
+			break
+		}
+		records = make([]runtime.MemProfileRecord, n+64)
+	}
+	count := int64(0)
+	for _, record := range records {
+		if creator(record.Stack()) == function {
+			count += record.AllocObjects
+		}
+	}
+	return count
+}
+
+// The function that made a sweep timer, for the allocation of its channel, the
+// one allocation of every sweep timer and ticker, or "" for any other.
+func sweepTimerCreator(stack []uintptr) string {
+	frames := runtime.CallersFrames(stack)
+	channel := false
+	sweepTimer := false
+	for {
+		frame, more := frames.Next()
+		switch {
+		case frame.Function == "runtime.makechan":
+			channel = true
+		case strings.HasPrefix(frame.Function, "runtime."):
+		case frame.Function == "github.com/urnetwork/server/internal/timersweep.(*Sweep).NewTimer" ||
+			frame.Function == "github.com/urnetwork/server/internal/timersweep.(*Sweep).NewTicker":
+			if !channel {
+				return ""
+			}
+			sweepTimer = true
+		case sweepTimer:
+			return frame.Function
+		default:
+			return ""
+		}
+		if !more {
+			return ""
+		}
+	}
+}
+
 // Creates a timer per pass, as a select on time.After in a loop does.
 func createTimerPerPassForTest(passCount int) {
 	for range passCount {

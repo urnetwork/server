@@ -652,7 +652,7 @@ func newE2eFront(t *testing.T, settings *FrontSettings, editRouteTable func(rout
 }
 
 // Binds one interface's sockets and serves them, as connect does: TLS
-// through the front's one long-lived config with tls.NewListener, never a
+// through the front's one long-lived config with NewTlsListener, never a
 // clone of it, so the server leaves the config alone.
 func (self *e2eFront) serveInterface(t *testing.T, interfaceName string) *e2eInterface {
 	t.Helper()
@@ -673,10 +673,10 @@ func (self *e2eFront) serveInterface(t *testing.T, interfaceName string) *e2eInt
 		t.Fatal(err)
 	}
 	e2eInterface.httpsAddr = httpsListener.Addr().String()
-	go httpsServer.Serve(tls.NewListener(httpsListener, self.front.TlsConfig()))
+	go httpsServer.Serve(NewTlsListener(httpsListener, self.front.TlsConfig(), httpsServer.ReadHeaderTimeout, nil))
 	if httpsIpv6Listener, err := net.Listen("tcp6", "[::1]:0"); err == nil {
 		e2eInterface.httpsIpv6Addr = httpsIpv6Listener.Addr().String()
-		go httpsServer.Serve(tls.NewListener(httpsIpv6Listener, self.front.TlsConfig()))
+		go httpsServer.Serve(NewTlsListener(httpsIpv6Listener, self.front.TlsConfig(), httpsServer.ReadHeaderTimeout, nil))
 	}
 	httpListener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {

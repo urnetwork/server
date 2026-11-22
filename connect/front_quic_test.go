@@ -19,9 +19,10 @@ import (
 	"testing"
 	"time"
 
-	quic "github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/http3"
-	"github.com/quic-go/quic-go/quicvarint"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+	quic "github.com/urnetwork/quic-go"
+	"github.com/urnetwork/quic-go/http3"
+	"github.com/urnetwork/quic-go/quicvarint"
 
 	"github.com/urnetwork/server/nginx"
 )
@@ -64,10 +65,10 @@ func TestFrontQuicDispatchesConnectNamesToConnect(t *testing.T) {
 	}
 	acquired := env.front.acquired()
 	wantAcquired := []string{
-		testFrontInterfaceA + " 127.0.0.1",
-		testFrontInterfaceA + " 127.0.0.1",
-		testFrontInterfaceB + " ::1",
-		testFrontInterfaceB + " ::1",
+		testFrontInterfaceA + " 127.0.0.1 connect",
+		testFrontInterfaceA + " 127.0.0.1 connect",
+		testFrontInterfaceB + " ::1 connect",
+		testFrontInterfaceB + " ::1 connect",
 	}
 	if !slices.Equal(acquired, wantAcquired) {
 		t.Fatalf("connection cap charged to %v, want %v", acquired, wantAcquired)
@@ -207,10 +208,12 @@ func TestFrontQuicConnectionCapRefusesWithRateLimited(t *testing.T) {
 	env.nextHandled()
 }
 
-// An api connection over the address's cap is closed with 0x1001 before
-// any request, as a connect connection is: the cap counts every api
-// connection an address holds, and a connect connection shares it. Once the
-// admitted api connection ends, its slot admits the next.
+// An api connection over the address's cap of api connections is closed
+// with 0x1001 before any request, as a connect connection over its own cap
+// is, but the two classes are capped apart (LBALTOPT2 R15): an address at its
+// api cap still gets its connect connection, and one at its connect cap still
+// gets its api connection. Once the admitted api connection ends, its slot
+// admits the next.
 func TestFrontQuicConnectionCapRefusesApiConnectionsWithRateLimited(t *testing.T) {
 	env := newTestFrontEnv(t, func(env *testFrontEnv) {
 		env.front.connectionCap = 1
@@ -223,26 +226,37 @@ func TestFrontQuicConnectionCapRefusesApiConnectionsWithRateLimited(t *testing.T
 	}
 	env.nextDispatch()
 
-	for _, c := range []struct {
-		serverName string
-		nextProtos []string
-	}{
-		{serverName: testFrontApiName, nextProtos: []string{http3.NextProtoH3}},
-		{serverName: testFrontConnectName, nextProtos: nil},
-	} {
-		conn, err := env.dialQuic(address, frontPortQuic, c.serverName, c.nextProtos)
-		if code := testFrontApplicationCode(t, conn, err); code != frontQuicErrorCodeRateLimited {
-			t.Fatalf("%s over the cap closed with %#x, want %#x", c.serverName, code, frontQuicErrorCodeRateLimited)
-		}
-		env.nextDispatch()
+	// at its api cap: a second api connection is refused
+	refused, err := env.dialQuic(address, frontPortQuic, testFrontApiName, []string{http3.NextProtoH3})
+	if code := testFrontApplicationCode(t, refused, err); code != frontQuicErrorCodeRateLimited {
+		t.Fatalf("an api connection over the cap closed with %#x, want %#x", code, frontQuicErrorCodeRateLimited)
 	}
+	env.nextDispatch()
+
+	// the connect transport has a cap of its own
+	connectConn, err := env.dialQuic(address, frontPortQuic, testFrontConnectName, nil)
+	if err != nil {
+		t.Fatalf("a connect connection with the api cap full: %v", err)
+	}
+	defer connectConn.CloseWithError(0, "")
+	if dispatch := env.nextDispatch(); dispatch.nameClass != nginx.NameClassConnect {
+		t.Fatalf("connect dispatch = %+v", dispatch)
+	}
+	env.nextHandled()
+
+	// and is refused only past its own
+	overConnect, err := env.dialQuic(address, frontPortQuic, testFrontConnectName, nil)
+	if code := testFrontApplicationCode(t, overConnect, err); code != frontQuicErrorCodeRateLimited {
+		t.Fatalf("a connect connection over its cap closed with %#x, want %#x", code, frontQuicErrorCodeRateLimited)
+	}
+	env.nextDispatch()
 	select {
 	case <-env.connectQuic.handled:
 		t.Fatal("an over-cap connection reached connect's handler")
 	default:
 	}
 
-	// the admitted connection ends and releases its slot
+	// the admitted api connection ends and releases its slot
 	client.Transport.(*http3.Transport).Close()
 	select {
 	case <-env.front.released:
@@ -253,8 +267,10 @@ func TestFrontQuicConnectionCapRefusesApiConnectionsWithRateLimited(t *testing.T
 	if status, _, err := testFrontGet(t, next, testFrontApiName, "/hello"); err != nil || status != http.StatusOK {
 		t.Fatalf("the api request after the release = %d %v", status, err)
 	}
-	if acquired := env.front.acquired(); len(acquired) != 4 || !slices.Equal(slices.Compact(acquired), []string{testFrontInterfaceA + " 127.0.0.1"}) {
-		t.Fatalf("connections charged to %v, want each of the four to eth1's address", acquired)
+	apiKey := testFrontInterfaceA + " 127.0.0.1 api"
+	connectKey := testFrontInterfaceA + " 127.0.0.1 connect"
+	if acquired := env.front.acquired(); !slices.Equal(acquired, []string{apiKey, apiKey, connectKey, connectKey, apiKey}) {
+		t.Fatalf("connections charged to %v, want each to eth1's address under its own class", acquired)
 	}
 }
 
@@ -309,13 +325,18 @@ func (self *testFrontEnv) dialSilently(address netip.Addr) *testFrontSilentSourc
 // One unvalidated-handshake limit stands behind every socket of the block:
 // with a maximum of two, two silent sources on two interfaces hold it, and a
 // third and a fourth source, one on each interface, are sent a Retry. A
-// limit per socket would have counted them instead.
+// limit per socket would have counted them instead. Each group counts the
+// Retry it asked for under its interface.
 func TestFrontQuicSharesOneHandshakeAdmissionLimit(t *testing.T) {
 	env := newTestFrontEnv(t, func(env *testFrontEnv) {
 		env.connectQuic.handshakeLimit = newConnectQuicHandshakeLimit(2)
 	})
 	addressA, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
 	addressB, _ := env.address(testFrontInterfaceB, frontFamilyIpv6)
+	retriesA := frontQuicRetriesCounter.WithLabelValues(testFrontInterfaceA, frontPortQuic)
+	retriesB := frontQuicRetriesCounter.WithLabelValues(testFrontInterfaceB, frontPortQuic)
+	retriesBeforeA := testutil.ToFloat64(retriesA)
+	retriesBeforeB := testutil.ToFloat64(retriesB)
 
 	held := []*testFrontSilentSource{}
 	for _, address := range []netip.Addr{addressA, addressB} {
@@ -326,9 +347,17 @@ func TestFrontQuicSharesOneHandshakeAdmissionLimit(t *testing.T) {
 			t.Fatalf("the handshake from %s was not counted", address)
 		}
 	}
+	if retries := testutil.ToFloat64(retriesA) + testutil.ToFloat64(retriesB) - retriesBeforeA - retriesBeforeB; retries != 0 {
+		t.Fatalf("%v Retries counted under the maximum", retries)
+	}
 	for _, address := range []netip.Addr{addressA, addressB} {
 		source := env.dialSilently(address)
 		testFrontWait(t, source.retry, "a Retry at the shared maximum on "+address.String())
+	}
+	// at least the first Initial of each was refused with a Retry; the
+	// source answers none, so its retransmissions may be refused again
+	if testutil.ToFloat64(retriesA) <= retriesBeforeA || testutil.ToFloat64(retriesB) <= retriesBeforeB {
+		t.Fatalf("Retries counted %v under %s and %v under %s", testutil.ToFloat64(retriesA)-retriesBeforeA, testFrontInterfaceA, testutil.ToFloat64(retriesB)-retriesBeforeB, testFrontInterfaceB)
 	}
 	for _, source := range held {
 		select {
@@ -383,7 +412,8 @@ func (self *testFrontProxyPrefixConn) WriteTo(p []byte, addr net.Addr) (int, err
 // datagrams with a PROXY v2 header claiming another address is not decoded,
 // so its handshake never completes and no connection is ever charged to the
 // claimed address, while a plain client on the same socket connects. The
-// transport reads the bound socket itself.
+// group's transport reads the bound socket itself, through the group's
+// quic.ConnGroup (TestFrontQuicGroupSocketsAreReadAsBound).
 func TestFrontPublicSocketIgnoresAProxyProtocolHeader(t *testing.T) {
 	env := newTestFrontEnv(t, nil)
 	address, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
@@ -414,20 +444,8 @@ func TestFrontPublicSocketIgnoresAProxyProtocolHeader(t *testing.T) {
 		t.Fatalf("a second connection was dispatched: %+v", dispatch)
 	default:
 	}
-	if acquired := env.front.acquired(); !slices.Equal(acquired, []string{testFrontInterfaceA + " 127.0.0.1"}) {
+	if acquired := env.front.acquired(); !slices.Equal(acquired, []string{testFrontInterfaceA + " 127.0.0.1 connect"}) {
 		t.Fatalf("connections charged to %v, want only the plain client's", acquired)
-	}
-
-	// every quic socket's transport reads the bound socket itself, with no
-	// reader in between
-	transportConns := env.connectQuic.builtTransportConns()
-	for _, bindAddressText := range env.binds.bindAddresses() {
-		for _, packetConn := range env.binds.boundPacketConns(bindAddressText) {
-			isQuic := packetConn.LocalAddr().(*net.UDPAddr).Port == env.routeTable.Listen.QuicPort
-			if isQuic && !slices.Contains(transportConns, packetConn) {
-				t.Fatalf("the transport of %s does not read the bound socket", bindAddressText)
-			}
-		}
 	}
 }
 
@@ -582,13 +600,21 @@ func TestFrontQuicReturnsTheWindowOfConnectionsConnectDidNotServe(t *testing.T) 
 	}
 }
 
-// The results the env's QUIC connections are counted with, as "<port kind>
-// <result>".
-func observeTestFrontConnectionResults(env *testFrontEnv) chan string {
-	results := make(chan string, 64)
-	env.settings.connectionResultObserverForTest = func(portKind string, result string) {
+// One accepted QUIC connection's result, as the front counted it.
+type testFrontConnectionResult struct {
+	interfaceName string
+	portKind      string
+	result        string
+	reason        string
+	class         string
+}
+
+// The results the env's QUIC connections are counted with.
+func observeTestFrontConnectionResults(env *testFrontEnv) chan testFrontConnectionResult {
+	results := make(chan testFrontConnectionResult, 64)
+	env.settings.connectionResultObserverForTest = func(interfaceName string, portKind string, result string, reason string, class string) {
 		select {
-		case results <- portKind + " " + result:
+		case results <- testFrontConnectionResult{interfaceName: interfaceName, portKind: portKind, result: result, reason: reason, class: class}:
 		default:
 		}
 	}
@@ -596,14 +622,14 @@ func observeTestFrontConnectionResults(env *testFrontEnv) chan string {
 }
 
 // The next result a QUIC connection was counted with.
-func nextTestFrontConnectionResult(t testing.TB, results chan string) string {
+func nextTestFrontConnectionResult(t testing.TB, results chan testFrontConnectionResult) testFrontConnectionResult {
 	t.Helper()
 	select {
 	case result := <-results:
 		return result
 	case <-time.After(testFrontProgressTimeout):
 		t.Fatal("no QUIC connection was counted")
-		return ""
+		return testFrontConnectionResult{}
 	}
 }
 
@@ -612,9 +638,11 @@ func nextTestFrontConnectionResult(t testing.TB, results chan string) string {
 // failed handshake, and only one whose handshake completed is refused with
 // 0x1000 and counted as an unknown name. The first client refuses the
 // handshake only once the front has dispatched its connection, so the front
-// decides while the handshake is still under way.
+// decides while the handshake is still under way; its refusal is the
+// bad_certificate alert crypto/tls sends for a VerifyConnection error, so the
+// failure's reason is certificate.
 func TestFrontQuicCountsAnUnknownNameOnceItsHandshakeCompletes(t *testing.T) {
-	var results chan string
+	var results chan testFrontConnectionResult
 	env := newTestFrontEnv(t, func(env *testFrontEnv) {
 		results = observeTestFrontConnectionResults(env)
 	})
@@ -646,8 +674,9 @@ func TestFrontQuicCountsAnUnknownNameOnceItsHandshakeCompletes(t *testing.T) {
 	case <-time.After(testFrontProgressTimeout):
 		t.Fatal("the refusing dial never ended")
 	}
-	if result := nextTestFrontConnectionResult(t, results); result != frontPortQuic+" "+frontQuicResultHandshakeFailed {
-		t.Fatalf("a refused name whose handshake failed counted as %q", result)
+	wantFailed := testFrontConnectionResult{interfaceName: testFrontInterfaceA, portKind: frontPortQuic, result: frontQuicResultHandshakeFailed, reason: frontQuicHandshakeReasonCertificate, class: frontQuicHandshakeClassNone}
+	if result := nextTestFrontConnectionResult(t, results); result != wantFailed {
+		t.Fatalf("a refused name whose handshake failed counted as %+v, want %+v", result, wantFailed)
 	}
 
 	tlsConfig = env.clientTlsConfig(testFrontForwardedName, []string{http3.NextProtoH3})
@@ -656,8 +685,9 @@ func TestFrontQuicCountsAnUnknownNameOnceItsHandshakeCompletes(t *testing.T) {
 		t.Fatalf("closed with %#x", code)
 	}
 	env.nextDispatch()
-	if result := nextTestFrontConnectionResult(t, results); result != frontPortQuic+" "+frontQuicResultUnknownName {
-		t.Fatalf("a name refused with 0x1000 counted as %q", result)
+	wantRefused := testFrontConnectionResult{interfaceName: testFrontInterfaceA, portKind: frontPortQuic, result: frontQuicResultUnknownName, reason: frontQuicResultReasonNone, class: frontQuicHandshakeClassNone}
+	if result := nextTestFrontConnectionResult(t, results); result != wantRefused {
+		t.Fatalf("a name refused with 0x1000 counted as %+v, want %+v", result, wantRefused)
 	}
 }
 

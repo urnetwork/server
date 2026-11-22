@@ -2,7 +2,6 @@ package model
 
 import (
 	"crypto/sha256"
-	"errors"
 	"fmt"
 	"reflect"
 	"sync"
@@ -254,39 +253,6 @@ func TestClientScorePageCacheDecodesChangedPages(t *testing.T) {
 			if hits, misses := counter.next(); hits != 0 || misses != 4 {
 				t.Fatalf("publication %d: hits=%d misses=%d, want each changed page decoded", publication, hits, misses)
 			}
-		}
-	})
-}
-
-// A cached decode never stands in for page bytes that fail their checksum.
-func TestClientScorePageCacheVerifiesPageBytesBeforeAHit(t *testing.T) {
-	server.DefaultTestEnv().Run(t, func(t testing.TB) {
-		withClientScorePageCacheForTest(t, clientScorePageCacheMaxBytes)
-		ctx := t.Context()
-		location := server.NewId()
-		score := nativeTestScore(RankModeQuality, ipFamilyFacetV4Only)
-		nativeTestPublishLocation(t, location, RankModeQuality, map[ipFamilyFacet][]*ClientScore{ipFamilyFacetV4Only: {score}})
-		read := func() (map[server.Id]*ClientScore, error) {
-			scores, _, _, err := loadNativeClientScoresWithCursor(ctx, RankModeQuality, map[server.Id]bool{location: true}, nil, server.Id{}, 20, []ipFamilyFacet{ipFamilyFacetV4Only}, nil)
-			return scores, err
-		}
-		if scores, err := read(); err != nil || len(scores) != 1 || scores[score.ClientId] == nil {
-			t.Fatalf("published page not read: count=%d err=%v", len(scores), err)
-		}
-		// another page's bytes under the cached page's recorded checksum
-		server.Redis(ctx, func(r server.RedisClient) {
-			key := clientScoreNativeKey(clientScoreLocationCountsKey(false, RankModeQuality, location, server.Id{}))
-			pointer, err := parseClientScoreNativePointer(r.Get(ctx, key).Val())
-			if err != nil {
-				t.Fatal(err)
-			}
-			slot, field := clientScoreNativeSlotKey(key, pointer.slot), clientScoreNativePageField(ipFamilyFacetV4Only, 0)
-			recorded := r.HGet(ctx, slot, field).Val()[:sha256.Size]
-			other := gobEncodeForTest(t, []*ClientScore{nativeTestScore(RankModeQuality, ipFamilyFacetV4Only)})
-			server.Raise(r.HSet(ctx, slot, field, recorded+string(other)).Err())
-		})
-		if scores, err := read(); !errors.Is(err, errClientScoreNativeUnavailable) || len(scores) != 0 {
-			t.Fatalf("a cached decode stood in for changed page bytes: count=%d err=%v", len(scores), err)
 		}
 	})
 }

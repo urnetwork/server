@@ -227,6 +227,96 @@ func TestUpstreamPoolDropsClosedIdleConnection(t *testing.T) {
 	}
 }
 
+// Checks the connections counted for a service, by how attempts got them.
+func checkConnectionCounts(t *testing.T, serviceName string, when string, reused float64, dialed float64, dialFailed float64) {
+	t.Helper()
+	gotReused := connectionCount(serviceName, upstreamConnectionReused)
+	gotDialed := connectionCount(serviceName, upstreamConnectionDialed)
+	gotDialFailed := connectionCount(serviceName, upstreamConnectionDialFailed)
+	if gotReused != reused || gotDialed != dialed || gotDialFailed != dialFailed {
+		t.Errorf("%s: connections reused %v, dialed %v, dial_failed %v; want %v, %v and %v", when, gotReused, gotDialed, gotDialFailed, reused, dialed, dialFailed)
+	}
+}
+
+// Every connection an attempt takes is counted, per service, by how it got
+// it: the first request dials, the next reuses the pooled connection, and
+// the one after the block closed that connection dials again, the dropped
+// connection never counted as reused. Without keepalive every request
+// dials.
+func TestUpstreamPoolCountsReusesAndDials(t *testing.T) {
+	serviceName := testServiceName("pool-counts")
+	upstream := newRecordingUpstream(t, "g1", nil)
+	group, _ := newTestGroup(t, testForwardRouteService(serviceName, []testBlock{
+		{name: "g1", weight: 1, port: upstream.port},
+	}), testForwardFrontSettings())
+	front := newTestForwardFront(t, group, testForwardOptions)
+	checkConnectionCounts(t, serviceName, "before any request", 0, 0, 0)
+	sendAndWait(t, front, "/first")
+	checkConnectionCounts(t, serviceName, "after the first request", 0, 1, 0)
+	sendAndWait(t, front, "/second")
+	checkConnectionCounts(t, serviceName, "after the second", 1, 1, 0)
+	pooledConn := idleConnsOf(t, group.blocks[0].pool, 1)[0].conn
+	upstream.server.CloseClientConnections()
+	waitReadable(t, pooledConn)
+	sendAndWait(t, front, "/third")
+	checkConnectionCounts(t, serviceName, "after the block closed the pooled connection", 1, 2, 0)
+	if conns := requestConns(upstream); conns[0] != conns[1] || conns[1] == conns[2] {
+		t.Errorf("connections %v, want the second request on the first's and the third on a new one", conns)
+	}
+
+	noKeepaliveName := testServiceName("pool-counts-none")
+	noKeepaliveService := testForwardRouteService(noKeepaliveName, []testBlock{
+		{name: "g1", weight: 1, port: upstream.port},
+	})
+	noKeepaliveService.Keepalive.Connections = 0
+	noKeepaliveGroup, _ := newTestGroup(t, noKeepaliveService, testForwardFrontSettings())
+	noKeepaliveFront := newTestForwardFront(t, noKeepaliveGroup, testForwardOptions)
+	for range 2 {
+		sendAndWait(t, noKeepaliveFront, "/")
+	}
+	checkConnectionCounts(t, noKeepaliveName, "without keepalive", 0, 2, 0)
+	// each service counts apart
+	checkConnectionCounts(t, serviceName, "after the other service's requests", 1, 2, 0)
+}
+
+// A dial that connects nothing counts as dial_failed, a refusing block's
+// and one its request's end cut short alike, and a closed pool, which dials
+// nothing, counts nothing.
+func TestUpstreamPoolCountsFailedDials(t *testing.T) {
+	refusedName := testServiceName("pool-counts-refused")
+	refusedGroup, _ := newTestGroup(t, testForwardRouteService(refusedName, []testBlock{
+		{name: "g1", weight: 1, port: closedPort(t)},
+	}), testForwardFrontSettings())
+	front := newTestForwardFront(t, refusedGroup, testForwardOptions)
+	request, _ := http.NewRequest(http.MethodGet, front.url("/refused"), nil)
+	if response, _, err := testDo(t, request); err != nil || response.StatusCode != http.StatusBadGateway {
+		t.Fatalf("a request to a refusing block: %v %v, want 502", response, err)
+	}
+	front.waitServed(t)
+	checkConnectionCounts(t, refusedName, "after a refused dial", 0, 0, 1)
+
+	canceledName := testServiceName("pool-counts-canceled")
+	canceledGroup, _ := newTestGroup(t, testForwardRouteService(canceledName, []testBlock{
+		{name: "g1", weight: 1, port: 1},
+	}), testForwardFrontSettings())
+	canceledGroup.dialContext = func(ctx context.Context, network string, address string) (net.Conn, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	requestCtx, cancelRequest := context.WithCancel(t.Context())
+	cancelRequest()
+	if _, err := canceledGroup.blocks[0].pool.dial(requestCtx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("a dial whose request ended returned %v, want its cancellation", err)
+	}
+	checkConnectionCounts(t, canceledName, "after a dial its request's end cut short", 0, 0, 1)
+
+	canceledGroup.close()
+	if _, err := canceledGroup.blocks[0].pool.dial(t.Context()); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("a dial on a closed pool returned %v, want net.ErrClosed", err)
+	}
+	checkConnectionCounts(t, canceledName, "after a dial on a closed pool", 0, 0, 1)
+}
+
 // The MSG_PEEK check: a quiet connection is alive; one with bytes nobody
 // asked for is not; a connection without a descriptor is assumed alive.
 func TestUpstreamConnAlive(t *testing.T) {

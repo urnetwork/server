@@ -9,6 +9,10 @@ package oauth
 // The authorization endpoint itself is NOT here -- it is the consent page on
 // the ur.io origin, because that is where the logged in session lives (IDP.md
 // §1). ur.io calls `AuthorizeHandler` to mint the code once the user approves.
+//
+// The api serves these handlers, and its route table for them is
+// api/oauth_routes.go. oauth must not import router: model imports oauth, and
+// router's tests import model.
 
 import (
 	"encoding/json"
@@ -22,25 +26,8 @@ import (
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/router"
 	"github.com/urnetwork/server/session"
 )
-
-// The authorization server routes. Served on the issuer host.
-func Routes() []*router.Route {
-	return []*router.Route{
-		router.NewRoute("GET", "/\\.well-known/oauth-authorization-server", ServerMetadataHandler),
-		router.NewRoute("GET", "/\\.well-known/openid-configuration", ServerMetadataHandler),
-		router.NewRoute("GET", "/\\.well-known/jwks\\.json", JwksHandler),
-		router.NewRoute("POST", "/oauth/token", TokenHandler),
-		router.NewRoute("POST", "/oauth/register", RegisterHandler),
-		router.NewRoute("POST", "/oauth/revoke", RevokeHandler),
-		router.NewRoute("GET", "/oauth/userinfo", UserinfoHandler),
-		// called by the consent page on the ur.io origin
-		router.NewRoute("POST", "/oauth/authorize", AuthorizeHandler),
-		router.NewRoute("POST", "/oauth/consent", ConsentHandler),
-	}
-}
 
 // rfc 6749 section 5.2 error envelope.
 type oauthError struct {
@@ -83,7 +70,7 @@ func writeGrantError(w http.ResponseWriter, err error) {
 	case errors.Is(err, ErrUnauthorizedUser):
 		// a declared reason tells the user what to do; any other detail is logged
 		description := ErrUnauthorizedUser.Error()
-		for _, reason := range []error{errUnauthorizedGuestNetwork, errUnauthorizedNoNetwork} {
+		for _, reason := range unauthorizedReasons {
 			if errors.Is(err, reason) {
 				description = reason.Error()
 			}
@@ -239,6 +226,20 @@ func UserinfoHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+const signInRequiredDescription = "Sign in to approve an application."
+
+// The consent screen and the approval answer only a person signed in to the
+// account, with the network token a sign-in holds. An API key authenticates as
+// the network too, but it is a credential for programs, and an application it
+// approved would keep its grant after the key is removed. A client token is
+// refused at the router as well (api/route_authz.go).
+func signedInUser(clientSession *session.ClientSession) bool {
+	return !clientSession.ApiKeyAuthenticated &&
+		!clientSession.UnsignedIdentity &&
+		clientSession.ByJwt != nil &&
+		clientSession.ByJwt.ClientId == nil
+}
+
 // What the consent page needs to render: who is asking, and for what.
 type ConsentRequest struct {
 	ClientId            string `json:"client_id"`
@@ -283,6 +284,10 @@ func ConsentHandler(w http.ResponseWriter, r *http.Request) {
 
 	if err := clientSession.Auth(r); err != nil {
 		writeOauthError(w, http.StatusUnauthorized, "login_required", "Sign in to continue.")
+		return
+	}
+	if !signedInUser(clientSession) {
+		writeOauthError(w, http.StatusForbidden, "access_denied", signInRequiredDescription)
 		return
 	}
 
@@ -341,6 +346,10 @@ func AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
 		writeOauthError(w, http.StatusUnauthorized, "login_required", "Sign in to continue.")
 		return
 	}
+	if !signedInUser(clientSession) {
+		writeOauthError(w, http.StatusForbidden, "access_denied", signInRequiredDescription)
+		return
+	}
 
 	var consentRequest ConsentRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&consentRequest); err != nil {
@@ -358,9 +367,10 @@ func AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
 		GuestMode:   byJwt.GuestMode,
 		// the principal identifies the user; roles carry through from the
 		// authorizing session, which for an ordinary login is empty
-		Principal: byJwt.Principal,
-		Roles:     byJwt.Roles,
-		AuthTime:  server.NowUtc(),
+		Principal:      byJwt.Principal,
+		Roles:          byJwt.Roles,
+		AuthTime:       server.NowUtc(),
+		CredentialTime: byJwt.CreateTime,
 	})
 	if err != nil {
 		writeGrantError(w, err)

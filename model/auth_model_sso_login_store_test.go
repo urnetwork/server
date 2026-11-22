@@ -11,10 +11,13 @@ import (
 // ssoLoginFakeStore is an in-memory parsedAuthJwtLoginStore. Login results
 // depend only on the rows a test puts in it.
 type ssoLoginFakeStore struct {
-	ssoAuths      []NetworkUserSsoAuth
+	ssoAuths []NetworkUserSsoAuth
+	// verified email or phone sign-ins
 	passwordAuths map[string]server.Id
-	networks      map[server.Id]string
-	networkIds    map[server.Id]server.Id
+	// email or phone sign-ins nobody verified
+	unverifiedPasswordAuths map[string]server.Id
+	networks                map[server.Id]string
+	networkIds              map[server.Id]server.Id
 	// network_user rows: user_auth -> rows
 	legacyUsers map[string][]legacyNetworkUser
 
@@ -25,10 +28,11 @@ type ssoLoginFakeStore struct {
 
 func newSsoLoginFakeStore() *ssoLoginFakeStore {
 	return &ssoLoginFakeStore{
-		passwordAuths: map[string]server.Id{},
-		networks:      map[server.Id]string{},
-		networkIds:    map[server.Id]server.Id{},
-		legacyUsers:   map[string][]legacyNetworkUser{},
+		passwordAuths:           map[string]server.Id{},
+		unverifiedPasswordAuths: map[string]server.Id{},
+		networks:                map[server.Id]string{},
+		networkIds:              map[server.Id]server.Id{},
+		legacyUsers:             map[string][]legacyNetworkUser{},
 	}
 }
 
@@ -51,11 +55,13 @@ func (self *ssoLoginFakeStore) store() *parsedAuthJwtLoginStore {
 			return matches, nil
 		},
 		passwordAuthByUserAuth: func(ctx context.Context, userAuth string) (*server.Id, bool, bool) {
-			userId, ok := self.passwordAuths[userAuth]
-			if !ok {
-				return nil, false, false
+			if userId, ok := self.passwordAuths[userAuth]; ok {
+				return &userId, true, true
 			}
-			return &userId, true, true
+			if userId, ok := self.unverifiedPasswordAuths[userAuth]; ok {
+				return &userId, false, true
+			}
+			return nil, false, false
 		},
 		legacyUsersByUserAuth: func(ctx context.Context, normalUserAuth string) ([]legacyNetworkUser, error) {
 			return self.legacyUsers[normalUserAuth], nil
@@ -313,5 +319,116 @@ func TestSsoLoginUnparseableTokenEmailMatchesNoRow(t *testing.T) {
 	}
 	if len(fake.signed) != 0 || len(fake.addedSso) != 0 {
 		t.Fatalf("signed %v and added sso %v", fake.signed, fake.addedSso)
+	}
+}
+
+// Root cause (owner decision 2026-11-20): Google or Apple sign-in joined the
+// account that held an unverified email or phone row with the token's email,
+// signed in to it and linked the provider there. Anyone can make such a row
+// with someone else's email: a sign-up, or an email added to an account that
+// has none (POST /auth/add-auth). The provider's proof outranks the claim: the
+// sign-in goes on as a new user, and links nothing.
+func TestSsoLoginNeverJoinsAnUnverifiedEmail(t *testing.T) {
+	for _, authType := range []AuthType{AuthTypeGoogle, AuthTypeApple} {
+		t.Run(string(authType), func(t *testing.T) {
+			fake := newSsoLoginFakeStore()
+			claimantUserId := server.NewId()
+			userAuth := "claimed@example.invalid"
+			fake.unverifiedPasswordAuths[userAuth] = claimantUserId
+			fake.addNetwork(claimantUserId, "claimant")
+
+			result, err := handleLoginParsedAuthJwtWithStore(
+				ssoLoginTestArgs(authType, userAuth),
+				context.Background(),
+				fake.store(),
+			)
+			if err != nil || result == nil || result.Network != nil || result.UserName == nil {
+				t.Fatalf("result=%+v err=%v, want the new-network route", result, err)
+			}
+			if len(fake.signed) != 0 || len(fake.addedSso) != 0 || fake.success != 0 {
+				t.Fatalf("signed %v, added sso %v and marked %d successes for an unverified email", fake.signed, fake.addedSso, fake.success)
+			}
+		})
+	}
+}
+
+// An Apple account whose sign-in row was never migrated still signs in when
+// another account planted an unverified row with its email: the row no longer
+// wins over the Apple account.
+func TestSsoLoginAppleLegacyWinsOverAnUnverifiedEmail(t *testing.T) {
+	fake := newSsoLoginFakeStore()
+	userAuth := "legacy-apple@example.invalid"
+	appleUserId := fake.addLegacyUser(userAuth, AuthTypeApple)
+	appleNetworkId := fake.addNetwork(appleUserId, "apple")
+	plantedUserId := server.NewId()
+	fake.unverifiedPasswordAuths[userAuth] = plantedUserId
+	fake.addNetwork(plantedUserId, "planted")
+
+	result, err := handleLoginParsedAuthJwtWithStore(
+		ssoLoginTestArgs(AuthTypeApple, userAuth),
+		context.Background(),
+		fake.store(),
+	)
+	if err != nil || result == nil || result.Network == nil {
+		t.Fatalf("result=%+v err=%v, want the apple account", result, err)
+	}
+	want := fmt.Sprintf("network=%s user=%s name=apple", appleNetworkId, appleUserId)
+	if result.Network.ByJwt != want {
+		t.Fatalf("signed %q, want %q", result.Network.ByJwt, want)
+	}
+}
+
+// A password user who verified their email and later signs in with Google
+// keeps one account: the verified email joins it, and Google is linked there.
+func TestSsoLoginJoinsAVerifiedEmailAndLinksTheProvider(t *testing.T) {
+	fake := newSsoLoginFakeStore()
+	userId := server.NewId()
+	userAuth := "verified@example.invalid"
+	fake.passwordAuths[userAuth] = userId
+	networkId := fake.addNetwork(userId, "verified")
+
+	result, err := handleLoginParsedAuthJwtWithStore(
+		ssoLoginTestArgs(AuthTypeGoogle, userAuth),
+		context.Background(),
+		fake.store(),
+	)
+	if err != nil || result == nil || result.Network == nil {
+		t.Fatalf("result=%+v err=%v, want the verified account", result, err)
+	}
+	want := fmt.Sprintf("network=%s user=%s name=verified", networkId, userId)
+	if result.Network.ByJwt != want {
+		t.Fatalf("signed %q, want %q", result.Network.ByJwt, want)
+	}
+	if len(fake.addedSso) != 1 || fake.addedSso[0].UserId != userId || !fake.addedSso[0].Notify || !fake.addedSso[0].Proven {
+		t.Fatalf("added sso %+v, want one notified, proven google link to the account", fake.addedSso)
+	}
+}
+
+// Two accounts can each hold the email under another provider. A sign-in goes
+// to the account holding the token's own provider, not to whichever row came
+// first.
+func TestSsoLoginPrefersTheTokensOwnProvider(t *testing.T) {
+	fake := newSsoLoginFakeStore()
+	userAuth := "two-providers@example.invalid"
+	appleUserId := server.NewId()
+	googleUserId := server.NewId()
+	fake.ssoAuths = append(fake.ssoAuths,
+		NetworkUserSsoAuth{UserId: &appleUserId, AuthType: SsoAuthTypeApple, UserAuth: &userAuth},
+		NetworkUserSsoAuth{UserId: &googleUserId, AuthType: SsoAuthTypeGoogle, UserAuth: &userAuth},
+	)
+	fake.addNetwork(appleUserId, "apple")
+	googleNetworkId := fake.addNetwork(googleUserId, "google")
+
+	result, err := handleLoginParsedAuthJwtWithStore(
+		ssoLoginTestArgs(AuthTypeGoogle, userAuth),
+		context.Background(),
+		fake.store(),
+	)
+	if err != nil || result == nil || result.Network == nil {
+		t.Fatalf("result=%+v err=%v, want the google account", result, err)
+	}
+	want := fmt.Sprintf("network=%s user=%s name=google", googleNetworkId, googleUserId)
+	if result.Network.ByJwt != want || len(fake.addedSso) != 0 {
+		t.Fatalf("signed %q and added %v, want %q and no link", result.Network.ByJwt, fake.addedSso, want)
 	}
 }

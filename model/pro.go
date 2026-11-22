@@ -75,6 +75,8 @@ type proDataCodeYaml struct {
 type proConfigYaml struct {
 	EnforceConcurrentClients bool            `yaml:"enforce_concurrent_clients"`
 	EnforceFeatures          bool            `yaml:"enforce_features"`
+	EnforceSessionCap        bool            `yaml:"enforce_session_cap"`
+	MaxSessions              int             `yaml:"max_sessions"`
 	Free                     proTierYaml     `yaml:"free"`
 	Pro                      proTierYaml     `yaml:"pro"`
 	Referral                 proReferralYaml `yaml:"referral"`
@@ -291,6 +293,14 @@ type ProConfig struct {
 	EnforceConcurrentClients bool
 	EnforceFeatures          bool
 
+	// EnforceSessionCap gates the session cap (pro.yml enforce_session_cap):
+	// while false no session mint is refused at the live cap or the retained
+	// cap, and each mint that would have been is counted. MaxSessions is the
+	// live cap (pro.yml max_sessions); read it through SessionCapPolicy, which
+	// treats a value of zero or less as no cap.
+	EnforceSessionCap bool
+	MaxSessions       int
+
 	Free ProTier
 	Pro  ProTier
 
@@ -448,6 +458,8 @@ var proConfig = sync.OnceValue(func() *ProConfig {
 	return &ProConfig{
 		EnforceConcurrentClients: y.EnforceConcurrentClients,
 		EnforceFeatures:          y.EnforceFeatures,
+		EnforceSessionCap:        y.EnforceSessionCap,
+		MaxSessions:              y.MaxSessions,
 		Free:                     parseProTier(y.Free),
 		Pro:                      parseProTier(y.Pro),
 		priceTiers:               priceTiers,

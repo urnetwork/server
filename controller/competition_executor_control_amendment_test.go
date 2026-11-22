@@ -122,6 +122,32 @@ func TestExecutorControlAmendmentRejectsScopeAndIdentityChanges(t *testing.T) {
 	}
 }
 
+func TestExecutorControlAmendmentAllowsExactEpochThreeBuilderChange(t *testing.T) {
+	settings, round, value := executorControlAmendmentFixture(t)
+	id, err := server.ParseId("01a1f4d0-47c9-ac2d-ce45-55ef159a9b41")
+	if err != nil {
+		t.Fatal(err)
+	}
+	round.Epoch, round.RoundId, value.RoundId = 3, id, id
+	settings.AutomationPolicy.Environment, value.Environment = "main", "main"
+	value.Hosts[0].AgentSha256 = value.Hosts[0].PreviousAgentSha256
+	value.Hosts[0].BuilderSha256 = strings.Repeat("f", 64)
+	value.Hosts[0].PreviousBuilderSha256 = strings.Repeat("e", 64)
+	if err := validateCompetitionExecutorControlAmendment(settings, round, value); err != nil {
+		t.Fatal(err)
+	}
+	otherID := server.NewId()
+	round.RoundId, value.RoundId = otherID, otherID
+	if validateCompetitionExecutorControlAmendment(settings, round, value) == nil {
+		t.Fatal("builder-only correction accepted for a different round")
+	}
+	round.RoundId, value.RoundId = id, id
+	value.Hosts[0].BuilderSha256 = value.Hosts[0].PreviousBuilderSha256
+	if validateCompetitionExecutorControlAmendment(settings, round, value) == nil {
+		t.Fatal("no-op replacement accepted")
+	}
+}
+
 // Legacy round-one and staging authority remain wholly outside this mechanism.
 func TestExecutorControlAmendmentRejectsLegacyAndStaging(t *testing.T) {
 	settings, round, value := executorControlAmendmentFixture(t)

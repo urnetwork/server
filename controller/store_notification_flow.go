@@ -155,8 +155,19 @@ func RecordStoreNotificationOutcome(ctx context.Context, store string, outcome s
 	storeNotifications.record(ctx, store, outcome)
 }
 
+const (
+	playNotificationTokenInfoStage          = "token_info"
+	playNotificationVerifiedProcessingStage = "verified_processing"
+)
+
 // See RecordStoreNotificationOutcome.
 func (self *storeNotificationRecorder) record(ctx context.Context, store string, outcome string) {
+	self.recordWithStage(ctx, store, outcome, "")
+}
+
+// The error stage belongs to the emitting call. Store and outcome remain the
+// counter labels and the fixed prefix of the single outcome line.
+func (self *storeNotificationRecorder) recordWithStage(ctx context.Context, store, outcome, stage string) {
 	storeNotificationsTotal.WithLabelValues(store, outcome).Inc()
 	switch outcome {
 	case StoreNotificationAccepted:
@@ -193,7 +204,12 @@ func (self *storeNotificationRecorder) record(ctx context.Context, store string,
 	default:
 		// one fixed line per refusal or error for the monitor's tail: no
 		// token, payload or identity
-		glog.Warningf("[store-notification]%s %s\n", store, outcome)
+		suffix := ""
+		switch stage {
+		case playNotificationTokenInfoStage, playNotificationVerifiedProcessingStage:
+			suffix = " stage=" + stage
+		}
+		glog.Warningf("[store-notification]%s %s%s\n", store, outcome, suffix)
 	}
 }
 
@@ -203,6 +219,7 @@ func (self *storeNotificationRecorder) record(ctx context.Context, store string,
 // the route has always answered.
 type playAuthError struct {
 	outcome string
+	stage   string
 	// the text, when it is not "Missing authorization."
 	message string
 }

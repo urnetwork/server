@@ -1140,7 +1140,7 @@ func PlayWebhook(
 ) (*PlayWebhookResult, error) {
 	result, err := playWebhook(webhookArgs, clientSession)
 	if err != nil {
-		RecordStoreNotificationOutcome(clientSession.Ctx, model.SubscriptionMarketGoogle, StoreNotificationError)
+		storeNotifications.recordWithStage(clientSession.Ctx, model.SubscriptionMarketGoogle, StoreNotificationError, playNotificationVerifiedProcessingStage)
 	} else {
 		RecordStoreNotificationOutcome(clientSession.Ctx, model.SubscriptionMarketGoogle, StoreNotificationAccepted)
 	}
@@ -1347,8 +1347,10 @@ func playWebhook(
 				// A credit failure (sku missing from play.yml, Google API failure) is a
 				// non-2xx so Pub/Sub RETRIES the delivery -- otherwise the entitlement
 				// would arrive only via the task scheduled at the END of the paid
-				// period, or never.
-				renewalResult, err := PlaySubscriptionRenewal(
+				// period, or never. Not the poll's entry (PlaySubscriptionRenewal),
+				// which ends quietly for a deleted network: here that error records
+				// the paid purchase for support.
+				renewalResult, err := PlaySubscriptionRenewalInConn(nil,
 					&PlaySubscriptionRenewalArgs{
 						NetworkId:      networkId,
 						PackageName:    rtdnMessage.PackageName,
@@ -1547,6 +1549,13 @@ type PlaySubscriptionRenewalResult struct {
 	InGrace bool `json:"in_grace,omitempty"`
 	// this call wrote the grace period's hold (playHoldGraceEntitlementInTx)
 	GraceHeld bool `json:"grace_held,omitempty"`
+	// Play moved the expiry out to ExpiryTime without a charge, as it does
+	// while a renewal's charge is pending: the entitlement holds through it,
+	// and nothing is granted (playCreditWindowInTx)
+	ChargePending bool `json:"charge_pending,omitempty"`
+	// the poll's network was deleted: nothing of it is left to credit or end,
+	// and the poll ends (PlaySubscriptionRenewal)
+	NetworkDeleted bool `json:"network_deleted,omitempty"`
 }
 
 func SchedulePlaySubscriptionRenewal(
@@ -1564,11 +1573,29 @@ func SchedulePlaySubscriptionRenewal(
 	)
 }
 
+// The scheduled Play renewal poll (taskworker's target). A poll whose network
+// was deleted ends here, with one log line: every credit, hold and end path
+// takes the network's payment lock first, and a deleted network refuses all of
+// them (model.ErrPaymentNetworkNotFound), so a retry could never do more. As
+// an error the poll was retried without end. The store's notification calls
+// PlaySubscriptionRenewalInConn, which still returns the error, so the
+// notification records the paid purchase for support.
 func PlaySubscriptionRenewal(
 	playSubscriptionRenewal *PlaySubscriptionRenewalArgs,
 	clientSession *session.ClientSession,
 ) (*PlaySubscriptionRenewalResult, error) {
-	return PlaySubscriptionRenewalInConn(nil, playSubscriptionRenewal, clientSession)
+	result, err := PlaySubscriptionRenewalInConn(nil, playSubscriptionRenewal, clientSession)
+	if errors.Is(err, model.ErrPaymentNetworkNotFound) {
+		glog.Infof(
+			"[sub]play renewal poll of token %s ends: its network %s was deleted\n",
+			playSubscriptionRenewal.PurchaseToken,
+			playSubscriptionRenewal.NetworkId,
+		)
+		return &PlaySubscriptionRenewalResult{
+			NetworkDeleted: true,
+		}, nil
+	}
+	return result, err
 }
 
 // Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
@@ -1701,7 +1728,8 @@ func PlaySubscriptionRenewalInConn(connOwner server.PgConn,
 			// commit/rollback) and RE-CHECKS the overlap inside -- whichever of the
 			// two racers gets the lock second sees the balance the first one wrote
 			// and adds nothing.
-			renewed := false
+			outcome := playWindowCovered
+			held := false
 			var creditErr error
 			// ReadCommitted, NOT the default RepeatableRead: the gate is
 			// lock-then-recheck, and under RepeatableRead the second racer's
@@ -1712,7 +1740,7 @@ func PlaySubscriptionRenewalInConn(connOwner server.PgConn,
 			// Per-statement snapshots make the post-lock re-check see the
 			// winner's commit, which is the entire point of the re-check.
 			server.TxInConn(clientSession.Ctx, connOwner, func(tx server.PgTx) {
-				renewed, creditErr = playCreditSubscriptionInTx(
+				outcome, held, creditErr = playCreditWindowInTx(
 					tx,
 					clientSession,
 					playSubscriptionRenewal,
@@ -1726,7 +1754,8 @@ func PlaySubscriptionRenewalInConn(connOwner server.PgConn,
 				return nil, creditErr
 			}
 
-			if renewed {
+			switch outcome {
+			case playWindowCredited:
 				if sku.Supporter {
 					// the pro balance is committed -- refresh the entitlement so the
 					// upgrade is visible immediately rather than after ProCacheTtl
@@ -1744,6 +1773,25 @@ func PlaySubscriptionRenewalInConn(connOwner server.PgConn,
 				return &PlaySubscriptionRenewalResult{
 					ExpiryTime: minExpiryTime,
 					Renewed:    true,
+				}, nil
+
+			case playWindowChargePending:
+				// Play moved the expiry out without a charge: nothing renewed,
+				// and the poll comes back at the moved expiry (the post), when
+				// the charge has usually landed
+				if held {
+					model.UpdateProNetworkInConn(connOwner, clientSession.Ctx, playSubscriptionRenewal.NetworkId)
+				}
+				if canceled {
+					return &PlaySubscriptionRenewalResult{
+						Canceled:      true,
+						ChargePending: true,
+						ExpiryTime:    maxExpiryTime,
+					}, nil
+				}
+				return &PlaySubscriptionRenewalResult{
+					ExpiryTime:    minExpiryTime,
+					ChargePending: true,
 				}, nil
 			}
 		}
@@ -1765,13 +1813,22 @@ func PlaySubscriptionRenewalInConn(connOwner server.PgConn,
 	}, nil
 }
 
-// playCreditSubscriptionInTx is the Play credit gate: it serializes on the
-// purchase token (advisory xact lock, released at commit/rollback), re-checks
-// the overlap inside the tx and only then adds the renewal and the balance.
-// renewed is false when a credit for this expiry already landed (or the paid
-// window has ended). The tx must be ReadCommitted (see PlaySubscriptionRenewal).
-// Shared by PlaySubscriptionRenewal and the unlinked-purchase binding
-// (play_purchase_binding_controller.go), which credits inside its own tx.
+// What the Play credit gate did with a window (playCreditWindowInTx).
+type playWindowOutcome int
+
+const (
+	// nothing: a credit for the expiry already landed, or the window ended
+	playWindowCovered playWindowOutcome = iota
+	// credited: a window Play charged, or the purchase's first window
+	playWindowCredited
+	// a window Play moved out without a charge: nothing granted
+	playWindowChargePending
+)
+
+// playCreditSubscriptionInTx is the Play credit gate (playCreditWindowInTx):
+// true when it credited the window. Shared by PlaySubscriptionRenewal and the
+// unlinked-purchase binding (play_purchase_binding_controller.go), which
+// credits inside its own tx.
 func playCreditSubscriptionInTx(
 	tx server.PgTx,
 	clientSession *session.ClientSession,
@@ -1781,13 +1838,59 @@ func playCreditSubscriptionInTx(
 	startTime time.Time,
 	maxExpiryTime time.Time,
 ) (bool, error) {
+	outcome, _, err := playCreditWindowInTx(
+		tx,
+		clientSession,
+		playSubscriptionRenewal,
+		sub,
+		sku,
+		startTime,
+		maxExpiryTime,
+	)
+	return outcome == playWindowCredited, err
+}
+
+// playCreditWindowInTx is the Play credit gate. It serializes on the purchase
+// token (advisory xact lock, released at commit/rollback), re-checks the
+// overlap inside the tx, and only then tells what the window is and writes
+// it. The tx must be ReadCommitted (see PlaySubscriptionRenewal).
+//
+// A purchase's first window is credited: a charge, or a free trial. A later
+// window is credited when Play charged it, that is, when it moves the expiry
+// at least playShortestPaidPeriod past the last charged window's
+// (classifyPlayCredit, from the purchase's earlier credits). Before nearly
+// every renewal Play moves the expiry out by about a day while the renewal's
+// charge is pending, sometimes a day at a time. Each such window was credited
+// as a paid period, with a period's revenue and data: the plan's full grant
+// for UR Pro, a full allowance for a data plan. Now it moves the entitlement's
+// end and grants nothing (owner, 2026-11-21). UR Pro holds through the moved
+// expiry and its grace day with a renewal row with no revenue and a zero-byte
+// Pro marker, as Play's grace period does (playHoldEntitlementLockedInTx); a
+// data plan's allowance keeps its own window, which ends a day past the
+// expiry before it. The charge that follows moves the expiry a period past the
+// last charged window, and it is credited once: a hold is no credit to the
+// overlap gate, and the charged period starts where the last paid period
+// ended, so its cycle grant starts there. A license tester's purchase moves no
+// money and reads no history: each of its accelerated windows is credited.
+//
+// held is true when this call wrote the hold of a UR Pro window Play moved
+// out, so the caller refreshes the Pro cache once the tx commits.
+func playCreditWindowInTx(
+	tx server.PgTx,
+	clientSession *session.ClientSession,
+	playSubscriptionRenewal *PlaySubscriptionRenewalArgs,
+	sub *PlaySubscription,
+	sku *Sku,
+	startTime time.Time,
+	maxExpiryTime time.Time,
+) (outcome playWindowOutcome, held bool, returnErr error) {
 	if err := model.LockPlaySubscriptionPurchaseInTx(
 		tx,
 		clientSession.Ctx,
 		playSubscriptionRenewal.NetworkId,
 		playSubscriptionRenewal.PurchaseToken,
 	); err != nil {
-		return false, err
+		return playWindowCovered, false, err
 	}
 	// A provider response can cross a terminal poll while waiting
 	// for this lock. Never let a stale ACTIVE response whose paid
@@ -1795,22 +1898,62 @@ func playCreditSubscriptionInTx(
 	// owner just closed. A real renewal has a future max expiry and
 	// still proceeds.
 	if !server.NowUtc().Before(maxExpiryTime) {
-		return false, nil
+		return playWindowCovered, false, nil
 	}
 
 	if _, err := model.GetOverlappingTransferBalanceInTx(tx, clientSession.Ctx, playSubscriptionRenewal.PurchaseToken, maxExpiryTime); err == nil {
 		// a concurrent credit for this expiry already landed
-		return false, nil
+		return playWindowCovered, false, nil
 	}
 
-	// the purchase's earlier credits, read before this one is added, tell the
-	// sales notice whether Play charged this window. A license tester's
-	// purchase moves no money and reads nothing.
+	// what the window is, from the purchase's earlier credits, read before
+	// this one is added: for the credit, and for the sales notice
 	testPurchase := sub.testPurchase()
-	var earlierExpiries []time.Time
-	historyRead := false
+	credit := playCreditNew
 	if !testPurchase {
-		earlierExpiries, historyRead = playEarlierCreditExpiriesInTx(tx, clientSession.Ctx, playSubscriptionRenewal.NetworkId, playSubscriptionRenewal.PurchaseToken)
+		earlierExpiries, err := playEarlierCreditExpiriesInTx(
+			tx,
+			clientSession.Ctx,
+			playSubscriptionRenewal.NetworkId,
+			playSubscriptionRenewal.PurchaseToken,
+			sku.Supporter,
+		)
+		if err != nil {
+			return playWindowCovered, false, err
+		}
+		credit = classifyPlayCredit(sub, playSubscriptionRenewal.SubscriptionId, startTime, maxExpiryTime, earlierExpiries)
+	}
+
+	if credit == playCreditNotCharged {
+		if !sku.Supporter {
+			glog.Infof(
+				"[sub]play purchase %s on network %s: Play moved the expiry to %s without a charge; nothing is granted\n",
+				playSubscriptionRenewal.PurchaseToken,
+				playSubscriptionRenewal.NetworkId,
+				maxExpiryTime.UTC().Format(time.RFC3339),
+			)
+			return playWindowChargePending, false, nil
+		}
+		var err error
+		held, err = playHoldEntitlementLockedInTx(
+			tx,
+			clientSession.Ctx,
+			playSubscriptionRenewal,
+			startTime,
+			maxExpiryTime.Add(SubscriptionGracePeriod),
+		)
+		if err != nil {
+			return playWindowCovered, false, err
+		}
+		if held {
+			glog.Infof(
+				"[sub]play purchase %s on network %s: Play moved the expiry to %s without a charge; Pro is held through it, and nothing is granted\n",
+				playSubscriptionRenewal.PurchaseToken,
+				playSubscriptionRenewal.NetworkId,
+				maxExpiryTime.UTC().Format(time.RFC3339),
+			)
+		}
+		return playWindowChargePending, held, nil
 	}
 
 	if sku.Supporter {
@@ -1833,7 +1976,7 @@ func playCreditSubscriptionInTx(
 			PaidEndTime:        &paidEndTime,
 		}
 		if err := model.AddSubscriptionRenewalInTx(tx, clientSession.Ctx, renewal); err != nil {
-			return false, err
+			return playWindowCovered, false, err
 		}
 		// the regional price tier and the welcome offer, from the
 		// store's region code and offer tag
@@ -1864,7 +2007,7 @@ func playCreditSubscriptionInTx(
 		model.GrantProCycleInTx(tx, clientSession.Ctx, playSubscriptionRenewal.NetworkId)
 
 	} else {
-		// a data pack, NOT a subscription -> data only, never Pro
+		// a data plan, NOT UR Pro -> data only, never Pro
 		transferBalance := &model.TransferBalance{
 			NetworkId:             playSubscriptionRenewal.NetworkId,
 			StartTime:             startTime,
@@ -1884,24 +2027,20 @@ func playCreditSubscriptionInTx(
 
 	// no balance covered this expiry. A window Play charged is a sale, and a
 	// free trial's first window a trial, posted once the caller's transaction
-	// commits; a window Play only moved out posts nothing
-	if historyRead {
-		credit := classifyPlayCredit(sub, playSubscriptionRenewal.SubscriptionId, startTime, maxExpiryTime, earlierExpiries)
+	// commits. A license tester's purchase moves no money and posts nothing.
+	if !testPurchase {
 		addSalesPaymentNoticeInTx(tx, func() *model.SalesPaymentNotice {
 			return playSalesNotice(playSubscriptionRenewal, sub, sku, maxExpiryTime, credit)
 		})
 	}
 
-	return true, nil
+	return playWindowCredited, false, nil
 }
 
 // Keeps Pro through Play's grace period. The renewal's charge failed and Play is retrying it, and Play holds the customer entitled
 // until maxExpiryTime, the grace period's end. Stripe's manual-payment grace
-// keeps a failing renewal's Pro the same way. Nothing here records the unpaid
-// renewal as paid: a renewal row with no revenue, so the network has an open
-// window (the monthly grant, the new-purchase guard, the cancel path), and a
-// zero-byte Pro marker with its exact window, so the end paths retire it. No
-// bytes, no sales notice and no onboarding or win-back record. When the charge
+// keeps a failing renewal's Pro the same way. The hold
+// (playHoldEntitlementLockedInTx) records nothing as paid. When the charge
 // lands, the recovered period credits as usual
 // (model.GetOverlappingTransferBalance does not count a hold as a credit), and
 // if it never does, the hold runs out on its own.
@@ -1932,6 +2071,25 @@ func playHoldGraceEntitlementInTx(
 	if _, err := model.GetOverlappingTransferBalanceInTx(tx, ctx, playSubscriptionRenewal.PurchaseToken, maxExpiryTime); err == nil {
 		return false, nil
 	}
+	return playHoldEntitlementLockedInTx(tx, ctx, playSubscriptionRenewal, startTime, endTime)
+}
+
+// Holds a UR Pro purchase's entitlement from startTime to endTime without
+// recording it as paid, in the caller's tx under the purchase's lock: Play's
+// grace period, and a window Play moved out while a renewal's charge is
+// pending. A renewal row with no revenue and no paid end, so the network has
+// an open window (the cycle grants, the new-purchase guard, the cancel path)
+// that pays for no period, and a zero-byte Pro marker with its exact window,
+// so the end paths retire it. No bytes, no revenue, no sales notice and no
+// onboarding or win-back record. held is false when an earlier hold has the
+// window.
+func playHoldEntitlementLockedInTx(
+	tx server.PgTx,
+	ctx context.Context,
+	playSubscriptionRenewal *PlaySubscriptionRenewalArgs,
+	startTime time.Time,
+	endTime time.Time,
+) (held bool, returnErr error) {
 	renewal := &model.SubscriptionRenewal{
 		NetworkId:          playSubscriptionRenewal.NetworkId,
 		StartTime:          startTime,
@@ -1998,18 +2156,51 @@ func endTerminalPlaySubscriptionRenewalInConn(connOwner server.PgConn,
 	}, nil
 }
 
+// The schedule of the Play renewal poll (PlaySubscriptionRenewalPost).
+type playRenewalPollSettings struct {
+	// The least time from a post to the next poll. A lapse inside its grace
+	// period is polled again after this, and so is an expiry closer than this,
+	// so a purchase whose expiry keeps passing is polled at most once per
+	// interval. One hour: about 24 checks across a lapse's day of grace, and at
+	// most one Play read an hour for any purchase. Non-positive polls again at
+	// once.
+	minPollInterval time.Duration
+}
+
+// A new instance on every call.
+func defaultPlayRenewalPollSettings() *playRenewalPollSettings {
+	return &playRenewalPollSettings{
+		minPollInterval: 1 * time.Hour,
+	}
+}
+
 // Runs in the transaction that finishes the renewal task and schedules the
-// next poll there. The subscription-ended notice is added to the account
-// message outbox in the same transaction: a finish that rolls back leaves no
-// notice, a finish that reruns its callback (or a retried post) owes one
-// notice, and a crash after the commit no longer loses it. The delivery task
-// sends it after the commit.
+// next poll there. This poll is the purchase's only one: a store notification
+// that asks for a poll while this one is pending merges into it
+// (task.RunOnce), so a purchase paid through a future expiry is always polled
+// again at that expiry, whoever credited it. The notification credits a
+// renewal the moment Play charges it, and the poll that runs next finds the
+// expiry already credited and reports it not renewed: nothing has ended.
+//
+// The subscription-ended notice is owed only once the expiry and its grace
+// period have passed with nothing renewed. It is added to the account message
+// outbox in the same transaction: a finish that rolls back leaves no notice, a
+// finish that reruns its callback (or a retried post) owes one notice, and a
+// crash after the commit no longer loses it. The delivery task sends it after
+// the commit.
 func PlaySubscriptionRenewalPost(
 	playSubscriptionRenewal *PlaySubscriptionRenewalArgs,
 	playSubscriptionRenewalResult *PlaySubscriptionRenewalResult,
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
+	settings := defaultPlayRenewalPollSettings()
+
+	if playSubscriptionRenewalResult.NetworkDeleted {
+		// the network is gone: no notice, and no poll again
+		return nil
+	}
+
 	if playSubscriptionRenewalResult.Canceled {
 		if !playSubscriptionRenewalResult.Terminal &&
 			!playSubscriptionRenewalResult.ExpiryTime.IsZero() {
@@ -2035,7 +2226,7 @@ func PlaySubscriptionRenewalPost(
 		// The recovery's notification usually gets there first.
 		playSubscriptionRenewal.CheckTime = server.MaxTime(
 			playSubscriptionRenewalResult.ExpiryTime,
-			server.NowUtc().Add(1*time.Hour),
+			server.NowUtc().Add(settings.minPollInterval),
 		)
 		SchedulePlaySubscriptionRenewal(
 			clientSession,
@@ -2045,27 +2236,31 @@ func PlaySubscriptionRenewalPost(
 		return nil
 	}
 
-	if playSubscriptionRenewalResult.Renewed {
-		// FIXME is the expiry time messed up sometimes?
+	now := server.NowUtc()
+	if playSubscriptionRenewalResult.Renewed || now.Before(playSubscriptionRenewalResult.ExpiryTime) {
+		// paid through a future expiry, credited by this poll or by another
+		// owner before it (the store's notification), or moved out to it
+		// while the renewal's charge is pending: poll again at the expiry
 		playSubscriptionRenewal.CheckTime = server.MaxTime(
 			playSubscriptionRenewalResult.ExpiryTime,
-			server.NowUtc().Add(1*time.Hour),
+			now.Add(settings.minPollInterval),
 		)
 		SchedulePlaySubscriptionRenewal(
 			clientSession,
 			tx,
 			playSubscriptionRenewal,
 		)
-	} else if now := server.NowUtc(); playSubscriptionRenewalResult.ExpiryTime.Before(now) && now.Before(playSubscriptionRenewalResult.ExpiryTime.Add(SubscriptionGracePeriod)) {
-		// check again in an hour
-		playSubscriptionRenewal.CheckTime = now.Add(1 * time.Hour)
+	} else if now.Before(playSubscriptionRenewalResult.ExpiryTime.Add(SubscriptionGracePeriod)) {
+		// the expiry passed inside its grace period: check again later
+		playSubscriptionRenewal.CheckTime = now.Add(settings.minPollInterval)
 		SchedulePlaySubscriptionRenewal(
 			clientSession,
 			tx,
 			playSubscriptionRenewal,
 		)
 	} else {
-		// else not renewed, stop trying
+		// the expiry and its grace period passed with nothing renewed: stop
+		// polling, and tell the admin
 		networkId := playSubscriptionRenewal.NetworkId
 		userAuth, err := model.GetUserAuthInTx(clientSession.Ctx, tx, networkId)
 		if err != nil {
@@ -2080,6 +2275,9 @@ func PlaySubscriptionRenewalPost(
 			// the network or its admin is gone
 			return nil
 		}
+		// a data plan's notice does not say UR Pro. An unknown product reads
+		// as UR Pro, as every notice did before
+		sku, ok := playSkusFunc()[playSubscriptionRenewal.SubscriptionId]
 		// one notice per lapse of this purchase on this network
 		addAccountMessageInTx(clientSession.Ctx, tx, &accountMessage{
 			key: fmt.Sprintf(
@@ -2090,7 +2288,9 @@ func PlaySubscriptionRenewalPost(
 			),
 			networkId: &networkId,
 			userAuth:  userAuth,
-			template:  &SubscriptionEndedTemplate{},
+			template: &SubscriptionEndedTemplate{
+				DataOnly: ok && !sku.Supporter,
+			},
 		})
 	}
 
@@ -2166,12 +2366,14 @@ func VerifyPlayBody(_ *session.ClientSession, req *http.Request) (body io.Reader
 			return
 		}
 		outcome := StoreNotificationRefusedMalformed
+		stage := ""
 		if returnErr == errWebhookVerificationUnavailable {
 			outcome = StoreNotificationRefusedUnavailable
 		} else if refused, ok := returnErr.(*playAuthError); ok {
 			outcome = refused.outcome
+			stage = refused.stage
 		}
-		RecordStoreNotificationOutcome(req.Context(), model.SubscriptionMarketGoogle, outcome)
+		storeNotifications.recordWithStage(req.Context(), model.SubscriptionMarketGoogle, outcome, stage)
 	}()
 	publisherEmail, err := playPublisherEmail()
 	if err != nil {
@@ -2221,8 +2423,8 @@ func verifyPlayAuth(ctx context.Context, auth string, publisherEmail string, aud
 				// Google answered: the token is not one it issued, or expired
 				return &playAuthError{outcome: StoreNotificationRefusedAuth, message: err.Error()}
 			}
-			// Google could not be asked: the push is unverified, not refused
-			return &playAuthError{outcome: StoreNotificationError, message: err.Error()}
+			// The lookup or its response decode failed before the claims checks.
+			return &playAuthError{outcome: StoreNotificationError, stage: playNotificationTokenInfoStage, message: err.Error()}
 		}
 		// Google's tokeninfo endpoint verifies the signature. Bind that token
 		// to this subscription and its verified service account as well.
@@ -3346,9 +3548,10 @@ type SolanaPaymentIntentArgs struct {
 	// never taken from the client -- the server derives it from pro.yml. A
 	// client-supplied amount would let anyone quote themselves a year for a cent.
 	Plan string `json:"plan"`
-	// the store's storefront country, when the app knows it; else the tier is
-	// resolved from the Stripe billing country or the client ip (Solana keeps the
-	// estimate: accepted risk on a one-time crypto payment)
+	// a store's storefront country. No store sells this, so the price tier is
+	// never taken from it: the tier is the one the server's country signals
+	// agree on (price_tier_signals.go), and the intent keeps this in the
+	// tier's evidence
 	StorefrontCountry string `json:"storefront_country,omitempty"`
 }
 
@@ -3444,8 +3647,8 @@ func CreateSolanaPaymentIntent(
 	}
 
 	// The price comes from pro.yml, keyed by the plan and the caller's regional
-	// price tier. It is NEVER taken from the client.
-	tier := ResolvePriceTier(clientSession, intent.StorefrontCountry)
+	// price tier. Neither is ever taken from the client.
+	tier := ResolvePurchasePriceTier(clientSession, intent.StorefrontCountry)
 	offerApplied := false
 	if intent.Plan == model.SolanaPlanYearlyOnboarding {
 		if EligibleOnboardingOffer(clientSession, clientSession.ByJwt.NetworkId) == nil {
@@ -3479,7 +3682,7 @@ func CreateSolanaPaymentIntent(
 	//
 	// The quote is the price plus a reserved sub-cent suffix, so a payment sent
 	// without the reference is still identified by its exact amount.
-	amountUsd, err := model.CreateSolanaPaymentIntentWithUniqueAmount(
+	amountUsd, err := model.CreateSolanaPlanPaymentIntentWithUniqueAmount(
 		clientSession.Ctx,
 		intent.Reference,
 		clientSession.ByJwt.NetworkId,
@@ -3487,6 +3690,7 @@ func CreateSolanaPaymentIntent(
 		intent.Plan,
 		server.NowUtc().Add(solanaPlanIntentDuration),
 		solanaPickAmountSuffixMicro,
+		tier.Evidence.rowJson(),
 	)
 	if err != nil {
 		glog.Errorf("[sub]could not create solana payment intent: %s\n", err)

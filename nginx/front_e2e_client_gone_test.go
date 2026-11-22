@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/urnetwork/quic-go"
+	"github.com/urnetwork/quic-go/http3"
 )
 
 // The front's request count of the api service with no block, by protocol
@@ -131,6 +133,146 @@ func TestFrontE2eClientResetMidBodyIsRecordedWithNoStatus(t *testing.T) {
 	}
 	if requests := e2e.serviceRequests("api"); len(requests) != 0 {
 		t.Errorf("%d requests reached a block, want none", len(requests))
+	}
+}
+
+// Regression test: an h3 client that resets its request's side while the
+// front reads its body, the response's side left open, gets no response,
+// as a client gone mid-body gets on h1 and h2. Its body is refused as
+// canceled and the request recorded with no status, on a buffered route,
+// which no block sees, and on a streamed one, whose block gets the body cut
+// short. The vendored http3 fails the read with the client's reset and
+// never ends the request's context for it, so the front answered a 400 and
+// counted an incomplete body. The barriers: on the buffered route the body's
+// spill file, which the front creates once the body has passed its memory
+// prefix; on the streamed route the block's read of the first bytes.
+func TestFrontE2eH3ClientResetMidBodyGetsNoResponse(t *testing.T) {
+	// the api's /stream/ paths stream, as the api's streamable paths do
+	e2e := newE2eFront(t, nil, func(routeTable *RouteTable) {
+		for _, service := range routeTable.Services {
+			if service.Name == "api" {
+				service.StreamablePaths = []string{"/stream/.*"}
+			}
+		}
+	})
+	h3ApiServer := newE2eH3ApiServer(t, e2e)
+	store := e2e.store(t)
+	createSpillFile := store.createSpillFile
+	spilling := make(chan struct{}, 1)
+	// set before any request reaches the store
+	store.createSpillFile = func() (bodySpillFile, error) {
+		select {
+		case spilling <- struct{}{}:
+		default:
+		}
+		return createSpillFile()
+	}
+	// the blocks read a streamed body as it arrives, and keep its end
+	blockReads := make(chan struct{}, 1)
+	blockBodyErrs := make(chan error, 1)
+	for _, block := range []string{"g1", "g2"} {
+		e2e.upstream(t, "api", block).setStreamHandler(func(w http.ResponseWriter, r *http.Request) {
+			buffer := make([]byte, 4096)
+			first := true
+			for {
+				n, err := r.Body.Read(buffer)
+				if 0 < n && first {
+					first = false
+					blockReads <- struct{}{}
+				}
+				if err != nil {
+					blockBodyErrs <- err
+					return
+				}
+			}
+		})
+	}
+
+	prefixBytes := e2e.settings.Body.MemoryPrefixBytes
+	for _, c := range []struct {
+		path           string
+		declaredLength int64
+		sent           []byte
+		// waits until the front is reading the body, past what was sent
+		barrier  func()
+		streamed bool
+	}{
+		{
+			path:           "/reset-buffered",
+			declaredLength: 2 * prefixBytes,
+			sent:           e2eBody(int(prefixBytes) + 10),
+			barrier: func() {
+				receiveE2e(t, spilling, "the spill of the body's first bytes past its prefix")
+			},
+		},
+		{
+			path:           "/stream/reset",
+			declaredLength: 100,
+			sent:           []byte("0123456789"),
+			barrier: func() {
+				receiveE2e(t, blockReads, "the block's read of the body's first bytes")
+			},
+			streamed: true,
+		},
+	} {
+		beforeCanceled := bodyRefusalCount("api", bodyRefusalCanceled)
+		beforeIncomplete := bodyRefusalCount("api", bodyRefusalIncomplete)
+		beforeNone := e2eApiRequestCount("h3", "none")
+		before4xx := e2eApiRequestCount("h3", "4xx")
+		beforeForwardErrors := forwardErrorCount("api", http.StatusBadGateway)
+		requestCounts := e2e.requestCounts()
+
+		str := h3ApiServer.openRequestStream(t, e2e)
+		// bounds a broken test, never a passing one
+		str.SetDeadline(time.Now().Add(e2eWaitTimeout))
+		request := newE2eRequest(t, "POST", "https://api.service.example"+c.path, http.NoBody)
+		// the declared length goes in the head; the body goes as DATA frames
+		request.ContentLength = c.declaredLength
+		if err := str.SendRequestHeader(request); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := str.Write(c.sent); err != nil {
+			t.Fatal(err)
+		}
+		c.barrier()
+		// RESET_STREAM for the request's side alone: no STOP_SENDING, so the
+		// response's side, and the request's context, stay open
+		str.CancelWrite(quic.StreamErrorCode(http3.ErrCodeRequestCanceled))
+		if response, err := str.ReadResponse(); err == nil {
+			t.Errorf("%s: a client that reset its request's side got %d, want no response", c.path, response.StatusCode)
+		}
+		h3ApiServer.servedLog.await(t, c.path)
+
+		if count := bodyRefusalCount("api", bodyRefusalCanceled) - beforeCanceled; count != 1 {
+			t.Errorf("%s: %v canceled refusals, want 1", c.path, count)
+		}
+		if count := bodyRefusalCount("api", bodyRefusalIncomplete) - beforeIncomplete; count != 0 {
+			t.Errorf("%s: %v incomplete refusals, want none", c.path, count)
+		}
+		if count := e2eApiRequestCount("h3", "none") - beforeNone; count != 1 {
+			t.Errorf("%s: %v requests recorded with no status, want 1", c.path, count)
+		}
+		if count := e2eApiRequestCount("h3", "4xx") - before4xx; count != 0 {
+			t.Errorf("%s: %v requests recorded as 4xx, want none", c.path, count)
+		}
+		if count := forwardErrorCount("api", http.StatusBadGateway) - beforeForwardErrors; count != 0 {
+			t.Errorf("%s: %v of the front's own 502s, want none", c.path, count)
+		}
+		requests := e2e.requestsSince(requestCounts)
+		if !c.streamed && len(requests) != 0 {
+			t.Errorf("%s: the reset body reached a block: %d requests", c.path, len(requests))
+		}
+		if c.streamed {
+			if len(requests) != 1 {
+				t.Errorf("%s: %d requests reached a block, want the streamed head once", c.path, len(requests))
+			}
+			if err := receiveE2e(t, blockBodyErrs, "the block's end of the body"); err == nil {
+				t.Errorf("%s: the block read the reset body whole", c.path)
+			}
+		}
+		if memoryBytes, spillBytes, spillFiles, bodies := e2e.bodyUsage(t); memoryBytes != 0 || spillBytes != 0 || spillFiles != 0 || bodies != 0 {
+			t.Errorf("%s: the store holds %d bytes, %d spilled in %d files, for %d bodies, want nothing", c.path, memoryBytes, spillBytes, spillFiles, bodies)
+		}
 	}
 }
 

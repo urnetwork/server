@@ -71,8 +71,13 @@ func sessionFixtureCredential(networkId server.Id, now time.Time) *ByJwt {
 	claims.ExpiresAt = gojwt.NewNumericDate(now.Add(30 * 24 * time.Hour))
 	return claims
 }
+
+// The cap of TestSessionRedisCapacityHorizonAndAtomicRevoke, enforced.
+const sessionCapacityTestLive = 1000
+
 func TestSessionRedisCapacityHorizonAndAtomicRevoke(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		defer Testing_SetSessionCapPolicy(SessionCapPolicy{Live: sessionCapacityTestLive, Retained: NetworkSessionRetainedLimit, Enforce: true})()
 		ctx := t.Context()
 		now := server.NowUtc()
 		networkId := server.NewId()
@@ -80,7 +85,7 @@ func TestSessionRedisCapacityHorizonAndAtomicRevoke(t *testing.T) {
 		if _, err := RegisterNetworkSession(ctx, first, "password", nil, false, now); err != nil {
 			t.Fatal(err)
 		}
-		for i := 1; i < NetworkSessionLiveLimit; i++ {
+		for i := 1; i < sessionCapacityTestLive; i++ {
 			if _, err := RegisterNetworkSession(ctx, sessionFixtureCredential(networkId, now), "password", nil, false, now); err != nil {
 				t.Fatal(i, err)
 			}
@@ -99,12 +104,12 @@ func TestSessionRedisCapacityHorizonAndAtomicRevoke(t *testing.T) {
 			t.Fatal("retry shortened authority", err)
 		}
 		inv, err := readSessionInventory(ctx, networkId, now)
-		if err != nil || len(inv.Members) != NetworkSessionLiveLimit*2 {
+		if err != nil || len(inv.Members) != sessionCapacityTestLive*2 {
 			t.Fatal("accepted inventory truncated", err)
 		}
 		op := server.NewId()
 		result, err := enforceSessionRevoke(ctx, networkId, op, "others", nil, first.SessionId)
-		if err != nil || result.RevokedCount != NetworkSessionLiveLimit-1 {
+		if err != nil || result.RevokedCount != sessionCapacityTestLive-1 {
 			t.Fatal("bulk cutoff", result, err)
 		}
 		inv, err = readSessionInventory(ctx, networkId, now)
@@ -281,8 +286,12 @@ func TestSessionResetCutoffKeepsOnlyNewNanosecondLineage(t *testing.T) {
 		}
 	})
 }
+
+// The retained cap counts revoked markers only (held minus live) and, enforced,
+// refuses a new session rather than evicting a marker.
 func TestSessionRetainedCapacityDoesNotEvictAcceptedMarker(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		defer Testing_SetSessionCapPolicy(SessionCapPolicy{Retained: NetworkSessionRetainedLimit, Enforce: true})()
 		ctx := t.Context()
 		now := server.NowUtc()
 		network := server.NewId()
@@ -291,7 +300,7 @@ func TestSessionRetainedCapacityDoesNotEvictAcceptedMarker(t *testing.T) {
 			t.Fatal(err)
 		}
 		server.Raise(server.RedisAuth(ctx, func(ctx context.Context, r server.RedisClient) error {
-			return r.Eval(ctx, `for i=1,9999 do redis.call('ZADD',KEYS[1],ARGV[1],'retained-'..i) end;return 1`, []string{SessionKey(network, "held")}, DeadlineMillis(existing.AcceptUntil().Add(SessionRetentionMargin))).Err()
+			return r.Eval(ctx, `for i=1,tonumber(ARGV[2]) do redis.call('ZADD',KEYS[1],ARGV[1],'retained-'..i) end;return 1`, []string{SessionKey(network, "held")}, DeadlineMillis(existing.AcceptUntil().Add(SessionRetentionMargin)), NetworkSessionRetainedLimit).Err()
 		}))
 		if _, err := RegisterNetworkSession(ctx, sessionFixtureCredential(network, now), "password", nil, false, now); err == nil {
 			t.Fatal("retained cap evicted reservation")

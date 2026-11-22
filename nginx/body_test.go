@@ -19,6 +19,8 @@ import (
 	"testing/iotest"
 	"testing/synctest"
 	"time"
+
+	"github.com/urnetwork/quic-go/http3"
 )
 
 // A body reader that hands out its bytes in chunks and counts what was
@@ -625,6 +627,36 @@ func TestBodyStoreReadFailures(t *testing.T) {
 		t.Fatalf("early end: %v, want 400", refusal)
 	}
 	checkStoreEmpty(t, bodyStore)
+}
+
+// Regression test: a body whose read fails because its client reset it is
+// refused as canceled, with no response, while the request's context is
+// still live, as an h3 client's reset of its request's side leaves it, and
+// as a reset can reach the read before the context ends on h2. Nothing stays
+// held, the body's spill file included. Before, such a body was counted as
+// incomplete and answered 400.
+func TestBodyStoreReadOfAResetBodyIsCanceled(t *testing.T) {
+	settings := DefaultBodySettings()
+	bodyStore, spyFiles := newSpyBodyStore(t, settings)
+	for _, resetErr := range []error{
+		testConnectionResetReadError(t),
+		&http3.Error{Remote: true, ErrorCode: http3.ErrCodeRequestCanceled},
+	} {
+		// past the memory prefix, so a spill file holds the rest
+		resetReader := io.MultiReader(bytes.NewReader(testBodyBytes(int(settings.MemoryPrefixBytes)+10)), errorReader{err: resetErr})
+		storedBody, refusal := bodyStore.read(testContext(t), resetReader, bodyReadOptions{
+			declaredLength: 2 * settings.MemoryPrefixBytes,
+			prefixBytes:    settings.MemoryPrefixBytes,
+		})
+		if storedBody != nil || refusal == nil || refusal.status != 0 || refusal.reason != bodyRefusalCanceled {
+			t.Errorf("a body its client reset (%v): refused %v, want canceled with no response", resetErr, refusal)
+		}
+		checkStoreEmpty(t, bodyStore)
+	}
+	if spyFiles.count() != 2 {
+		t.Errorf("%d spill files created, want one per body", spyFiles.count())
+	}
+	spyFiles.checkClosed()
 }
 
 // A reader that fails, first canceling the request's context when given a

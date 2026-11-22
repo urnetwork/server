@@ -20,6 +20,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/internal/timersweep"
 	"github.com/urnetwork/server/model"
 )
 
@@ -123,6 +124,8 @@ func DefaultConnectionAnnounceSettings() *ConnectionAnnounceSettings {
 		// aligned with the `bytesPerSecondCutoff` used by provider ranking
 		SyntheticSpeedBytesPerSecond: 4 * model.Mib,
 		SyntheticSpeedTimeout:        60 * time.Second,
+
+		Batch: *DefaultConnectionAnnounceBatchSettings(),
 	}
 }
 
@@ -171,6 +174,12 @@ type ConnectionAnnounceSettings struct {
 	SyntheticSpeedBytesPerSecond ByteCount
 	SyntheticSpeedTimeout        time.Duration
 
+	// the batcher the handler makes from these settings, which commits the
+	// announcements' sync round reads and stats writes, verify egress lease
+	// refreshes and measurement writes in groups
+	// (transport_announce_batch.go)
+	Batch ConnectionAnnounceBatchSettings
+
 	// LifecycleStarted and LifecycleDone are optional, nonblocking observers
 	// for test fixtures that must join asynchronous connection cleanup. They
 	// are nil in production.
@@ -195,6 +204,21 @@ type ConnectionAnnounceSettings struct {
 	livenessLeaseWrittenForTest func(outcome string)
 	// Replaces the process's lease writer.
 	livenessLeaseWriterForTest *providerLivenessLeaseWriter
+	// Observe each arm and fire of the announcement's sweep timers, by kind:
+	// announceTimerWindow, announceTimerSync, announceTimerTest and
+	// announceTimerVerify. An arm is reported just before it is made.
+	announceTimerArmedForTest func(kind string, timeout time.Duration)
+	announceTimerFiredForTest func(kind string)
+
+	// the process's timer sweep, set from the exchange in NewConnectHandler.
+	// The announce window, the sync rounds, the test schedule, the verify
+	// egress refreshes and the passive samples wait on it, each firing at its
+	// deadline or at most one sweep tick after it (LBALTOPT2.md §8.1). Nil
+	// gives each of those timers a sweep of its own.
+	timerSweep *timersweep.Sweep
+	// the handler's batcher, made from Batch in NewConnectHandler. Nil, as
+	// for an announcement a test builds, uses the process's default batcher.
+	batcher *connectionAnnounceBatcher
 }
 
 type LatencyTest struct {
@@ -266,10 +290,6 @@ type ConnectionAnnounce struct {
 	// prove: 0 (legacy), 4 or 6. Recorded with the connection; the observed
 	// family is derived from clientAddress at the model.
 	ipFamilyIntent int
-	// proxiedEgress is whether the transport declared it was dialed through
-	// a proxy (transport_egress_proxy.go): its egress lease marks the client
-	// first, so the client shows no unit
-	proxiedEgress bool
 	// the client's app version from its auth, for the provider rollout gauge
 	// (providerVersionConnection); "" when it sent none
 	appVersion string
@@ -350,9 +370,9 @@ type connectionMeasurements struct {
 // production: connectionReconcile is that handler's, holds the row while the
 // transport lives, and retires it if its final disconnect fails. ipFamilyIntent
 // is the address family the transport declared it intends to prove (0, 4 or
-// 6), proxiedEgress whether it declared it was dialed through a proxy, and
-// appVersion the client's app version from its auth. Tests announce without a
-// reconcile through NewConnectionAnnounce* (transport_announce_testing_test.go).
+// 6) and appVersion the client's app version from its auth. Tests announce
+// without a reconcile through NewConnectionAnnounce*
+// (transport_announce_testing_test.go).
 func newConnectionAnnounceWithReconcile(
 	ctx context.Context,
 	cancel context.CancelFunc,
@@ -360,7 +380,6 @@ func newConnectionAnnounceWithReconcile(
 	clientId server.Id,
 	clientAddress string,
 	ipFamilyIntent int,
-	proxiedEgress bool,
 	appVersion string,
 	handlerId server.Id,
 	connectionReconcile *handlerConnectionReconcile,
@@ -375,7 +394,6 @@ func newConnectionAnnounceWithReconcile(
 		clientId:               clientId,
 		clientAddress:          clientAddress,
 		ipFamilyIntent:         ipFamilyIntent,
-		proxiedEgress:          proxiedEgress,
 		appVersion:             appVersion,
 		handlerId:              handlerId,
 		connectionReconcile:    connectionReconcile,
@@ -453,10 +471,17 @@ func (self *ConnectionAnnounce) run() {
 	}()
 	if 0 < self.announceTimeout {
 		model.SetPendingNetworkClientConnection(self.ctx, self.clientId, self.announceTimeout+5*time.Second)
+		// both halves of the window on the sweep: the registration comes at
+		// most two ticks after the window, well inside the pending marker's
+		// five seconds of slack
+		self.announceTimerArmedForTest(announceTimerWindow, self.announceTimeout/2)
+		announceWait := self.settings.timerSweep.NewTimer(self.announceTimeout / 2)
+		defer announceWait.Stop()
 		select {
 		case <-self.ctx.Done():
 			return
-		case <-time.After(self.announceTimeout / 2):
+		case <-announceWait.C:
+			self.announceTimerFiredForTest(announceTimerWindow)
 		}
 
 		if self.testConfig.AllowLatency() || self.testConfig.AllowSpeed() {
@@ -485,10 +510,13 @@ func (self *ConnectionAnnounce) run() {
 			}
 		}
 
+		self.announceTimerArmedForTest(announceTimerWindow, self.announceTimeout/2)
+		announceWait.Reset(self.announceTimeout / 2)
 		select {
 		case <-self.ctx.Done():
 			return
-		case <-time.After(self.announceTimeout / 2):
+		case <-announceWait.C:
+			self.announceTimerFiredForTest(announceTimerWindow)
 		}
 	}
 
@@ -586,13 +614,14 @@ func (self *ConnectionAnnounce) run() {
 		feedFailureCount := 0
 		feed := func() {
 			if feedErr := self.recoverLiveCall(func() {
-				if self.proxiedEgress {
-					// marks the client before the lease, so the index never
-					// attributes this transport to an unmarked client
-					model.FeedVerifyProxiedConnectionEgress(self.ctx, self.clientId, connectionId, verifyEgressIp, verifySettings)
-				} else {
-					model.FeedVerifyConnectionEgress(self.ctx, self.clientId, connectionId, verifyEgressIp, verifySettings)
-				}
+				// The lease refresh goes out with the process's other due
+				// refreshes, in one batch.
+				self.batcher().feedVerifyEgress(self.ctx, model.VerifyConnectionEgressFeed{
+					ClientId:     self.clientId,
+					ConnectionId: connectionId,
+					Ip:           verifyEgressIp,
+					Settings:     verifySettings,
+				})
 			}); feedErr != nil {
 				feedFailureCount += 1
 				defaultLiveFailureLog.record(liveFailureOperationVerifyEgressLease, feedFailureCount, feedErr)
@@ -601,19 +630,31 @@ func (self *ConnectionAnnounce) run() {
 			feedFailureCount = 0
 		}
 		feed()
-		// only this worker feeds from here on
+		// only this worker feeds from here on. A refresh may come a sweep
+		// tick late, against a lease ttl several refreshes long.
+		feedTimeout := func() time.Duration {
+			timeout := verifySettings.EgressRefreshInterval
+			if 0 < feedFailureCount {
+				timeout = min(timeout, self.retryTimeout(feedFailureCount))
+			}
+			return timeout
+		}
 		self.startWorker(func() {
+			timeout := feedTimeout()
+			self.announceTimerArmedForTest(announceTimerVerify, timeout)
+			feedTimer := self.settings.timerSweep.NewTimer(timeout)
+			defer feedTimer.Stop()
 			for {
-				timeout := verifySettings.EgressRefreshInterval
-				if 0 < feedFailureCount {
-					timeout = min(timeout, self.retryTimeout(feedFailureCount))
-				}
 				select {
 				case <-self.ctx.Done():
 					return
-				case <-time.After(timeout):
+				case <-feedTimer.C:
+					self.announceTimerFiredForTest(announceTimerVerify)
 				}
 				feed()
+				timeout = feedTimeout()
+				self.announceTimerArmedForTest(announceTimerVerify, timeout)
+				feedTimer.Reset(timeout)
 			}
 		})
 	}
@@ -729,25 +770,38 @@ func (self *ConnectionAnnounce) run() {
 	syncFailureCount := 0
 	// One timer for the next test and one for the next sync round, each re-armed
 	// only after it fires. A time.After for both on every round left the one
-	// that did not fire in the timer heap, the test's for 12 to 24 hours.
-	testTimer := time.NewTimer(nextTest())
+	// that did not fire in the timer heap, the test's for 12 to 24 hours. Both
+	// wait on the sweep, outside the runtime's timer heaps: a round may start
+	// a sweep tick late, and its stats cover the time from the last round's
+	// end to its own, so no time is lost.
+	testTimeout := nextTest()
+	self.announceTimerArmedForTest(announceTimerTest, testTimeout)
+	testTimer := self.settings.timerSweep.NewTimer(testTimeout)
 	defer testTimer.Stop()
-	syncTimer := time.NewTimer(self.retryTimeout(syncFailureCount))
+	syncTimeout := self.retryTimeout(syncFailureCount)
+	self.announceTimerArmedForTest(announceTimerSync, syncTimeout)
+	syncTimer := self.settings.timerSweep.NewTimer(syncTimeout)
 	defer syncTimer.Stop()
 	// a fired sync timer is re-armed after the round, for its outcome
 	syncTimerFired := false
 	for {
 		if syncTimerFired {
-			syncTimer.Reset(self.retryTimeout(syncFailureCount))
+			syncTimeout = self.retryTimeout(syncFailureCount)
+			self.announceTimerArmedForTest(announceTimerSync, syncTimeout)
+			syncTimer.Reset(syncTimeout)
 			syncTimerFired = false
 		}
 		select {
 		case <-self.ctx.Done():
 			return
 		case <-testTimer.C:
-			testTimer.Reset(nextTest())
+			self.announceTimerFiredForTest(announceTimerTest)
+			testTimeout = nextTest()
+			self.announceTimerArmedForTest(announceTimerTest, testTimeout)
+			testTimer.Reset(testTimeout)
 		case <-syncTimer.C:
 			syncTimerFired = true
+			self.announceTimerFiredForTest(announceTimerSync)
 			roundEndTime := server.NowUtc()
 
 			// FIXME need events to support kicking off connections from the model
@@ -764,7 +818,8 @@ func (self *ConnectionAnnounce) run() {
 			var changedCount int
 			var currentProvideModes map[model.ProvideMode]bool
 			if readErr := self.recoverLiveCall(func() {
-				changedCount, currentProvideModes = model.GetProvideKeyChanges(self.ctx, self.clientId, nextStartTime)
+				// with the process's other due rounds, in one batch
+				changedCount, currentProvideModes = self.batcher().getProvideKeyChanges(self.ctx, self.clientId, nextStartTime)
 			}); readErr != nil {
 				syncFailureCount += 1
 				defaultLiveFailureLog.record(liveFailureOperationSyncRead, syncFailureCount, readErr)
@@ -873,21 +928,42 @@ func (self *ConnectionAnnounce) run() {
 				// record to redis only (never pg): the per-sync stats of every
 				// connected provider were the single largest statement load on
 				// the database. RollupClientReliabilityStats drains the redis
-				// counters into `client_reliability` per block.
-				model.RecordClientReliabilityStatsRange(
-					self.ctx,
-					self.networkId,
-					self.clientId,
-					clientAddressHash,
-					startTime,
-					nextStartTime,
-					stats,
-				)
+				// counters into `client_reliability` per block. With the
+				// process's other due rounds, in one batch.
+				self.batcher().recordReliabilityStats(self.ctx, model.ClientReliabilityStatsRecord{
+					NetworkId:         self.networkId,
+					ClientId:          self.clientId,
+					ClientAddressHash: clientAddressHash,
+					StatsStartTime:    startTime,
+					StatsEndTime:      nextStartTime,
+					Stats:             *stats,
+				})
 				if recorded := self.settings.reliabilityStatsRecordedForTest; recorded != nil {
 					recorded(self.clientId, *stats)
 				}
 			}
 		}
+	}
+}
+
+// The kinds of the announcement's sweep timers, as its test observers name
+// them.
+const (
+	announceTimerWindow = "window"
+	announceTimerSync   = "sync"
+	announceTimerTest   = "test"
+	announceTimerVerify = "verify"
+)
+
+func (self *ConnectionAnnounce) announceTimerArmedForTest(kind string, timeout time.Duration) {
+	if armed := self.settings.announceTimerArmedForTest; armed != nil {
+		armed(kind, timeout)
+	}
+}
+
+func (self *ConnectionAnnounce) announceTimerFiredForTest(kind string) {
+	if fired := self.settings.announceTimerFiredForTest; fired != nil {
+		fired(kind)
 	}
 }
 
@@ -1312,8 +1388,10 @@ func connectionMeasurementAverage(previous, sample, sampleCount uint64, sampleWi
 // and their count fence makes a replay idempotent, so nothing is lost.
 func (self *ConnectionAnnounce) runMeasurementPublisher() {
 	// one timer for the passive samples, re-armed after each fires: a
-	// time.After per sample created a timer every window for each connection
-	passiveSampleTimer := time.NewTimer(self.settings.PassiveSpeedWindowDuration)
+	// time.After per sample created a timer every window for each connection.
+	// It waits on the sweep, so a window may run a sweep tick long; the sample
+	// divides by the window's measured length.
+	passiveSampleTimer := self.settings.timerSweep.NewTimer(self.settings.PassiveSpeedWindowDuration)
 	defer passiveSampleTimer.Stop()
 	// consecutive failed writes; while a retry waits, no write is attempted
 	writeFailureCount := 0
@@ -1355,7 +1433,14 @@ func (self *ConnectionAnnounce) runMeasurementPublisher() {
 			}()
 			if pending {
 				if writeErr := self.recoverLiveCall(func() {
-					self.writeMeasurements(measurements)
+					if self.beforeMeasurementWriteForTest != nil {
+						// a test holds this connection's own transaction
+						self.writeMeasurements(measurements)
+					} else {
+						// with the process's other pending snapshots, in one
+						// batch
+						self.batcher().writeMeasurements(self.ctx, measurements)
+					}
 				}); writeErr != nil {
 					writeFailureCount += 1
 					defaultLiveFailureLog.record(liveFailureOperationMeasurementWrite, writeFailureCount, writeErr)
@@ -1385,12 +1470,19 @@ func (self *ConnectionAnnounce) runMeasurementPublisher() {
 // fence makes replay after an ambiguous transaction result idempotent and
 // prevents an older snapshot from regressing either metric independently.
 func (self *ConnectionAnnounce) writeMeasurements(measurements connectionMeasurements) {
-	server.Tx(self.ctx, func(tx server.PgTx) {
-		if self.beforeMeasurementWriteForTest != nil {
-			self.beforeMeasurementWriteForTest()
+	writeConnectionMeasurements(self.ctx, measurements, self.beforeMeasurementWriteForTest)
+}
+
+// One snapshot's write in its own transaction, writeMeasurements' and a
+// batch's for a snapshot that cannot share its statements. beforeWrite, nil
+// in production, runs inside the transaction before its statements.
+func writeConnectionMeasurements(ctx context.Context, measurements connectionMeasurements, beforeWrite func()) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		if beforeWrite != nil {
+			beforeWrite()
 		}
 		if measurements.latency {
-			server.RaisePgResult(tx.Exec(self.ctx, `
+			server.RaisePgResult(tx.Exec(ctx, `
 				INSERT INTO network_client_latency (connection_id, latency_ms, sample_count)
 				VALUES ($1, $2, $3)
 				ON CONFLICT (connection_id) DO UPDATE
@@ -1399,7 +1491,7 @@ func (self *ConnectionAnnounce) writeMeasurements(measurements connectionMeasure
 			`, measurements.connectionId, measurements.latencyMillis, measurements.latencySampleCount))
 		}
 		if measurements.speed {
-			server.RaisePgResult(tx.Exec(self.ctx, `
+			server.RaisePgResult(tx.Exec(ctx, `
 				INSERT INTO network_client_speed (connection_id, bytes_per_second, sample_count)
 				VALUES ($1, $2, $3)
 				ON CONFLICT (connection_id) DO UPDATE
@@ -1408,4 +1500,12 @@ func (self *ConnectionAnnounce) writeMeasurements(measurements connectionMeasure
 			`, measurements.connectionId, measurements.bytesPerSecond, measurements.speedSampleCount))
 		}
 	})
+}
+
+// The announcement's batcher: its handler's, or the process's default.
+func (self *ConnectionAnnounce) batcher() *connectionAnnounceBatcher {
+	if self.settings.batcher != nil {
+		return self.settings.batcher
+	}
+	return defaultConnectionAnnounceBatcher
 }

@@ -2,18 +2,33 @@ package nginx
 
 // What the front records of its requests (owner: s-http; D17): bounded
 // counters and response-head latency histograms by service, protocol,
-// status class and upstream block, a counter of limit refusals by limit, the
-// earliest expiry of the certificates it serves, and an optional access log
-// at V(1), sampled, that honors no_access_log and no_success_access_log.
+// status class and upstream block, a counter of limit refusals by limit,
+// zone and the class of the name, the earliest expiry of the certificates it
+// serves, a counter of the
+// QUIC ClientHellos its QUIC TLS config reads, by interface, port kind, the
+// class of the name and whether h3 was offered, gauges of how its connect connections
+// concentrate on source addresses (concentration.go), by family and bound,
+// and an optional access log at V(1), sampled, that honors no_access_log and
+// no_success_access_log.
+//
+// The service and block labels are upstream_service and upstream_block: the
+// process's stats push adds its own service and block to every series, and
+// the push client refuses a whole push, every metric of the process, when a
+// metric has a label of a name it adds (server.StatsPushReservedLabelNames).
 //
 // No label or log line carries a client address or a hidden route prefix:
 // labels come from the route table or fixed sets, never from a request, and
 // the access log replaces every hidden prefix it finds in what the client
 // sent and never writes the peer, X-UR-Forwarded-For or the query.
+//
+// A request's metrics cost no allocation and no lookup by labels: the label
+// values are constants, and each label set's series are resolved once and
+// kept per service and block (frontRequestMetrics).
 
 import (
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -37,11 +52,17 @@ type frontMetrics struct {
 	// builds no front, as connect without a route file, exports none: a
 	// gauge's 0 would read as a certificate that lapsed in 1970
 	certificateExpiry *prometheus.GaugeVec
+	// every ClientHello the QUIC TLS config reads (newTlsConfigs)
+	quicClientHellos *prometheus.CounterVec
+	// the source addresses holding connect connections, and the connections
+	// they hold, by family and bound (frontConcentration)
+	connectAddresses          *prometheus.GaugeVec
+	connectAddressConnections *prometheus.GaugeVec
 }
 
 // Builds and registers one independent set of the front's metric families.
 func newFrontMetrics(registerer prometheus.Registerer) *frontMetrics {
-	labels := []string{"service", "protocol", "status_class", "block"}
+	labels := []string{"upstream_service", "protocol", "status_class", "upstream_block"}
 	metrics := &frontMetrics{
 		requests: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: "urnetwork",
@@ -61,20 +82,41 @@ func newFrontMetrics(registerer prometheus.Registerer) *frontMetrics {
 			Namespace: "urnetwork",
 			Subsystem: "front",
 			Name:      "limit_refusals_total",
-			Help:      "Requests and QUIC connections the lb_alt front refused under its D8 limits, by limit: request, route, concurrency, quic, state, or interface for a QUIC connection on an interface the route table doesn't list",
-		}, []string{"limit"}),
+			Help:      "Requests and QUIC connections the lb_alt front refused under its D8 limits, by limit (request, route, concurrency, quic, state; identity, identity_concurrency, ceiling and ceiling_concurrency for the identity limit; interface for a QUIC connection on an interface the route table doesn't list, class for one of a class the front doesn't serve on QUIC), zone: the request zone the request was charged to, whichever limit refused it, nginx's route_<service>_<path> for a route zone from the route file, identity for a request charged to its verified identity, or default for the interface's shared zone, which a refused QUIC connection is counted in too, - for interface and class; and name_class, the class of the name the request or connection named (connect, api, lb, forwarded, redirect, unknown): a QUIC connection's is api or connect, each class with a cap of its own",
+		}, []string{"limit", "zone", "name_class"}),
 		certificateExpiry: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: "urnetwork",
 			Subsystem: "front",
 			Name:      "certificate_expiry_timestamp_seconds",
 			Help:      "The earliest NotAfter of the certificates the lb_alt front serves, as a Unix time; in the past when a served name's certificate has lapsed, which the front serves all the same, as nginx does. Absent from a process that builds no front",
 		}, nil),
+		quicClientHellos: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "urnetwork",
+			Subsystem: "front",
+			Name:      "quic_client_hellos_total",
+			Help:      "QUIC ClientHellos the lb_alt front read, by interface (the route table interface whose address the ClientHello arrived at; other for none), port kind (quic, whodis, other), the class of the server name (connect, api, lb, forwarded, redirect for a served name; alt for alt, alt-v4 or alt-v6 on any domain, unknown for another name and none for a missing or invalid one, which the front doesn't serve on QUIC, so their handshakes fail) and whether the client offered h3 (true, false). Neither the name nor an address is ever a label",
+		}, []string{"interface", "port", "name_class", "h3_offered"}),
+		connectAddresses: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: "urnetwork",
+			Subsystem: "front",
+			Name:      "connect_addresses",
+			Help:      "Source addresses holding active connect connections through the lb_alt front (h1 upgrades to connect names served in-process, and connect's QUIC connections), by family (ipv4, ipv6) and over (0, 10, 100, 1000): the addresses holding more connections than that, so over 0 counts every address holding one. The address itself is never a label (LBALTOPT2 R16)",
+		}, []string{"family", "over"}),
+		connectAddressConnections: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: "urnetwork",
+			Subsystem: "front",
+			Name:      "connect_address_connections",
+			Help:      "Active connect connections through the lb_alt front held by the source addresses urnetwork_front_connect_addresses counts, by family (ipv4, ipv6) and over (0, 10, 100, 1000): over 0 is every connection, so over N divided by over 0 is the share of a block's connections that its addresses with more than N hold (LBALTOPT2 R16)",
+		}, []string{"family", "over"}),
 	}
 	registerer.MustRegister(
 		metrics.requests,
 		metrics.responseHeaderSeconds,
 		metrics.limitRefusals,
 		metrics.certificateExpiry,
+		metrics.quicClientHellos,
+		metrics.connectAddresses,
+		metrics.connectAddressConnections,
 	)
 	return metrics
 }
@@ -102,61 +144,153 @@ func (self *glogFrontAccessLog) write(line string) {
 	glog.Infof("[front]%s\n", line)
 }
 
-// The status class label of a response: 1xx to 5xx, "none" when no head
-// was written, as when the handler panicked.
-func routeHttpStatusClass(statusCode int) string {
+// The status class labels, by routeHttpStatusClassIndex: "none" when no
+// head was written, as when the handler panicked, 1xx to 5xx, and "other"
+// for a status outside them.
+var routeHttpStatusClasses = [...]string{"none", "1xx", "2xx", "3xx", "4xx", "5xx", "other"}
+
+// The index of a response's status class label in routeHttpStatusClasses.
+func routeHttpStatusClassIndex(statusCode int) int {
 	switch {
-	case 100 <= statusCode && statusCode < 600:
-		return fmt.Sprintf("%dxx", statusCode/100)
 	case statusCode == 0:
-		return "none"
+		return 0
+	case 100 <= statusCode && statusCode < 600:
+		return statusCode / 100
 	default:
-		return "other"
+		return len(routeHttpStatusClasses) - 1
 	}
 }
 
-// The protocol label of a request.
-func routeHttpProtocol(protoMajor int) string {
-	switch protoMajor {
-	case 1:
-		return "h1"
-	case 2:
-		return "h2"
-	case 3:
-		return "h3"
-	default:
-		return "other"
+// The protocol labels, by routeHttpProtocolIndex: "other", then h1, h2 and
+// h3 at their major versions.
+var routeHttpProtocols = [...]string{"other", "h1", "h2", "h3"}
+
+// The index of a request's protocol label in routeHttpProtocols.
+func routeHttpProtocolIndex(protoMajor int) int {
+	if 1 <= protoMajor && protoMajor < len(routeHttpProtocols) {
+		return protoMajor
 	}
+	return 0
+}
+
+// The requests counter's and the latency histogram's series of one label
+// set.
+type frontRequestSeries struct {
+	requests              prometheus.Counter
+	responseHeaderSeconds prometheus.Observer
+}
+
+// The request metrics of one service and block label: the series of each
+// protocol and status class, each resolved by its labels on its first
+// request and kept, so a request's metrics take no lookup by labels. The
+// labels come from the route table and the closed sets above, so the series
+// are as bounded as before. Safe for concurrent use.
+type frontRequestMetrics struct {
+	metrics *frontMetrics
+	service string
+	block   string
+	series  [len(routeHttpProtocols)][len(routeHttpStatusClasses)]atomic.Pointer[frontRequestSeries]
+}
+
+// Request metrics for a service and block label of metrics, with nothing
+// resolved yet.
+func newFrontRequestMetrics(metrics *frontMetrics, service string, block string) *frontRequestMetrics {
+	return &frontRequestMetrics{
+		metrics: metrics,
+		service: service,
+		block:   block,
+	}
+}
+
+// The series of a protocol and status class index. Requests that race to
+// resolve one get the same series: the vectors keep one per label set, and
+// the first stored is kept.
+func (self *frontRequestMetrics) requestSeries(protocolIndex int, statusClassIndex int) *frontRequestSeries {
+	slot := &self.series[protocolIndex][statusClassIndex]
+	if series := slot.Load(); series != nil {
+		return series
+	}
+	protocol := routeHttpProtocols[protocolIndex]
+	statusClass := routeHttpStatusClasses[statusClassIndex]
+	series := &frontRequestSeries{
+		requests:              self.metrics.requests.WithLabelValues(self.service, protocol, statusClass, self.block),
+		responseHeaderSeconds: self.metrics.responseHeaderSeconds.WithLabelValues(self.service, protocol, statusClass, self.block),
+	}
+	if !slot.CompareAndSwap(nil, series) {
+		return slot.Load()
+	}
+	return series
+}
+
+// A service's request metrics, by the block label of the block that
+// answered: each of the service's blocks, and local for connect in-process.
+type frontServiceRequestMetrics struct {
+	blockRequestMetrics map[string]*frontRequestMetrics
+	// for a request no block of the service answered
+	noBlockRequestMetrics *frontRequestMetrics
+}
+
+// The request metrics of every service of a route table, by service name,
+// and of a request for no service. Only a block of the service, or connect
+// in-process, is a block label. Read-only once built.
+type frontRequestMetricsTable struct {
+	serviceRequestMetrics   map[string]*frontServiceRequestMetrics
+	noServiceRequestMetrics *frontRequestMetrics
+}
+
+// The request metrics of a route table's services, over metrics.
+func newFrontRequestMetricsTable(metrics *frontMetrics, routes *routeHttpTable) *frontRequestMetricsTable {
+	table := &frontRequestMetricsTable{
+		serviceRequestMetrics:   map[string]*frontServiceRequestMetrics{},
+		noServiceRequestMetrics: newFrontRequestMetrics(metrics, routeHttpNoLabel, routeHttpNoLabel),
+	}
+	for serviceName, routeService := range routes.services {
+		service := routeService.service.Name
+		serviceRequestMetrics := &frontServiceRequestMetrics{
+			blockRequestMetrics: map[string]*frontRequestMetrics{
+				routeHttpInProcessBlock: newFrontRequestMetrics(metrics, service, routeHttpInProcessBlock),
+			},
+			noBlockRequestMetrics: newFrontRequestMetrics(metrics, service, routeHttpNoLabel),
+		}
+		for blockName := range routeService.blockNames {
+			serviceRequestMetrics.blockRequestMetrics[blockName] = newFrontRequestMetrics(metrics, service, blockName)
+		}
+		table.serviceRequestMetrics[serviceName] = serviceRequestMetrics
+	}
+	return table
+}
+
+// The request metrics of a request for serviceName answered by
+// upstreamBlock: the service's, or no service's when the table has none of
+// that name, and the block's, or no block's when it is neither a block of
+// the service nor local.
+func (self *frontRequestMetricsTable) requestMetrics(serviceName string, upstreamBlock string) *frontRequestMetrics {
+	serviceRequestMetrics, ok := self.serviceRequestMetrics[serviceName]
+	if !ok {
+		return self.noServiceRequestMetrics
+	}
+	if blockRequestMetrics, ok := serviceRequestMetrics.blockRequestMetrics[upstreamBlock]; ok {
+		return blockRequestMetrics
+	}
+	return serviceRequestMetrics.noBlockRequestMetrics
 }
 
 // Records one ended request: its metrics, and its access log line when one
 // is due.
 func (self *Front) observe(exchange *routeHttpExchange) {
 	response := exchange.response
-	service := routeHttpNoLabel
-	block := routeHttpNoLabel
-	if routeService, ok := self.routes.services[exchange.serviceName]; ok {
-		service = routeService.service.Name
-		// only a block of the service, or connect in-process, is a label
-		switch {
-		case response.upstreamBlock == routeHttpInProcessBlock:
-			block = routeHttpInProcessBlock
-		case routeService.blockNames[response.upstreamBlock]:
-			block = response.upstreamBlock
-		}
-	}
-	protocol := routeHttpProtocol(exchange.r.ProtoMajor)
-	statusClass := routeHttpStatusClass(response.statusCode)
-	self.metrics.requests.WithLabelValues(service, protocol, statusClass, block).Inc()
+	requestMetrics := self.requestMetrics.requestMetrics(exchange.serviceName, response.upstreamBlock)
+	series := requestMetrics.requestSeries(routeHttpProtocolIndex(exchange.r.ProtoMajor), routeHttpStatusClassIndex(response.statusCode))
+	series.requests.Inc()
 	if !response.headerTime.IsZero() {
-		self.metrics.responseHeaderSeconds.WithLabelValues(service, protocol, statusClass, block).Observe(
-			response.headerTime.Sub(exchange.startTime).Seconds(),
-		)
+		series.responseHeaderSeconds.Observe(response.headerTime.Sub(exchange.startTime).Seconds())
 	}
 
 	if !self.accessLog.enabled() {
 		return
 	}
+	service := requestMetrics.service
+	block := requestMetrics.block
 	request := exchange.request
 	host := exchange.r.Host
 	path := routeHttpNoLabel

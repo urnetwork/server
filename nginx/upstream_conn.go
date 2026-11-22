@@ -21,8 +21,8 @@ package nginx
 //     exchange: a pooled connection carries none;
 //   - a streamed body goes on as it arrives, each read written and flushed,
 //     as nginx's proxy_request_buffering off sends it;
-//   - the response head is limited as nginx's proxy_buffer_size limits it,
-//     every head of the attempt together, an informational one included;
+//   - each response head fits nginx's proxy_buffer_size, including each
+//     informational head before the block's final response;
 //   - a connection is kept only when its response was read whole and its
 //     request written whole, as nginx keeps one only once request_body_sent
 //     (ngx_http_upstream_free_keepalive_peer). The write runs in its own
@@ -49,7 +49,11 @@ package nginx
 //     the block closed, or that holds bytes nobody asked for, is dropped
 //     before any request is written to it;
 //   - dialed connections have SO_KEEPALIVE on with the system's probe
-//     timing, nginx's `proxy_socket_keepalive on`.
+//     timing, nginx's `proxy_socket_keepalive on`;
+//   - every connection an attempt takes is counted by service, as reused
+//     from the pool, dialed, or a failed dial
+//     (urnetwork_lbalt_upstream_connections_total), so the pools' reuse can
+//     be read.
 
 import (
 	"bufio"
@@ -142,7 +146,8 @@ func (self *upstreamPool) expiredWithLock(upstreamConn *upstreamConnection, now 
 }
 
 // A live idle connection, the most recently used first, or nil. Expired
-// connections, and ones the block closed, are closed on the way.
+// connections, and ones the block closed, are closed on the way; only the
+// one taken counts as reused.
 func (self *upstreamPool) takeIdle() *upstreamConnection {
 	now := time.Now()
 	for {
@@ -171,6 +176,7 @@ func (self *upstreamPool) takeIdle() *upstreamConnection {
 			return nil
 		}
 		if upstreamConnAlive(upstreamConn.conn) {
+			self.group.reusedConnections.Inc()
 			return upstreamConn
 		}
 		self.forget(upstreamConn)
@@ -182,7 +188,8 @@ func (self *upstreamPool) takeIdle() *upstreamConnection {
 // context or the group's close, whichever comes first, and close waits for
 // it, so no connection outlives a close that never saw it: a dial that
 // finds the pool closed once it has a connection closes it. The error is the
-// dial's, or net.ErrClosed for a closed pool.
+// dial's, or net.ErrClosed for a closed pool. Every dial counts as dialed or
+// dial_failed by whether it connected; a closed pool dials nothing.
 func (self *upstreamPool) dial(ctx context.Context) (*upstreamConnection, error) {
 	open := func() bool {
 		self.stateLock.Lock()
@@ -204,8 +211,10 @@ func (self *upstreamPool) dial(ctx context.Context) (*upstreamConnection, error)
 
 	conn, err := self.group.dialContext(dialCtx, "tcp", self.block.target)
 	if err != nil {
+		self.group.dialFailedConnections.Inc()
 		return nil, err
 	}
+	self.group.dialedConnections.Inc()
 	upstreamConn := &upstreamConnection{
 		pool:          self,
 		conn:          conn,
@@ -469,9 +478,11 @@ func upstreamIoFailure(err error) upstreamFailure {
 	return upstreamFailureError
 }
 
-// One request as the upstream sees it, the same for every attempt.
+// One request as the upstream sees it, the same for every attempt but for
+// its latest exchange.
 type upstreamRequest struct {
-	// the request line and headers
+	// the request line and headers. The write of each of the request's
+	// exchanges reads it, until the exchange is finished
 	head []byte
 	// the method, for parsing the response (a HEAD's has no body)
 	method string
@@ -485,6 +496,11 @@ type upstreamRequest struct {
 	upgrade      bool
 	readTimeout  time.Duration
 	writeTimeout time.Duration
+	// the latest exchange, set as it begins: each attempt's exchange is
+	// finished before the next attempt's begins (a failed one by exchange, a
+	// retried 503 by forward), so this is the only one whose write may still
+	// run. Kept by the request's goroutine
+	exchange *upstreamExchange
 }
 
 // One request and its response on one connection. The request write runs
@@ -538,11 +554,6 @@ func (self *upstreamGroup) exchange(ctx context.Context, upstreamConn *upstreamC
 	upstreamConn.readErr = nil
 	upstreamConn.writtenBytes.Store(0)
 	upstreamConn.readArmed.Store(false)
-	if maxHeadBytes := self.settings.Forward.MaxUpstreamResponseHeaderBytes; 0 < maxHeadBytes {
-		upstreamConn.headBytesLeft = int64(maxHeadBytes)
-	} else {
-		upstreamConn.headBytesLeft = -1
-	}
 
 	exchange = &upstreamExchange{
 		conn:        upstreamConn,
@@ -552,6 +563,7 @@ func (self *upstreamGroup) exchange(ctx context.Context, upstreamConn *upstreamC
 		// write on it; a cut connection is never reused
 		stopCancel: context.AfterFunc(ctx, upstreamConn.close),
 	}
+	request.exchange = exchange
 	go func() {
 		err := exchange.writeRequest()
 		switch {
@@ -572,7 +584,7 @@ func (self *upstreamGroup) exchange(ctx context.Context, upstreamConn *upstreamC
 		exchange.writeResult <- err
 	}()
 
-	response, err := readUpstreamResponseHead(upstreamConn.reader, request.method)
+	response, err := upstreamConn.readResponseHead(request.method, self.settings.Forward.MaxUpstreamResponseHeaderBytes)
 	if err == nil && response.StatusCode == http.StatusSwitchingProtocols && !request.upgrade {
 		err = errors.New("upstream switched protocols unasked")
 		upstreamConn.readErr = nil
@@ -609,14 +621,18 @@ func (self *upstreamGroup) exchange(ctx context.Context, upstreamConn *upstreamC
 	return exchange, upstreamFailureNone, false
 }
 
-// Reads the final response head, past informational ones, as nginx skips
-// them. A 101 is final. The bytes after the head stay in reader.
-func readUpstreamResponseHead(reader *bufio.Reader, method string) (*http.Response, error) {
+// Reads past informational heads to the final response. Each head starts
+// with its own budget, including bytes already buffered for it. A 101 is final.
+func (self *upstreamConnection) readResponseHead(method string, maxHeadBytes int) (*http.Response, error) {
 	request := &http.Request{
 		Method: method,
 	}
 	for {
-		response, err := http.ReadResponse(reader, request)
+		self.headBytesLeft = -1
+		if maxHeadBytes > 0 {
+			self.headBytesLeft = int64(maxHeadBytes - self.reader.Buffered())
+		}
+		response, err := http.ReadResponse(self.reader, request)
 		if err != nil {
 			return nil, err
 		}

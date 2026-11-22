@@ -687,6 +687,21 @@ var parityAcceptances = []*parityAcceptance{
 			}
 		},
 	},
+	{
+		id:     "retry-after",
+		source: "LBALTOPT2 R15 (a): the front's own 429 carries Retry-After, the refused bucket's wait in whole seconds from 1 to 60, where nginx's has none",
+		match: func(check *parityCheck, difference *parityDifference) bool {
+			sequence, field, ok := parityResponseKey(difference.key)
+			if !ok || field != "header.Retry-After" || difference.nginx != parityAbsent || !check.bothOwnResponses(sequence) {
+				return false
+			}
+			if parityResponseValue(check.front, sequence, "status") != "429" {
+				return false
+			}
+			seconds, err := strconv.Atoi(difference.front)
+			return err == nil && 1 <= seconds && seconds <= 60 && strconv.Itoa(seconds) == difference.front
+		},
+	},
 }
 
 // The first acceptance that names a difference, or nil.

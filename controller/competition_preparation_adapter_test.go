@@ -24,6 +24,39 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
+func TestCompetitionPreparationLivenessRetriesOnlyObservationTimeout(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		first  error
+		second error
+		calls  int
+		want   error
+	}{
+		{"recovered", context.DeadlineExceeded, nil, 2, nil},
+		{"bounded", context.DeadlineExceeded, context.DeadlineExceeded, 2, context.DeadlineExceeded},
+		{"fenced", errors.Join(context.DeadlineExceeded, ErrLeaseLost), nil, 1, ErrLeaseLost},
+		{"held", errors.Join(context.DeadlineExceeded, ErrAutomationHeld), nil, 1, ErrAutomationHeld},
+		{"conflict", ErrConflict, nil, 1, ErrConflict},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			calls := 0
+			err := checkCompetitionPreparationLivenessWithRetry(t.Context(), func(ctx context.Context) error {
+				if _, ok := ctx.Deadline(); !ok {
+					t.Fatal("missing probe timeout")
+				}
+				calls++
+				if calls == 1 {
+					return test.first
+				}
+				return test.second
+			})
+			if calls != test.calls || !errors.Is(err, test.want) {
+				t.Fatalf("probes=%d error=%v, want %d %v", calls, err, test.calls, test.want)
+			}
+		})
+	}
+}
+
 // Role receipts and event order share one lock across the TLS server and
 // adapter caller. Tests inject failures at exact transitions, never by sleeping.
 type competitionPreparationTestState struct {

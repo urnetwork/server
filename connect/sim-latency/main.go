@@ -89,14 +89,14 @@ Usage:
   sim-latency staging-review --epoch=<n> approve --job-id=<id> --reviewer=<id> --reason=<text> --evidence=<path>
   sim-latency promote --epoch=<n> (--winner=<dir> --winner-job-id=<id> | --no-winner) [--message=<text>] [--source-config=<path>] [--repos-root=<dir>] [--dry-run]
   sim-latency supervise --enable-automation --owner-id=<id> --state-dir=<dir> --worker-command=<path> --worker-sha256=<digest> [--worker-control-join-timeout=<duration>] --prepare-command=<path> --prepare-sha256=<digest> [--official-review-round-id=<id>] [--review-command=<path>] [--review-sha256=<digest>] [--reviewer-token-file=<path>] [--review-api-url=<url>] [--build-command=<path>] [--build-sha256=<digest>] [--source-config=<path>] [--repos-root=<dir>] [--once] [--prepare-only]
-  sim-latency stage-reviewed-source --review-id=<id> --state-dir=<dir> --build-command=<path> --build-sha256=<digest> [--source-config=<path>] [--repos-root=<dir>]
+  sim-latency stage-reviewed-source --review-id=<id> --state-dir=<dir> --build-command=<path> --build-sha256=<digest> [--source-config=<path>] [--repos-root=<dir>] [--reuse-reviewed-stage=<path>] [--source-build-base-image=<digest>]
   sim-latency bootstrap-source --enable-automation --owner-id=<id> --state-dir=<dir> --manifest-commit=<sha> [--opens-at=<time>] [--source-config=<path>] [--repos-root=<dir>]
   sim-latency source-review-packet --round-id=<id> --job-id=<id> --out-dir=<dir>
   sim-latency review-broker --model-key-file=<path>
   sim-latency review-broker --review-provider-settings=<path> --review-provider-settings-sha256=<sha256> --review-state-directory=<path>
   sim-latency review-multipass-broker --review-provider-settings=<path> --review-provider-settings-sha256=<sha256> --review-state-directory=<path>
-  sim-latency source-build-broker --build-settings=<path> --build-settings-sha256=<digest>
-  sim-latency source-qualify-build --qualification-settings=<path> --qualification-settings-sha256=<digest>
+  sim-latency source-build-broker --build-settings=<path> --build-settings-sha256=<digest> [--recover-host-qualification=<digest>] [--resume-host-qualification=<digest>] [--replay-qualifier=<path> --replay-qualifier-sha256=<digest>]
+  sim-latency source-qualify-build --qualification-settings=<path> --qualification-settings-sha256=<digest> [--retained-test-evidence-only]
   sim-latency launch-preflight --epoch=<n> --evaluator-image=<digest> --operator-token-file=<path> --grafana-url=<url> --grafana-token-file=<path> --metrics-url=<url> --metrics-token-file=<path> [--api-url=<url>] [--openapi=<path>] [--artifact-capacity-bytes=<n>] [--preflight-timeout=<d>] [--source-config=<path>] [--repos-root=<dir>] [--out=<path>]
   sim-latency handoff-manifest --epoch=<n> --evaluator-image=<digest> --openapi=<path> --baseline-manifest=<path> --preflight=<path> [--staging-evidence=<paths>] [--source-config=<path>] [--repos-root=<dir>] [--out=<path>]
   sim-latency credentials generate --vault=<path> --delivery=<path> --submitter-name=<name> --operator-name=<name>
@@ -122,6 +122,13 @@ Options:
   --qualification-settings-sha256=<digest> Immutable installed qualification-settings digest.
   --build-settings=<path> Private deployment settings for the isolated source build broker.
   --build-settings-sha256=<digest> Immutable installed build-settings digest.
+  --recover-host-qualification=<digest>  Exact expired source-build request digest authorized for one retained-evidence host qualification.
+  --resume-host-qualification=<digest>  Exact live source-build reservation for one host-only correction without extending its deadline.
+  --replay-qualifier=<path>  Installed qualifier for the host-only replay correction.
+  --replay-qualifier-sha256=<digest>  Immutable replay qualifier wrapper digest.
+  --retained-test-evidence-only  Replay original authenticated test evidence without executing or dispatching tests.
+  --reuse-reviewed-stage=<path>  Verify one exact private source checkout left by a prior staging attempt.
+  --source-build-base-image=<digest>  Exact admitted toolchain image for the approved epoch-three build.
   --model-key-file=<path> Dedicated OpenAI API key leaf; no main credentials belong in the broker.
   --review-provider-settings=<path> Immutable public Snow provider settings leaf.
   --review-provider-settings-sha256=<sha256> Authenticated provider settings digest.

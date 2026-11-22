@@ -4094,7 +4094,7 @@
     {
       "type": "timeseries",
       "title": "session journal backlog",
-      "description": "Durable session operation and index repair backlog by state.",
+      "description": "Durable session operation and index repair backlog by state, and the pending session operations a recovery pass could not advance in the last 5 minutes (urnetwork_session_operation_recovery_failures_total). Recovery runs on maintenance shard 0 every 30 seconds; an operation it cannot advance is retried in its turn, behind the others, so it never holds up later operations. A failure count that keeps rising is one operation failing every pass: read the taskworker log, and the oldest unfinished session operation panel for its age.",
       "gridPos": {
         "h": 8,
         "w": 8,
@@ -4128,13 +4128,18 @@
           "refId": "A",
           "expr": "max by (state) (urnetwork_session_journal_pending{env=\"$env\"})",
           "legendFormat": "{{state}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(increase(urnetwork_session_operation_recovery_failures_total{env=\"$env\"}[5m]))",
+          "legendFormat": "recovery could not advance (last 5m)"
         }
       ]
     },
     {
       "type": "timeseries",
       "title": "oldest unfinished session operation",
-      "description": "Age of the oldest unfinished session operation or index repair by state.",
+      "description": "Age of the oldest unfinished session operation or index repair by state, the largest any taskworker reports. Only the taskworker running maintenance shard 0 refreshes it, and the others keep what they last saw, so a flat value can be stale; the unfinished session work still aging panel shows only ages that are growing, which is what the alerts read. The orange line is SessionJournalStuck's 60 seconds and the red line SessionJournalStuckLong's 15 minutes.",
       "gridPos": {
         "h": 8,
         "w": 8,
@@ -4148,7 +4153,29 @@
       "fieldConfig": {
         "defaults": {
           "unit": "s",
-          "min": 0
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 60
+              },
+              {
+                "color": "red",
+                "value": 900
+              }
+            ]
+          },
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          }
         },
         "overrides": []
       },
@@ -4174,7 +4201,7 @@
     {
       "type": "timeseries",
       "title": "session clock, authority loss and observation drops",
-      "description": "The conservative Redis versus local clock disagreement seen by session minting, mints suspended per second because it exceeded the fleet bound, journalled revocations per second whose Redis receipt and markers are missing, and optional observations dropped per second.",
+      "description": "The conservative Redis versus local clock disagreement seen by session minting, mints suspended per second because it exceeded the fleet bound, journalled revocations per second whose Redis receipt and markers are missing, and optional observations dropped per second. Alerts (warp grafana/alerting/session-authority.yml): SessionClockDisagreement warns above 10 seconds of disagreement on a host for 2 minutes, before the 15-second refusal; SessionClockRefusals and SessionAuthorityLoss page on any increase. The disagreement is sampled only by session mints, so it reads 0 until minting is on.",
       "gridPos": {
         "h": 8,
         "w": 8,
@@ -4229,7 +4256,7 @@
     {
       "type": "timeseries",
       "title": "revocation record checks / s by outcome",
-      "description": "Tagged-credential state checks answered from the Redis revocation record, per second by service and outcome. record_valid and record_refused are answered by the record itself (refused: a tombstone, a revoked session, or a credential issued before its account's credentials changed). record_miss found no projection and fell back to the SQL state query, which then rebuilds the projection (writes panel, kind projection). record_unavailable could not read Redis, so the check refused the credential as unavailable: the record is the authority, and nothing is accepted without it. A rising record_unavailable means authentication is refusing tagged credentials because Redis is unavailable. Readers stay off, and this panel stays empty, until vault auth.yml sets revocation_record_enabled; untagged credentials keep the SQL state query either way (JWT state queries panel).",
+      "description": "Tagged-credential state checks answered from the Redis revocation record, per second by service and outcome. record_valid and record_refused are answered by the record itself (refused: a tombstone, a revoked session, or a credential issued before its account's credentials changed). record_miss found no projection and fell back to the SQL state query, which then rebuilds the projection (writes panel, kind projection). record_unavailable could not read Redis. Until 2026-11-18 that refused the credential as unavailable; since owner decision 3 (REVOKE-FINAL.md \u00a715) the check accepts it unchecked and counts it in urnetwork_session_check_unavailable_total (the session rollout row below), unless its caller had already given up. A rising record_unavailable means tagged credentials are being accepted without their revocation check because Redis is unavailable. Readers stay off, and this panel stays empty, until vault auth.yml sets revocation_record_enabled; untagged credentials keep the SQL state query either way (JWT state queries panel).",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -4269,7 +4296,7 @@
     {
       "type": "timeseries",
       "title": "revocation record writes / s by kind and outcome",
-      "description": "Writes to the Redis revocation record, per second by service, kind and outcome. client, session, credential and network are revocations: each writes its tombstone before its SQL change commits, and a failure fails the revocation itself, so the client or session stays active until the revoke is retried. A rising failure on these kinds means revocations are failing because Redis was unavailable. projection is a positive entry written after a SQL fallback found a credential valid: its failure only costs the next check another fallback, and stale is a projection refused because its SQL read was more than a minute old by Redis time. Writers always write, whether or not vault auth.yml has enabled readers with revocation_record_enabled, so the record is complete from the first enabled read.",
+      "description": "Writes to the Redis revocation record, per second by service, kind and outcome. client, session, credential and network are revocations: each writes its tombstone before its SQL change commits, and a failure fails the revocation itself, so the client or session stays active until the revoke is retried. A rising failure on these kinds means revocations are failing because Redis was unavailable. projection is a positive entry written after a SQL fallback found a credential valid: its failure only costs the next check another fallback, and stale is a projection refused because its SQL read was more than a minute old by Redis time. Writers always write, whether or not vault auth.yml has enabled readers with revocation_record_enabled, so the record is complete from the first enabled read. SessionRevocationWritesFailing (warn, warp grafana/alerting/session-authority.yml) fires when more than 1% of a service's revocation writes (projections left out) fail for 5 minutes, at least 0.1 a second; in the week of 2026-11-11 the share peaked at 0.05% on api and proxy.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -4307,6 +4334,581 @@
       ]
     },
     {
+      "type": "timeseries",
+      "title": "session maintenance runs / min by outcome",
+      "description": "MaintainNetworkSessions runs per minute by outcome, across every taskworker: 32 shards every 30 seconds, about 62 successful runs a minute. Shard 0 also expires receipts, repairs the index outbox, recovers revocation operations and refreshes the journal gauges. SessionMaintenanceStalled (warn, warp grafana/alerting/session-authority.yml) fires under 32 successes a minute held for 10 minutes (the orange line); rolls dipped it for at most 5 minutes in the week of 2026-11-11. SessionMaintenanceFailing (warn) fires over 1 failure a minute held for 10 minutes: a shard that fails every run fails twice a minute. One lost shard among 32 is below what this rate can show; the monitor's task checks see it.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 233
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 32
+              }
+            ]
+          },
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (outcome) (rate(urnetwork_taskworker_executions_total{env=\"$env\",task=\"work.MaintainNetworkSessions\"}[5m])) * 60",
+          "legendFormat": "{{outcome}} / min"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "unfinished session work still aging",
+      "description": "The age of the oldest unfinished session work by state, counting only gauges that rose in the last 5 minutes: what SessionJournalStuck and SessionJournalStuckLong read. Only the taskworker that runs maintenance shard 0 refreshes the journal gauges, and every other taskworker keeps the value it last observed, so the oldest unfinished session operation panel can show a stale age that is not growing. A stuck operation's age rises at each observation. SessionJournalStuck (warn) fires on any state above 60 seconds (two maintenance intervals, the orange line) for 2 minutes; SessionJournalStuckLong (page) on a prepared or enforced revocation above 15 minutes (the red line) for 5 minutes. Empty while nothing is stuck.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 233
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 60
+              },
+              {
+                "color": "red",
+                "value": 900
+              }
+            ]
+          },
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (state) ((urnetwork_session_journal_oldest_seconds{env=\"$env\"} > 0) and (delta(urnetwork_session_journal_oldest_seconds{env=\"$env\"}[5m]) > 0))",
+          "legendFormat": "{{state}}"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "sessions: unchecked acceptances, untagged mints, the session limit and frees (session/REVOKE-FINAL.md \u00a715)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 241
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "credentials accepted unchecked / s by service, path and credential",
+      "description": "Credentials accepted without their revocation check because their Redis keys could not be reached, per second by service, check path and credential (session or tagged client). Owner decision 3 of 2026-11-18 (REVOKE-FINAL.md \u00a715): such a check accepts the credential and counts it here, and never answers 503 for that reason, so a credential revoked during the failure keeps working until Redis answers again. A caller that cancelled its request is not counted. Redis pool timeouts per service are drawn on the same axis: when both rise together the services cannot reach Redis. Read it beside the Redis pool dial failures panel and urnetwork / redis cluster. The alerts read the share in the next panel.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 242
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (service, path, credential) (rate(urnetwork_session_check_unavailable_total{env=\"$env\"}[$__rate_interval]))",
+          "legendFormat": "unchecked {{service}} {{path}} {{credential}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (service) (rate(urnetwork_redis_pool_timeouts_total{env=\"$env\"}[$__rate_interval]))",
+          "legendFormat": "redis pool timeouts {{service}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "unchecked share of tagged credential checks by service",
+      "description": "Unchecked acceptances as a share of each service's revocation record checks (urnetwork_jwt_state_record_checks_total, every outcome) over 5 minutes: the expression the alerts in warp grafana/alerting/session-auth.yml evaluate. SessionChecksUnchecked (warn, orange line) fires above 5% held for 10 minutes with at least 1 unchecked acceptance a second; SessionChecksUncheckedSevere (page, red line) fires above 25% held for 5 minutes with at least 10 a second. Before decision 3 these checks were refused as record_unavailable. From 11-16 to 11-18 that ran at 1.5-3.2% of connect's checks, lease rechecks and cancelled callers included, and under 1% for every other service; no 10-minute stretch held above 2.6%. A Redis dial burst of a few seconds does not hold the share for 10 minutes, and one unreachable master of the 48 leaves about 2% of credentials unchecked. A service with unchecked acceptances but no record checks reads 100%.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 242
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.05
+              },
+              {
+                "color": "red",
+                "value": 0.25
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (service) (rate(urnetwork_session_check_unavailable_total{env=\"$env\"}[5m])) / (sum by (service) (rate(urnetwork_jwt_state_record_checks_total{env=\"$env\"}[5m])) or sum by (service) (rate(urnetwork_session_check_unavailable_total{env=\"$env\"}[5m])))",
+          "legendFormat": "{{service}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Redis pool dial failures / min by service",
+      "description": "go-redis connection pool dial failures logged per minute by service, the line `redis: connection pool: failed to dial after N attempts: dial tcp <node>:<port>: <error>`. No counter records them; this log line is the signal. A rise here with unchecked acceptances or untagged mints means checks and mints could not reach Redis. i/o timeout points at the network path or a stalled node, connection refused at a node that is down; the \u00a74 page-tier classes chart those dial errors across every client. Drill in with urnetwork / service logs (the port names the node), then urnetwork / redis cluster.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 242
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "warp-loki"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (service) (count_over_time({env=\"$env\"} |= \"connection pool: failed to dial\" [1m]))",
+          "legendFormat": "{{service}}",
+          "datasource": {
+            "type": "loki",
+            "uid": "warp-loki"
+          }
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "mints issued untagged or unextended / s by service and kind (Redis unreachable at mint)",
+      "description": "Mints that could not register their session in Redis within the mint budget, per second by service and session kind (decisions 3 and 9, REVOKE-FINAL.md \u00a715). Untagged: a mint that would start a session issued an untagged credential instead, as before sessions, so no session exists that nobody can list or revoke. An untagged credential is not on the Sessions list and session revocation does not reach it; client removal and password reset still do. It gets its session at its next refresh. Unextended: a mint that carries an existing session (a refresh, or a client minted under a tagged credential, such as a hosted proxy's child) signed on that session without extending it, expiring no later than the credential it was minted from, so every revocation of the session still outlives it; the next refresh after Redis answers extends it. SessionMintsUntagged (warn) fires when more than 1% of a service's session mints (urnetwork_session_storage_seconds_count, operation mint) fall back untagged for 10 minutes, with at least 0.1 a second. Both rise together in an outage.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 250
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (service, kind) (rate(urnetwork_session_mint_untagged_total{env=\"$env\"}[$__rate_interval]))",
+          "legendFormat": "untagged {{service}} {{kind}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (service, kind) (rate(urnetwork_session_mint_unextended_total{env=\"$env\"}[$__rate_interval]))",
+          "legendFormat": "unextended {{service}} {{kind}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "session limit: would refuse (unenforced) and refused / s by kind and cap",
+      "description": "New sessions over a network's session limit, per second by session kind (signin, code, client) and cap: live is the 5,000 live sessions per network set in config all/pro.yml, retained is the 10,000 retained revocation markers (held minus live). While all/pro.yml enforce_session_cap is false, as shipped, nothing is refused and each would-be refusal counts as would refuse. Once it is true, a new session over the limit answers 409 session_limit_reached with a pointer to Account \u2192 Sessions and counts as refused; nothing is evicted, and refreshing a tagged session is never refused. A legacy token's first renewal starts its session, so it counts as new (decisions 6 and 7, REVOKE-FINAL.md \u00a715). A top-level client's own session does not count while the concurrent client limit exempts the client: declared provide intent, pending or qualified with a live intent connection.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 250
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (kind, cap) (rate(urnetwork_session_cap_would_refuse_total{env=\"$env\"}[$__rate_interval]))",
+          "legendFormat": "would refuse {{kind}} {{cap}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (kind, cap) (rate(urnetwork_session_cap_refused_total{env=\"$env\"}[$__rate_interval]))",
+          "legendFormat": "refused {{kind}} {{cap}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "would-refuse new sessions in the last 24 hours by kind and cap",
+      "description": "The rolling 24-hour count of new sessions the limit would have refused while it is unenforced. This is the number to judge the enforce_session_cap flip on (REVOKE-FINAL.md \u00a715, plan step 4): after the flip about this many sign-ins, code sign-ins and client creations a day would get 409 session_limit_reached. A network at the limit that keeps retrying counts each attempt.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 250
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (kind, cap) (increase(urnetwork_session_cap_would_refuse_total{env=\"$env\"}[1d]))",
+          "legendFormat": "{{kind}} {{cap}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "client sessions freed on removal / s by path",
+      "description": "Client-owned sessions (hosted proxy, API-key client, adopted device, per-client legacy lineage) deleted from the live set because their client was removed, per second by service and removal path (decision 6, REVOKE-FINAL.md \u00a715). Every removal path frees, the 30-day idle reap included. A free leaves no retained marker, because the client-active check already refuses the client's credentials, and it takes neither the network's lifecycle lock nor a journal entry. Removing a client never frees a sign-in or auth-code session. A path stays at zero when the clients it removes own no session: clients created with a network or client credential carry their parent's.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 258
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (service, path) (rate(urnetwork_session_freed_on_removal_total{env=\"$env\"}[$__rate_interval]))",
+          "legendFormat": "{{service}} {{path}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "networks above each live-session level (per sample pass)",
+      "description": "Each pass of the taskworker's session level sample observes every network that has a live session set once, about every 15 minutes, into the histogram urnetwork_session_live_per_network (buckets 10, 100, 500, 1,000, 2,000, 5,000 and 10,000; no network labels), with the live sessions the limit counts. Each line is networks per pass: the last hour's observations divided by its passes (urnetwork_session_live_sample_passes_total), so it does not depend on the period. The passes are drawn too: a partial pass was cut short by its budget and observed only some networks, so the lines read low while partial passes appear. Above 5,000 is over the live-session limit (config all/pro.yml), which refuses only once enforce_session_cap is on. Logarithmic axis.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 258
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "scaleDistribution": {
+              "type": "log",
+              "log": 10
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(urnetwork_session_live_per_network_count{env=\"$env\"}[1h])) / sum(increase(urnetwork_session_live_sample_passes_total{env=\"$env\"}[1h]))",
+          "legendFormat": "networks with a live session"
+        },
+        {
+          "refId": "B",
+          "expr": "(scalar(sum(increase(urnetwork_session_live_per_network_count{env=\"$env\"}[1h]))) - sum by (le) (increase(urnetwork_session_live_per_network_bucket{env=\"$env\",le=~\"10|100|500|1000|2000|5000|10000\"}[1h]))) / scalar(sum(increase(urnetwork_session_live_sample_passes_total{env=\"$env\"}[1h])))",
+          "legendFormat": "above {{le}}"
+        },
+        {
+          "refId": "C",
+          "expr": "sum by (outcome) (increase(urnetwork_session_live_sample_passes_total{env=\"$env\"}[1h]))",
+          "legendFormat": "sample passes in the last hour: {{outcome}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "live sessions per network: p50, p99, p99.9",
+      "description": "Quantiles of live sessions per network across the networks observed in the last hour, estimated from the histogram's buckets. Within a bucket the estimate is linear, so a quantile between 1,000 and 2,000 is approximate. The red line is the 5,000 live-session limit.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 258
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 5000
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(urnetwork_session_live_per_network_bucket{env=\"$env\"}[1h])))",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(urnetwork_session_live_per_network_bucket{env=\"$env\"}[1h])))",
+          "legendFormat": "p99"
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.999, sum by (le) (rate(urnetwork_session_live_per_network_bucket{env=\"$env\"}[1h])))",
+          "legendFormat": "p99.9"
+        }
+      ]
+    },
+    {
       "type": "row",
       "title": "measurement source freshness",
       "collapsed": false,
@@ -4314,7 +4916,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 233
+        "y": 266
       }
     },
     {
@@ -4325,7 +4927,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 234
+        "y": 267
       },
       "datasource": {
         "type": "prometheus",
@@ -4375,7 +4977,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 234
+        "y": 267
       },
       "datasource": {
         "type": "prometheus",
@@ -4425,7 +5027,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 242
+        "y": 275
       },
       "datasource": {
         "type": "prometheus",
@@ -4465,7 +5067,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 250
+        "y": 283
       }
     },
     {
@@ -4480,7 +5082,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 251
+        "y": 284
       },
       "fieldConfig": {
         "defaults": {
@@ -4552,7 +5154,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 251
+        "y": 284
       },
       "fieldConfig": {
         "defaults": {
@@ -4607,7 +5209,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 259
+        "y": 292
       },
       "fieldConfig": {
         "defaults": {
@@ -4679,7 +5281,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 259
+        "y": 292
       },
       "fieldConfig": {
         "defaults": {

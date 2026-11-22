@@ -48,14 +48,40 @@ func createTestClient(t testing.TB, ctx context.Context, applicationType string,
 	return client
 }
 
+// A user approving with a sign-in made now. The approval reads the user's
+// credential_change_time, so the user has a row.
 func testAuthorizingUser(t testing.TB, ctx context.Context) *AuthorizingUser {
+	userId := server.NewId()
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`INSERT INTO network_user (user_id, user_name, auth_type) VALUES ($1, $2, 'password')`,
+			userId,
+			"oauth-test",
+		))
+	})
+	now := server.NowUtc()
 	return &AuthorizingUser{
-		UserId:      server.NewId(),
-		NetworkId:   server.NewId(),
-		NetworkName: "testnetwork",
-		Principal:   "user@example.com",
-		AuthTime:    server.NowUtc(),
+		UserId:         userId,
+		NetworkId:      server.NewId(),
+		NetworkName:    "testnetwork",
+		Principal:      "user@example.com",
+		AuthTime:       now,
+		CredentialTime: now,
 	}
+}
+
+// Moves the user's credential cutoff, as a credential rotation does, without
+// revoking anything.
+func testMoveCredentialCutoff(t testing.TB, ctx context.Context, userId server.Id, cutoff time.Time) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`UPDATE network_user SET credential_change_time = $2 WHERE user_id = $1`,
+			userId,
+			cutoff,
+		))
+	})
 }
 
 func testAuthorizationRequest(client *Client, scopes []string) *AuthorizationRequest {

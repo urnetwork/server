@@ -855,3 +855,148 @@ func TestRouteTableServedNamesLeavesOutAnUnexposedService(t *testing.T) {
 		t.Fatalf("ServedNames() = %v, want %v", servedNames, want)
 	}
 }
+
+// The identity limit's fields are optional: the fixture has none, parses
+// with the identity limit off, and encodes back to its own bytes (above), so
+// a file warpctl renders without them keeps its revision. Written, they
+// parse into their fields and encode back as written, in the schema's
+// order after exclude_subnets.
+func TestParseRouteTableReadsTheOptionalIdentityLimit(t *testing.T) {
+	routeTable, err := ParseRouteTable(routeFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, routeInterface := range routeTable.Interfaces {
+		rateLimit := routeInterface.RateLimit
+		if rateLimit.IdentityRequestsPerMinute != 0 || rateLimit.IdentityBurst != 0 || rateLimit.IdentityAddressFactor != 0 {
+			t.Fatalf("%s: identity fields %v without them in the file", routeInterface.Name, rateLimit)
+		}
+		if newLimitInterface(routeInterface).identityEnabled() {
+			t.Fatalf("%s: the identity limit is on without its fields", routeInterface.Name)
+		}
+	}
+
+	tree := routeFixtureTree(t)
+	rateLimit := routeTreeValue(t, tree, "interfaces", 1, "rate_limit").(map[string]any)
+	rateLimit["identity_requests_per_minute"] = json.Number("120")
+	rateLimit["identity_burst"] = json.Number("60")
+	rateLimit["identity_address_factor"] = json.Number("20")
+	raw := append(encodeRouteTree(t, tree), '\n')
+	routeTable, err = ParseRouteTable(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := RouteRateLimit{
+		RequestsPerMinute:         450,
+		Burst:                     150,
+		NetConnections:            50,
+		ExcludeSubnets:            []string{"10.0.0.0/8", "172.16.0.0/12"},
+		IdentityRequestsPerMinute: 120,
+		IdentityBurst:             60,
+		IdentityAddressFactor:     20,
+	}
+	if got := *routeTable.Interfaces[1].RateLimit; !reflect.DeepEqual(got, want) {
+		t.Fatalf("rate_limit = %#v, want %#v", got, want)
+	}
+	if routeTable.Interfaces[0].RateLimit.IdentityRequestsPerMinute != 0 {
+		t.Fatal("another interface took the identity fields")
+	}
+	limits := newLimitInterface(routeTable.Interfaces[1])
+	if !limits.identityEnabled() || limits.identityMilliRequestsPerSecond != 2000 || limits.identityBurst != 60 ||
+		limits.ceilingMilliRequestsPerSecond != 7500*20 || limits.ceilingBurst != 150*20 || limits.ceilingNetConnections != 50*20 {
+		t.Fatalf("limits %+v, want the identity at 120 r/m and the ceiling 20 times the address", limits)
+	}
+
+	// the fields encode after exclude_subnets, as warpctl writes them
+	encoded, err := json.MarshalIndent(routeTable, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	encodedText := string(encoded)
+	order := []string{`"exclude_subnets"`, `"identity_requests_per_minute": 120`, `"identity_burst": 60`, `"identity_address_factor": 20`}
+	last := -1
+	for _, key := range order {
+		i := strings.Index(encodedText, key)
+		if i <= last {
+			t.Fatalf("%s is out of order or missing in the encoding", key)
+		}
+		last = i
+	}
+	// and that encoding, as warpctl would write the file, parses to the same
+	// table and encodes to the same bytes
+	reparsed, err := ParseRouteTable(append(encoded, '\n'))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(reparsed, routeTable) {
+		t.Fatal("the encoded table with identity fields parses to another table")
+	}
+	reencoded, err := json.MarshalIndent(reparsed, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(reencoded, encoded) {
+		t.Fatal("a table with identity fields doesn't encode back to its file")
+	}
+}
+
+// An optional field may be absent, but never null.
+func TestParseRouteTableRefusesANullOptionalField(t *testing.T) {
+	for _, key := range []string{"identity_requests_per_minute", "identity_burst", "identity_address_factor"} {
+		tree := routeFixtureTree(t)
+		routeTreeValue(t, tree, "interfaces", 0, "rate_limit").(map[string]any)[key] = nil
+		_, err := ParseRouteTable(encodeRouteTree(t, tree))
+		fieldError := routeFieldErrorOf(err)
+		if fieldPath := "interfaces[0].rate_limit." + key; fieldError == nil || fieldError.fieldPath != fieldPath || fieldError.message != "must not be null" {
+			t.Errorf("null %s: err = %v, want null refused", key, err)
+		}
+	}
+}
+
+// Each identity limit rule refuses its field: none negative; off, no burst
+// or factor; on, a factor from 1 to the cap, which can't make the ceiling's
+// burst or cap overflow.
+func TestParseRouteTableValidatesTheIdentityLimit(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		values    map[string]any
+		fieldPath string
+		message   string
+	}{
+		{name: "a negative rate", values: map[string]any{"identity_requests_per_minute": -1, "identity_address_factor": 1}, fieldPath: "identity_requests_per_minute", message: "negative"},
+		{name: "a negative burst", values: map[string]any{"identity_requests_per_minute": 60, "identity_burst": -1, "identity_address_factor": 1}, fieldPath: "identity_burst", message: "negative"},
+		{name: "a negative factor", values: map[string]any{"identity_requests_per_minute": 60, "identity_address_factor": -1}, fieldPath: "identity_address_factor", message: "negative"},
+		{name: "a burst while off", values: map[string]any{"identity_burst": 10}, fieldPath: "identity_burst", message: "zero without identity_requests_per_minute"},
+		{name: "a factor while off", values: map[string]any{"identity_address_factor": 10}, fieldPath: "identity_address_factor", message: "zero without identity_requests_per_minute"},
+		{name: "on without a factor", values: map[string]any{"identity_requests_per_minute": 60}, fieldPath: "identity_address_factor", message: "1-1000"},
+		{name: "a factor over the cap", values: map[string]any{"identity_requests_per_minute": 60, "identity_address_factor": 1001}, fieldPath: "identity_address_factor", message: "1-1000"},
+		{name: "a ceiling that overflows", values: map[string]any{"burst": json.Number("9223372036854775807"), "identity_requests_per_minute": 60, "identity_address_factor": 2}, fieldPath: "identity_address_factor", message: "overflow"},
+	} {
+		tree := routeFixtureTree(t)
+		rateLimit := routeTreeValue(t, tree, "interfaces", 0, "rate_limit").(map[string]any)
+		for key, value := range c.values {
+			rateLimit[key] = value
+		}
+		_, err := ParseRouteTable(encodeRouteTree(t, tree))
+		fieldError := routeFieldErrorOf(err)
+		if fieldPath := "interfaces[0].rate_limit." + c.fieldPath; fieldError == nil || fieldError.fieldPath != fieldPath || !strings.Contains(fieldError.message, c.message) {
+			t.Errorf("%s: err = %v, want %s refused: %s", c.name, err, fieldPath, c.message)
+		}
+	}
+
+	// the smallest valid identity limit, and a fractional rate
+	for _, values := range []map[string]any{
+		{"identity_requests_per_minute": 1, "identity_address_factor": 1},
+		{"identity_requests_per_minute": json.Number("0.5"), "identity_burst": 0, "identity_address_factor": 1000},
+		{"identity_requests_per_minute": 0, "identity_burst": 0, "identity_address_factor": 0},
+	} {
+		tree := routeFixtureTree(t)
+		rateLimit := routeTreeValue(t, tree, "interfaces", 0, "rate_limit").(map[string]any)
+		for key, value := range values {
+			rateLimit[key] = value
+		}
+		if _, err := ParseRouteTable(encodeRouteTree(t, tree)); err != nil {
+			t.Errorf("%v: %v", values, err)
+		}
+	}
+}

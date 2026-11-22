@@ -348,6 +348,19 @@ func (self *PostgresCompetitionSupervisorDriver) PublishSource(ctx context.Conte
 // Requires real runtime acknowledgments, production qualification and archive
 // availability; a no-op hook cannot satisfy the subsequent store activation guard.
 func (self *PostgresCompetitionSupervisorDriver) PrepareSource(ctx context.Context, lease model.CompetitionSupervisorLease, intent *model.CompetitionSourceActivation) error {
+	// A repaired host can already have acknowledged the exact source through
+	// its qualified worker. Replaying the original host installer in that
+	// case would replace the newly attested runtime with the retired one.
+	correction, err := readEpochThreeRuntimeCorrection(ctx, intent)
+	if err != nil {
+		return err
+	}
+	if correction != nil {
+		if err := self.Store.SourcePreparationReady(ctx, self.Settings, intent.Generation); err != nil {
+			return err
+		}
+		return self.Store.CheckSourceOperatorHandoff(ctx, self.Settings, lease, intent.Generation)
+	}
 	if self.Hooks.PrepareSource == nil {
 		return errors.New("runtime source propagation integration is not configured")
 	}

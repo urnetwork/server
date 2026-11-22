@@ -199,14 +199,23 @@ func roundBaselinePreparationContext(settings *Settings, job *queuedJob) (string
 	if settings == nil || job == nil || job.JobId == (server.Id{}) || job.RoundId != job.Round.RoundId {
 		return "", errors.New("baseline preparation requires an exact round/job identity")
 	}
+	var correctedQualificationSha256 string
+	if qualification := competitionBaselineQualification(settings, job.RoundId); qualification != settings.EvaluationPolicy.HostQualificationSha256 {
+		if job.WorkerImageDigest != settings.epochThreeRuntimeCorrection.WorkerImageDigest {
+			return "", errors.New("baseline producer image differs from the approved runtime correction")
+		}
+		correctedQualificationSha256 = qualification
+	}
 	content, err := json.Marshal(struct {
 		JobId, RoundId                                                              server.Id
 		PatchSha256, ProvidersSha256, Commitment, BaseSha, Image, Evaluator, Worker string
 		Policy                                                                      json.RawMessage
+		CorrectedQualificationSha256                                                string `json:",omitempty"`
 	}{JobId: job.JobId, RoundId: job.RoundId, PatchSha256: job.PatchSha256,
 		ProvidersSha256: job.Round.ProvidersSha256, Commitment: job.Round.WorkloadCommitment,
 		BaseSha: settings.BaseSha, Image: settings.EvaluatorImageDigest,
-		Evaluator: settings.EvaluatorCommandSha256, Worker: job.WorkerImageDigest, Policy: job.Round.PolicyJson})
+		Evaluator: settings.EvaluatorCommandSha256, Worker: job.WorkerImageDigest, Policy: job.Round.PolicyJson,
+		CorrectedQualificationSha256: correctedQualificationSha256})
 	if err != nil {
 		return "", err
 	}

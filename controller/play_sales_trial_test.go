@@ -88,9 +88,10 @@ func TestPlayTrialStartPostsATrialWithNoCharge(t *testing.T) {
 	})
 }
 
-// The day Play moves the expiry out while a charge is pending is credited
-// (the customer is entitled through it) but is not a sale: no new order, no
-// notice. The renewal's charge that follows is one sale.
+// The day Play moves the expiry out while a charge is pending is not a sale:
+// no new order, no notice. It is not credited either: the gate holds the
+// entitlement through it and grants nothing (play_precharge_extension_test.go).
+// The renewal's charge that follows is one sale.
 func TestPlayWindowMovedWithoutAChargePostsNothing(t *testing.T) {
 	fixture := newPlaySalesTrialFixture(t)
 	trialEnd := fixture.start.Add(14*24*time.Hour - 2*time.Second)
@@ -99,8 +100,8 @@ func TestPlayWindowMovedWithoutAChargePostsNothing(t *testing.T) {
 
 	// a day and a second later, the same order: the trial's conversion charge
 	// is pending, twice
-	connect.AssertEqual(t, fixture.credit(sub, trialEnd.Add(24*time.Hour+time.Second)), true)
-	connect.AssertEqual(t, fixture.credit(sub, trialEnd.Add(48*time.Hour+2*time.Second)), true)
+	connect.AssertEqual(t, fixture.credit(sub, trialEnd.Add(24*time.Hour+time.Second)), false)
+	connect.AssertEqual(t, fixture.credit(sub, trialEnd.Add(48*time.Hour+2*time.Second)), false)
 	connect.AssertEqual(t, len(fixture.notices()), 1)
 
 	// a monthly purchase: its first month, Play's extra day, then the renewal
@@ -110,7 +111,7 @@ func TestPlayWindowMovedWithoutAChargePostsNothing(t *testing.T) {
 	monthSub.LineItems[0].OfferDetails = &PlayOfferDetails{BasePlanId: "supporter-base"}
 	monthSub.LineItems[0].AutoRenewingPlan.RecurringPrice = json.RawMessage(`{"currencyCode":"USD","units":"4","nanos":990000000}`)
 	connect.AssertEqual(t, monthly.credit(monthSub, monthEnd), true)
-	connect.AssertEqual(t, monthly.credit(monthSub, monthEnd.Add(24*time.Hour+time.Second)), true)
+	connect.AssertEqual(t, monthly.credit(monthSub, monthEnd.Add(24*time.Hour+time.Second)), false)
 	monthSub.LineItems[0].LatestSuccessfulOrderId = "GPA.3300-0000-0000-00001..0"
 	connect.AssertEqual(t, monthly.credit(monthSub, monthEnd.Add(30*24*time.Hour)), true)
 	connect.AssertEqual(t, monthly.texts(), []string{
@@ -120,13 +121,13 @@ func TestPlayWindowMovedWithoutAChargePostsNothing(t *testing.T) {
 }
 
 // The trial's first charge is the purchase's first sale, after the trial and
-// its pending day.
+// its pending day, which is not credited.
 func TestPlayTrialConversionIsTheFirstSale(t *testing.T) {
 	fixture := newPlaySalesTrialFixture(t)
 	trialEnd := fixture.start.Add(14*24*time.Hour - 2*time.Second)
 	sub := playPenguinSubscription(fixture.start, trialEnd)
 	connect.AssertEqual(t, fixture.credit(sub, trialEnd), true)
-	connect.AssertEqual(t, fixture.credit(sub, trialEnd.Add(24*time.Hour+time.Second)), true)
+	connect.AssertEqual(t, fixture.credit(sub, trialEnd.Add(24*time.Hour+time.Second)), false)
 
 	// the conversion's order is the first renewal's, "..0"
 	sub.LineItems[0].LatestSuccessfulOrderId = "GPA.3300-0000-0000-00001..0"

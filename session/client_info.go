@@ -37,6 +37,11 @@ type SessionLastUsed struct {
 	CountryCode string `json:"country_code"`
 	DeviceType  string `json:"device_type"`
 	AppVersion  string `json:"app_version"`
+	// how the using client's build reached its device
+	// (ClientInfo.Distribution, ClientDistribution*): the browser extension
+	// (extension_chrome, extension_firefox) shares the site's device type,
+	// web. "" is unknown, as in every use recorded before it was kept.
+	Distribution string `json:"distribution"`
 }
 
 func UnknownClientInfo() ClientInfo { return connect.UnknownClientInfo() }

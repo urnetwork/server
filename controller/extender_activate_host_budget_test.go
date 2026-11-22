@@ -332,7 +332,7 @@ func TestExtenderActivateCountsHostsTheUptimeProbesRevoked(t *testing.T) {
 			ctx,
 			settings.addressBudgetId(netip.MustParseAddr(firstIp)),
 			model.AccountActionExtenderActivateAddressV4,
-			settings.AddressRateLimit,
+			settings.AddressIpv4RateLimit,
 			attemptTime,
 		)
 		if result := testActivateHost(t, ctx, service, hosts[0], firstIp); !result.Activated {
@@ -709,7 +709,7 @@ func TestExtenderActivateCountsBusyAndBudgetRefusals(t *testing.T) {
 		settings := DefaultExtenderActivateSettings()
 		settings.metrics = metrics
 		settings.ClientRateLimit = 1
-		settings.AddressRateLimit = 1
+		settings.AddressIpv4RateLimit = 1
 		settings.AccountRateLimit = 2
 		settings.MaxConcurrentProbes = 1
 		settings.BusyRetryAfterMin = 90 * time.Second
@@ -892,7 +892,7 @@ func TestExtenderActivateChecksTheKeysNetworkBeforeTheGuardAndTheBudgets(t *test
 		probes := newTestCountingProbes()
 		service.testProbes = probes.probes(nil)
 		attemptCount := testTotalAccountActionAttemptCount(t, ctx)
-		for i := range settings.AddressRateLimit + 1 {
+		for i := range settings.AddressIpv4RateLimit + 1 {
 			if refused := testActivateHost(t, ctx, service, theirPost, extenderIp); !testKeyOtherNetworkRefusal(refused) {
 				t.Fatalf("post %d of another network's key: activated %t, %q", i+1, refused.Activated, refused.Error)
 			}

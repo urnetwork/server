@@ -37,7 +37,8 @@ Usage:
   competitionworker [--worker_id=<id>] [--baseline-preparation-config=<path> --baseline-preparation-sha256=<sha>] [--future-baseline-preparation-config=<path> --future-baseline-preparation-sha256=<sha>] [--distributed-config=<path> --distributed-sha256=<sha>]
   competitionworker --check [--worker_id=<id>] [--baseline-preparation-config=<path> --baseline-preparation-sha256=<sha>] [--future-baseline-preparation-config=<path> --future-baseline-preparation-sha256=<sha>] [--distributed-config=<path> --distributed-sha256=<sha>]
   competitionworker --supervisor-request [--worker_id=<id>] [--baseline-preparation-config=<path> --baseline-preparation-sha256=<sha>] [--future-baseline-preparation-config=<path> --future-baseline-preparation-sha256=<sha>] [--distributed-config=<path> --distributed-sha256=<sha>]
-  competitionworker --source-readiness=<generation> [--worker_id=<id>] [--baseline-preparation-config=<path> --baseline-preparation-sha256=<sha>] [--future-baseline-preparation-config=<path> --future-baseline-preparation-sha256=<sha>] [--distributed-config=<path> --distributed-sha256=<sha>]
+  competitionworker --record-admission-exception --distributed-config=<path> --distributed-sha256=<sha>
+  competitionworker --source-readiness=<generation> [--worker_id=<id>] [--baseline-preparation-config=<path> --baseline-preparation-sha256=<sha>] [--future-baseline-preparation-config=<path> --future-baseline-preparation-sha256=<sha>] [--distributed-config=<path> --distributed-sha256=<sha>] [--readiness-host-config=<path> --readiness-host-sha256=<sha>]
   competitionworker -h | --help
   competitionworker --version
 
@@ -46,7 +47,10 @@ Options:
   --version          Show version.
   --check            Verify the host and database without claiming work.
   --supervisor-request  Read strict fenced v2 round identity from stdin; never select another round.
+  --record-admission-exception  Read a bounded approval, retained receipt and live operator lease from stdin; never claim work.
   --source-readiness=<generation>  Probe and acknowledge this exact installed v2 source generation.
+  --readiness-host-config=<path>  Root-owned host qualification configuration for the readiness probe.
+  --readiness-host-sha256=<sha>  Exact SHA-256 of that qualification configuration.
   --baseline-preparation-config=<path>  Root-pinned full-R9 preparation role; does not change API or submission budget.
   --baseline-preparation-sha256=<sha>  Exact immutable preparation configuration SHA-256.
   --future-baseline-preparation-config=<path>  Separately pinned future-policy role; inactive for current rounds.
@@ -103,12 +107,34 @@ Options:
 			panic(err)
 		}
 	}
+	recordAdmission, _ := opts.Bool("--record-admission-exception")
+	if recordAdmission {
+		if server.RequireEnv() != "main" {
+			panic("recording executor admission requires the main environment")
+		}
+		if err := runWorkerProbe(func(ctx context.Context) error {
+			return controller.RecordCompetitionExecutorAdmissionRequest(ctx, settings, os.Stdin)
+		}); err != nil {
+			panic(err)
+		}
+		return
+	}
 	supervised, _ := opts.Bool("--supervisor-request")
 	readinessGeneration, _ := opts.String("--source-readiness")
 	if readinessGeneration != "" {
 		generation, err := strconv.ParseInt(readinessGeneration, 10, 64)
 		if err != nil || generation < 1 || server.RequireEnv() != "main" {
 			panic("source readiness requires an exact positive generation and main environment")
+		}
+		hostConfig, _ := opts.String("--readiness-host-config")
+		hostDigest, _ := opts.String("--readiness-host-sha256")
+		if (hostConfig == "") != (hostDigest == "") {
+			panic("readiness host requires both the config path and its exact SHA-256")
+		}
+		if hostConfig != "" {
+			if err := controller.ConfigureCompetitionReadinessHost(settings, hostConfig, hostDigest); err != nil {
+				panic(err)
+			}
 		}
 		if err := runWorkerProbe(func(ctx context.Context) error {
 			return controller.AcknowledgeCompetitionSourceWorker(ctx, settings, generation, workerId)

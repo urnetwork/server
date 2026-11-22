@@ -88,9 +88,11 @@ func RemoveContractsPastHorizon(
 
 // The next run waits the idle interval: the pass reached the horizon, the
 // reaper is off or its control unreadable, or it only dry runs, which never
-// advances its cursor and would otherwise reread the same contracts at once.
+// advances its cursor and would otherwise reread the same contracts at once;
+// unless the zero-byte pass is on and stopped short of its horizon, which the
+// next run takes up at once.
 func contractHorizonRunIdle(report *model.ContractHorizonReport) bool {
-	return report.CaughtUp || report.Idle() || report.Mode == model.ContractHorizonModeDryRun
+	return report.Idle() || (report.CaughtUp || report.Mode == model.ContractHorizonModeDryRun) && !report.ZeroByteBehind
 }
 
 func RemoveContractsPastHorizonPost(

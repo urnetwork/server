@@ -23,14 +23,17 @@ import (
 // The numbers the owner settled on 2026-11-01, kept together in the settings:
 // 6 an hour per family per address, the account's floor of 60 plus 6 per proven
 // host up to 1200, a proven host passed between an hour and 7 days ago, 32
-// counted per /24 or /48.
+// counted per /24 or /48. Each family's address budget is this default where
+// the operator's config sets none (extender_activate_config.go).
 func TestExtenderActivateSettingsHoldThePerHostNumbers(t *testing.T) {
 	settings := DefaultExtenderActivateSettings()
 	connect.AssertEqual(t, settings.ClientRateLimit, 6)
-	connect.AssertEqual(t, settings.AddressRateLimit, 6)
+	connect.AssertEqual(t, settings.AddressIpv4RateLimit, 6)
+	connect.AssertEqual(t, settings.AddressIpv6RateLimit, 6)
 	connect.AssertEqual(t, settings.AddressIpv4PrefixBitCount, 32)
 	connect.AssertEqual(t, settings.AddressIpv6PrefixBitCount, 64)
-	connect.AssertEqual(t, settings.ProvenAddressRateLimit, 6)
+	connect.AssertEqual(t, settings.ProvenAddressIpv4RateLimit, 6)
+	connect.AssertEqual(t, settings.ProvenAddressIpv6RateLimit, 6)
 	connect.AssertEqual(t, settings.AccountRateLimit, 60)
 	connect.AssertEqual(t, settings.AccountRateLimitPerProvenHost, 6)
 	connect.AssertEqual(t, settings.AccountRateLimitCeiling, 1200)
@@ -221,7 +224,8 @@ type testActivationColdStart struct {
 // moment there is room with no jitter.
 func testTodayExtenderActivateSettings() *ExtenderActivateSettings {
 	settings := DefaultExtenderActivateSettings()
-	settings.AddressRateLimit = 1 << 30
+	settings.AddressIpv4RateLimit = 1 << 30
+	settings.AddressIpv6RateLimit = 1 << 30
 	settings.AccountRateLimitPerProvenHost = 0
 	settings.AccountRateLimitCeiling = settings.AccountRateLimit
 	settings.BudgetRetryAfterJitter = 0
@@ -360,7 +364,7 @@ func runTestActivationColdStart(scenario testActivationColdStart) (doneMinute in
 			extendLimit  func() int
 		}{
 			{attemptTimes: &family.clientAttemptTimes, limit: settings.ClientRateLimit},
-			{attemptTimes: &family.addressAttemptTimes, limit: settings.AddressRateLimit},
+			{attemptTimes: &family.addressAttemptTimes, limit: settings.addressRateLimit(ipVersion)},
 			{attemptTimes: ipVersionAccountAttemptTimes[ipVersion], limit: settings.AccountRateLimit, extendLimit: accountExtendLimit},
 		}
 		// the longest wait of the budgets with no room, and up to

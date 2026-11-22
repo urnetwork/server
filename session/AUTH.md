@@ -7,7 +7,7 @@ How the server authenticates a request or a connection, and what each credential
 - [REVOKE-OPERATIONS.md](REVOKE-OPERATIONS.md): tracked sessions and revocation.
 - [EMBED1.md](../EMBED1.md): the Embed plan.
 
-State as of 2026-10-13.
+State as of 2026-10-13. Sessions (§2, §3, §6 and §8) follow the owner's decisions of 2026-11-18 in [REVOKE-FINAL.md §15](REVOKE-FINAL.md).
 
 ## Terms
 
@@ -20,7 +20,7 @@ State as of 2026-10-13.
 | Credential | What it is | Where it comes from | Lifetime | Renewal | What ends it |
 |---|---|---|---|---|---|
 | Network token | JWT with no `client_id` | The sign-in routes (all Public), listed below | 30 days | `POST /auth/network-refresh` | Password reset; session revocation (tagged tokens); expiry, once `reject_expired` is on |
-| Client token | JWT with `client_id`, `device_id`, `root_client_id`, and `session_id` when sessions are on | `POST /network/auth-client`; `POST /network/register-client-v1` | 30 days | `GET /auth/refresh` | Removing or deactivating the client; for untagged tokens, any inactive ancestor; password reset; session revocation |
+| Client token | JWT with `client_id`, `device_id`, `root_client_id`, and `session_id` when sessions are on | `POST /network/auth-client`; `POST /network/register-client-v1` | 30 days | `GET /auth/refresh` | Removing or deactivating the client; for untagged tokens, any inactive ancestor; password reset, except a hosted proxy's (§6); session revocation |
 | API key | `urn_…`, 56 characters, stored as its SHA-256 | `POST /account/api-key` | Never expires | None: both refresh routes refuse it | `POST /account/api-key/remove`. The key is looked up on every request, so removal takes effect on the next one |
 | Auth code | A sign-in code | `POST /auth/code-create` (at most 24 h and 100 uses) | ≤ 24 h | None | Its expiry or uses |
 | MCP OAuth identity | An unsigned request identity (`UnsignedIdentity`, `mcp/auth.go`) | `POST /oauth/authorize`, `POST /oauth/consent` | The OAuth access token's `expires_in` | The OAuth refresh grant (`oauth/grant.go`); both refresh routes refuse it | Expiry of its OAuth tokens |
@@ -33,7 +33,7 @@ State as of 2026-10-13.
 - **API keys.** An API key authenticates as its network. The request gets a network identity built for that request (`ApiKeyAuthenticated`, Pro false), and it never has a token to refresh.
 - **Auth codes.** `/auth/code-login` returns a network token whose `CreateTime` is that of the root token that created the code. When session creation is on, a redemption starts an independent session.
 - **SSO.** Google and Apple id tokens are inputs to `/auth/login`, not credentials. Their audience must be one of our OAuth client ids: the `client_id` key of vault `google.yml` and `apple.yml`. An empty value skips the audience check (`session/sso_jwt.go`). The OAuth callbacks (`/auth/apple/callback`, `/auth/google/callback`) only hand the provider's answer back to the app; they mint nothing.
-- **Internal credentials.** Hosted proxy devices run on hosted session credentials (`MintHostedSession`) and never hold a network credential. Internal probes (`SignInternalProbe`) carry no session and their real client root, with the normal lifetime.
+- **Internal credentials.** Hosted proxy devices run on hosted session credentials (`MintHostedSession`) and never hold a network credential. When session creation is on, each hosted proxy has its own session. Internal probes (`SignInternalProbe`) carry no session and their real client root, with the normal lifetime.
 - **Lag guests** ([lag.dev](../../mmm/lag.dev/PLAN.md) A1). A browser on lag.dev gets a guest network marked to expire after 24 h, with one client, and that client's token. The token carries `lag_guest`, which every credential derived from it and every renewal keeps. It works on the two routes the browser needs, `GET /lag/extenders` and `POST /lag/track`, and nowhere else:
   - every other route answers it 403, "A lag.dev guest token works only on the lag.dev routes.", before its handler runs, whatever its class (§4);
   - the connect transport refuses it as a refused credential, on h1 and h3 alike, so a guest is never a VPN client;
@@ -70,7 +70,7 @@ The reason is the shared domain. Any host under `bringyour.com` can set a cookie
 - `network_id`, `network_name`, `user_id`.
 - `create_time`: the lineage time (§5). It is not the mint time.
 - `client_id`, `device_id`: client tokens only.
-- `session_id`: the sign-in session, when sessions are on. A network token and its client tokens share it.
+- `session_id`: the session, when sessions are on. A sign-in, an auth-code redemption, a hosted proxy, a client created with an API key and an adopted device each start their own. A credential minted from another credential carries its `session_id`, so a network token and the client tokens it creates share it. A mint that cannot reach Redis carries none (§3).
 - `root_client_id`: the topmost client row, on client tokens.
 - `pro`: re-derived at every mint.
 - `roles`, `principal`: assigned at client or auth code creation. They mean nothing to the network.
@@ -88,7 +88,7 @@ Every API request (`ClientSession.Auth`) and every connect transport (`connect/t
    - An expired token is accepted only while `reject_expired` is false, with 30 s of leeway.
    - Each such acceptance counts in `urnetwork_auth_jwt_legacy_accepts_total{cause,kind}`, where `kind` is `network` or `client`.
 3. **Session horizon.** A token that carries `session_id` or `root_client_id` must have `exp`. It is refused from `exp + 60 days + 30 s`, whatever the gates say.
-4. **Session marker.** A `session_id` is checked against its Redis revocation marker. If Redis is unavailable, the token is refused; there is no fallback.
+4. **Session marker.** A `session_id` is checked against its Redis revocation marker. If Redis cannot be reached, the token is accepted unchecked and counted in `urnetwork_session_check_unavailable_total{path,credential}`, and an alert fires on the rate (owner decision 3, 2026-11-18). The check never answers 503 for that reason, so a session revoked meanwhile keeps working until Redis answers again.
 5. **Account state, in one database read** (`ValidateByJwtState`).
    - The network exists and the user is its admin.
    - `create_time` is not before `network_user.credential_change_time`.
@@ -103,12 +103,12 @@ Every API request (`ClientSession.Auth`) and every connect transport (`connect/t
 - Rejections count in `urnetwork_auth_jwt_rejections_total{cause}`, with causes such as `signature`, `expired`, `missing_claims`, `no_active_row` and `credential_rotated`.
 - An API key skips steps 1–5: its hash lookup is the check.
 
-**Connect transports.** These register before their final check. After admission, an authorization lease checks each connection again every 60 s and retires it after 90 s without a successful check. So a revoked session or a removed client loses its connections within about 90 s.
+**Connect transports.** These register before their final check. After admission, an authorization lease checks each connection again every 60 s. Only a definitive answer retires a connection: revoked (close 4003), expired (4004) or invalid (4005). A recheck that gets no answer keeps the connection, unverified, and tries again on a 5 to 60 s backoff (owner decision, 2026-10-11). So while Redis and the database answer, a revoked session or a removed client loses its connections within about 90 s. During an outage that happens at the first recheck that gets an answer.
 
 **Redis revocation authority (owner decision, 2026-10-26; REVOKE-FINAL.md §14).** With vault `auth.yml` `revocation_record_enabled: true`, a tagged credential skips steps 4 and 5.
 - It reads one Redis revocation record, keyed by its root client or its session in one of 64 shards of its network. The record holds the session, own-client, root, admin and credential-cutoff state.
 - If the record cannot answer, the SQL state query does, after the session marker and the session journal, and its valid answer is projected into the record.
-- If Redis is unavailable, the credential is refused with 503 and nothing falls back to SQL.
+- If Redis cannot be reached, the credential is accepted unchecked and counted, as in step 4 (owner decision 3, 2026-11-18, REVOKE-FINAL.md §15). Until then it was refused with 503. A missing field still falls back to SQL; only an unreachable Redis changes.
 - Untagged credentials keep steps 4 and 5 unchanged.
 
 ## 4. Route authorization: admin, client, Embed
@@ -188,14 +188,25 @@ The reason: a password reset sets `credential_change_time = now()`, and in Postg
 - It re-reads the name and Pro, and keeps guest mode, roles, principal and `create_time`.
 - While the gates are off, it renews expired and legacy no-`exp` tokens too, which moves the installed base onto renewable tokens.
 - Outcomes count in `urnetwork_auth_network_refreshes_total{outcome}`.
+- If Redis does not register a tagged token's renewal within the mint budget, the refresh still answers: the new token carries the same session, is not extended, and expires no later than the presented token (owner decision 9, 2026-11-18, REVOKE-FINAL.md §15). It counts in `urnetwork_session_mint_unextended_total{kind}`. A presented token already past its `exp` gets nothing from that and answers 503.
 
 **Answers.** A refresh answers 200 with `{"by_jwt": …}` or `{"error": {"message": …}}` for a refusal of the request's kind; 401 when the credential is rejected; 403 for a client token on a Network route.
 
 ## 6. Revocation
 
 - **Password reset.** Every credential whose `create_time` is before the reset is rejected: the network token and every client token minted from it.
-- **Removing a client.** Its tokens stop working at once. For untagged tokens, so do its descendants'. Connections close within the lease, about 90 s.
+  - A password reset, sign-out-all and "sign out other sessions" retire every session except hosted-proxy sessions (owner decision 4, 2026-11-18).
+  - That includes sign-in and auth-code sessions, API-key clients' and adopted devices' sessions, and per-client legacy lineages. An API-key client is minted again with the key.
+  - A hosted proxy stops only when it is deleted or its own session is revoked.
+- **Removing a client.** Its tokens stop working at once. For untagged tokens, so do its descendants'. Connections close at the next answered lease recheck (§3), within about 90 s.
+  - When session creation is on, a removal also frees the sessions the client alone owns: a hosted proxy's, an API-key client's, an adopted device's, or a per-client legacy lineage.
+  - This holds on every removal path, the 30-day idle reap included.
+  - A removal never ends a sign-in or auth-code session, which other clients may share.
 - **Sessions.** These routes are Network class: `GET /network/sessions`, `POST /network/revoke-session`, `POST /network/revoke-other-sessions` and `GET /network/session-operations/…`. Revoking writes a Redis marker that every check reads. See REVOKE-OPERATIONS.md.
+- **Session limit.** A network holds at most 5,000 live sessions, set in config `all/pro.yml`. A top-level client's own session does not count while the concurrent-client limit exempts the client: it declared provide intent, its qualification (a registered Public provide key, a passing egress probe and the 12-hour reliability floor) is pending or qualified, and its intent connection is live; a provider install also counts out for its first six minutes. Both limits use one rule (`intent_exempt_until`). An app with only a Stream key, a hosted proxy, and a network-only or friends-and-family provider count.
+  - While `all/pro.yml` `enforce_session_cap` is false, as shipped, nothing is refused. Each would-be refusal is counted in `urnetwork_session_cap_would_refuse_total`.
+  - Once it is true, a new session over the limit gets 409 `session_limit_reached`, with a message that points to Account → Sessions, the apps' path.
+  - Refreshing a tagged session is never refused, and no session is evicted. A legacy token's first renewal starts its session, so at an enforced limit it is refused; the owner decides that case before the switch flips.
 - **API keys.** Removing a key stops it at its next request.
 - **No per-token deny list.** Apart from session markers, a JWT stays valid until expiry, a password reset, or its client's removal.
 
@@ -223,20 +234,25 @@ The reason: a password reset sets `credential_change_time = now()`, and in Postg
 
 ## 8. Gates and rollout state
 
-| vault `auth.yml` | main, 2026-10-09 | Effect |
-|---|---|---|
-| `reject_missing_expiration` | false | Tokens without `exp` (pre-hardening) are accepted |
-| `reject_expired` | false | Expired tokens are accepted (except a tagged token past its horizon) |
-| `session_creation_enabled` | absent (false) | New mints carry no `session_id`. Tagged tokens are still enforced |
+| vault `auth.yml` | main, 2026-11-18 | Read | Effect |
+|---|---|---|---|
+| `reject_missing_expiration` | false | Once per process | Tokens without `exp` (pre-hardening) are accepted |
+| `reject_expired` | false | Once per process | Expired tokens are accepted (except a tagged token past its horizon) |
+| `revocation_record_enabled` | true, since 2026-10-27 | Once per process | Tagged credentials are checked against the Redis revocation record (§3). Writers write the record either way |
+| `session_creation_enabled` | absent (false) | At most every 5 s | New mints carry no `session_id`. Tagged tokens are still enforced |
 
-The values are read once per process, so a flip needs a restart.
+The three flags read once per process need a restart to flip. `session_creation_enabled` is read at most every 5 s, and a failed read keeps the last value, so it flips on each host within 5 s of the vault delivery reaching it, with no restart. The fleet follows the delivery, with no per-block canary.
+
+Config `all/pro.yml` holds the session limit beside the concurrent-client limit: `max_sessions` (5,000) and `enforce_session_cap` (false). Both are read once per process, like `enforce_concurrent_clients`, so the switch reaches each service at its next restart after the config release.
 
 **Before turning on `reject_expired`:**
 
 - The apps must ship the SDK with network-token renewal (`679a836a` or later), and ur.io must deploy its switch to `/auth/network-refresh`.
 - `urnetwork_auth_jwt_legacy_accepts_total{cause="expired",kind="network"}` must fall to near zero.
 
-After the flip, a network token that expired unrenewed needs a new sign-in. Turn on `session_creation_enabled` only by the deployment gates in REVOKE-OPERATIONS.md.
+After the flip, a network token that expired unrenewed needs a new sign-in.
+
+**Turning on `session_creation_enabled`** starts sessions, the Sessions list and revocation for everyone at once (owner decision 5, 2026-11-18). There are no cohorts and no separate management switch. The flip needs the owner's go; the order is in REVOKE-OPERATIONS.md. The session limit stays unenforced until `all/pro.yml` `enforce_session_cap` flips, which is one config change (§6).
 
 ## 9. Where it lives
 
@@ -251,6 +267,7 @@ After the flip, a network token that expired unrenewed needs a new sign-in. Turn
 | Client creation and own-client limits | `model/network_client_model.go` | `model/network_client_authz_test.go` |
 | Refresh routes | `controller/auth_controller.go` | `api/auth_refresh_db_test.go` |
 | Connect transport auth and leases | `connect/transport.go`, `connect/transport_authentication.go`, `session/authorization_lease.go` | `connect/*_test.go` |
+| Session and credential-check panels and alerts | `grafana/dashboards/signals.json` (the sessions rows), warp `grafana/alerting/session-auth.yml` and `session-authority.yml` | `grafana/session_rollout_dashboard_test.go`, `grafana/session_authority_dashboard_test.go`, `grafana/revocation_record_dashboard_test.go`, warp `grafana/session_auth_alerts_test.go` and `session_authority_alerts_test.go` |
 | SSO id tokens | `session/sso_jwt.go`, `session/google_jwt.go`, `session/apple_jwt.go` | `session/*_jwt_test.go` |
 | No cookies: dropped from requests and responses | `session/cookies.go`, `router/router.go`, `router/metrics.go` | `session/cookies_test.go`, `router/router_cookies_test.go` |
 | Lag guests: the claim, the route gate, the connect refusal, no grants | `session/by_jwt.go`, `router/lag_guest_credential.go`, `api/route_authz.go` (`lagGuestRoutes`), `connect/transport_authentication.go`, `controller/lag_session_controller.go`, `model/lag_guest_model.go` | `session/lag_guest_jwt_test.go`, `router/lag_guest_credential_test.go`, `api/lag_route_test.go`, `connect/transport_lag_guest_test.go`, `model/lag_grant_test.go` |

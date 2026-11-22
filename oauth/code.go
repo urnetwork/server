@@ -57,68 +57,73 @@ type AuthorizationCode struct {
 // Mints a single use authorization code and returns the raw value, which is
 // the only place it exists in the clear.
 func CreateAuthorizationCode(ctx context.Context, code *AuthorizationCode) (string, error) {
+	codeStr, err := newAuthorizationCode(code)
+	if err != nil {
+		return "", err
+	}
+
+	server.Tx(ctx, func(tx server.PgTx) {
+		insertAuthorizationCodeInTx(ctx, tx, codeStr, code)
+	})
+
+	return codeStr, nil
+}
+
+// Checks a code before it is minted, and draws its raw value.
+func newAuthorizationCode(code *AuthorizationCode) (string, error) {
 	if code.CodeChallengeMethod != PkceMethodS256 {
 		return "", fmt.Errorf("unsupported code_challenge_method %q", code.CodeChallengeMethod)
 	}
 	if code.Resource == "" {
 		return "", fmt.Errorf("resource is required")
 	}
+	return newOpaqueToken()
+}
 
-	codeStr, err := newOpaqueToken()
-	if err != nil {
-		return "", err
-	}
-
+func insertAuthorizationCodeInTx(ctx context.Context, tx server.PgTx, codeStr string, code *AuthorizationCode) {
 	rolesJson, err := json.Marshal(code.Roles)
-	if err != nil {
-		return "", err
-	}
+	server.Raise(err)
 
 	now := server.NowUtc()
-	codeHash := tokenHash(codeStr)
 
-	server.Tx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-			INSERT INTO oauth_authorization_code (
-				code_hash,
-				client_id,
-				user_id,
-				network_id,
-				redirect_uri,
-				code_challenge,
-				code_challenge_method,
-				resource,
-				scope,
-				nonce,
-				principal,
-				roles_json,
-				auth_time,
-				create_time,
-				expire_time
-			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-			`,
-			codeHash,
-			code.ClientId,
-			code.UserId,
-			code.NetworkId,
-			code.RedirectUri,
-			code.CodeChallenge,
-			code.CodeChallengeMethod,
-			code.Resource,
-			FormatScope(code.Scopes),
-			code.Nonce,
-			code.Principal,
-			string(rolesJson),
-			code.AuthTime,
-			now,
-			now.Add(AuthorizationCodeDuration),
-		))
-	})
-
-	return codeStr, nil
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+		INSERT INTO oauth_authorization_code (
+			code_hash,
+			client_id,
+			user_id,
+			network_id,
+			redirect_uri,
+			code_challenge,
+			code_challenge_method,
+			resource,
+			scope,
+			nonce,
+			principal,
+			roles_json,
+			auth_time,
+			create_time,
+			expire_time
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+		`,
+		tokenHash(codeStr),
+		code.ClientId,
+		code.UserId,
+		code.NetworkId,
+		code.RedirectUri,
+		code.CodeChallenge,
+		code.CodeChallengeMethod,
+		code.Resource,
+		FormatScope(code.Scopes),
+		code.Nonce,
+		code.Principal,
+		string(rolesJson),
+		code.AuthTime,
+		now,
+		now.Add(AuthorizationCodeDuration),
+	))
 }
 
 // Redeems a code, verifying the pkce verifier, the redirect uri, the client,
@@ -234,6 +239,12 @@ func RedeemAuthorizationCode(
 			returnErr = ErrPkceFailed
 			return
 		}
+		// a credential rotation after the approval (a password reset, a
+		// sign-out-all) ends it
+		if !credentialCurrentInTx(ctx, tx, userId, authTime) {
+			returnErr = fmt.Errorf("%w: the account's credentials changed after the approval", ErrInvalidCode)
+			return
+		}
 
 		server.RaisePgResult(tx.Exec(
 			ctx,
@@ -315,8 +326,9 @@ func RotateRefreshToken(
 	tokenHashValue := tokenHash(tokenStr)
 
 	var (
-		familyId    server.Id
-		reuseFamily bool
+		familyId     server.Id
+		reuseFamily  bool
+		revokeFamily bool
 	)
 
 	server.Tx(ctx, func(tx server.PgTx) {
@@ -397,6 +409,15 @@ func RotateRefreshToken(
 			returnErr = fmt.Errorf("%w: client mismatch", ErrInvalidRefreshToken)
 			return
 		}
+		// A credential rotation after the approval (a password reset, a
+		// sign-out-all) ends the grant. The rotation revokes the family
+		// (RevokeUserGrantsInTx); this also refuses a successor that a
+		// refresh running across the rotation wrote after it.
+		if !credentialCurrentInTx(ctx, tx, userId, authTime) {
+			revokeFamily = true
+			returnErr = fmt.Errorf("%w: the account's credentials changed after the approval", ErrInvalidRefreshToken)
+			return
+		}
 
 		grantedScopes := ParseScope(scope)
 		// a refresh may narrow the grant, never widen it. Checked before the
@@ -445,7 +466,7 @@ func RotateRefreshToken(
 		}
 	})
 
-	if reuseFamily {
+	if reuseFamily || revokeFamily {
 		// outside the transaction above, which is rolling back its own row
 		RevokeRefreshTokenFamily(ctx, familyId)
 		return nil, "", returnErr

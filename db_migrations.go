@@ -11917,6 +11917,26 @@ var migrations = []any{
 	newSqlMigration(CompetitionSilleStorageRecoveryMigrationSql()),
 
 	newSqlMigration(competitionEpochThreeSourceRecoveryMigration()),
+
+	// Bind an independently approved runtime correction to epoch three
+	// without changing its original intake or grading policy.
+	newSqlMigration(competitionEpochThreeRuntimeCorrectionSql()),
+
+	// Record the exact epoch-three builder correction without claiming a
+	// replacement agent executable where that executable did not change.
+	newSqlMigration(competitionEpochThreeExecutorBuilderCorrectionSql()),
+	newSqlMigration(competitionEpochThreeGoofeAdmissionSql()),
+	newSqlMigration(competitionEpochThreeGoofeArchiveBindingCorrectionSql()),
+
+	// The per client and day record of probed exits that differ from every
+	// network their provider connects from: a new table, which no running
+	// release reads or writes.
+	newSqlMigration(providerEgressExitDaySchemaSql),
+
+	// What decided each purchase's price tier, on the crypto, Gamma and
+	// Solana Pay intents (price_tier_evidence_schema.go): one nullable jsonb
+	// column on each, which no running release reads or writes.
+	newSqlMigration(priceTierEvidenceSchemaSql),
 }
 
 // The deleted_network backfill (the migration above): every network an App

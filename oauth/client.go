@@ -69,7 +69,9 @@ type Client struct {
 	Scopes          []string
 }
 
-// Reports whether a redirect uri was registered by this client.
+// Reports whether a redirect uri was registered by this client, and is one this
+// server sends a user agent to (redirect_uri.go). A client registered before
+// those rules keeps the uris it registered, so they are applied on every use.
 //
 // Compared exactly, per oauth 2.1: no prefix or wildcard matching, because a
 // loose match is how an open redirector turns into token exfiltration. Native
@@ -77,6 +79,10 @@ type Client struct {
 // which rfc 8252 requires the server to allow since the client cannot reserve
 // one in advance.
 func (self *Client) ValidRedirectUri(redirectUri string) bool {
+	if checkRedirectUri(redirectUri, self.ApplicationType) != nil {
+		return false
+	}
+
 	for _, registered := range self.RedirectUris {
 		if registered == redirectUri {
 			return true
@@ -290,30 +296,14 @@ func RegisterClient(ctx context.Context, document *clientMetadataDocument) (*Cli
 	return client, nil
 }
 
-// A native client may register a loopback redirect; a web client must use
-// https. This is what lets claude desktop and the cli work without allowing a
-// web client to redirect a code to localhost.
+// A native client may register a loopback redirect or a private-use scheme; a
+// web client must use https (redirect_uri.go). This is what lets claude desktop
+// and the cli work without allowing a web client to redirect a code to
+// localhost.
 func validateRedirectUris(redirectUris []string, applicationType string) error {
 	for _, redirectUri := range redirectUris {
-		redirectUrl, err := url.Parse(redirectUri)
-		if err != nil {
-			return fmt.Errorf("%w: %s", ErrInvalidRedirect, redirectUri)
-		}
-		if redirectUrl.Fragment != "" {
-			return fmt.Errorf("%w: fragment not allowed", ErrInvalidRedirect)
-		}
-
-		switch redirectUrl.Scheme {
-		case "https":
-		case "http":
-			if applicationType != ApplicationTypeNative || !isLoopbackHost(redirectUrl.Hostname()) {
-				return fmt.Errorf("%w: http is only allowed for native loopback", ErrInvalidRedirect)
-			}
-		default:
-			// a private uri scheme is how a native app receives a redirect
-			if applicationType != ApplicationTypeNative {
-				return fmt.Errorf("%w: unsupported scheme %s", ErrInvalidRedirect, redirectUrl.Scheme)
-			}
+		if err := checkRedirectUri(redirectUri, applicationType); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -617,41 +607,59 @@ func GetConsent(ctx context.Context, userId server.Id, clientId string) *Consent
 // Records approval, unioning with anything already approved so a narrower
 // later grant does not silently drop permissions the client still relies on.
 func SaveConsent(ctx context.Context, consent *Consent) {
-	scopes := consent.Scopes
-	if existing := GetConsent(ctx, consent.UserId, consent.ClientId); existing != nil {
-		for _, scope := range existing.Scopes {
-			if !HasScope(scopes, scope) {
-				scopes = append(scopes, scope)
+	server.Tx(ctx, func(tx server.PgTx) {
+		saveConsentInTx(ctx, tx, consent)
+	})
+}
+
+func saveConsentInTx(ctx context.Context, tx server.PgTx, consent *Consent) {
+	scopes := append([]string{}, consent.Scopes...)
+	result, err := tx.Query(
+		ctx,
+		`
+		SELECT scope
+		FROM oauth_consent
+		WHERE user_id = $1 AND client_id = $2
+		`,
+		consent.UserId,
+		consent.ClientId,
+	)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			var scope string
+			server.Raise(result.Scan(&scope))
+			for _, existing := range ParseScope(scope) {
+				if !HasScope(scopes, existing) {
+					scopes = append(scopes, existing)
+				}
 			}
 		}
-	}
-
-	server.Tx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-			INSERT INTO oauth_consent (
-				user_id,
-				client_id,
-				network_id,
-				scope,
-				create_time,
-				update_time
-			)
-			VALUES ($1, $2, $3, $4, $5, $5)
-			ON CONFLICT (user_id, client_id) DO UPDATE
-			SET
-				network_id = $3,
-				scope = $4,
-				update_time = $5
-			`,
-			consent.UserId,
-			consent.ClientId,
-			consent.NetworkId,
-			FormatScope(scopes),
-			server.NowUtc(),
-		))
 	})
+
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+		INSERT INTO oauth_consent (
+			user_id,
+			client_id,
+			network_id,
+			scope,
+			create_time,
+			update_time
+		)
+		VALUES ($1, $2, $3, $4, $5, $5)
+		ON CONFLICT (user_id, client_id) DO UPDATE
+		SET
+			network_id = $3,
+			scope = $4,
+			update_time = $5
+		`,
+		consent.UserId,
+		consent.ClientId,
+		consent.NetworkId,
+		FormatScope(scopes),
+		server.NowUtc(),
+	))
 }
 
 // Disconnects a client: the remembered consent is dropped and every refresh

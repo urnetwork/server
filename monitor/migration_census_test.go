@@ -115,8 +115,8 @@ func TestMigrationCensusBoundsCompletePublishedSource(t *testing.T) {
 	if err != nil || len(program) > settings.MaximumProgramBytes {
 		t.Fatal("bounded source lost its finite program admission", err)
 	}
-	// The exact predecessor differs in SQL only by the additive suffix. This
-	// comparison is offline and does not claim a production OOM observation.
+	// Reconstruct the historical Sille-recovery source measured by this control.
+	// Its v844 readiness guard predated the runtime-correction boundary.
 	priorContracts := []snMainnetMigrationContract{}
 	priorHead := server.CompetitionSilleStorageRecoveryMigrationVersion()
 	for _, contract := range migrationCurrentSuffixContracts {
@@ -131,6 +131,12 @@ func TestMigrationCensusBoundsCompletePublishedSource(t *testing.T) {
 		t.Fatal("predecessor comparison cannot locate the exact source-owned suffix")
 	}
 	prior := strings.Replace(query, currentSuffix, migrationCurrentSuffixVersionQueries(priorContracts), 1)
+	readiness := snMainnetMigrationFunction("competition_v2_source_readiness_guard()", "trigger", "plpgsql", "v", false, competitionMigration844CompetitionV2SourceReadinessGuardBody)
+	boundedReadiness := migrationCompetitionBefore(competitionEpochThreeRuntimeCorrectionVersion, readiness)
+	if strings.Count(prior, boundedReadiness) != 1 {
+		t.Fatal("predecessor comparison cannot restore the historical readiness predicate")
+	}
+	prior = strings.Replace(prior, boundedReadiness, readiness, 1)
 	priorPlan, err := planMigrationCensus(prior, settings)
 	if err != nil {
 		t.Fatal("predecessor source is not admitted by the same bounded planner", err)
@@ -197,6 +203,38 @@ func TestMigrationCensusOwnerBoundsRefuseWithoutPartialPlan(t *testing.T) {
 	plan.settings.MaximumProgramBytes = 1
 	if program, err := plan.script(); err == nil || program != "" {
 		t.Fatal("program bytes escaped their independent owner admission")
+	}
+}
+
+// Every expression is four bytes including the outer spaces. With two per
+// batch, the decimal offset widens at batch 5 and the index widens at batch 10.
+func TestMigrationCensusStatementBytesIncludeFrameDigitsAndSeparators(t *testing.T) {
+	query := "WITH version AS (SELECT 1) SELECT 'a'," + strings.Repeat("'é',", 23) + "'a' FROM version;"
+	settings := DefaultMigrationCensusSettings()
+	settings.MaximumColumnsPerStatement = 2
+	control, err := planMigrationCensus(query, settings)
+	if err != nil || len(control.batches) != 13 {
+		t.Fatal("expected twelve pairs followed by one column", err)
+	}
+	for _, index := range []int{5, 10} {
+		boundary := control.batches[index]
+		if len(boundary.query) != len(control.batches[index-1].query)+1 {
+			t.Fatal("fixture did not cross a decimal frame boundary", index)
+		}
+		for _, shortBy := range []int{0, 1} {
+			settings.MaximumStatementBytes = len(boundary.query) - shortBy
+			plan, err := planMigrationCensus(query, settings)
+			if err != nil || len(plan.batches) <= index {
+				t.Fatal("bounded plan omitted the boundary batch", index, err)
+			}
+			batch := plan.batches[index]
+			if batch.offset != boundary.offset || batch.columns != 2-shortBy || len(batch.query) > settings.MaximumStatementBytes {
+				t.Fatalf("batch %d at %d bytes has offset %d and %d columns", index, settings.MaximumStatementBytes, batch.offset, batch.columns)
+			}
+			if shortBy == 0 && batch.query != boundary.query {
+				t.Fatal("an exact fit changed the original batch SQL", index)
+			}
+		}
 	}
 }
 

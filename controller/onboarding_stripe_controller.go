@@ -29,16 +29,20 @@ import (
 
 // Stripe for the onboarding program: the inline payment sheet (the non-Play
 // Android flavors, Windows and Linux), the per-tier price ids, the welcome-offer
-// coupon, and the webhook steps that finalize the price tier from the card's
+// coupon, and the webhook steps that finalize the price tier with the card's
 // billing country before the trial ends. The existing Checkout path keeps
 // working and applies the same tier and coupon (see StripeCreateCheckoutSession).
+// Stripe is a rail without a store: the tier is the one the server's country
+// signals agree on, never a country the client sends (price_tier_signals.go).
 
 // Subscription metadata keys the onboarding code stamps on Stripe subscriptions.
 const (
-	stripeMetadataNetworkId       = "network_id"
-	stripeMetadataPlan            = "plan"
-	stripeMetadataPriceTier       = "price_tier"
-	stripeMetadataOnboardingOffer = "onboarding_offer"
+	stripeMetadataNetworkId = "network_id"
+	stripeMetadataPlan      = "plan"
+	stripeMetadataPriceTier = "price_tier"
+	// what decided the tier, without its countries (stripePriceTierEvidence)
+	stripeMetadataPriceTierEvidence = "price_tier_evidence"
+	stripeMetadataOnboardingOffer   = "onboarding_offer"
 	// payment_sheet: "pending" until the sheet's SetupIntent succeeds and the
 	// payment method is attached; "attached" after. While pending, the $0 trial
 	// invoice is NOT credited -- an abandoned sheet must not hand out a trial.
@@ -251,9 +255,10 @@ type StripePricesResult struct {
 	Error              *OnboardingError `json:"error,omitempty"`
 }
 
-// StripePrices returns the caller's tier's Stripe price ids.
+// StripePrices returns the caller's tier's Stripe price ids: the tier the
+// payment sheet and Checkout charge, never the storefront country's.
 func StripePrices(storefrontCountry string, clientSession *session.ClientSession) (*StripePricesResult, error) {
-	tier := ResolvePriceTier(clientSession, storefrontCountry)
+	tier := ResolvePurchasePriceTier(clientSession, storefrontCountry)
 	stripe.Key = stripeApiToken()
 	yearly, err := StripePriceIdForTier(tier.Tier, model.PlanYearly)
 	if err != nil {
@@ -286,7 +291,8 @@ func StripePrices(storefrontCountry string, clientSession *session.ClientSession
 type StripePaymentSheetArgs struct {
 	// yearly | monthly
 	Plan string `json:"plan"`
-	// the store's storefront country, when the app knows it
+	// a store's storefront country. Stripe is not a store, so the price tier
+	// is never taken from it (price_tier_signals.go)
 	StorefrontCountry string `json:"storefront_country,omitempty"`
 	// the Stripe API version the mobile SDK requires for its ephemeral key
 	StripeVersion string `json:"stripe_version,omitempty"`
@@ -357,7 +363,7 @@ func StripePaymentSheet(
 		glog.Infof("[stripe]payment sheet: network %s has no purchase start left: %s\n", networkId, refusal)
 		return stripePaymentSheetError(PurchaseErrorCodeRateLimited, refusal), nil
 	}
-	tier := ResolvePriceTier(clientSession, args.StorefrontCountry)
+	tier := ResolvePurchasePriceTier(clientSession, args.StorefrontCountry)
 
 	stripe.Key = stripeApiToken()
 
@@ -394,6 +400,9 @@ func StripePaymentSheet(
 		stripeMetadataPlan:         plan,
 		stripeMetadataPriceTier:    tier.Tier.Name,
 		stripeMetadataPaymentSheet: stripePaymentSheetPending,
+	}
+	if evidence := tier.Evidence.stripe().metadataValue(); evidence != "" {
+		metadata[stripeMetadataPriceTierEvidence] = evidence
 	}
 	if offer != nil && couponId != "" {
 		metadata[stripeMetadataOnboardingOffer] = "1"
@@ -735,7 +744,7 @@ func stripeCheckoutTierAndDiscount(
 	if itemId == StripeItemProYearly {
 		plan = model.PlanYearly
 	}
-	tier := ResolvePriceTier(clientSession, storefrontCountry)
+	tier := ResolvePurchasePriceTier(clientSession, storefrontCountry)
 	priceId, err = StripePriceIdForTier(tier.Tier, plan)
 	if err != nil {
 		return "", nil, nil, "", err
@@ -743,6 +752,9 @@ func stripeCheckoutTierAndDiscount(
 	metadata = map[string]string{
 		stripeMetadataPlan:      plan,
 		stripeMetadataPriceTier: tier.Tier.Name,
+	}
+	if evidence := tier.Evidence.stripe().metadataValue(); evidence != "" {
+		metadata[stripeMetadataPriceTierEvidence] = evidence
 	}
 	if couponId, offer := stripeOnboardingDiscount(clientSession, plan); offer != nil && couponId != "" {
 		discounts = []*stripe.CheckoutSessionDiscountParams{{Coupon: stripe.String(couponId)}}
@@ -1217,7 +1229,9 @@ type stripeFinalizeResult struct {
 
 // stripeFinalizeTierForCustomer records the customer's billing country and
 // brings every subscription still in its trial (or waiting on the payment sheet)
-// onto the tier that country resolves to: the item price is switched BEFORE the
+// onto the tier its signals agree on once that country joins them
+// (stripeFinalizedPriceTier): a regional card alone never makes a subscription
+// priced at the standard tier regional. The item price is switched BEFORE the
 // trial ends (nothing has been charged yet, no proration), the metadata is
 // updated, a pending payment sheet is marked attached and its trial invoice is
 // credited now.
@@ -1307,7 +1321,7 @@ func stripeFinalizeTierForCustomer(clientSession *session.ClientSession, custome
 
 		var items []*stripe.SubscriptionItemsParams
 		if code != "" && plan != "" && (inTrial || pending) {
-			tier := model.Pro().PriceTierForCountry(code)
+			tier, evidence := stripeFinalizedPriceTier(sub.Metadata, code)
 			if tier.Name != currentTier {
 				priceId, err := StripePriceIdForTier(tier, plan)
 				if err != nil {
@@ -1318,9 +1332,12 @@ func stripeFinalizeTierForCustomer(clientSession *session.ClientSession, custome
 						Price: stripe.String(priceId),
 					}}
 					metadata[stripeMetadataPriceTier] = tier.Name
+					if value := evidence.metadataValue(); value != "" {
+						metadata[stripeMetadataPriceTierEvidence] = value
+					}
 					glog.Infof(
-						"[stripe]subscription %s for network %s moves from tier %s to %s (billing country %s) before the trial ends\n",
-						sub.ID, networkId, currentTier, tier.Name, code,
+						"[stripe]subscription %s for network %s moves from tier %s to %s (billing country %s, signals %v) before the trial ends\n",
+						sub.ID, networkId, currentTier, tier.Name, code, evidence.Signals,
 					)
 				}
 			}

@@ -111,7 +111,7 @@ func bindSourceBuildImageScriptLabels(root *sourceBuildContext, request reviewed
 LABEL com.urnetwork.competition.entrypoint-sha256=%q
 LABEL com.urnetwork.competition.shell-overlay=%q
 LABEL com.urnetwork.competition.shell-overlay-base=%q
-`, digests[0], digests[1], "authenticated-source-scripts-v1", request.Proposal.EvaluatedImageDigest))...)
+`, digests[0], digests[1], "authenticated-source-scripts-v1", sourceBuildBaseImage(request)))...)
 	return nil
 }
 

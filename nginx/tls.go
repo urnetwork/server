@@ -26,8 +26,11 @@ package nginx
 // built with unless the config its GetConfigForClient returns sets keys of its
 // own (Config.ticketKeys, crypto/tls common.go), and no config here sets any.
 // quic-go under go1.27 uses the listener's config without cloning it
-// (third_party/quic-go/internal/handshake/tls_config_go127.go). So a ticket
-// resumes on any socket of the process, and on no other process.
+// (quic-go's internal/handshake/tls_config_go127.go). So a ticket
+// resumes on any socket of the process, and on no other process; unless
+// TlsSettings.SessionTicketSecrets is set, when the two base configs hold the
+// day's keys those secrets derive, which every front holding them shares
+// (tls_ticket.go; LBALT.md D6c, amended 2026-11-20).
 
 import (
 	"cmp"
@@ -35,9 +38,12 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -52,11 +58,46 @@ const (
 	tlsNextProtoH3    = "h3"
 )
 
+// The text of ErrTlsNoCertificate, which connect's error log reads to label
+// the failed handshake.
+const TlsNoCertificateMessage = "lbalt: no certificate for the server name"
+
 // The handshake error when the front has no certificate for a ClientHello:
 // on QUIC a missing, invalid or unknown server name, and on TCP any name the
 // default server can't stand in for. It names no server name, since the
-// client chose it.
-var errTlsNoCertificate = errors.New("lbalt: no certificate for the server name")
+// client chose it. crypto/tls answers it with internal_error. Under QUIC,
+// quic-go closes the connection with a local CRYPTO_ERROR 0x150 whose error
+// wraps this one, so errors.Is finds it in the connection's close cause,
+// which connect's QUIC handshake reasons read.
+var ErrTlsNoCertificate = errors.New(TlsNoCertificateMessage)
+
+// The class a QUIC ClientHello's server name is counted under when the front
+// doesn't serve it on QUIC, so its handshake fails. A served name is counted
+// under its NameClass.
+const (
+	// alt, alt-v4 or alt-v6 as the first label, on any domain: the names of
+	// the retired alt, which older clients still present
+	tlsQuicNameClassAlt = "alt"
+	// any other name the front doesn't serve
+	tlsQuicNameClassUnknown = "unknown"
+	// no name, or one nginx's rule refuses (normalizeHost)
+	tlsQuicNameClassNone = "none"
+)
+
+// The port a QUIC ClientHello arrived on, as the ClientHello metric labels
+// it: connect's port kinds (connect/front.go), told apart by the route table's
+// listen ports.
+const (
+	tlsQuicPortQuic   = "quic"
+	tlsQuicPortWhodis = "whodis"
+	// any other local port, or a ClientHello with no local address
+	tlsQuicPortOther = "other"
+)
+
+// The interface label of a QUIC ClientHello whose local address is no route
+// table interface's, or that has none. Every other ClientHello is labeled
+// with its interface's name.
+const tlsQuicInterfaceOther = "other"
 
 // Every served name's certificate and key. Read-only once loaded, so safe
 // for concurrent use.
@@ -385,10 +426,40 @@ func quicNegotiableNextProtos(offeredNextProtos []string) []string {
 // invalid or unknown SNI gets no certificate, as in alt, so its handshake
 // fails. QUIC itself requires TLS 1.3.
 //
+// tlsConfig reads each ClientHello's offer (TlsClientOffer) into the slot its
+// handshake's context carries, when it carries one (NewTlsListener), with the
+// class of its server name: a served name's class, none for no name, and
+// unknown for any other name.
+//
+// quicTlsConfig counts every ClientHello it reads in metrics'
+// quicClientHellos, once each, since crypto/tls calls GetConfigForClient once
+// per handshake, a HelloRetryRequest's included: by the interface whose
+// address its local address is among interfaces, by the port kind its local
+// port is among listen's ports, by its name's class, and by whether it offered
+// h3. A failed handshake of a name the front doesn't serve is counted only
+// there: quic-go accepts a connection once the client's transport parameters
+// are read, after GetConfigForClient, so connect's dispatch never sees it.
+// Neither the name nor an address ever reaches a label.
+//
 // Early data stays off (D9): Go's TLS never accepts it over TCP, and on QUIC
 // tickets carry it only when connect's public quic.Config allows 0-RTT,
 // which it doesn't.
-func newTlsConfigs(certificateStore *CertificateStore, matcher *nameMatcher, defaultName string, settings *TlsSettings) (tlsConfig *tls.Config, quicTlsConfig *tls.Config) {
+//
+// With settings' SessionTicketSecrets, both bases hold the shared keys of
+// the day now reads (tlsTicketKeys), refreshed by each handshake's
+// GetConfigForClient, and a TCP client that offers no TLS 1.3 gets a config
+// that issues and accepts no ticket: one built alongside each per-name
+// config and the default server's. Without them, nothing sets keys.
+func newTlsConfigs(
+	certificateStore *CertificateStore,
+	matcher *nameMatcher,
+	defaultName string,
+	listen *RouteListen,
+	interfaces []*RouteInterface,
+	settings *TlsSettings,
+	metrics *frontMetrics,
+	now func() time.Time,
+) (tlsConfig *tls.Config, quicTlsConfig *tls.Config) {
 	newNameTlsConfig := func(certificate *tls.Certificate, nextProtos []string) *tls.Config {
 		return &tls.Config{
 			Certificates:     []tls.Certificate{*certificate},
@@ -398,12 +469,23 @@ func newTlsConfigs(certificateStore *CertificateStore, matcher *nameMatcher, def
 			CurvePreferences: slices.Clone(settings.CurvePreferences),
 		}
 	}
+	// nil without secrets
+	ticketKeys := newTlsTicketKeys(settings.SessionTicketSecrets, now)
+	// a name's config for a TCP client offering no TLS 1.3 while the keys are
+	// shared: no ticket issued or accepted
+	newNoTicketNameTlsConfig := func(certificate *tls.Certificate, nextProtos []string) *tls.Config {
+		nameTlsConfig := newNameTlsConfig(certificate, nextProtos)
+		nameTlsConfig.SessionTicketsDisabled = true
+		return nameTlsConfig
+	}
 	// connect names serve their websocket and H1+ carriers over h1 only
 	connectNextProtos := []string{tlsNextProtoHttp1}
 	// nginx's order for every other name, and for the default server
 	otherNextProtos := []string{tlsNextProtoH2, tlsNextProtoHttp1}
 
 	tcpNameTlsConfigs := map[string]*tls.Config{}
+	// for a TCP client offering no TLS 1.3 while the keys are shared
+	tcpNoTicketNameTlsConfigs := map[string]*tls.Config{}
 	// for a QUIC client that offers h3, and for one that doesn't
 	quicH3NameTlsConfigs := map[string]*tls.Config{}
 	quicRawNameTlsConfigs := map[string]*tls.Config{}
@@ -417,56 +499,147 @@ func newTlsConfigs(certificateStore *CertificateStore, matcher *nameMatcher, def
 			tcpNextProtos = connectNextProtos
 		}
 		tcpNameTlsConfigs[match.name] = newNameTlsConfig(certificate, slices.Clone(tcpNextProtos))
+		if ticketKeys != nil {
+			tcpNoTicketNameTlsConfigs[match.name] = newNoTicketNameTlsConfig(certificate, slices.Clone(tcpNextProtos))
+		}
 		quicH3NameTlsConfigs[match.name] = newNameTlsConfig(certificate, []string{tlsNextProtoH3})
 		quicRawNameTlsConfigs[match.name] = newNameTlsConfig(certificate, nil)
 	}
 	var defaultTlsConfig *tls.Config
+	var defaultNoTicketTlsConfig *tls.Config
 	if certificate, ok := certificateStore.certificate(defaultName); ok {
 		defaultTlsConfig = newNameTlsConfig(certificate, slices.Clone(otherNextProtos))
+		if ticketKeys != nil {
+			defaultNoTicketTlsConfig = newNoTicketNameTlsConfig(certificate, slices.Clone(otherNextProtos))
+		}
 	}
 
+	// the config among nameTlsConfigs for a TCP ClientHello's server name,
+	// nil for the default server's, and the class its offer is counted
+	// under: a served name's, none for no name, or unknown
+	tcpNameTlsConfig := func(serverName string, nameTlsConfigs map[string]*tls.Config) (*tls.Config, string) {
+		if serverName == "" {
+			return nil, tlsClientOfferNameNone
+		}
+		if name, ok := normalizeHost(serverName); ok {
+			if match, ok := matcher.match(name); ok {
+				if nameTlsConfig, ok := nameTlsConfigs[match.name]; ok {
+					return nameTlsConfig, match.class.String()
+				}
+			}
+		}
+		return nil, NameClassUnknown.String()
+	}
 	tlsConfig = &tls.Config{
 		NextProtos:       slices.Clone(otherNextProtos),
 		MinVersion:       settings.MinVersion,
 		CipherSuites:     slices.Clone(settings.CipherSuites),
 		CurvePreferences: slices.Clone(settings.CurvePreferences),
 		GetConfigForClient: func(clientHello *tls.ClientHelloInfo) (*tls.Config, error) {
-			if serverName, ok := normalizeHost(clientHello.ServerName); ok {
-				if match, ok := matcher.match(serverName); ok {
-					if nameTlsConfig, ok := tcpNameTlsConfigs[match.name]; ok {
-						return nameTlsConfig, nil
-					}
+			nameTlsConfigs := tcpNameTlsConfigs
+			serverDefaultTlsConfig := defaultTlsConfig
+			if ticketKeys != nil {
+				ticketKeys.refresh()
+				if !slices.Contains(clientHello.SupportedVersions, tls.VersionTLS13) {
+					nameTlsConfigs = tcpNoTicketNameTlsConfigs
+					serverDefaultTlsConfig = defaultNoTicketTlsConfig
 				}
 			}
-			if defaultTlsConfig == nil {
-				return nil, errTlsNoCertificate
+			nameTlsConfig, nameClass := tcpNameTlsConfig(clientHello.ServerName, nameTlsConfigs)
+			recordTlsClientOffer(clientHello, nameClass)
+			if nameTlsConfig != nil {
+				return nameTlsConfig, nil
 			}
-			return defaultTlsConfig, nil
+			if serverDefaultTlsConfig == nil {
+				return nil, ErrTlsNoCertificate
+			}
+			return serverDefaultTlsConfig, nil
 		},
+	}
+
+	// the interface of each address the route table binds, so a ClientHello
+	// is labeled by the name, never the address
+	addressInterfaceNames := map[netip.Addr]string{}
+	for _, routeInterface := range interfaces {
+		for _, address := range []string{routeInterface.Ipv4, routeInterface.Ipv6} {
+			if parsedAddress, err := netip.ParseAddr(address); err == nil {
+				addressInterfaceNames[parsedAddress.Unmap()] = routeInterface.Name
+			}
+		}
+	}
+	// the interface and port kind of a QUIC ClientHello, by the local address
+	// quic-go reports for it: the socket group's, so the interface address
+	// and listen port it was bound to
+	quicLocalLabels := func(clientHello *tls.ClientHelloInfo) (interfaceName string, portKind string) {
+		interfaceName, portKind = tlsQuicInterfaceOther, tlsQuicPortOther
+		if clientHello.Conn == nil {
+			return
+		}
+		localAddr, ok := clientHello.Conn.LocalAddr().(*net.UDPAddr)
+		if !ok {
+			return
+		}
+		if address, ok := netip.AddrFromSlice(localAddr.IP); ok {
+			if addressInterfaceName, ok := addressInterfaceNames[address.Unmap()]; ok {
+				interfaceName = addressInterfaceName
+			}
+		}
+		if listen == nil {
+			return
+		}
+		switch localAddr.Port {
+		case listen.QuicPort:
+			portKind = tlsQuicPortQuic
+		case listen.WhodisPort:
+			portKind = tlsQuicPortWhodis
+		}
+		return
+	}
+	// the config for a QUIC ClientHello's server name among nameTlsConfigs,
+	// nil for none, and the class it is counted under: a served name's, or
+	// the class of a name the front doesn't serve on QUIC
+	quicNameTlsConfig := func(serverName string, nameTlsConfigs map[string]*tls.Config) (*tls.Config, string) {
+		name, ok := normalizeHost(serverName)
+		if !ok {
+			return nil, tlsQuicNameClassNone
+		}
+		if match, ok := matcher.match(name); ok {
+			if nameTlsConfig, ok := nameTlsConfigs[match.name]; ok {
+				return nameTlsConfig, match.class.String()
+			}
+		}
+		if firstLabel, _, hasDomain := strings.Cut(name, "."); hasDomain {
+			switch firstLabel {
+			case "alt", "alt-v4", "alt-v6":
+				return nil, tlsQuicNameClassAlt
+			}
+		}
+		return nil, tlsQuicNameClassUnknown
 	}
 	quicTlsConfig = &tls.Config{
 		MinVersion:       settings.MinVersion,
 		CipherSuites:     slices.Clone(settings.CipherSuites),
 		CurvePreferences: slices.Clone(settings.CurvePreferences),
 		GetConfigForClient: func(clientHello *tls.ClientHelloInfo) (*tls.Config, error) {
-			serverName, ok := normalizeHost(clientHello.ServerName)
-			if !ok {
-				return nil, errTlsNoCertificate
+			if ticketKeys != nil {
+				ticketKeys.refresh()
 			}
-			match, ok := matcher.match(serverName)
-			if !ok {
-				return nil, errTlsNoCertificate
-			}
+			h3Offered := quicNegotiableNextProtos(clientHello.SupportedProtos) != nil
 			nameTlsConfigs := quicRawNameTlsConfigs
-			if quicNegotiableNextProtos(clientHello.SupportedProtos) != nil {
+			if h3Offered {
 				nameTlsConfigs = quicH3NameTlsConfigs
 			}
-			nameTlsConfig, ok := nameTlsConfigs[match.name]
-			if !ok {
-				return nil, errTlsNoCertificate
+			nameTlsConfig, nameClass := quicNameTlsConfig(clientHello.ServerName, nameTlsConfigs)
+			interfaceName, portKind := quicLocalLabels(clientHello)
+			metrics.quicClientHellos.WithLabelValues(interfaceName, portKind, nameClass, strconv.FormatBool(h3Offered)).Inc()
+			if nameTlsConfig == nil {
+				return nil, ErrTlsNoCertificate
 			}
 			return nameTlsConfig, nil
 		},
+	}
+	if ticketKeys != nil {
+		ticketKeys.install(tlsConfig, quicTlsConfig)
 	}
 	return tlsConfig, quicTlsConfig
 }

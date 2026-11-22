@@ -207,7 +207,7 @@ server-wide, so no plain vacuum returns space to the filesystem.
 | contract_close_report | 325 | Deleted with its contract; prober retention (119/s) | Same defect | pkey 38 GiB reclaimable |
 | network_client | 262 | Retired hosted children hard-deleted after 1 day, removed proxies after 2, others after 30; prober | Yes (279–334 deletes/s against 364–387 inserts/s) | Indexes regrowing after O2 |
 | network_client_location_reliability | 187 | 15-minute batched delete, 31 days after last seen | Yes | Reused |
-| st_provider_usage_archive | 160 (16 weeks + DEFAULT) | Capture on every contract delete (SN25 proof); O1 export to edge-6 and early drop under a weekly floor (close age 70 days); otherwise 52 weeks | Yes. Grows with the reaper's deletes | Returned by the weekly drop |
+| st_provider_usage_archive | 160 (16 weeks + DEFAULT) | Capture on every contract delete (SN25 proof); O1 export to edge-6 and early drop under a rolling floor (close age 42 days since 2026-11-21, 70 before); otherwise 52 weeks | Yes. Grows with the reaper's deletes | Returned by the weekly drop |
 | provide_key | 138 | Deleted at deactivation; prober | Yes | Heap: 69 GiB free, reused |
 | provider_egress_health_history | 76 | Daily partitions, 7 days | Yes | Returned by the drop |
 | audit_device_event | 73 | Hourly row delete at 180 days | **First delete 2027-02-06**; grows about 6 GiB/day | Reused |
@@ -364,7 +364,7 @@ inflow, and the other families keep growing.
 | contract_close_report | settlement, SN close originals, the reapers; billing of one-sided closes at the sender's count (owner 11-11) | as long as its contract: it is deleted with it |
 | contract_close_report_evidence | admission (exact retries, refusing a reused report id) and the SN epoch census (windows of at most 32,768 closed contracts); not settlement, disputes or payouts | 35 days, the guard's floor (owner 11-01). An open dispute keeps its contract unresolved, and unresolved contracts keep their evidence at any age |
 | transfer_escrow_sweep | payout history, operator block points, leaderboard, SN reconcile, reimbursements | with its contract once discharged; unchanged |
-| st_provider_usage_archive | SN25 subnet usage proof, read by the epoch usage statement | on Main until O1 exports a week past the floor (close age 70 days); exported weeks live on edge-6 |
+| st_provider_usage_archive | SN25 subnet usage proof, read by the epoch usage statement | on Main until O1 exports a week past the floor (close age 42 days since 2026-11-21, 70 before); exported weeks live on edge-6 |
 | st_client_key_history | original-close verification, SN epoch key overlay | 30 days after the client is gone |
 
 Nothing here argues for shorter windows on its own. The windows are the owner's, and
@@ -425,7 +425,7 @@ measured rates of §2 and these assumptions:
   reused, then grows at 70% of today's rate.
 - network_client's and provide_key's index regrowth stops at their pre-O2 sizes; the
   work-session heads, location tables and audit tables continue at today's rates.
-- The usage archive receives every deleted contract; O1 drops weeks past 70 days.
+- The usage archive receives every deleted contract; O1 drops weeks past 70 days (42 since 2026-11-21).
 - I2 frees 144 GiB on 11-18; I3 frees 1,500 GiB in four steps (11-22, 11-25, 12-01,
   12-04), half of it regrowing over 35 days (all of it in the stress case); I5 frees
   74 GiB, modelled in one step on 11-28.
@@ -675,7 +675,8 @@ since 11-02). Development and owner.
 
 **S5. Retention windows** (each an owner decision; none is recommended now):
 - The usage archive's O1 floor, close age 70 → 49 days: about −0.4 TiB at steady state.
-  SN25 epoch reads set the floor.
+  SN25 epoch reads set the floor. **Decided 2026-11-21: 42 days, rolling,** never past a
+  week before the window of an SN epoch not yet recorded (`db_provider_usage_archive_export.go`).
 - audit_device_event 180 → 90 days (O5): it caps near half its 180-day size. Check
   readers beyond `/stats/last-90`.
 - A contract horizon below 35 days: every week shorter is about 20% less contract data

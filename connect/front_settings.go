@@ -27,8 +27,9 @@ type FrontServerSettings struct {
 	Front *nginx.FrontSettings
 	// SO_REUSEPORT sockets bound for each (interface address, protocol,
 	// port), for receive parallelism within the block: N = 4 (D10, confirmed
-	// by the owner 2026-11-18). warpctl promotes a generation only with every
-	// one of them up. Non-positive is refused at start.
+	// by the owner 2026-11-18). The udp sockets of each address and port feed
+	// one QUIC transport (D22 (b)). warpctl promotes a generation only with
+	// every one of them up. Non-positive is refused at start.
 	SocketsPerPort int
 	// the wait before re-creating a lost socket once the previous attempt
 	// failed or the re-created socket was lost again before
@@ -57,6 +58,59 @@ type FrontServerSettings struct {
 	// Non-positive keeps the deadline at DrainTimeout. A positive
 	// DrainTimeout no longer than this is refused at start.
 	DrainStopReserve time.Duration
+	// the datagrams that can wait between a whodis group's sockets and its
+	// translation (front_whodis.go): past it, each socket's reader waits, and
+	// what arrives meanwhile waits in the socket's own receive buffer, as when
+	// the translation is slow to read a lone socket. 256, as quic-go's
+	// ConnGroup queues for the quic port. Non-positive is refused at start.
+	WhodisFanInQueueLength int
+	// the pace of each whodis group's decode53 translation, in DNS responses
+	// a second (connect's PacketTranslationSettings.WritePacketsPerSecond).
+	// Non-positive writes them unpaced. 0.
+	//
+	// The translation's default, 200, is a client's: it paces one client's
+	// queries (connect 6afc426c, raised to 800 in 187d98cb and set back in
+	// 704d5e9f, none with a reason), and the front inherited it. On the front
+	// it is the one encoder of the group, shared by every client the group
+	// serves, and quic-go waits on each write, so a group sent about 200
+	// responses, 50 full QUIC packets, a second in all, sleeping a random 0 to
+	// 10 ms after each, and an abandoned handshake's 20 to 24 responses
+	// delayed every other client's (2026-11-21). A global pace is neither a
+	// limit per destination nor an amplification bound. What bounds the
+	// front's replies is QUIC's, as on the quic port, which no pace slows: 3
+	// times the bytes received before the address is validated (RFC 9000
+	// §8.1), which the encoding lowers to about 2.4 times on the wire, since a
+	// response carries 326 QUIC bytes in about 545 and a query 132 in about
+	// 280; the unvalidated-handshake limit and its Retry; and each
+	// connection's congestion control and pacer. The encoder then costs one
+	// encode and one socket write a response, on its one goroutine; a high
+	// nonzero pace would still wait on a timer after every response.
+	WhodisWritePacketsPerSecond int
+	// quic-go's HandshakeIdleTimeout on the whodis transports, in place of
+	// connect's (QuicConnectTimeout + QuicHandshakeTimeout, 30 s); quic-go
+	// also ends any handshake at twice this from its start. Non-positive keeps
+	// connect's. 10 s (owner, 2026-11-21). An established connection keeps
+	// connect's MaxIdleTimeout.
+	//
+	// A healthy whodis handshake takes 0.4 to 1 s. Every packet from the
+	// client restarts the wait, so it bounds the client's silence:
+	//   - a client that never heard the front retransmits its Initial on its
+	//     PTO, 200 ms doubling (sent at 0.2, 0.6, 1.4, 3.0, 6.2, 12.6 s). It
+	//     holds none of the front's state, so once the wait passed, its next
+	//     Initial makes a new connection and it loses nothing
+	//     (TestFrontWhodisLostReplyCostsTheClientNothing);
+	//   - a client that has the front's flight sends its Finished, then
+	//     retransmits it at its PTO, three RTTs from its first sample,
+	//     doubling: the k-th try arrives (3 x 2^(k-1) - 2) RTTs after the
+	//     flight. 10 s takes 6 tries at 100 ms, 4 at 300 ms, 3 at 500 ms; 30 s
+	//     took 7, 6 and 5.
+	WhodisHandshakeIdleTimeout time.Duration
+	// whether the whodis transports trace each handshake for the class of
+	// its failure (front_quic_trace.go): one small object a connection, and
+	// quic-go's construction of the connection's events during its handshake
+	// only, since the trace is a quic.HandshakeOnlyTrace; an established
+	// connection costs nothing. true. The quic port never traces.
+	WhodisHandshakeTrace bool
 	// binds one public udp socket, when set, in place of
 	// listenFrontPacket's SO_REUSEPORT bind to the exact address. Tests use
 	// it to observe, hold and fail binds, as the extender's
@@ -75,16 +129,36 @@ type FrontServerSettings struct {
 	// a socket's serve returned, before its run is released, so a test can
 	// hold a lost socket's release.
 	socketServeEndObserverForTest func(key frontSocketKey)
+	// Nil outside package tests. Called on the supervising goroutine each time
+	// a udp group's transport stopped serving, with the group's first
+	// socket's key, before the transport is closed or replaced, so a test can
+	// hold a lost transport's release.
+	quicTransportServeEndObserverForTest func(key frontSocketKey)
 	// Nil outside package tests. Called with the name and class an accepted
 	// QUIC connection was dispatched by, before its front is entered.
 	dispatchObserverForTest func(serverName string, nameClass nginx.NameClass)
-	// Nil outside package tests. Called with the port kind and result each
-	// accepted QUIC connection is counted with, as it is counted.
-	connectionResultObserverForTest func(portKind string, result string)
-	// Nil outside package tests. Called with the port kind and kind of each
-	// message a public HTTP server wrote to its error log, as it is counted,
-	// and the text the front logged for it, empty when it logged nothing.
-	httpErrorObserverForTest func(portKind string, kind string, logged string)
+	// Nil outside package tests. Called with the interface, port kind,
+	// result, reason and class each accepted QUIC connection is counted with,
+	// as it is counted.
+	connectionResultObserverForTest func(interfaceName string, portKind string, result string, reason string, class string)
+	// Nil outside package tests. Called with the interface, port kind, QUIC
+	// version and resumption each completed QUIC handshake is counted with, as
+	// it is counted, before the connection's result.
+	quicHandshakeObserverForTest func(interfaceName string, portKind string, version string, resumed string)
+	// Nil outside package tests. Called with the version, resumption and
+	// application protocol each completed TLS handshake on a public TCP
+	// socket is counted with, as it is counted, before the connection is
+	// served.
+	tlsHandshakeObserverForTest func(version string, resumed string, alpn string)
+	// Nil outside package tests. Called with the protocol, resumption and
+	// offer labels each completed TLS handshake on a public TCP socket is
+	// counted with in front_tls_handshake_offers_total, as it is counted.
+	tlsHandshakeOfferObserverForTest func(alpn string, resumed string, nameClass string, resumption string, versions string)
+	// Nil outside package tests. Called with the port kind, kind and reason of
+	// each message a public HTTP server wrote to its error log, as it is
+	// counted, and the text the front logged for it, empty when it logged
+	// nothing.
+	httpErrorObserverForTest func(portKind string, kind string, reason string, logged string)
 	// Nil outside package tests. Called with the name of each forced close
 	// step reported as not closed within ForcedCloseTimeout, as it is logged.
 	forcedCloseReportObserverForTest func(step string)
@@ -93,15 +167,25 @@ type FrontServerSettings struct {
 	startedObserverForTest func()
 }
 
-// A new instance on every call, with its own nginx front defaults.
+// A new instance on every call, with its own nginx front defaults, and the
+// front's requests identified for the identity limit by their bearer tokens
+// (frontRequestIdentifier), which only an interface whose rate_limit turns
+// the identity limit on asks for.
 func DefaultFrontServerSettings() *FrontServerSettings {
+	frontSettings := nginx.DefaultFrontSettings()
+	frontSettings.Limit.IdentifyRequest = newFrontRequestIdentifier().identify
 	return &FrontServerSettings{
-		Front:                     nginx.DefaultFrontSettings(),
+		Front:                     frontSettings,
 		SocketsPerPort:            4,
 		SocketRestartInitialDelay: 100 * time.Millisecond,
 		SocketRestartMaxDelay:     5 * time.Second,
 		SocketHealthyRunTimeout:   1 * time.Minute,
 		DrainStopReserve:          2 * time.Minute,
+		WhodisFanInQueueLength:    256,
+		// unpaced: the front's replies are bounded by QUIC
+		WhodisWritePacketsPerSecond: 0,
+		WhodisHandshakeIdleTimeout:  10 * time.Second,
+		WhodisHandshakeTrace:        true,
 	}
 }
 
@@ -115,6 +199,9 @@ func (self *FrontServerSettings) validate() error {
 	}
 	if self.SocketRestartInitialDelay <= 0 {
 		return errors.New("front settings need a positive socket restart delay")
+	}
+	if self.WhodisFanInQueueLength <= 0 {
+		return errors.New("front settings need a positive whodis fan-in queue")
 	}
 	if drainTimeout := self.Front.Http.DrainTimeout; 0 < drainTimeout && drainTimeout <= self.DrainStopReserve {
 		return errors.New("front settings leave the drain no time before the stop reserve")

@@ -13,7 +13,7 @@ package nginx
 // read of the body.
 //
 // The servers are built as connect builds its public ones: the front's
-// handlers under Front.ConfigureServer, TLS through tls.NewListener with the
+// handlers under Front.ConfigureServer, TLS through NewTlsListener with the
 // front's one config, plain TCP for port 80, over listeners whose
 // connections record how the server ends them. Each client writes its head
 // and the first 64 KiB of the body it keeps sending at once, so some of it
@@ -23,7 +23,6 @@ package nginx
 import (
 	"bufio"
 	"context"
-	"crypto/tls"
 	"errors"
 	"io"
 	"net"
@@ -124,7 +123,7 @@ func (self *e2eLingerConn) Close() error {
 }
 
 // Serves handler on a new recording listener on loopback, as connect serves
-// a public port: TLS through tls.NewListener with the front's one config
+// a public port: TLS through NewTlsListener with the front's one config
 // when overTls is set. The listener and the server close when the test ends.
 func serveE2eLinger(t *testing.T, e2e *e2eFront, handler http.Handler, overTls bool) (*e2eLingerListener, *http.Server) {
 	t.Helper()
@@ -143,7 +142,7 @@ func serveE2eLinger(t *testing.T, e2e *e2eFront, handler http.Handler, overTls b
 	})
 	var served net.Listener = listener
 	if overTls {
-		served = tls.NewListener(listener, e2e.front.TlsConfig())
+		served = NewTlsListener(listener, e2e.front.TlsConfig(), httpServer.ReadHeaderTimeout, nil)
 	}
 	go httpServer.Serve(served)
 	return listener, httpServer

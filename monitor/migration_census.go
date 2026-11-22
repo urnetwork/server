@@ -266,29 +266,39 @@ func planMigrationCensus(query string, settings MigrationCensusSettings) (*migra
 	}
 	digest := sha256.Sum256([]byte(query))
 	plan := &migrationCensusPlan{settings: settings, digest: hex.EncodeToString(digest[:]), columns: len(expressions)}
-	statement := func(index, offset int, values []string) string {
-		return prefix + fmt.Sprintf("SELECT json_build_object('kind','batch','index',%d,'offset',%d,'values',json_build_array(%s))::text FROM version;", index, offset, strings.Join(values, ",\n"))
-	}
+	const separator = ",\n"
+	const trailer = "))::text FROM version;"
 	values := []string{}
 	offset := 0
+	batchHeader := func() string {
+		return prefix + fmt.Sprintf("SELECT json_build_object('kind','batch','index',%d,'offset',%d,'values',json_build_array(", len(plan.batches), offset)
+	}
+	header := batchHeader()
+	remaining := settings.MaximumStatementBytes - len(header) - len(trailer)
 	flush := func() {
-		plan.batches = append(plan.batches, migrationCensusBatch{index: len(plan.batches), offset: offset, columns: len(values), query: statement(len(plan.batches), offset, values)})
+		statement := header + strings.Join(values, separator) + trailer
+		plan.batches = append(plan.batches, migrationCensusBatch{index: len(plan.batches), offset: offset, columns: len(values), query: statement})
 		offset += len(values)
-		values = nil
+		values = values[:0]
+		header = batchHeader()
+		remaining = settings.MaximumStatementBytes - len(header) - len(trailer)
 	}
 	for _, expression := range expressions {
 		if strings.TrimSpace(expression) == "" {
 			return nil, errors.New("migration census contains an empty column")
 		}
-		next := append(append([]string(nil), values...), expression)
-		if len(values) != 0 && (len(next) > settings.MaximumColumnsPerStatement || len(statement(len(plan.batches), offset, next)) > settings.MaximumStatementBytes) {
-			flush()
-			next = []string{expression}
+		if len(values) != 0 {
+			if len(values) == settings.MaximumColumnsPerStatement || len(expression) > remaining-len(separator) {
+				flush()
+			} else {
+				remaining -= len(separator)
+			}
 		}
-		if len(statement(len(plan.batches), offset, next)) > settings.MaximumStatementBytes {
+		if len(expression) > remaining {
 			return nil, fmt.Errorf("migration census column %d exceeds its statement byte bound", offset+len(values))
 		}
-		values = next
+		values = append(values, expression)
+		remaining -= len(expression)
 		if len(plan.batches) >= settings.MaximumBatches {
 			return nil, errors.New("migration census batch count exceeded")
 		}

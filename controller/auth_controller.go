@@ -125,6 +125,8 @@ func authLoginWithPassword(
 		result.VerificationRequired.SendError = sendVerification(
 			result.VerificationRequired.UserAuth,
 			loginWithPassword.VerifyOtpNumeric,
+			// the sign-in proved the password
+			result.VerificationRequired.PasswordUserId,
 			clientSession,
 			verifySend,
 		)
@@ -132,17 +134,20 @@ func authLoginWithPassword(
 	return result, err
 }
 
-// Sends a verification code after login or sign-up. Returns why no code was
-// sent, or nil when it was.
+// Sends a verification code after login or sign-up. passwordUserId is the user
+// whose password the request proved or set. Returns why no code was sent, or
+// nil when it was.
 func sendVerification(
 	userAuth string,
 	useNumeric bool,
+	passwordUserId *server.Id,
 	clientSession *session.ClientSession,
 	verifySend authVerifySendFunction,
 ) *AuthVerifySendError {
 	result, err := verifySend(AuthVerifySendArgs{
-		UserAuth:   userAuth,
-		UseNumeric: useNumeric,
+		UserAuth:       userAuth,
+		UseNumeric:     useNumeric,
+		PasswordUserId: passwordUserId,
 	}, clientSession)
 	if err != nil {
 		// no code was created, so none can have been sent
@@ -161,6 +166,10 @@ type AuthVerifySendArgs struct {
 	// return a rate-limit refusal or a send failure in the result `error`
 	// with a 200, instead of the HTTP 429 / 502 older clients expect
 	ResultErrors bool `json:"result_errors,omitempty"`
+	// the user whose password the sending request proved or set: a password
+	// sign-in or a sign-up (model.AuthVerifyCreateCodeArgs.PasswordUserId).
+	// Never read from a request body.
+	PasswordUserId *server.Id `json:"-"`
 }
 
 type AuthVerifySendError = model.AuthVerifySendError
@@ -217,8 +226,9 @@ func authVerifySend(
 	}
 
 	verifyCreateCode := model.AuthVerifyCreateCodeArgs{
-		UserAuth: *userAuth,
-		CodeType: verifyCodeType,
+		UserAuth:       *userAuth,
+		CodeType:       verifyCodeType,
+		PasswordUserId: verifySend.PasswordUserId,
 	}
 	verifyCreateCodeResult, err := createCode(verifyCreateCode, clientSession)
 	if err != nil {

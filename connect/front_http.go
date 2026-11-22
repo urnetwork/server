@@ -6,9 +6,9 @@ package connect
 //
 // Each interface has one http.Server per port, serving every socket of that
 // port on the interface's addresses, so the drain reaches each with one
-// Shutdown. TLS is the nginx front's one long-lived config through
-// tls.NewListener, never cloned: http.Server.ServeTLS would clone it, and
-// session tickets would then stop resuming across the block's sockets (D6c).
+// Shutdown. The nginx TLS listener uses the front's long-lived config so
+// tickets resume across the block's sockets (D6c), and applies the header
+// timeout to HTTP/2 after net/http completes the handshake.
 //
 // Every accepted connection is tracked from its accept to its close, under
 // TLS and through a hijack, so the drain can wait for the websockets and H1+
@@ -21,7 +21,9 @@ package connect
 //
 // net/http logs handshake failures and handler panics with the client's
 // address, so each server's error log counts them instead; a panic is still
-// logged, with the address cut out.
+// logged, with the address cut out. The TLS listener reports each handshake
+// that completes, which is counted by version, resumption and protocol, and
+// again by what its ClientHello offered (LBALTOPT2 R22).
 
 import (
 	"context"
@@ -31,12 +33,14 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/urnetwork/glog"
+	"github.com/urnetwork/server/nginx"
 )
 
 // One bound public tcp listener, served by its interface's server for the
@@ -78,9 +82,59 @@ func (self *frontTcpRun) serve() error {
 		frontServer: self.frontServer,
 	}
 	if self.socket.key.portKind == frontPortHttps {
-		listener = tls.NewListener(listener, self.frontServer.tlsConfig)
+		listener = nginx.NewTlsListener(
+			listener,
+			self.frontServer.tlsConfig,
+			self.socket.httpServer.ReadHeaderTimeout,
+			self.frontServer.countTlsHandshake,
+		)
 	}
 	return self.socket.httpServer.Serve(listener)
+}
+
+// Counts one TLS handshake on a public TCP socket that completed, by version,
+// whether it resumed a session and the application protocol, and by the
+// protocol, the resumption and what its ClientHello offered. Called once per
+// connection, on its serving goroutine, before its first request.
+func (self *frontServer) countTlsHandshake(connectionState tls.ConnectionState, clientOffer nginx.TlsClientOffer) {
+	version := frontTlsVersionLabel(connectionState.Version)
+	resumed := strconv.FormatBool(connectionState.DidResume)
+	alpn := frontTlsAlpnLabel(connectionState.NegotiatedProtocol)
+	frontTlsHandshakesCounter.WithLabelValues(version, resumed, alpn).Inc()
+	nameClass, resumption, versions := clientOffer.Labels()
+	frontTlsHandshakeOffersCounter.WithLabelValues(alpn, resumed, nameClass, resumption, versions).Inc()
+	if observer := self.settings.tlsHandshakeObserverForTest; observer != nil {
+		observer(version, resumed, alpn)
+	}
+	if observer := self.settings.tlsHandshakeOfferObserverForTest; observer != nil {
+		observer(alpn, resumed, nameClass, resumption, versions)
+	}
+}
+
+// The version label of a completed TLS handshake.
+func frontTlsVersionLabel(version uint16) string {
+	switch version {
+	case tls.VersionTLS12:
+		return frontTlsVersionTls12
+	case tls.VersionTLS13:
+		return frontTlsVersionTls13
+	default:
+		return frontTlsVersionOther
+	}
+}
+
+// The application protocol label of a completed TLS handshake.
+func frontTlsAlpnLabel(negotiatedProtocol string) string {
+	switch negotiatedProtocol {
+	case "h2":
+		return frontTlsAlpnH2
+	case "http/1.1":
+		return frontTlsAlpnHttp1
+	case "":
+		return frontTlsAlpnNone
+	default:
+		return frontTlsAlpnOther
+	}
 }
 
 // The tcp drain is its server's (frontServer.beginDrain), which reaches every
@@ -371,31 +425,84 @@ func (self *frontTrackedConn) Close() error {
 type frontHttpErrorLog struct {
 	portKind string
 	// FrontServerSettings.httpErrorObserverForTest
-	observer func(portKind string, kind string, logged string)
+	observer func(portKind string, kind string, reason string, logged string)
 }
 
-// Counts one message by its kind, logging only a panic, scrubbed.
+// Counts one message by its kind, and a failed handshake by its reason,
+// logging only a panic, scrubbed.
 func (self *frontHttpErrorLog) Write(message []byte) (int, error) {
 	text := string(message)
 	kind := frontHttpErrorOther
+	reason := frontHttpErrorReasonNone
 	switch {
 	case strings.Contains(text, "TLS handshake error"):
 		kind = frontHttpErrorTlsHandshake
+		reason = frontTlsHandshakeReason(text)
 	case strings.Contains(text, "panic serving"):
 		kind = frontHttpErrorPanic
 	case strings.Contains(text, "Accept error"):
 		kind = frontHttpErrorAccept
 	}
-	frontHttpServerErrorsCounter.WithLabelValues(self.portKind, kind).Inc()
+	frontHttpServerErrorsCounter.WithLabelValues(self.portKind, kind, reason).Inc()
 	logged := ""
 	if kind == frontHttpErrorPanic {
 		logged = scrubFrontHttpPanic(text)
 		glog.Errorf("[front]%s handler panic: %s\n", self.portKind, logged)
 	}
 	if self.observer != nil {
-		self.observer(self.portKind, kind, logged)
+		self.observer(self.portKind, kind, reason, logged)
 	}
 	return len(message), nil
+}
+
+// The reason in net/http's "http: TLS handshake error from <address>:
+// <error>". Only the error is read: it starts after the address's first
+// ": ", which an IPv6 address in brackets never holds, and it may quote the
+// connection's addresses, which never reach a label. The error is
+// crypto/tls's, the kernel's through the connection, or the front's own
+// (nginx.TlsNoCertificateMessage), and net/http says "client sent an HTTP
+// request to an HTTPS server" for a request on the TLS port. The specific
+// texts are checked before the client's other alerts.
+func frontTlsHandshakeReason(text string) string {
+	_, addressError, found := strings.Cut(text, "TLS handshake error from ")
+	if !found {
+		return frontTlsHandshakeReasonOther
+	}
+	_, handshakeError, found := strings.Cut(addressError, ": ")
+	if !found {
+		return frontTlsHandshakeReasonOther
+	}
+	handshakeError = strings.TrimSpace(handshakeError)
+	containsAny := func(substrings ...string) bool {
+		for _, substring := range substrings {
+			if strings.Contains(handshakeError, substring) {
+				return true
+			}
+		}
+		return false
+	}
+	switch {
+	case containsAny(nginx.TlsNoCertificateMessage):
+		return frontTlsHandshakeReasonUnknownName
+	case containsAny("i/o timeout", "deadline exceeded"):
+		return frontTlsHandshakeReasonTimeout
+	case handshakeError == "EOF" || containsAny("unexpected EOF", "connection reset by peer", "broken pipe"):
+		return frontTlsHandshakeReasonClosed
+	case containsAny("client sent an HTTP request to an HTTPS server", "does not look like a TLS handshake", "oversized record received"):
+		return frontTlsHandshakeReasonNotTls
+	case containsAny("offered only unsupported versions", "protocol version not supported", "unsupported SSLv2 handshake"):
+		return frontTlsHandshakeReasonVersion
+	case containsAny("no cipher suite supported", "no key exchanges supported", "peer doesn't support"):
+		return frontTlsHandshakeReasonCipher
+	case containsAny("unsupported application protocols", "no application protocol"):
+		return frontTlsHandshakeReasonAlpn
+	case strings.HasPrefix(handshakeError, "remote error: tls: ") && containsAny("certificate"):
+		return frontTlsHandshakeReasonCertificate
+	case strings.HasPrefix(handshakeError, "remote error: tls: "):
+		return frontTlsHandshakeReasonClientAlert
+	default:
+		return frontTlsHandshakeReasonOther
+	}
 }
 
 // A net/http panic message without the client address it quotes: the

@@ -179,12 +179,17 @@ func TestHttpIntervalMaximumCarriesItsOwnFreshness(t *testing.T) {
 	}
 }
 
-func TestHttpDurationSummaryExportsExactSumCountWithoutBuckets(t *testing.T) {
+// The route duration is a classic histogram with a fixed, bounded set of
+// buckets and the route as its only label, so its _sum and _count are exactly
+// the series the former summary exported and each route adds a known number
+// of bucket series.
+func TestHttpDurationHistogramExportsBoundedBucketsAndExactSumCount(t *testing.T) {
 	registry := prometheus.NewPedanticRegistry()
 	metrics := newHttpMetrics(registry)
 	metrics.now = func() time.Time { return time.Unix(1_800_000_000, 0) }
 	metrics.observe("GET ^/synthetic$", "200", "completed", 2250*time.Millisecond, 0, 0)
 	metrics.observe("GET ^/synthetic$", "200", "completed", time.Second, 0, 0)
+	metrics.observe("GET ^/synthetic$", "200", "completed", 3*time.Millisecond, 0, 0)
 
 	families, err := registry.Gather()
 	if err != nil {
@@ -197,20 +202,51 @@ func TestHttpDurationSummaryExportsExactSumCountWithoutBuckets(t *testing.T) {
 			break
 		}
 	}
-	if duration == nil || duration.GetType() != dto.MetricType_SUMMARY || len(duration.Metric) != 1 {
-		t.Fatalf("HTTP duration family = %+v, want one summary", duration)
+	if duration == nil || duration.GetType() != dto.MetricType_HISTOGRAM || len(duration.Metric) != 1 {
+		t.Fatalf("HTTP duration family = %+v, want one histogram", duration)
 	}
-	summary := duration.Metric[0].GetSummary()
-	if summary.GetSampleCount() != 2 || summary.GetSampleSum() != 3.25 || len(summary.Quantile) != 0 {
-		t.Fatalf("HTTP duration summary = %+v, want count=2 sum=3.25 and no quantiles", summary)
+	if labels := duration.Metric[0].GetLabel(); len(labels) != 1 || labels[0].GetName() != "route" {
+		t.Fatalf("HTTP duration labels = %+v, want route alone", labels)
 	}
+	histogram := duration.Metric[0].GetHistogram()
+	if histogram.GetSampleCount() != 3 || histogram.GetSampleSum() != 3.253 {
+		t.Fatalf("HTTP duration histogram count=%d sum=%v, want count=3 sum=3.253", histogram.GetSampleCount(), histogram.GetSampleSum())
+	}
+	buckets := histogram.GetBucket()
+	if len(buckets) != len(httpDurationBuckets) {
+		t.Fatalf("HTTP duration has %d buckets, want %d", len(buckets), len(httpDurationBuckets))
+	}
+	// cumulative: 3 ms falls in le=0.005 and above, 1 s in le=1 and above,
+	// and 2.25 s in le=5 alone
+	wantCumulative := map[float64]uint64{0.001: 0, 0.0025: 0, 0.005: 1, 0.01: 1, 0.025: 1, 0.05: 1, 0.1: 1, 0.25: 1, 1: 2, 5: 3}
+	for i, bucket := range buckets {
+		if bucket.GetUpperBound() != httpDurationBuckets[i] {
+			t.Fatalf("bucket %d bound = %v, want %v", i, bucket.GetUpperBound(), httpDurationBuckets[i])
+		}
+		if want := wantCumulative[bucket.GetUpperBound()]; bucket.GetCumulativeCount() != want {
+			t.Fatalf("bucket le=%v count = %d, want %d", bucket.GetUpperBound(), bucket.GetCumulativeCount(), want)
+		}
+	}
+	// _sum and _count keep the names and labels the summary had, which the
+	// monitor's route signals read
 	want := strings.NewReader(`# HELP urnetwork_http_request_duration_seconds HTTP handler duration by configured route.
-# TYPE urnetwork_http_request_duration_seconds summary
-urnetwork_http_request_duration_seconds_sum{route="GET ^/synthetic$"} 3.25
-urnetwork_http_request_duration_seconds_count{route="GET ^/synthetic$"} 2
+# TYPE urnetwork_http_request_duration_seconds histogram
+urnetwork_http_request_duration_seconds_bucket{route="GET ^/synthetic$",le="0.001"} 0
+urnetwork_http_request_duration_seconds_bucket{route="GET ^/synthetic$",le="0.0025"} 0
+urnetwork_http_request_duration_seconds_bucket{route="GET ^/synthetic$",le="0.005"} 1
+urnetwork_http_request_duration_seconds_bucket{route="GET ^/synthetic$",le="0.01"} 1
+urnetwork_http_request_duration_seconds_bucket{route="GET ^/synthetic$",le="0.025"} 1
+urnetwork_http_request_duration_seconds_bucket{route="GET ^/synthetic$",le="0.05"} 1
+urnetwork_http_request_duration_seconds_bucket{route="GET ^/synthetic$",le="0.1"} 1
+urnetwork_http_request_duration_seconds_bucket{route="GET ^/synthetic$",le="0.25"} 1
+urnetwork_http_request_duration_seconds_bucket{route="GET ^/synthetic$",le="1"} 2
+urnetwork_http_request_duration_seconds_bucket{route="GET ^/synthetic$",le="5"} 3
+urnetwork_http_request_duration_seconds_bucket{route="GET ^/synthetic$",le="+Inf"} 3
+urnetwork_http_request_duration_seconds_sum{route="GET ^/synthetic$"} 3.253
+urnetwork_http_request_duration_seconds_count{route="GET ^/synthetic$"} 3
 `)
 	if err := testutil.GatherAndCompare(registry, want, "urnetwork_http_request_duration_seconds"); err != nil {
-		t.Fatalf("HTTP duration exposition contains more than exact sum/count: %v", err)
+		t.Fatalf("HTTP duration exposition: %v", err)
 	}
 }
 

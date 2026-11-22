@@ -38,6 +38,25 @@ func TestSourcePreparationRequiresBothExactRuntimeReceipts(t *testing.T) {
 			t.Fatal("different runtime acknowledgment accepted")
 		}
 	}
+
+	correction := &model.CompetitionEpochThreeRuntimeCorrection{
+		WorkerQualificationSha256: strings.Repeat("f", 64),
+		WorkerImageDigest:         "sha256:" + strings.Repeat("1", 64),
+	}
+	replacement := worker
+	replacement.QualificationSha256, replacement.RuntimeImageDigest = correction.WorkerQualificationSha256, correction.WorkerImageDigest
+	if err := sourcePreparationReceiptsMatchWithCorrection(intent, []model.CompetitionSourceReadiness{api, replacement}, correction); err != nil {
+		t.Fatal(err)
+	}
+	wrongImage := replacement
+	wrongImage.RuntimeImageDigest = worker.RuntimeImageDigest
+	changedAPI := api
+	changedAPI.QualificationSha256 = correction.WorkerQualificationSha256
+	for _, receipts := range [][]model.CompetitionSourceReadiness{{api, worker}, {api, wrongImage}, {changedAPI, replacement}, {replacement}} {
+		if sourcePreparationReceiptsMatchWithCorrection(intent, receipts, correction) == nil {
+			t.Fatal("correction accepted an obsolete, changed, or incomplete quorum")
+		}
+	}
 }
 
 // Main control-plane configuration remains static while only authenticated

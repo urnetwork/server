@@ -159,6 +159,47 @@ func TestFrontHttpsKeepaliveRequestsCloseTheConnectionOverH2(t *testing.T) {
 	}
 }
 
+// After TLS and an initial exchange, the next ordinary HTTP/2 request
+// must get its own header deadline and release it once the head is complete.
+func TestFrontHttpsBoundsEachH2RequestHeader(t *testing.T) {
+	accepted := make(chan *testFrontStallingConn, 1)
+	env := newTestNginxFrontEnv(t, func(env *testFrontEnv) {
+		listen := env.settings.Listen
+		env.settings.Listen = func(network, address string) (net.Listener, error) {
+			listener, err := listen(network, address)
+			if err != nil {
+				return nil, err
+			}
+			return &testFrontStallingListener{Listener: listener, accepted: accepted}, nil
+		}
+	}, http.NotFoundHandler())
+	address, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
+	name := env.routeTable.Lb.Names[0]
+	path := env.routeTable.Lb.RoutePrefixes[0] + "/status"
+	client := env.dialH2Client(env.bindAddress(address, frontPortHttps), name)
+	if status := client.get(name, path); status != "200" {
+		t.Fatalf("first request returned %s", status)
+	}
+	conn := <-accepted
+	func() {
+		conn.stateLock.Lock()
+		defer conn.stateLock.Unlock()
+		conn.readDeadlines = nil
+	}()
+	start := time.Now()
+	if status := client.get(name, path); status != "200" {
+		t.Fatalf("second request returned %s", status)
+	}
+	end := time.Now()
+	conn.stateLock.Lock()
+	defer conn.stateLock.Unlock()
+	timeout := env.settings.Front.Http.ClientHeaderTimeout
+	if len(conn.readDeadlines) != 2 || conn.readDeadlines[0].Before(start.Add(timeout)) ||
+		conn.readDeadlines[0].After(end.Add(timeout)) || !conn.readDeadlines[1].IsZero() {
+		t.Fatalf("second request read deadlines %v, want a fresh %s header deadline followed by zero", conn.readDeadlines, timeout)
+	}
+}
+
 // A connection past nginx's keepalive_time is closed after its next request
 // over h1. With a keepalive_time of 1 ns every connection is past it by its
 // first request, which then carries Connection: close and closes it.
@@ -565,6 +606,17 @@ type testFrontStallingConn struct {
 	writeDeadline time.Time
 	// the write deadline of each write as it started, in order
 	writeStartDeadlines []time.Time
+	readDeadlines       []time.Time
+}
+
+// Records the read deadlines applied to the public socket in order.
+func (self *testFrontStallingConn) SetReadDeadline(deadline time.Time) error {
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.readDeadlines = append(self.readDeadlines, deadline)
+	}()
+	return self.Conn.SetReadDeadline(deadline)
 }
 
 // See net.Conn.

@@ -85,7 +85,7 @@ func (self *exchangeTcpBenchmarkSingleReadConn) SetWriteDeadline(time.Time) erro
 
 // Creates a real loopback TCP pair so net.Buffers can retain its TCP writev
 // implementation instead of falling back through a test connection wrapper.
-func newExchangeTcpBenchmarkPair(benchmark *testing.B) (*net.TCPConn, *net.TCPConn) {
+func newExchangeTcpBenchmarkPair(benchmark testing.TB) (*net.TCPConn, *net.TCPConn) {
 	benchmark.Helper()
 
 	listener, err := net.ListenTCP(

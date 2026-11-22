@@ -2,13 +2,31 @@
 
 Implementation accompanies [REVOKE-FINAL.md](REVOKE-FINAL.md). App UI remains the separate [UI plan](REVOKE-UI-FINAL.md); the shared SDK controller and language bindings are implemented. Production enablement follows the deployment gates below.
 
+The owner's decisions of 2026-11-18 ([REVOKE-FINAL.md §15](REVOKE-FINAL.md)) set the session limit, removal frees, the Redis-unreachable behaviour, the reset scope and the all-at-once rollout described here. Where an older line below disagrees, §15 is the plan.
+
 ## Authority and storage
 
 `server/session` owns JWT parsing, common validation, mint registration, Redis session state, lifecycle locks and durable operation primitives. `model` owns client/auth-code business writes and cleanup. The former `server/jwt` package is merged into `session`. Production signing is private: registered mint helpers, and named internal probe exemptions, are the signing boundary. A source guard rejects production use of `Testing_Sign`.
 
 All validation retains network/user/admin, own-client active/device ownership and credential epoch checks. The additional authority is session marker, otherwise database root, otherwise recursive database ancestors (maximum 1,024). For A → B → C, removing B rejects a legacy recursive C credential; a session credential or root credential naming active A may still authorize active C. Session revoke is a distinct action and retires every JWT carrying that SID.
 
-Session/root-tagged credentials require `exp`. Normal expiry is 30 days; the fleet terminal acceptance horizon is `exp + 60 days + 30 seconds`. Retention adds five minutes and rounds up to milliseconds. Strict local expiry never shortens stored fleet retention. Mint/refresh scripts only extend existing horizons, including shared key deadlines. The live inventory is capped at 1,000; retained identities at 10,000. Full capacity refuses admission without evicting accepted credentials or shortening markers. Existing session refresh remains possible.
+Session/root-tagged credentials require `exp`. Normal expiry is 30 days; the fleet terminal acceptance horizon is `exp + 60 days + 30 seconds`, so a session lives about 90 days after its last mint or refresh (decision 8). Retention adds five minutes and rounds up to milliseconds. Strict local expiry never shortens stored fleet retention. Mint/refresh scripts only extend existing horizons, including shared key deadlines.
+
+**The session limit (decisions 6 and 7).**
+- A network holds at most 5,000 live sessions, set in config `all/pro.yml` next to `enforce_concurrent_clients`.
+- A top-level client's own session does not count while the concurrent-client limit exempts the client: it declared provide intent, its qualification (a registered Public provide key, a passing egress probe and the 12-hour reliability floor) is pending or qualified, and its intent connection is live; a provider install also counts out for its first six minutes. Both limits use one rule (`intent_exempt_until`). An app with only a Stream key, a hosted proxy, and a network-only or friends-and-family provider count.
+- `enforce_session_cap` in the same file ships false. While it is false, no mint is refused for the live limit or the retained-identity limit. Each would-be refusal counts in `urnetwork_session_cap_would_refuse_total{kind,cap}`, by session kind (`signin`, `code`, `client`) and cap (`live`, `retained`).
+- Turning enforcement on is that one config change.
+- Once enforced, a new session over the limit gets 409 `session_limit_reached`, pointing to Account → Sessions, and counts in `urnetwork_session_cap_refused_total{kind,cap}`. At the retained-identity limit the code is `session_retention_limit_reached`.
+- Nothing is evicted and no marker is shortened. Refreshing a tagged session remains possible. A legacy token's first renewal starts its session, so at an enforced limit it is refused; the owner decides that case before the switch flips.
+- The retained-identity limit stays at 10,000 per network and counts retained markers only (held minus live). It too refuses only while `enforce_session_cap` is true. Frees write no marker, so only revocations add to it.
+
+**Removal frees (decision 6).**
+- Removing a client deletes the sessions it alone owns from the live set: a hosted proxy, an API-key client, an adopted device or a per-client legacy lineage.
+- A free writes no retained marker, because the client-active check already refuses those credentials. It takes neither the network lifecycle lock nor a journal entry.
+- Every removal path frees: single and bulk removal, proxy trims, network and account deletion, lag guest removal and the 30-day idle reap.
+- Removing a client never ends a sign-in or auth-code session, which other live clients may share.
+- Frees count in `urnetwork_session_freed_on_removal_total{path}`.
 
 Network keys use `{ns_<network_id>}`; metadata and typed last use are separate keys. Revoke writes markers and removes live ZSET members in the same script, before asynchronous SQL cleanup. GET excludes expired/revoked sessions independently of maintenance. Last-use metadata means authenticated use, not packet activity or current device presence. Process and Redis 60-second throttles can combine to 120 seconds of healthy-storage lag, plus the 100ms optional-write budget. Raw IP is never stored in that object.
 
@@ -18,13 +36,34 @@ Operations move from prepared to enforced to complete. Receipt recovery precedes
 
 Auth-code redemption has a durable, globally unique request ID and immutable prepared claims before consuming a use. A different code with the same ID gets generic `409 request_id_conflict`. A completed redemption is an independent session and can replay after its creator is revoked. An unredeemed code still depends on its origin. Hosted NULL migration chooses one durable SID/lineage under a row lock; restarts reuse it. A hosted producer also checks durable operation targets before renewing a stored binding: unfinished cleanup cannot revive a revoked SID after Redis retention expires, and an applicable prepared operation gives unavailable until recovery resolves it. This is a producer check, not a SQL session lookup on every request.
 
+**Reset scope (decision 4).**
+- A password reset, sign-out-all and revoke-other-sessions retire every session except hosted-proxy sessions.
+- That includes sign-in and auth-code sessions, API-key clients' and adopted devices' sessions, and per-client legacy lineages. An API-key client is minted again with the key.
+- Hosted-proxy sessions are skipped. A hosted proxy keeps working, and keeps minting, after a reset.
+- A hosted proxy stops only when it is deleted or its own session is revoked. It never bootstraps again after its own session is revoked.
+
 ## Bounded maintenance and connections
 
-`MaintainNetworkSessions` is registered in startup, targets and the auth maintenance workload. It runs 32 fixed shards every 30 seconds, reviewing at most 32 networks per task with a five-second outer budget. Shard zero sweeps first, then expires up to 128 terminal receipts, repairs up to 64 outbox entries, and resumes up to 32 operations. Each stage has its own one-second budget; failures do not starve later stages. Optional backlog metrics run last for at most 100ms. Client cleanup is bounded to 128 rows per operation and rechecks SID under row locks, preserving explicit rebinds to a new session. Unfinished operations are not expired.
+`MaintainNetworkSessions` is registered in startup, targets and the auth maintenance workload. It runs 32 fixed shards every 30 seconds, reviewing at most 32 networks per task with a five-second outer budget. Shard zero sweeps first, then expires up to 128 terminal receipts, repairs up to 64 outbox entries, and resumes up to 32 operations. Each stage has its own one-second budget; failures do not starve later stages. Optional backlog metrics run last for at most 100ms. Client cleanup is bounded to 128 rows per operation and rechecks SID under row locks, preserving explicit rebinds to a new session. Unfinished operations are not expired. A taskworker sample pass, about every 15 minutes, observes every network that has a live session set once into the histogram `urnetwork_session_live_per_network`, with the live sessions the limit counts. The histogram has no network labels. `urnetwork_session_live_sample_passes_total{outcome}` counts the passes, `complete` or `partial` (cut short by the budget).
 
 Index publication only lowers the next review deadline and updates a revision. Review can raise/remove only when its observed revision still matches. Repair recalculates the network's earliest acceptance/retention deadline. Natural TTLs and list filtering remain correct if an index update is delayed. Normal maintenance does not scan Redis keyspace.
 
-The authentication Redis client has a normal pool, no preflight PING and no hidden command retries. Its total budget is two seconds, shortened by the caller; dial, handshake, pool wait, reads, writes and bounded cluster redirects participate. Required storage failure is 503, not a credential rejection. Optional metadata, hints and metrics cannot turn successful authentication into 401.
+The authentication Redis client has a normal pool, no preflight PING and no hidden command retries. Its total budget is two seconds, shortened by the caller; dial, handshake, pool wait, reads, writes and bounded cluster redirects participate. Optional metadata, hints and metrics cannot turn successful authentication into 401.
+
+**Redis unreachable: accept and alert (decision 3).** This covers session credentials and tagged client credentials, at the API and at connect.
+- A check that cannot reach its Redis keys, or gets no answer within its short check budget, accepts the credential. It never answers 503 or a credential rejection for that reason, and it does not ask SQL instead.
+  - Each such acceptance counts in `urnetwork_session_check_unavailable_total{path,credential}`. A caller that cancelled is not counted.
+  - A credential revoked meanwhile keeps working until Redis answers again.
+- A mint that cannot register its session in Redis within its budget issues an untagged credential, as before sessions.
+  - So no tagged session exists that nobody can list or revoke.
+  - It counts in `urnetwork_session_mint_untagged_total{kind}`.
+  - The credential is outside session revocation, but client removal and password reset still end it. It gets its session at its next refresh.
+- A mint that carries an existing session signs on that session without extending it when Redis does not register it within its budget (decision 9). That covers a refresh, and a client minted under a tagged credential, such as a hosted proxy's child or an app's client.
+  - The token keeps the session and expires no later than the presented credential, so every revocation of the session still outlives it.
+  - It counts in `urnetwork_session_mint_unextended_total{kind}`. The next refresh after Redis answers extends the session.
+  - Still 503: a presented credential already past its `exp`, a hosted proxy's own mint on its stored binding, and an API-key reissue onto a client's stored session.
+- Revocation writes still need Redis. A removal, reset, deletion or session revoke that cannot write its record fails and is retried (REVOKE-FINAL.md §14).
+- Leases keep the 2026-10-11 rule below: no answer, no retirement.
 
 Platform transports register before their final auth check and before successful admission. Each has a 90-second lease, checked every 60 seconds and anchored at check start. Only a definitive answer retires an admitted transport (owner decision, 2026-10-11; REVOKE-FINAL.md, Platform connection guarantee): a check without an answer holds the lease, republishes the connection authority best effort and rechecks on a 5 to 60 second backoff with per-credential jitter, and `urnetwork_session_lease_unavailable_rechecks_total` and `urnetwork_session_lease_unverified_seconds` show how long sessions run unverified. Admission still requires a successful check. Close causes distinguish revoked (4003), expired (4004) and invalid (4005); unavailable (4002) remains in the vocabulary but leases no longer send it. H1's sole writer sends the typed cause before socket teardown, with a one-second blocked-writer fallback; relay work is cancelled immediately.
 
@@ -34,11 +73,22 @@ Protocol allocations are frame types 33 (session revision hint) and 34 (stream a
 
 ## Enablement and incident handling
 
-`session_creation_enabled` in vault `auth.yml` defaults false when absent. Keep it false while deploying schema, every API/connect/local/hosted/proxy/taskworker authority, and compatible connect/SDK consumers. Even with creation disabled, tagged credentials continue mandatory registration/check-and-extend and revocation enforcement. Enable new mints only after all producer and admission paths, including the oldest supported rollback binary, implement the full invariant. Enable management through the deployment/feature rollout after the correctness and data-plane gates. A pre-session binary is not a valid rollback once tagged credentials exist.
+`session_creation_enabled` in vault `auth.yml` defaults false when absent.
+- It is read on every mint, not once per process. A vault delivery flips it on each host as the file lands, with no restart and no per-block canary.
+- Keep it false while deploying schema, every API/connect/local/hosted/proxy/taskworker authority, and compatible connect/SDK consumers.
+- Even with creation disabled, tagged credentials continue mandatory registration/check-and-extend and revocation enforcement.
+- Enable new mints only after all producer and admission paths, including the oldest supported rollback binary, implement the full invariant.
+- Turning it on starts sessions, the Sessions list and revocation for everyone at once (decision 5). There are no cohorts and no separate management switch, and the flip needs the owner's go.
+- The order: migrations, if any; then api, alt, connect, proxy and taskworker; then the config release with `enforce_session_cap: false`; then the flip.
+- A pre-session binary is not a valid rollback once tagged credentials exist. Neither is one older than the 2026-10-27 record writers, while `revocation_record_enabled` is on.
 
-Before enablement, verify deployed Redis persistence, replication and **no eviction of authority keys**, keyspace event configuration for optional hints, index validity, scheduled shard execution and outbox recovery. Redis remains a denylist: losing acknowledged markers can restore acceptance. SQL recovers application crashes and unfinished cleanup; it is not a durable per-request allowlist. A status read detecting a missing retained receipt and missing expected marker reports unavailable and increments `urnetwork_session_authority_loss_total`. Treat any increase as an authority incident, stop new minting/management writes, investigate and restore the known authority state. Do not disable required marker reads as an availability workaround or claim success from a historical SQL result alone.
+Redis stays as deployed (owner, 2026-11-18): no replicas and no persistence work.
+- While a node cannot be reached, the credentials whose keys it holds are accepted unchecked. The alerts below report it.
+- Authority keys carry TTLs, so a node at `maxmemory` can evict them. RedisEvictions reports any eviction.
 
-Every registered mint samples Redis TIME. More than 15 seconds of disagreement per server, or backwards local time, refuses minting; the per-server bound permits at most 30 seconds fleet spread. Alert before 10 seconds and immediately on any refusal. Observe all API/connect/worker hosts and Redis with the deployment's clock monitoring. The five-minute retention margin is not permission to ignore a broken clock; correct the clocks before resuming mints.
+Before enablement, verify keyspace event configuration for optional hints, index validity, scheduled shard execution and outbox recovery. Redis remains a denylist: losing acknowledged markers can restore acceptance. SQL recovers application crashes and unfinished cleanup; it is not a durable per-request allowlist. A status read detecting a missing retained receipt and missing expected marker reports unavailable and increments `urnetwork_session_authority_loss_total`. Treat any increase as an authority incident, stop new minting/management writes, investigate and restore the known authority state. Do not disable required marker reads as an availability workaround or claim success from a historical SQL result alone.
+
+Every registered mint samples Redis TIME. More than 15 seconds of disagreement per server, or backwards local time, refuses minting; the per-server bound permits at most 30 seconds fleet spread. Alert before 10 seconds and immediately on any refusal: SessionClockDisagreement warns above 10 seconds on a host for 2 minutes, and SessionClockRefusals pages on any refusal. Both see only hosts that mint. Observe all API/connect/worker hosts and Redis with the deployment's clock monitoring; host clock offsets are not collected yet. The five-minute retention margin is not permission to ignore a broken clock; correct the clocks before resuming mints.
 
 Monitor bounded-label metrics:
 
@@ -46,13 +96,25 @@ Monitor bounded-label metrics:
 |---|---|
 | `urnetwork_session_storage_seconds{operation,outcome}` | Track p95/p99 and unavailable rate; investigate checks approaching the two-second budget. |
 | `urnetwork_session_capacity_refusals_total{capacity}` | Investigate live/retained exhaustion; do not evict old accepted entries. |
-| `urnetwork_session_clock_disagreement_seconds`, `urnetwork_session_clock_refusals_total` | Alert at the clock thresholds above. |
-| `urnetwork_session_journal_pending{state}`, `urnetwork_session_journal_oldest_seconds{state}` | Alert on prepared/enforced/index work older than two maintenance intervals and sustained growth. Keep unfinished rows for recovery. |
+| `urnetwork_session_clock_disagreement_seconds`, `urnetwork_session_clock_refusals_total` | SessionClockDisagreement warns above 10 seconds for 2 minutes; SessionClockRefusals pages on any refusal. Correct the clock first. |
+| `urnetwork_session_journal_pending{state}`, `urnetwork_session_journal_oldest_seconds{state}` | SessionJournalStuck warns on work older than two maintenance intervals (60 seconds) that is still aging, for 2 minutes. SessionJournalStuckLong pages on a prepared or enforced revocation older than 15 minutes. Only the shard-0 taskworker refreshes these gauges, and the others keep stale values, so the alerts count only rising ages; a growing backlog shows as aging work. Keep unfinished rows for recovery. |
 | `urnetwork_session_lease_retirements_total{cause}` | Separate dependency-driven retirement from confirmed revocation/expiry. |
 | `urnetwork_session_observation_drops_total` | Presentation freshness degradation; do not weaken auth to repair it. |
-| `urnetwork_session_authority_loss_total` | Any increase requires authority-state incident investigation. |
+| `urnetwork_session_authority_loss_total` | Any increase requires authority-state incident investigation. SessionAuthorityLoss pages on it. |
+| `urnetwork_session_revocation_record_writes_total{kind,outcome}` | SessionRevocationWritesFailing warns when more than 1% of a service's revocation writes fail for 5 minutes (projections left out). Those changes commit only when a retry reaches Redis. |
+| `urnetwork_taskworker_executions_total{task="work.MaintainNetworkSessions"}` | About 62 successful runs a minute. SessionMaintenanceStalled warns under 32 for 10 minutes; SessionMaintenanceFailing warns over 1 failure a minute for 10 minutes. One lost shard is below what the rate shows; the monitor's task checks see it. |
+| `urnetwork_session_check_unavailable_total{path,credential}` | Credentials accepted unchecked (decision 3). SessionChecksUnchecked warns above 5% of a service's record checks held for 10 minutes; SessionChecksUncheckedSevere pages above 25% held for 5 minutes. Find the unreachable node: Redis pool timeouts, the logged pool dial failures, RedisNodeDown. |
+| `urnetwork_session_mint_untagged_total{kind}` | Mints issued untagged (decision 3). SessionMintsUntagged warns above 1% of a service's mints held for 10 minutes. The credentials heal at their next refresh; fix Redis. |
+| `urnetwork_session_mint_unextended_total{kind}` | Mints of an existing session signed unextended (decision 9). They rise with the untagged mints in an outage; the next refresh extends. |
+| `urnetwork_session_operation_recovery_failures_total` | Pending session operations a recovery pass could not advance. Each is retried in its turn, behind the others; a steady rise is one operation failing every pass. |
+| `urnetwork_session_cap_would_refuse_total{kind,cap}` | Would-be refusals while `enforce_session_cap` is off. Review the daily count by kind before flipping the switch. |
+| `urnetwork_session_cap_refused_total{kind,cap}` | Refusals at the enforced limit. A rise after the flip is networks at 5,000; a refusal is never an eviction. |
+| `urnetwork_session_freed_on_removal_total{path}` | Client sessions freed by removal. A removal path that frees nothing while it removes session-owning clients leaves sessions counted toward the limit until their horizon. |
+| `urnetwork_session_live_per_network`, `urnetwork_session_live_sample_passes_total{outcome}` | Live sessions per network, sampled about every 15 minutes, and the passes. Networks near 5,000 are the ones the enforced limit would refuse. Partial passes undercount; a stream of them means the pass needs a larger budget. |
 
 Existing auth rejection, compatibility and state-query metrics continue to report common validation. Do not label metrics with network, client, session or operation IDs.
+
+These are charted on the server signals dashboard, in the "sessions and credential state" row and the session rollout row after it. The alert rules are in warp `grafana/alerting/session-auth.yml` (unchecked acceptances and untagged mints) and `grafana/alerting/session-authority.yml` (the rest); §15's metrics table gives each metric's meaning.
 
 Legacy network JWTs remain a deliberate coverage limit. Upgrade derives a documented lineage ID, not a historical sign-in identity; old auth-code lineages may group. Original untagged tokens remain valid under their original compatibility rules and may derive the lineage again after its finite marker lifetime. Responses therefore say `legacy_coverage: partial`. Account credential rotation remains the account-wide fallback.
 
@@ -81,7 +143,7 @@ Local fixture environment: Go 1.27.2, PostgreSQL and Redis 8 containers, 2026-10
 | WASM typed snapshot execution | Passed, 1.045s. |
 | TypeScript declarations, OpenAPI/type freshness and npm suite | Passed; 138 tests, no skips. Nullable auth-code request identity has a type-checking regression. |
 
-The maximum-state profile includes 1,000 live sessions and 10,000 retained IDs, including 9,000 real markers. Redis keys used 2,717,332 bytes; complete list was 26.884ms and atomic bulk revoke 20.790ms. A sequential 1,000-client common SQL/Redis validation pass took 1.082s (p50 1.017ms, p99 2.064ms). A 1,000-stream two-endpoint grant renewal pass took 1.577s (p50 1.292ms, p99 3.941ms). Repeat these gates against deployment Redis topology, database pool sizes, fleet fan-out and scheduling load before enablement; local figures do not establish fleet capacity.
+The maximum-state profile includes 1,000 live sessions and 10,000 retained IDs, including 9,000 real markers. Redis keys used 2,717,332 bytes; complete list was 26.884ms and atomic bulk revoke 20.790ms. A sequential 1,000-client common SQL/Redis validation pass took 1.082s (p50 1.017ms, p99 2.064ms). A 1,000-stream two-endpoint grant renewal pass took 1.577s (p50 1.292ms, p99 3.941ms). Local figures do not establish fleet capacity. The owner replaced the production load gates with local performance tests at production-like rates (2026-11-18, REVOKE-FINAL.md §15).
 
 The unrestricted full session suite encounters the pre-existing live Apple JWK fetch wait in `TestAppleJwk` and timed out; affected offline/local tests pass. Root server-package tests on this macOS host have pre-existing Linux-only ARIN helper references. No production rollout, external SSO verification or whole-repository integration-suite success is claimed.
 
@@ -89,15 +151,29 @@ The unrestricted full session suite encounters the pre-existing live Apple JWK f
 
 The owner decided on 2026-10-26 that Redis becomes the authority (REVOKE-FINAL.md §14). A tagged credential's state check reads one revocation record, and the SQL state query answers only what the record cannot.
 
-**Enablement.** Set vault `auth.yml` `revocation_record_enabled: true` only after every writer is deployed: api, connect, proxy, alt and taskworker. Writers always write. Each process reads the setting once at start.
+**Enablement.** Set vault `auth.yml` `revocation_record_enabled: true` only after every writer is deployed: api, connect, proxy, alt and taskworker. Writers always write. Each process reads the setting once at start. It has been on in main since 2026-10-27.
 
 **Metrics:**
-- `urnetwork_jwt_state_record_checks_total{caller,operation,credential,outcome}`: `record_valid` and `record_refused` are answered by Redis, `record_miss` went to the SQL fallback, and `record_unavailable` was refused with 503. Expect misses at about one per active credential per hour once projections are warm. `urnetwork_jwt_state_queries_total` should fall by the same amount.
+- `urnetwork_jwt_state_record_checks_total{caller,operation,credential,outcome}`:
+  - `record_valid` and `record_refused` are answered by Redis, and `record_miss` went to the SQL fallback.
+  - `record_unavailable` could not reach Redis. Until 2026-11-18 it was refused with 503. Since decision 3 the credential is accepted unchecked and counted in `urnetwork_session_check_unavailable_total`.
+  - Expect misses at about one per active credential per hour once projections are warm. `urnetwork_jwt_state_queries_total` should fall by the same amount.
 - `urnetwork_session_revocation_record_writes_total{kind,outcome}`: a `failure` is a revocation that did not commit. A `stale` projection is harmless; it only leaves the next check to SQL.
 
 **Failure modes.**
-- **Redis down.** Tagged checks answer 503, and removals, password resets, network deletions and session revocations fail and are retried; nothing commits without its record. Leases stay held, unverified, as before.
-- **Redis data loss.** Checks miss and the SQL fallback rebuilds the record. Watch the miss rate spike; no acceptance is lost or restored.
-- **Spurious tombstone** (a write succeeded but its commit failed). The client is refused for at most ten minutes, then SQL answers. A spurious `n:del` or `n:cred` lasts until the key expires (25 hours), and only an intended deletion or rotation can write it.
+- **Redis down.** Tagged checks accept the credential unchecked and count it, mints that start a session issue untagged credentials (decision 3), and mints that carry a session sign on it unextended (decision 9). Removals, password resets, network deletions and session revocations fail and are retried; nothing commits without its record. Leases stay held, unverified, as before.
+- **Redis data loss.** Checks miss and the SQL fallback rebuilds the record. Watch the miss rate spike; no acceptance is lost.
+- **Redis restart from an older snapshot.** Redis runs on RDB snapshots without an append-only file, so a crashed node can come back with an older copy of its keys. That is a rollback, not a loss.
+  - A tombstone written after the node's last save is lost, and the positive field it replaced comes back.
+  - A removed client, reset password or revoked session is then accepted until that positive expires, within an hour of its projection.
+  - Only revocations written between the node's last save and the crash are affected.
+- **Spurious tombstone** (a record write succeeded but its transaction did not commit). Only an intended removal, reset, deletion or revoke writes one.
+  - A spurious client or session tombstone refuses for ten minutes, then SQL answers.
+    - The refusal is definitive: an API call gets 401, and a lease recheck retires the connection.
+    - A refresh refused in that window signs the app out, and connect clients hold their dials for 15 to 20 minutes, so the effect can outlast the ten minutes.
+  - A spurious `n:cred` has no lifetime of its own, and projections only ever raise it.
+    - Every later projection, tombstone or network write on that record extends the key to 25 hours.
+    - So it lasts as long as the network keeps checking credentials. It works as a sign-out of every credential issued before it, without a password change; signing in again works.
+  - A spurious `n:del` lasts until 25 hours after the last tombstone or network write on that record. Projections neither write nor extend a deleted network's record.
 
 **Rollback.** Clear `revocation_record_enabled` and restart. Readers return to SQL; writers keep writing.

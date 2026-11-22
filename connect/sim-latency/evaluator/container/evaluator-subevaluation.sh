@@ -666,6 +666,10 @@ write_source_evidence() {
     mv -f -- "$pending" "$source_evidence_path"
 }
 write_source_evidence false
+phase_source_workspace=false
+if [[ "$subevaluation_scoped" = true && -n "$round_baseline_path" ]]; then
+    phase_source_workspace=true
+fi
 
 kernel_release="$(uname -r)"
 microcode_revision="$(awk -F: '$1 ~ /^microcode/ {gsub(/[[:space:]]/, "", $2); print $2}' /proc/cpuinfo | sort -u | paste -sd, -)"
@@ -925,6 +929,33 @@ seal_evaluation_source() {
     if [[ "$subevaluation_scoped" != true ]]; then
         sudo -n chown -R "$container_host_uid:$container_host_gid" "$root"
     fi
+}
+
+retire_phase_source_checkout() {
+    local root="$1"
+    [[ "$phase_source_workspace" = true && -n "$active_source_root" &&
+        "$active_source_root" = "$work_dir"/evaluation-sources.* &&
+        ( "$root" = "$active_source_root/baseline" || "$root" = "$active_source_root/candidate" ) &&
+        -d "$root" && ! -L "$root" &&
+        "$(realpath -e "$root")" = "$root" ]] ||
+        die "refusing to retire an unexpected phase source checkout"
+    find "$root" -type d -exec chmod u+rwx {} +
+    rm -rf -- "$root"
+    [ ! -e "$root" ] || die "phase source checkout survived retirement"
+}
+
+restore_phase_baseline_checkout() {
+    local restored_identity
+    [[ "$phase_source_workspace" = true && ! -e "$baseline_source_root" && ! -L "$baseline_source_root" ]] ||
+        die "phase baseline destination is not empty"
+    restored_identity="$($PREPARE_EVALUATION_SOURCE \
+        "${source_mode_args[@]}" --base-image "$base_image_id" --destination "$baseline_source_root")" ||
+        die "could not restore the authenticated baseline source checkout"
+    validate_prepared_source_identity "$restored_identity" ||
+        die "restored baseline source identity is invalid"
+    jq -e --argjson original "$baseline_source_identity" '. == $original' <<<"$restored_identity" >/dev/null ||
+        die "restored baseline source differs from its original authenticated identity"
+    seal_evaluation_source "$baseline_source_root" "$base_sha" ""
 }
 
 remove_evaluation_sources() {
@@ -1791,9 +1822,15 @@ jq -e --arg base_sha "$base_sha" --arg build_sha "$candidate_sha" \
      .candidate_commits == $candidate_commits and
      (.paths | type == "array")' \
     <<<"$candidate_identity" >/dev/null || die "candidate image identity is invalid"
+if [[ "$phase_source_workspace" = true ]]; then
+    restore_phase_baseline_checkout
+fi
 authenticate_protected_simulator_tree
 write_source_evidence false
 seal_evaluation_source "$candidate_source_root" "$candidate_sha" "$patch_sha256"
+if [[ "$phase_source_workspace" = true ]]; then
+    retire_phase_source_checkout "$baseline_source_root"
+fi
 }
 
 seal_evaluation_source "$baseline_source_root" "$base_sha" ""
@@ -1928,6 +1965,11 @@ fi
 # submission. Removing the ephemeral environment also keeps its one-time
 # backing-service credentials out of a terminal build-failure archive.
 rm -f -- "$score_runner_env" "$score_compose_env"
+if [[ "$phase_source_workspace" = true ]]; then
+    # The shared baseline is already authenticated. Keep the full pristine
+    # checkout out of the evidence mount while the tracked compiler runs.
+    retire_phase_source_checkout "$baseline_source_root"
+fi
 build_candidate
 if [[ "$subevaluation_scoped" = true ]]; then
     subevaluation_retire_build "$work_dir/build-retirement.json" || die "build retirement did not prove its bounded frozen memory phase"
@@ -1935,6 +1977,10 @@ fi
 for ((i = 1; i <= replicates; i++)); do
     run_stage candidate "$i" "$candidate_image_id" "$candidate_sha" "$candidate_simulator_sha256" "$patch_sha256"
 done
+if [[ "$phase_source_workspace" = true ]]; then
+    retire_phase_source_checkout "$candidate_source_root"
+    restore_phase_baseline_checkout
+fi
 write_evaluation_progress scoring "$replicates" "$replicates"
 
 # Rebuild the scorer environment for candidate scoring; no baseline path was

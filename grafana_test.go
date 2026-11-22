@@ -8,7 +8,10 @@ import (
 	"net/http/httptest"
 	"runtime/debug"
 	"slices"
+	"strings"
 	"testing"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 func TestSourceBuildInfoFromSettings(t *testing.T) {
@@ -133,5 +136,91 @@ func TestNewStatsPusherSendsBasicAuth(t *testing.T) {
 
 	if err := newStatsPusher(server.URL, "api", "writer", "secret").Push(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A metric with a label of a reserved name makes the push client refuse the
+// whole push of its process, as the lb_alt front's request counter, labeled
+// block, stopped every metric of connect on its first requests. Other names
+// push.
+func TestStatsPushRefusesReservedLabelNames(t *testing.T) {
+	pushServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer pushServer.Close()
+
+	pushLabeled := func(labelName string) error {
+		registry := prometheus.NewRegistry()
+		counter := prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "stats_push_label_test_total",
+			Help: "A counter with one label, pushed under the process grouping",
+		}, []string{labelName})
+		registry.MustRegister(counter)
+		counter.WithLabelValues("synthetic").Inc()
+		return newGroupedStatsPusher(
+			pushServer.URL,
+			"env-test",
+			"service-test",
+			"block-test",
+			"host-test",
+			"instance-test",
+			"writer",
+			"secret",
+		).Gatherer(registry).Push()
+	}
+
+	for _, labelName := range StatsPushReservedLabelNames() {
+		if err := pushLabeled(labelName); err == nil {
+			t.Errorf("a metric labeled %s pushed; the push client should refuse it", labelName)
+		}
+	}
+	for _, labelName := range []string{"upstream_service", "upstream_block"} {
+		if err := pushLabeled(labelName); err != nil {
+			t.Errorf("a metric labeled %s did not push: %s", labelName, err)
+		}
+	}
+}
+
+// The reserved names are exactly the job and the grouping labels the process
+// pusher keys a push by, so the list can't drift from the grouping. The push
+// client writes the grouping labels into its URL in map order, so the names
+// compare as sets.
+func TestStatsPushReservedLabelNamesMatchGrouping(t *testing.T) {
+	pushPaths := make(chan string, 1)
+	pushServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case pushPaths <- r.URL.Path:
+		default:
+		}
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer pushServer.Close()
+
+	err := newGroupedStatsPusher(
+		pushServer.URL,
+		"env-test",
+		"service-test",
+		"block-test",
+		"host-test",
+		"instance-test",
+		"writer",
+		"secret",
+	).Gatherer(prometheus.NewRegistry()).Push()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// /metrics/job/<job>/env/<env>/..., name and value in turn
+	pushPath := <-pushPaths
+	pathParts := strings.Split(strings.TrimPrefix(pushPath, "/metrics/"), "/")
+	labelNames := []string{}
+	for i := 0; i+1 < len(pathParts); i += 2 {
+		labelNames = append(labelNames, pathParts[i])
+	}
+	slices.Sort(labelNames)
+	reservedLabelNames := StatsPushReservedLabelNames()
+	slices.Sort(reservedLabelNames)
+	if !slices.Equal(labelNames, reservedLabelNames) {
+		t.Fatalf("push keyed by %v, reserved names %v", labelNames, reservedLabelNames)
 	}
 }

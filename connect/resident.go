@@ -7,12 +7,12 @@ import (
 	"encoding/gob"
 	"errors"
 	"fmt"
+	"io"
 	"math"
-	"slices"
-	// "io"
 	"math/rand/v2"
 	"net"
 	"net/netip"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -34,6 +34,7 @@ import (
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/internal/timersweep"
 	"github.com/urnetwork/server/model"
 )
 
@@ -174,6 +175,22 @@ var exchangeIOBytesCounter = prometheus.NewCounterVec(
 	[]string{"op", "direction", "kind"},
 )
 
+// The exchange's socket calls, by operation and direction (LBALTOPT2.md R21).
+// A sent call is one write or one writev, of one frame or of a batch; a
+// received call is one read by a link's buffered reader, which takes what the
+// socket holds, up to its buffer. Over exchange_io_frames_total, the frames a
+// call carries. A call that finds the socket full or empty waits in the
+// runtime's poller and is still one call.
+var exchangeIOCallsCounter = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "exchange_io_calls_total",
+		Help:      "Socket calls of exchange links, by exchange operation and I/O direction: sent, each write or writev of one or more frames; received, each read by a link's buffered reader; frames over calls is the frames a call carries",
+	},
+	[]string{"op", "direction"},
+)
+
 var exchangeActiveConnectionsGauge = prometheus.NewGaugeVec(
 	prometheus.GaugeOpts{
 		Namespace: "urnetwork",
@@ -238,6 +255,9 @@ type exchangeIOCollectors struct {
 // Pre-bind every label combination once rather than performing a CounterVec
 // lookup for every frame on this multi-billion-call path.
 var exchangeIOCollectorsByLabel [exchangeIOOpCount][exchangeIODirectionCount][exchangeIOFrameKindCount]exchangeIOCollectors
+
+// The calls counter of each label combination, bound once as the frames'.
+var exchangeIOCallsByLabel [exchangeIOOpCount][exchangeIODirectionCount]prometheus.Counter
 
 func recordExchangeIO(op exchangeIOOp, direction exchangeIODirection, kind exchangeIOFrameKind, payloadByteCount int) {
 	collectors := &exchangeIOCollectorsByLabel[op][direction][kind]
@@ -372,6 +392,7 @@ func init() {
 	prometheus.MustRegister(receiveQueueDroppedBytesCounter)
 	prometheus.MustRegister(exchangeIOFramesCounter)
 	prometheus.MustRegister(exchangeIOBytesCounter)
+	prometheus.MustRegister(exchangeIOCallsCounter)
 	prometheus.MustRegister(exchangeActiveConnectionsGauge)
 	prometheus.MustRegister(residentClientsGauge)
 	prometheus.MustRegister(residentLazyForwardIngressEnabledGauge)
@@ -388,6 +409,10 @@ func init() {
 
 	for op := exchangeIOOp(0); op < exchangeIOOpCount; op++ {
 		for direction := exchangeIODirection(0); direction < exchangeIODirectionCount; direction++ {
+			exchangeIOCallsByLabel[op][direction] = exchangeIOCallsCounter.WithLabelValues(
+				exchangeIOOpLabels[op],
+				exchangeIODirectionLabels[direction],
+			)
 			for kind := exchangeIOFrameKind(0); kind < exchangeIOFrameKindCount; kind++ {
 				exchangeIOCollectorsByLabel[op][direction][kind] = exchangeIOCollectors{
 					frames: exchangeIOFramesCounter.WithLabelValues(
@@ -803,7 +828,13 @@ type Exchange struct {
 	// the edge inventory moves target; nil while moves are disabled
 	edgeInventory *EdgeInventory
 
-	settings              *ExchangeSettings
+	settings *ExchangeSettings
+	// the process's logical timers: the residents' idle watches and
+	// registration refreshes, the forwards' idle watches, and the timers of
+	// the handler's announcements and authorization leases. Nil in an
+	// exchange a test builds without newExchange, which gives each such timer
+	// a sweep of its own (LBALTOPT2.md §8.1).
+	timerSweep            *timersweep.Sweep
 	memoryOwnerLedger     *connect.TransferMemoryOwnerLedger
 	payloadOwnerLedger    *residentPayloadLedger
 	sdkPayloadOwnerLedger *connect.TransferPayloadOwnerLedger
@@ -834,6 +865,9 @@ type Exchange struct {
 	// Nil in production; registration tests wait for a resident's teardown,
 	// its peer registration cleanup included, to finish.
 	afterResidentTeardownForTest func(*Resident)
+	// Nil in production; refresh tests replace a resident's registration
+	// refresh and observe when each one comes.
+	refreshResidentRegistrationForTest func(*Resident) bool
 	// Nil in production; local transport tests hold an attach after its
 	// generation check, a pump after it takes a batch's first message and
 	// after it gathers the batch, and a pump before it waits on a delivery
@@ -983,6 +1017,7 @@ func newExchange(
 		hostToServicePorts:    hostToServicePorts,
 		routes:                routes,
 		settings:              settings,
+		timerSweep:            timersweep.New(timersweep.DefaultTick),
 		memoryOwnerLedger:     settings.MemoryOwnerLedger,
 		payloadOwnerLedger:    settings.payloadOwnerLedger,
 		sdkPayloadOwnerLedger: settings.SDKPayloadOwnerLedger,
@@ -1366,20 +1401,8 @@ func (self *Exchange) nominateLocalResident(
 		}
 	})
 	go server.HandleError(resident.runIdleWatcher)
-	// poll the resident the same as exchange connections
 	go server.HandleError(func() {
-		defer resident.Cancel()
-		for {
-			select {
-			case <-resident.Done():
-				return
-			case <-time.After(self.settings.ExchangeResidentTtl / 4):
-			}
-
-			if !self.refreshResidentRegistration(resident) {
-				return
-			}
-		}
+		self.runResidentRegistrationRefresh(resident)
 	})
 	if afterStarted := self.afterResidentWorkersStartedForTest; afterStarted != nil {
 		afterStarted(resident)
@@ -1405,6 +1428,33 @@ func residentReplaced(ctx context.Context, clientId server.Id, residentId server
 		current := model.GetResidentForClient(ctx, clientId, 0)
 		return current != nil && current.ResidentId != residentId
 	})
+}
+
+// Polls the resident the same as exchange connections: refreshes its
+// registration every ExchangeResidentTtl/4 after the last refresh ends, until
+// the resident ends or a refresh finds it replaced. The wait is on the
+// exchange's timer sweep, so a refresh may come one sweep tick late, against a
+// registration ttl four refreshes long (LBALTOPT2.md §8.1).
+func (self *Exchange) runResidentRegistrationRefresh(resident *Resident) {
+	defer resident.Cancel()
+	refreshTimer := self.timerSweep.NewTimer(self.settings.ExchangeResidentTtl / 4)
+	defer refreshTimer.Stop()
+	for {
+		select {
+		case <-resident.Done():
+			return
+		case <-refreshTimer.C:
+		}
+
+		refresh := self.refreshResidentRegistration
+		if self.refreshResidentRegistrationForTest != nil {
+			refresh = self.refreshResidentRegistrationForTest
+		}
+		if !refresh(resident) {
+			return
+		}
+		refreshTimer.Reset(self.settings.ExchangeResidentTtl / 4)
+	}
 }
 
 // Refreshes metadata for one resident. Transport cancellation must not change
@@ -1771,7 +1821,10 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 			sendBuffer.setIOOp(header.Op)
 			pinger := newExchangePinger(self.settings)
 			defer pinger.stop()
-			batch := make([][]byte, 0, self.settings.ExchangeWriteBatchCount)
+			// grown by append to the largest batch the link writes: the
+			// gather's condition bounds it, so a sparse link keeps a few
+			// slots, not ExchangeWriteBatchCount (6 KiB) from its first write
+			var batch [][]byte
 			// gather pending messages into `batch` without blocking, bounded by
 			// the write batch limits, and write them with a single writev.
 			// returns false to end the send loop (closed channel or write error).
@@ -2684,6 +2737,32 @@ func (self *exchangePinger) stop() {
 	self.timer.Stop()
 }
 
+// The socket of an exchange buffer, counting each write call in
+// exchange_io_calls_total under the buffer's op. The framer writes through
+// it; a writev of a batch counts itself. A buffer owns one, so passing it to
+// the framer allocates nothing.
+type exchangeIOCountingWriter struct {
+	buffer *ExchangeBuffer
+	conn   net.Conn
+}
+
+func (self *exchangeIOCountingWriter) Write(b []byte) (int, error) {
+	exchangeIOCallsByLabel[self.buffer.ioOp][exchangeIODirectionSent].Inc()
+	return self.conn.Write(b)
+}
+
+// The socket under an exchange buffer's buffered reader, counting each read
+// call in exchange_io_calls_total under the buffer's op.
+type exchangeIOCountingReader struct {
+	buffer *ExchangeBuffer
+	conn   net.Conn
+}
+
+func (self *exchangeIOCountingReader) Read(b []byte) (int, error) {
+	exchangeIOCallsByLabel[self.buffer.ioOp][exchangeIODirectionReceived].Inc()
+	return self.conn.Read(b)
+}
+
 // each call overwrites the internal buffer
 type ExchangeBuffer struct {
 	settings *ExchangeSettings
@@ -2703,6 +2782,8 @@ type ExchangeBuffer struct {
 	// buffer writes from a single goroutine, so the backing is reused across
 	// batches instead of allocating one per flush.
 	writeBuffers net.Buffers
+	// the copy of writeBuffers a writev consumes, empty between writes
+	writevBuffers net.Buffers
 	// The single writer allocates this only for a non-empty message that fits.
 	// Receive-only, idle, and oversized-only senders retain no payload scratch.
 	writeStorage []byte
@@ -2715,6 +2796,10 @@ type ExchangeBuffer struct {
 	// the op label of the frames this buffer records. An accepted
 	// connection's buffer learns it from the header it reads.
 	ioOp exchangeIOOp
+	// the socket the framer writes to and the reader reads from, each
+	// counting its calls (exchange_io_calls_total)
+	countingWriter exchangeIOCountingWriter
+	countingReader exchangeIOCountingReader
 
 	// Test-only scalar observation after the real native writev returns.
 	afterWritevForTest func(messageCount int, writtenByteCount int64, writeErr error)
@@ -2744,10 +2829,19 @@ func (self *ExchangeBuffer) connReader(conn net.Conn) *bufio.Reader {
 		if 0 < self.readBufferLimit {
 			readBufferByteCount = min(readBufferByteCount, self.readBufferLimit)
 		}
-		self.reader = bufio.NewReaderSize(conn, readBufferByteCount)
+		self.countingReader = exchangeIOCountingReader{buffer: self, conn: conn}
+		self.reader = bufio.NewReaderSize(&self.countingReader, readBufferByteCount)
 		self.readerConn = conn
 	}
 	return self.reader
+}
+
+// The socket as the framer writes to it, counting each write call.
+func (self *ExchangeBuffer) connWriter(conn net.Conn) io.Writer {
+	if self.countingWriter.buffer != self || self.countingWriter.conn != conn {
+		self.countingWriter = exchangeIOCountingWriter{buffer: self, conn: conn}
+	}
+	return &self.countingWriter
 }
 
 func (self *ExchangeBuffer) WriteHeader(ctx context.Context, conn net.Conn, header *ExchangeHeader) error {
@@ -2760,7 +2854,11 @@ func (self *ExchangeBuffer) WriteHeader(ctx context.Context, conn net.Conn, head
 		return err
 	}
 	self.writeDeadline.reset()
-	if err := self.framer.Write(conn, headerBytes); err != nil {
+	// One write of the whole frame: the header's gob is about 380 bytes, past
+	// the framer's split threshold, so a plain Write sent it in two (R21).
+	storage := connect.MessagePoolGet(len(headerBytes) + exchangeIOFrameHeaderByteCount)
+	defer connect.MessagePoolReturn(storage)
+	if err := self.framer.WriteBatchWithStorage(self.connWriter(conn), [][]byte{headerBytes}, storage); err != nil {
 		return err
 	}
 	recordExchangeIO(self.ioOp, exchangeIODirectionSent, exchangeIOFrameKindHandshake, len(headerBytes))
@@ -2811,8 +2909,17 @@ func (self *ExchangeBuffer) WriteMessage(conn net.Conn, transferFrameBytes []byt
 		connect.MessagePoolReturn(transferFrameBytes)
 		return err
 	}
+	if len(self.writeStorage) < exchangeIOFrameHeaderByteCount+len(transferFrameBytes) &&
+		0 < len(transferFrameBytes) &&
+		len(transferFrameBytes) <= self.settings.FramerSettings.MaxMessageLen &&
+		len(transferFrameBytes) <= math.MaxUint16 {
+		// A frame larger than the singleton scratch: its length header and
+		// body in one writev, without a copy, where the framer would split it
+		// into two writes (R21).
+		return self.writevFrames(conn, [][]byte{transferFrameBytes})
+	}
 	err := self.framer.WriteBatchWithStorage(
-		conn,
+		self.connWriter(conn),
 		[][]byte{transferFrameBytes},
 		self.writeStorage,
 	)
@@ -2858,7 +2965,13 @@ func (self *ExchangeBuffer) WriteMessages(conn net.Conn, transferFrameBytesBatch
 		}
 		return err
 	}
+	return self.writevFrames(conn, transferFrameBytesBatch)
+}
 
+// Writes frames whose lengths were checked, under a refreshed deadline, with
+// one writev: a length header iovec and a body iovec for each. Returns every
+// message to the pool, and records each frame the writev completed.
+func (self *ExchangeBuffer) writevFrames(conn net.Conn, transferFrameBytesBatch [][]byte) error {
 	headers := connect.MessagePoolGet(exchangeIOFrameHeaderByteCount * len(transferFrameBytesBatch))
 	defer connect.MessagePoolReturn(headers)
 
@@ -2870,10 +2983,14 @@ func (self *ExchangeBuffer) WriteMessages(conn net.Conn, transferFrameBytesBatch
 		self.writeBuffers = append(self.writeBuffers, header, transferFrameBytes)
 	}
 
-	// WriteTo drains its receiver, so write through a local copy; self.writeBuffers
-	// keeps its backing for the next batch.
-	buffers := self.writeBuffers
-	n, err := buffers.WriteTo(conn)
+	// WriteTo drains its receiver, so write through a copy; self.writeBuffers
+	// keeps its backing for the next batch. The copy is a field: a local one
+	// escaped to the heap through the socket's writev, an allocation a batch.
+	// The socket itself, so that the batch is one writev.
+	self.writevBuffers = self.writeBuffers
+	exchangeIOCallsByLabel[self.ioOp][exchangeIODirectionSent].Inc()
+	n, err := self.writevBuffers.WriteTo(conn)
+	self.writevBuffers = nil
 	if callback := self.afterWritevForTest; callback != nil {
 		callback(len(transferFrameBytesBatch), n, err)
 	}
@@ -3247,7 +3364,10 @@ func (self *ExchangeConnection) Run() {
 
 		pinger := newExchangePinger(self.settings)
 		defer pinger.stop()
-		batch := make([][]byte, 0, self.settings.ExchangeWriteBatchCount)
+		// grown by append to the largest batch the link writes: the gather's
+		// condition bounds it, so a sparse link keeps a few slots, not
+		// ExchangeWriteBatchCount (6 KiB) from its first write
+		var batch [][]byte
 		// gather pending messages into `batch` without blocking, bounded by the
 		// write batch limits, and write them with a single writev.
 		// returns false to end the send loop (closed channel or write error).
@@ -4268,9 +4388,11 @@ func (self *ResidentForward) CancelIfIdle() bool {
 }
 
 // Owns idle expiry independently from socket liveness. Forward activity is
-// payload admission; exchange keepalives do not extend this deadline.
+// payload admission; exchange keepalives do not extend this deadline. The
+// wait is on the exchange's timer sweep, so expiry comes at the idle deadline
+// or at most one sweep tick after it, never before (LBALTOPT2.md §8.1).
 func (self *ResidentForward) runIdleWatcher(sourceId server.Id) {
-	timer := time.NewTimer(self.exchange.settings.ForwardIdleTimeout)
+	timer := self.exchange.timerSweep.NewTimer(self.exchange.settings.ForwardIdleTimeout)
 	defer timer.Stop()
 	for {
 		if self.CancelIfIdle() {
@@ -5602,9 +5724,12 @@ func (self *Resident) CancelIfIdle() bool {
 // between timer wakes must not round that deadline up by another whole TTL.
 // Activity can move the deadline after arming; rechecking on wake preserves
 // that activity's full allowance without changing accepted control teardown.
+//
+// The wait is on the exchange's timer sweep: retirement comes at the idle
+// deadline or at most one sweep tick after it, never before.
 func (self *Resident) runIdleWatcher() {
 	defer self.Cancel()
-	timer := time.NewTimer(self.exchange.settings.ExchangeResidentTtl)
+	timer := self.exchange.timerSweep.NewTimer(self.exchange.settings.ExchangeResidentTtl)
 	defer timer.Stop()
 	for {
 		if self.CancelIfIdle() {
@@ -5636,6 +5761,15 @@ func (self *Resident) IsDone() bool {
 
 func (self *Resident) Done() <-chan struct{} {
 	return self.ctx.Done()
+}
+
+// The exchange's timer sweep. A resident a test builds without an exchange
+// gives each of its timers a sweep of its own.
+func (self *Resident) timerSweep() *timersweep.Sweep {
+	if self.exchange == nil {
+		return nil
+	}
+	return self.exchange.timerSweep
 }
 
 func (self *Resident) Cancel() {

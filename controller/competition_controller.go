@@ -607,6 +607,7 @@ type Settings struct {
 	distributedReevaluationSettings     *competitionDistributedReevaluationSettings
 	// Isolated fixture scope only; never configurable or loaded from a document.
 	secondRecoveryJobIdForTest   server.Id
+	readinessHostConfig          *CompetitionHostQualificationConfig
 	AutomationPolicy             model.CompetitionAutomationPolicy       `yaml:"automation_policy"`
 	Enabled                      bool                                    `yaml:"enabled"`
 	CompetitionId                string                                  `yaml:"competition_id"`
@@ -657,6 +658,7 @@ type Settings struct {
 	executorFreshOnly             bool
 	distributedSourceCommits      map[string]string
 	executorControlAmendment      *competitionExecutorControlAmendmentRecord
+	epochThreeRuntimeCorrection   *model.CompetitionEpochThreeRuntimeCorrection
 	executorExpiredControlWitness *competitionExpiredControlWitness
 	executorQualificationRecovery *competitionExecutorQualificationRecoveryRecord
 	// Non-serialized proof set only after exact retained runtime authentication.
@@ -1294,14 +1296,24 @@ type artifactManifest struct {
 }
 
 func (self CommandEvaluator) SelfCheck(ctx context.Context, settings *Settings) (HostSelfCheck, error) {
+	if settings.readinessHostConfig != nil {
+		config := settings.readinessHostConfig
+		local := *settings
+		local.SelfCheckCommand, local.SelfCheckCommandSha256 = config.HostCheckCommand, config.HostCheckSha256
+		return qualificationHostSelfCheck(ctx, &local, config.HostConfig)
+	}
+	return runCompetitionHostSelfCheck(ctx, settings, []string{"--json"}, 30*time.Second)
+}
+
+func runCompetitionHostSelfCheck(ctx context.Context, settings *Settings, args []string, timeout time.Duration) (HostSelfCheck, error) {
 	if err := verifyPinnedExecutable(settings.SelfCheckCommand, settings.SelfCheckCommandSha256); err != nil {
 		return HostSelfCheck{}, err
 	}
-	checkCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	checkCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	stdout := &boundedBuffer{limit: maxSelfCheckBytes}
 	stderr := &boundedBuffer{limit: maxSelfCheckBytes}
-	exitCode, err := runContainedCommand(checkCtx, settings.ArtifactRoot, settings.SelfCheckCommand, []string{"--json"}, stdout, stderr)
+	exitCode, err := runContainedCommand(checkCtx, settings.ArtifactRoot, settings.SelfCheckCommand, args, stdout, stderr)
 	if err != nil {
 		return HostSelfCheck{}, fmt.Errorf("self-check command: %w", err)
 	}
@@ -1652,7 +1664,7 @@ func validateRoundBaselineRecord(settings *Settings, round *roundRecord, baselin
 		baseline.EvaluatorImageDigest != settings.EvaluatorImageDigest ||
 		baseline.ScorerVersion != settings.scorerVersion() ||
 		baseline.HardwareId != settings.EvaluationPolicy.HardwareId ||
-		baseline.HostQualificationSha256 != settings.EvaluationPolicy.HostQualificationSha256 ||
+		baseline.HostQualificationSha256 != competitionBaselineQualification(settings, round.RoundId) ||
 		baseline.SourceJobId == (server.Id{}) || baseline.SourceAttempt <= 0 ||
 		!sha256Pattern.MatchString(baseline.SourceArtifactManifestSha256) || baseline.CreatedAt.IsZero() {
 		return errors.New("round baseline record identity is invalid")

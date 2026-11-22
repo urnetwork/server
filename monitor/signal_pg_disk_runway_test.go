@@ -11,8 +11,8 @@ import (
 	"time"
 )
 
-// The explicit coverage signal never contacts a source or emits healthy
-// runway, including when no unique primary can be selected.
+// The coverage warning points to independently measured space and runway
+// without fetching either, even when no unique primary can be selected.
 func TestPgDiskRunwayUnknownHasNoSourceFetch(t *testing.T) {
 	for _, mode := range []string{"configured", "missing primary", "ambiguous primary", "excluded primary"} {
 		settings := syntheticSettings(&syntheticSource{
@@ -43,6 +43,12 @@ func TestPgDiskRunwayUnknownHasNoSourceFetch(t *testing.T) {
 		}
 		if !strings.Contains(alert.Observed, "forecast=unknown") || !strings.Contains(alert.Observed, "paired-history-not-implemented") {
 			t.Fatal("missing history was hidden as a measured forecast")
+		}
+		for _, measured := range []Signal{NewPgDiskSpaceSignal(), NewStorageRunwaySignal()} {
+			if !strings.Contains(alert.Evidence, measured.Key()) || !strings.Contains(alert.Action, measured.Key()) ||
+				!strings.Contains(alert.Playbook, "§"+measured.Number()) {
+				t.Errorf("%s: coverage warning lacks guidance for %s", mode, measured.Key())
+			}
 		}
 	}
 }

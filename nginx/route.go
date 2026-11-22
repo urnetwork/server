@@ -16,7 +16,10 @@ package nginx
 // version, or a value the front can't serve is refused with an error naming
 // the field, and a connect that can't parse its route file fails its start
 // rather than come up half-configured. Route prefixes are hidden, so no error
-// carries one.
+// carries one. The one exception to "missing" is an optional field, tagged
+// omitempty: warpctl leaves it out at its zero value, which means off, so a
+// file without it has the bytes, and the revision, it had before the field
+// existed (rate_limit's identity fields).
 
 import (
 	"bytes"
@@ -122,7 +125,8 @@ type RouteInterface struct {
 }
 
 // An interface's per-address limits: nginx's shared limit_req and limit_conn
-// zones, which are per interface (D8).
+// zones, which are per interface (D8), and the identity limit, which only
+// the lb_alt front has (LBALTOPT2 R15).
 type RouteRateLimit struct {
 	// the shared request rate per address. It may be fractional, since a
 	// requests_per_second rate becomes 60 times as many per minute. Zero
@@ -133,10 +137,34 @@ type RouteRateLimit struct {
 	Burst int `json:"burst"`
 	// concurrent requests per address. Each h2 or h3 stream counts, and an
 	// upgraded connection holds its slot until it closes. Zero means no cap.
+	// Each class of QUIC connection, api and connect, has a cap of this many
+	// per address too.
 	NetConnections int `json:"net_connections"`
 	// CIDR prefixes exempt from every limit
 	ExcludeSubnets []string `json:"exclude_subnets"`
+	// Optional: the identity limit's request rate per client, or per network
+	// for a network token, which turns the identity limit on when positive.
+	// Then a request of the shared zone to the api or connect whose bearer
+	// token verifies is charged to its identity at this rate and
+	// identity_burst, held to net_connections in flight per identity, and
+	// charged to its address at requests_per_minute, burst and
+	// net_connections times identity_address_factor, a ceiling apart from the
+	// shared zone that still bounds one address. Any other request is charged
+	// as without it. May be fractional, as requests_per_minute. Zero, or
+	// absent, means off, and then identity_burst and identity_address_factor
+	// must be zero too.
+	IdentityRequestsPerMinute float64 `json:"identity_requests_per_minute,omitempty"`
+	// Optional: requests one identity is admitted above its rate at once, as
+	// burst
+	IdentityBurst int `json:"identity_burst,omitempty"`
+	// Optional: how many times one address's limits a verified request's
+	// address ceiling is, at least 1 with the identity limit on
+	IdentityAddressFactor int `json:"identity_address_factor,omitempty"`
 }
+
+// The largest identity_address_factor, so the ceiling's burst and cap stay
+// far inside an int.
+const maxRouteIdentityAddressFactor = 1000
 
 // This generation's internal ports, from WARP_PORTS. warpctl DNATs each
 // interface's public ports to them (LBALT-IMPL.md §2.3).
@@ -358,6 +386,20 @@ func (self *RouteTable) ApiService() *RouteService {
 	return service
 }
 
+// The class of the service named serviceName: NameClassConnect for
+// front.connect_service, NameClassApi for front.api_service, and
+// NameClassForwarded for every other.
+func (self *RouteTable) serviceClass(serviceName string) NameClass {
+	switch serviceName {
+	case self.Front.ConnectService:
+		return NameClassConnect
+	case self.Front.ApiService:
+		return NameClassApi
+	default:
+		return NameClassForwarded
+	}
+}
+
 // Every name the front serves, each once, and each needing a certificate:
 // the lb names first, in their order (the first is the TCP default server),
 // then every exposed service's names and redirect alias names, sorted. A
@@ -521,6 +563,9 @@ func (self *RouteTable) validate() error {
 			}
 		}
 		if err := checkRouteUnique(rateLimitPath+".exclude_subnets", rateLimit.ExcludeSubnets); err != nil {
+			return err
+		}
+		if err := checkRouteIdentityLimit(rateLimitPath, rateLimit); err != nil {
 			return err
 		}
 	}
@@ -738,10 +783,45 @@ func (self *routeFieldError) Error() string {
 	return fmt.Sprintf("route file: %s: %s", self.fieldPath, self.message)
 }
 
+// Checks a rate_limit's identity limit fields (RouteRateLimit): none
+// negative; with identity_requests_per_minute zero, the identity limit is
+// off and the other two must be zero; with it on, identity_address_factor is
+// 1 through maxRouteIdentityAddressFactor, and the ceiling it makes of burst
+// and net_connections fits an int.
+func checkRouteIdentityLimit(rateLimitPath string, rateLimit *RouteRateLimit) error {
+	if rateLimit.IdentityRequestsPerMinute < 0 {
+		return routeFieldErrorf(rateLimitPath+".identity_requests_per_minute", "must not be negative (got %v)", rateLimit.IdentityRequestsPerMinute)
+	}
+	if err := checkRouteCount(rateLimitPath+".identity_burst", rateLimit.IdentityBurst); err != nil {
+		return err
+	}
+	if err := checkRouteCount(rateLimitPath+".identity_address_factor", rateLimit.IdentityAddressFactor); err != nil {
+		return err
+	}
+	if rateLimit.IdentityRequestsPerMinute == 0 {
+		if rateLimit.IdentityBurst != 0 {
+			return routeFieldErrorf(rateLimitPath+".identity_burst", "must be zero without identity_requests_per_minute (got %d)", rateLimit.IdentityBurst)
+		}
+		if rateLimit.IdentityAddressFactor != 0 {
+			return routeFieldErrorf(rateLimitPath+".identity_address_factor", "must be zero without identity_requests_per_minute (got %d)", rateLimit.IdentityAddressFactor)
+		}
+		return nil
+	}
+	factor := rateLimit.IdentityAddressFactor
+	if factor < 1 || maxRouteIdentityAddressFactor < factor {
+		return routeFieldErrorf(rateLimitPath+".identity_address_factor", "must be in 1-%d with identity_requests_per_minute (got %d)", maxRouteIdentityAddressFactor, factor)
+	}
+	if math.MaxInt/factor < rateLimit.Burst || math.MaxInt/factor < rateLimit.NetConnections {
+		return routeFieldErrorf(rateLimitPath+".identity_address_factor", "makes burst or net_connections overflow (got %d)", factor)
+	}
+	return nil
+}
+
 // Checks decoded json against the shape of valueType, before the typed
 // decode: an object for each struct, with every field under its exact key and
 // no other key, an array for each slice, and no null anywhere. Scalar types
-// are left to the typed decode.
+// are left to the typed decode. A field tagged omitempty may be absent, never
+// null.
 func checkRouteShape(value any, valueType reflect.Type, fieldPath string) error {
 	if valueType.Kind() == reflect.Pointer {
 		valueType = valueType.Elem()
@@ -754,9 +834,10 @@ func checkRouteShape(value any, valueType reflect.Type, fieldPath string) error 
 		}
 		fieldNameTypes := map[string]reflect.Type{}
 		fieldNames := []string{}
+		optionalFieldNames := map[string]bool{}
 		for i := range valueType.NumField() {
 			field := valueType.Field(i)
-			name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+			name, options, _ := strings.Cut(field.Tag.Get("json"), ",")
 			if !field.IsExported() || name == "-" {
 				continue
 			}
@@ -765,6 +846,9 @@ func checkRouteShape(value any, valueType reflect.Type, fieldPath string) error 
 			}
 			fieldNameTypes[name] = field.Type
 			fieldNames = append(fieldNames, name)
+			if slices.Contains(strings.Split(options, ","), "omitempty") {
+				optionalFieldNames[name] = true
+			}
 		}
 		// an extra key first, since a misspelled or recased key also leaves
 		// its field missing
@@ -777,6 +861,9 @@ func checkRouteShape(value any, valueType reflect.Type, fieldPath string) error 
 			childPath := joinRouteFieldPath(fieldPath, name)
 			childValue, ok := object[name]
 			if !ok {
+				if optionalFieldNames[name] {
+					continue
+				}
 				return routeFieldErrorf(childPath, "is missing")
 			}
 			if childValue == nil {

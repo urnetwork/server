@@ -222,19 +222,18 @@ consumers before the API rollout: old consumers may reject private production
 `score` responses, and old adapter binaries cannot read new private feedback or
 refresh fields. Do not roll an old binary back onto the new adapter state file.
 
-Production R2 selects `elected_winner_snow_union_v2`: publish the provisional
-winner, automatically review it with qualified Qwen (`qwen3.8-27b`) and Gemma
-(`gemma-4-26b-a4b`) on Snow, retain the union of their findings, and require both
-to approve. Revoke/re-elect on substantiated rejection, then independently build,
+Use GPT-6.2 Astra at `max` for code and honesty/safety review of the provisional
+winner. Use the authorized official-review path for the round. Revoke/re-elect
+on substantiated rejection, then independently build,
 qualify and promote that approved winner before opening the next epoch.
 Only an exhausted eligible ranking carries the incumbent forward. Missing or
 expired review and failed source qualification block and alert support; they
 never silently approve, promote another candidate, or fall back. The sixth
 epoch is reviewed before the supervisor exits. Historical Sol, GPT-5.4 mini and
-three-model Snow records retain their original identities; Muse is not a member
-of the R2 two-model policy. Provider qualification remains required.
-See [RUN-MAIN.md](RUN-MAIN.md#adopted-automatic-closing-policy-2026-10-23)
-for activation, the private model-broker protocol, scoped authority, and
+Snow records retain their original identities. Qwen/Gemma is not a planned
+review path; a frozen Snow policy still requires explicit authorization to
+accept Astra review.
+See [RUN-MAIN.md](RUN-MAIN.md) for activation, scoped authority, and
 independent build/readiness requirements.
 
 V2 rounds do not populate `GET /competition/leaderboard`, including when
@@ -482,8 +481,8 @@ for approval. See the version/hash-bound
 
 This source contract does not change numerical gates or reopen immutable old
 approvals. New requests and receipts carry its explicit identity; exact old
-idempotent replays remain unchanged. Independent tests and real Qwen/Gemma
-qualification of the new contract are required before operational activation.
+idempotent replays remain unchanged. Independently test and qualify the
+authorized review handoff before operational activation.
 
 ## Epoch source identity and promotion
 

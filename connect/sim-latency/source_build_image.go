@@ -85,7 +85,7 @@ LABEL org.opencontainers.image.title="URnetwork sim-latency evaluator base" \
       com.urnetwork.competition.staging="%t"
 USER 65532:65532
 WORKDIR /workspace/server
-`, strings.TrimPrefix(request.Proposal.EvaluatedImageDigest, "sha256:"), commit, commit, request.SourceGeneration,
+`, strings.TrimPrefix(sourceBuildBaseImage(request), "sha256:"), commit, commit, request.SourceGeneration,
 		hex.EncodeToString(manifestHash[:]), hex.EncodeToString(lockHash[:]), request.Proposal.Staging)
 	if request.TrustedInstrument != nil || request.Proposal != nil && request.Operation == "isolated_reviewed_source_build" && sourceBuildRequestMinimumWork(request) {
 		// Both dispatch and runner come from the authenticated protected child;
