@@ -7,11 +7,13 @@ import (
 	"encoding/gob"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"math/bits"
 	mathrand "math/rand/v2"
 	"reflect"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -548,6 +550,76 @@ func TestClientScorePageCodecSharesOnlyEqualMaps(t *testing.T) {
 		t.Fatal("a gob decode shared a map")
 	}
 	assertClientScorePageMatchesGob(t, sample)
+}
+
+// TestClientScorePageCacheConcurrentReaders over typed pages: concurrent
+// readers of the same and different pages, with evictions, each decode
+// through the pooled decoders and get the page's scores, and what they do to
+// their copies stays theirs though the page's equal maps are one map.
+func TestClientScorePageCacheConcurrentReadersOfTypedPages(t *testing.T) {
+	// deterministic for reproducible failures; never shapes traffic
+	r := mathrand.New(mathrand.NewPCG(8, 8))
+	type page struct {
+		data     []byte
+		checksum [sha256.Size]byte
+		want     []*ClientScore
+	}
+	pages := []page{}
+	maxBytes := int64(-1)
+	for range 3 {
+		sample := clientScorePageTestRealisticSample(r, 40)
+		data, err := encodeClientScorePageTyped(sample)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, size, err := decodeClientScorePageTyped(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pages = append(pages, page{data: data, checksum: sha256.Sum256(data), want: want})
+		maxBytes += size
+	}
+	// room for any two of the three pages, so readers evict and decode again
+	cache := withClientScorePageCacheForTest(t, maxBytes-1)
+	var wg sync.WaitGroup
+	for reader := range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range 100 {
+				page := pages[(reader+i)%len(pages)]
+				scores, err := decodeClientScorePage(page.data, page.checksum)
+				if err != nil || len(scores) != len(page.want) {
+					t.Errorf("read count=%d err=%v", len(scores), err)
+					return
+				}
+				for j, score := range scores {
+					want := page.want[j]
+					if score.ClientId != want.ClientId || !reflect.DeepEqual(score.Scores, want.Scores) || !reflect.DeepEqual(score.LookbackClientScores, want.LookbackClientScores) {
+						t.Error("a reader got another page's or a changed score")
+						return
+					}
+					// what a reader may do to its copy: replace fields, and a
+					// map with a changed clone
+					score.Online = !score.Online
+					scaledWeights := maps.Clone(score.ScaledWeights)
+					scaledWeights[RankModeQuality] = 1
+					score.ScaledWeights = scaledWeights
+					score.PassesMinimums = nil
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if cached, bytes := cache.size(); 2 < cached || maxBytes < bytes {
+		t.Fatalf("bound not kept: pages=%d bytes=%d", cached, bytes)
+	}
+	for _, page := range pages {
+		fresh, _, err := decodeClientScorePageTyped(page.data)
+		if err != nil || !reflect.DeepEqual(fresh, page.want) {
+			t.Fatalf("a typed page no longer decodes to its scores: %v", err)
+		}
+	}
 }
 
 // The readers' decode of a gob page, as the export has always written it, is
