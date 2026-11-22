@@ -922,3 +922,212 @@ func TestExchangeReadsNoResumedMarkerOutsideARestore(t *testing.T) {
 		connect.AssertEqual(t, len(source.requests), 1)
 	})
 }
+
+// A device of the network whose key the test holds, so its own statements can
+// be signed: a member's first device, say, that then makes that member's vault.
+type exchangeScopesDevice struct {
+	sidecarId server.Id
+	key       ed25519.PrivateKey
+}
+
+// A fresh device and its identity key.
+func newExchangeScopesDevice(t testing.TB) *exchangeScopesDevice {
+	t.Helper()
+	_, privateKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &exchangeScopesDevice{sidecarId: server.NewId(), key: privateKey}
+}
+
+// body signed by device under its type's purpose, as a Signed's bytes, the
+// owner's first device's for a nil device.
+func (self *exchangeScopesWorld) signAs(device *exchangeScopesDevice, signedType bridge.SignedType, body proto.Message) []byte {
+	self.t.Helper()
+	if device == nil {
+		return self.world.SignAsOwner(signedType, body)
+	}
+	bodyBytes, err := proto.MarshalOptions{Deterministic: true}.Marshal(body)
+	if err != nil {
+		self.t.Fatal(err)
+	}
+	purpose, ok := sidecar.ConfigStatementPurpose(signedType)
+	if !ok {
+		self.t.Fatalf("no purpose for %s", signedType)
+	}
+	signed, err := proto.MarshalOptions{Deterministic: true}.Marshal(&bridge.Signed{
+		Body:      bodyBytes,
+		SignerId:  sidecar.Id(device.sidecarId).Bytes(),
+		Signature: ed25519.Sign(device.key, bridge.SignedBytes(purpose, signedType, bodyBytes)),
+		Type:      uint32(signedType),
+	})
+	if err != nil {
+		self.t.Fatal(err)
+	}
+	return signed
+}
+
+// signer's admission of device as a device of memberId, the owner's first
+// device signing for a nil signer.
+func (self *exchangeScopesWorld) admitDevice(signer *exchangeScopesDevice, device *exchangeScopesDevice, memberId server.Id, capabilities uint32) {
+	self.t.Helper()
+	self.post(self.signAs(signer, bridge.SignedType_SIGNED_SIDECAR_ADMIT, &protocol.SidecarAdmit{
+		Header:            self.world.Header(),
+		NetworkId:         sidecar.Id(self.networkId).Bytes(),
+		SidecarId:         sidecar.Id(device.sidecarId).Bytes(),
+		IdentityPublicKey: device.key.Public().(ed25519.PublicKey),
+		IdentityAlg:       "ed25519",
+		MemberId:          sidecar.Id(memberId).Bytes(),
+		Capabilities:      capabilities,
+	}))
+}
+
+// signer's RepoCreate of a fresh repo of kind, owner-bound to signer's member
+// where the kind is; the owner's first device signs for a nil signer.
+func (self *exchangeScopesWorld) createRepo(signer *exchangeScopesDevice, kind protocol.RepoKind) server.Id {
+	self.t.Helper()
+	repoId := server.NewId()
+	self.post(self.signAs(signer, bridge.SignedType_SIGNED_REPO_CREATE, &protocol.RepoCreate{
+		Header: self.world.Header(), RepoId: sidecar.Id(repoId).Bytes(), Kind: kind,
+	}))
+	return repoId
+}
+
+// The e2e-gkm-concurrency second device's case (TestE2eGkmConcurrencySecondDevice)
+// at the exchange: a personal network's owner makes its vault and mailbox on
+// its first device, which then admits a second device of the owner, consented
+// by §8.5's scoped clause. The exchange grants the second device the vault's and
+// the mailbox's r and rw at evs and gkm, as the gate's state honors them
+// (D-ACL-21), and refuses it the vault's admin, which only the vault's creator
+// holds; an ephemeral device of the owner, which no consent clause holds for,
+// gets the vault's deposit alone and its r refused.
+func TestExchangeScopesASecondDeviceGetsItsOwnersVault(t *testing.T) {
+	self := newExchangeScopesWorld(t)
+	vaultId := self.createRepo(nil, protocol.RepoKind_REPO_KIND_VAULT)
+	mailboxId := self.createRepo(nil, protocol.RepoKind_REPO_KIND_MAILBOX)
+	secondSidecarId, ephemeralSidecarId := server.NewId(), server.NewId()
+	self.admitOwnerDevice(secondSidecarId, false, 0, 0)
+	self.admitOwnerDevice(ephemeralSidecarId, true, self.world.Clock().Now().Add(24*time.Hour).UnixMilli(), 0)
+	snapshot := self.load()
+	source := self.source()
+	connect.AssertEqual(t, snapshot.Acl.ConsentedFor(sidecar.Id(secondSidecarId), sidecar.Id(self.ownerMemberId)), true)
+
+	for _, audience := range []string{"evs", "gkm"} {
+		aclAudience, _ := exchangeAclAudience(audience)
+		scopes := []string{repoScope(vaultId, "r"), repoScope(vaultId, "rw"), repoScope(mailboxId, "rw")}
+		grant, err := source.Grant(self.ctx, self.request(&secondSidecarId, self.ownerMemberId, audience, scopes...))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, grant.Scopes, scopes)
+		connect.AssertEqual(t, *grant.MemberId, self.ownerMemberId)
+		connect.AssertEqual(t, grant.ProjVersion, snapshot.Pin.GetVersion())
+		for _, repoId := range []server.Id{vaultId, mailboxId} {
+			rights := snapshot.Acl.EvsAccess(sidecar.AclSidecarSubject(sidecar.Id(secondSidecarId)), sidecar.Id(repoId), aclAudience, self.world.Clock().Now()).Rights
+			connect.AssertEqual(t, rights.Has(sidecar.AclEvsRead) && rights.Has(sidecar.AclEvsWrite), true)
+		}
+
+		// the vault's admin is its creator's: beside rw it is left out, alone it is refused
+		grant, err = source.Grant(self.ctx, self.request(&secondSidecarId, self.ownerMemberId, audience, repoScope(vaultId, "admin"), repoScope(vaultId, "rw")))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, grant.Scopes, []string{repoScope(vaultId, "rw")})
+		_, err = source.Grant(self.ctx, self.request(&secondSidecarId, self.ownerMemberId, audience, repoScope(vaultId, "admin")))
+		requireExchangeRefused(t, "the second device's vault admin at "+audience, err, ErrInvalidScope)
+		grant, err = source.Grant(self.ctx, self.request(&self.ownerSidecarId, self.ownerMemberId, audience, repoScope(vaultId, "admin")))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, grant.Scopes, []string{repoScope(vaultId, "admin")})
+
+		_, err = source.Grant(self.ctx, self.request(&ephemeralSidecarId, self.ownerMemberId, audience, repoScope(vaultId, "r")))
+		requireExchangeRefused(t, "the ephemeral device's vault read at "+audience, err, ErrInvalidScope)
+		grant, err = source.Grant(self.ctx, self.request(&ephemeralSidecarId, self.ownerMemberId, audience, repoScope(vaultId, "deposit")))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, grant.Scopes, []string{repoScope(vaultId, "deposit")})
+	}
+}
+
+// Owner decision 126 at the exchange: a member's vault opens to the member's
+// consented devices alone. Member m's first device, consented by its invite,
+// makes m's vault; the network owner's device then admits another device of m,
+// which no consent of m's covers, and m's first device admits a third, which
+// the scoped clause consents. The exchange refuses the unconsented device the
+// vault's r and rw, giving it the deposit m's other devices have, refuses the
+// network owner's own device every role there, an admin of m's but no device of
+// m's, and grants the third device r and rw; once m's first device files an
+// AdmissionConfirm of the unconsented device, its r and rw are granted too.
+func TestExchangeScopesAMembersVaultRefusesItsUnconsentedDevices(t *testing.T) {
+	self := newExchangeScopesWorld(t)
+	memberId := server.NewId()
+	self.post(self.world.SignAsOwner(bridge.SignedType_SIGNED_MEMBER_ADMIT, &protocol.MemberAdmit{
+		Header: self.world.Header(), MemberId: sidecar.Id(memberId).Bytes(), Role: bridge.MemberRole_MEMBER_ROLE_MEMBER,
+	}))
+	first, unconsented, third := newExchangeScopesDevice(t), newExchangeScopesDevice(t), newExchangeScopesDevice(t)
+	self.admitDevice(nil, first, memberId, uint32(bridge.SidecarCapability_SIDECAR_CAPABILITY_INVITED))
+	vaultId := self.createRepo(first, protocol.RepoKind_REPO_KIND_VAULT)
+	self.admitDevice(nil, unconsented, memberId, 0)
+	self.admitDevice(first, third, memberId, 0)
+	snapshot := self.load()
+	source := self.source()
+	connect.AssertEqual(t, snapshot.Acl.ConsentedFor(sidecar.Id(unconsented.sidecarId), sidecar.Id(memberId)), false)
+	connect.AssertEqual(t, snapshot.Acl.ConsentedFor(sidecar.Id(third.sidecarId), sidecar.Id(memberId)), true)
+	readWrite := []string{repoScope(vaultId, "r"), repoScope(vaultId, "rw")}
+
+	for _, audience := range []string{"evs", "gkm"} {
+		for _, device := range []*exchangeScopesDevice{first, third} {
+			grant, err := source.Grant(self.ctx, self.request(&device.sidecarId, memberId, audience, readWrite...))
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, grant.Scopes, readWrite)
+			connect.AssertEqual(t, *grant.MemberId, memberId)
+		}
+		_, err := source.Grant(self.ctx, self.request(&unconsented.sidecarId, memberId, audience, readWrite...))
+		requireExchangeRefused(t, "the unconsented device at "+audience, err, ErrInvalidScope)
+		grant, err := source.Grant(self.ctx, self.request(&unconsented.sidecarId, memberId, audience, repoScope(vaultId, "deposit"), repoScope(vaultId, "r")))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, grant.Scopes, []string{repoScope(vaultId, "deposit")})
+		for _, role := range []string{"deposit", "r", "rw", "admin"} {
+			_, err := source.Grant(self.ctx, self.request(&self.ownerSidecarId, self.ownerMemberId, audience, repoScope(vaultId, role)))
+			requireExchangeRefused(t, "the network owner's device's "+role+" at "+audience, err, ErrInvalidScope)
+		}
+	}
+
+	self.post(self.signAs(first, bridge.SignedType_SIGNED_ADMISSION_CONFIRM, &protocol.AdmissionConfirm{
+		Header: self.world.Header(), SidecarId: sidecar.Id(unconsented.sidecarId).Bytes(),
+	}))
+	self.load()
+	for _, audience := range []string{"evs", "gkm"} {
+		grant, err := source.Grant(self.ctx, self.request(&unconsented.sidecarId, memberId, audience, readWrite...))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, grant.Scopes, readWrite)
+	}
+}
+
+// The second device's case through the exchange itself, as the e2e's key
+// client meets it: its client's token and proof buy a gkm token holding the
+// vault's r and rw, naming it and its member at the state's position, where
+// before the projection granted none of the scopes (400 invalid_scope); an
+// ephemeral device's client still has its read refused.
+func TestExchangeWithASecondDevicesVaultScopes(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
+		fixture := newExchangeFixture(t)
+		userId := fixture.userId
+		self := newExchangeScopesWorldFor(t, fixture.networkId, userId, server.NewId())
+		vaultId := self.createRepo(nil, protocol.RepoKind_REPO_KIND_VAULT)
+		secondSidecarId, ephemeralSidecarId := server.NewId(), server.NewId()
+		self.admitOwnerDevice(secondSidecarId, false, 0, 0)
+		self.admitOwnerDevice(ephemeralSidecarId, true, self.world.Clock().Now().Add(24*time.Hour).UnixMilli(), 0)
+		snapshot := self.load()
+		defer SetExchangeScopeSource(self.source())()
+
+		fixture.sidecarId = secondSidecarId
+		readWrite := []string{repoScope(vaultId, "r"), repoScope(vaultId, "rw")}
+		result, err := Exchange(t.Context(), fixture.args("gkm", strings.Join(readWrite, " ")))
+		connect.AssertEqual(t, err, nil)
+		claims, err := newTestServiceTokenVerifier(t).Verify(result.AccessToken, "gkm")
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, claims.Scopes(), readWrite)
+		connect.AssertEqual(t, *claims.SidecarId, secondSidecarId)
+		connect.AssertEqual(t, *claims.MemberId, userId)
+		connect.AssertEqual(t, claims.ProjVersion, snapshot.Pin.GetVersion())
+
+		fixture.sidecarId = ephemeralSidecarId
+		_, err = Exchange(t.Context(), fixture.args("gkm", repoScope(vaultId, "r")))
+		requireExchangeRefused(t, "the ephemeral device's vault read", err, ErrInvalidScope)
+	})
+}
