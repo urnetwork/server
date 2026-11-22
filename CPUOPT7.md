@@ -49,7 +49,7 @@ carries a deterministic test.
   4. **server:** FindProviders2 page reads copy only the records they keep (02e54f61a, on
      main).
 - **Expected saving** (§5): about 3–4 cores of the fleet's 45 proxy cores. That's
-  1.9–2.4 on crisp and 1.0–1.4 on fireside, almost all of it from the connect donor scan.
+  1.8–2.4 on crisp and 1.1–1.5 on fireside, most of it from the connect donor scan.
   - The hosts are saturated, so freed CPU shows first as service: shorter
     find-providers loads and setups, fewer mint refusals. Only after that does it show as
     idle.
@@ -198,8 +198,11 @@ Both hosts, matched windows A (11-16 00–06Z) and B (11-22 00–05Z), Mimir:
 
 ## 4. What changed
 
-All four keep every answer the same. Each has a deterministic test that fails on the old
-code, and a benchmark.
+All four keep every answer the same, and each has a benchmark.
+- 4.3 and 4.4 carry a test that fails on the old code's allocations.
+- 4.1's tests compare the new scan with the full scan through the production writers, and
+  fail on either broken variant.
+- 4.2 has a guard test of its answers.
 
 ### 4.1 connect: the indexed donor scan (8a41fb8f, branch `perf/cpuopt7-proxy-1122`)
 
@@ -316,7 +319,7 @@ From §2's shares, at about 22.5 proxy cores per host:
 | 4.2 `IsDone` | 0.2–0.3 | 0.1 | 4.1% / 1.5% reaper pass, 20–30% of it |
 | 4.3 `encodeUuid` | 0.15–0.2 | 0.3–0.35 | 1.0% / 2.0% of a process, about 75% of it removed |
 | 4.4 page reads | 0.05–0.2 | 0.05–0.2 | 5.4% of allocation is page copies; the saved share is the filter's (unmeasured, 10–30%) plus the pointer slice, through GC |
-| **Total** | **1.9–2.4** | **1.0–1.4** | about 3–4 of the fleet's 45 proxy cores |
+| **Total** | **1.8–2.4** | **1.1–1.5** | about 3–4 of the fleet's 45 proxy cores |
 
 - Only 4.4 lands on main now. 4.1–4.3 reach the proxy when its build pins the connect and
   sdk commits (§7).
@@ -413,12 +416,23 @@ follows the 11-21 hotfix roll.
 
 ## 8. Tests run
 
-- **server** (`perf/cpuopt7-proxy-1122` and the merged tree): build; vet; `./grafana` with
-  `URNETWORK_PROMTOOL` (promtool 3.5.0) in a pure env; `TestBuildsForDarwin`; the new
-  model tests; the 91 FindProviders2 and score-read DB tests; the proxy package (DB). All
-  DB tests ran through test-env.sh after confirming that local-pg and local-redis resolve
-  to 10.213.0.1 and both containers are healthy. No `./monitor/` tests were run (planetoid
-  runs the monitor).
-- **connect:** the new tests; the multi-client subset; the full root package run, with its
-  result recorded in the landing notes.
-- **sdk:** the new tests.
+- **server, on the exact merge tree** (`perf/cpuopt7-proxy-1122` merged `--no-ff` on main
+  `5a3622fca`), 06:15–06:22Z:
+  - build;
+  - vet of `.`, session, model, localclient, proxy, api, connect, controller,
+    bringyourctl and taskworker/work;
+  - `./grafana` with `URNETWORK_PROMTOOL` (promtool 3.5.0) in a pure env;
+  - `TestBuildsForDarwin`;
+  - the new model tests, 2/2;
+  - the FindProviders2, score-read and page-cache DB tests, 91/91.
+- **server proxy package** (DB, on the branch with the connect branch as its sibling, so
+  the proxy's own tests ran the indexed donor scan): ok in 659 s, 330 passed, 0 failed.
+- **DB tests** ran through test-env.sh after confirming that local-pg and local-redis
+  resolve to 10.213.0.1 and both containers are healthy. No `./monitor/` tests were run
+  (planetoid runs the monitor).
+- **connect:**
+  - the new tests pass on the branch and on the deployed pin `e9148707`;
+  - the multi-client subset (§4.1) passes after the source test update;
+  - the full root package (9,074 tests) is the branch's merge gate, run on the merged tree
+    before it merges.
+- **sdk:** the new tests pass.
