@@ -317,6 +317,11 @@ func runGkmConcurrencyReform(t testing.TB, settings *gkmConcurrencyReformSetting
 		answers[resumed][first.name] = reseedGroupId
 	}
 
+	// each stage past the contention on a bound of its own, so a convergence that runs out its bound leaves the writes
+	// and reads after it their time
+	cancel()
+	ctx, cancel = self.world.StepContext(t.Context(), caseSettings.PhaseTimeout)
+	defer cancel()
 	// a re-form's first generation past the ladder may need a sync to land, which a lost hint delays to a resync
 	if err := self.awaitConvergence(ctx, "after the re-forms", caseSettings.convergenceBound(true)); err != nil {
 		t.Errorf("%v", err)
@@ -381,6 +386,9 @@ func runGkmConcurrencyReform(t testing.TB, settings *gkmConcurrencyReformSetting
 	}
 
 	// every member's write under the newest generation reads on every other member
+	cancel()
+	ctx, cancel = self.world.StepContext(t.Context(), caseSettings.PhaseTimeout)
+	defer cancel()
 	for _, repo := range repos {
 		for _, device := range devices {
 			if err := self.write(ctx, device, repo, fmt.Sprintf("after-%s.txt", device.name)); err != nil {

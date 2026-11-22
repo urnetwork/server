@@ -65,8 +65,10 @@
 //
 // Not here, each for the reason given: EvsShares, since the world's networks are personal and admit only their owner
 // member's untagged devices, every one a consented reader of every owner-bound repo, so a share names no new holder;
-// and a restart of a device keeping its keychain, since sidecart3 starts a T3Sidecar on a memory instance of its own
-// and offers no restart on it, so a device here can only die. A re-form under contention and a personal network's
+// a restart of a device keeping its keychain, since sidecart3 starts a T3Sidecar on a memory instance of its own and
+// offers no restart on it, so a device here can only die; and admissions beside revocations, since T3Network.Admit
+// syncs on every device that follows, a revoked one's included, so the case admits in the growth phase and revokes in
+// the shrink phase, filing its own statements with a sync that waits on no revoked or closed device. A re-form under contention and a personal network's
 // new second device are cases of their own below (TestE2eGkmConcurrencyReform, TestE2eGkmConcurrencySecondDevice).
 //
 // A failure from a product bug stays failing; the case reports it with its evidence and runs on, so one finding does
@@ -476,13 +478,70 @@ func runGkmConcurrency(t testing.TB, settings *gkmConcurrencySettings) {
 	self.accountRefusals("the dying writer's phase")
 	self.finalPhase()
 	self.accountRefusals("the final phase")
+	self.checkModel()
 	self.checkGenerations()
 	self.checkDeliveries()
 	self.checkShrinksRotated()
 	self.checkKeychains()
 	self.checkAlarms()
 	self.checkChaos()
+	self.logJoiners()
 	self.logSummary()
+}
+
+// The case's record of who reads each repo agrees with the readers the owner's newest verified state gives
+// (ConfigState.RepoReaders, §8's RepoReaders, the key holders of a repo no agent, Delegation or recovery binding reads),
+// so no check here rests on a record the product would not share.
+func (self *gkmConcurrencyCase) checkModel() {
+	follower := self.owner.device.Follower()
+	if follower == nil || follower.Client() == nil || follower.Client().State() == nil {
+		self.t.Errorf("the owner follows no log to check the case's record by")
+		return
+	}
+	state := follower.Client().State()
+	for _, repo := range self.repoList() {
+		readers := state.RepoReaders(repo.repoId)
+		for _, device := range self.deviceList() {
+			recorded := self.holdsAt(repo, device, state.Pin().GetVersion())
+			if read := slices.Contains(readers, device.sidecarId); read != recorded {
+				self.t.Errorf("at log position %d the owner's state has %s reading %s %t, the case's record %t", state.Pin().GetVersion(), device.name, repo.name, read, recorded)
+			}
+		}
+	}
+}
+
+// How each device admitted during the churn took each repo's key: deliveries gkm took for it, and how many of them
+// followed a late ask of its own (KF2: the admission's signer writes the first wrap at once, or the device asks late).
+func (self *gkmConcurrencyCase) logJoiners() {
+	for _, device := range self.deviceList() {
+		if !device.joined {
+			continue
+		}
+		for _, repo := range self.repoList() {
+			groupId, ok := self.repoGroup(repo)
+			if !ok || !self.holdsAt(repo, device, math.MaxUint64) {
+				continue
+			}
+			firstAsk := time.Time{}
+			for _, ask := range self.origin.askList() {
+				if ask.sidecarId == device.sidecarId && ask.groupId == groupId && (firstAsk.IsZero() || ask.time.Before(firstAsk)) {
+					firstAsk = ask.time
+				}
+			}
+			unasked, asked := 0, 0
+			for _, delivery := range self.origin.deliveryList() {
+				if delivery.recipient != device.sidecarId || delivery.groupId != groupId || delivery.status != 201 {
+					continue
+				}
+				if firstAsk.IsZero() || delivery.time.Before(firstAsk) {
+					unasked += 1
+				} else {
+					asked += 1
+				}
+			}
+			self.t.Logf("%s, admitted during the churn, took %s's keys by %d deliveries made before any late ask of its own and %d after one", device.name, repo.name, unasked, asked)
+		}
+	}
 }
 
 // Every device, in the order the case added them.
