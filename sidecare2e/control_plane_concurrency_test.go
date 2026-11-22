@@ -44,7 +44,8 @@
 //     rows and the exchange agree on who is a member and who is admitted; a revoked or removed device is refused at the
 //     exchange's projection (controlPlaneExchange, since a device that learned of its revocation asks for nothing), and
 //     a removed member's devices are revoked in every live device's state (§7.10: a MemberRevoke revokes the member's
-//     untagged devices) and their clients deactivated at api; the share's subject is granted the vault's read and takes
+//     untagged devices) and their clients deactivated at api, and api holds every rev/ object its removal owes within
+//     RevocationSettleTimeout; the share's subject is granted the vault's read and takes
 //     its key while the share stands, is refused the read once it is revoked, and takes no later generation; at the
 //     next rotation of the config repo every live device, the team's tagged sidecars among them, takes the new
 //     generation while no revoked or removed one does; and the team's tagged sidecars, the Admin's keys, outlive the
@@ -138,6 +139,10 @@ type controlPlaneSettings struct {
 	// How long a device's key client may take to hold a rotated generation, and how often it is asked meanwhile.
 	RotationSettleTimeout  time.Duration
 	RotationSettleInterval time.Duration
+	// How long a member's removal may take to land every rev/ object it owes (§7.10), its MemberRevoke's effects
+	// writing theirs as a task does, with no hook a test reads, and how often the store is asked meanwhile.
+	RevocationSettleTimeout  time.Duration
+	RevocationSettleInterval time.Duration
 	// How a preview is asked again while evs answers unavailable.
 	Retry *controlPlaneRetrySettings
 	// The team's settings.
@@ -176,16 +181,18 @@ func defaultControlPlaneSettings() *controlPlaneSettings {
 		RaceGrant: func(index int) string {
 			return fmt.Sprintf(`{"src": ["autogroup:member"], "dst": ["dns:race-%d"], "allow": ["admin"]}`, index)
 		},
-		GateBound:              5 * time.Second,
-		ReadSettleTimeout:      90 * time.Second,
-		ReadSettleInterval:     500 * time.Millisecond,
-		RotationSettleTimeout:  90 * time.Second,
-		RotationSettleInterval: 250 * time.Millisecond,
-		Retry:                  &controlPlaneRetrySettings{Timeout: 2 * time.Minute, Interval: 500 * time.Millisecond},
-		Team:                   team,
-		Ledgers:                defaultControlPlaneLedgerSettings(),
-		Bursts:                 DefaultWorldBurstSettings(),
-		PhaseTimeout:           4 * time.Minute,
+		GateBound:                5 * time.Second,
+		ReadSettleTimeout:        90 * time.Second,
+		ReadSettleInterval:       500 * time.Millisecond,
+		RotationSettleTimeout:    90 * time.Second,
+		RotationSettleInterval:   250 * time.Millisecond,
+		RevocationSettleTimeout:  60 * time.Second,
+		RevocationSettleInterval: 250 * time.Millisecond,
+		Retry:                    &controlPlaneRetrySettings{Timeout: 2 * time.Minute, Interval: 500 * time.Millisecond},
+		Team:                     team,
+		Ledgers:                  defaultControlPlaneLedgerSettings(),
+		Bursts:                   DefaultWorldBurstSettings(),
+		PhaseTimeout:             4 * time.Minute,
 	}
 }
 
