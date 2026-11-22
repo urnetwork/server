@@ -35,10 +35,8 @@ func TestTlsEdgeStorePassesItsSuite(t *testing.T) {
 			AddLabel: func(ctx context.Context, networkId sidecar.Id) (string, error) {
 				id := server.Id(networkId)
 				Testing_CreateNetwork(ctx, id, "tls-"+strings.ReplaceAll(id.String()[24:], "-", ""), server.NewId())
-				// a label takes its place in the map's serial order when its zone is made, as publishing makes it
-				if _, err := EnsureNetworkZone(ctx, id, root); err != nil {
-					return "", err
-				}
+				// drawn alone, as a sidecar's first GET /sidecar/label draws it: the draw takes its place in the
+				// map's serial order
 				return EnsureNetworkLabel(ctx, id, root)
 			},
 			AddCustomHost: func(ctx context.Context, networkId sidecar.Id, host string, ownerHost string, active bool) error {

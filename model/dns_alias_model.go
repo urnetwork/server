@@ -172,15 +172,6 @@ func getNetworkNameInTx(ctx context.Context, query server.PgCanQuery, networkId 
 	return name
 }
 
-// Takes the network's label lock to the end of the transaction, as EnsureNetworkLabelInTx takes it.
-func lockDnsLabelInTx(ctx context.Context, tx server.PgTx, networkId server.Id) {
-	server.RaisePgResult(tx.Exec(
-		ctx,
-		`SELECT pg_advisory_xact_lock(hashtextextended('dns_label:' || $1::uuid::text, 0))`,
-		networkId,
-	))
-}
-
 // The alias row at the alias's apex: holding its label's apex once certified, nothing before (reading
 // 11).
 func dnsAliasRecordSet(root string, alias string, labelApex string) dnsservice.DnsRecordSet {

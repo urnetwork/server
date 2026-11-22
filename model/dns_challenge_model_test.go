@@ -126,13 +126,15 @@ func TestDnsChallengeWhileRestoring(t *testing.T) {
 		defer Testing_SetDnsChallengesPerNameHour(10)()
 		root := testDnsRoot(t, ctx)
 		_, apex := testDnsNetwork(t, ctx, root)
+		// the label's zone, written with the draw
+		base := testDnsRootSerial(t, ctx, root)
 		if err := SetDnsRestoring(ctx, root, true); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := DnsPutChallenge(ctx, &DnsChallengeArgs{Root: root, Name: apex, Values: []string{"digest"}}); !errors.Is(err, dnsservice.ErrDnsRestoring) {
 			t.Fatalf("a challenge while restoring answered %v", err)
 		}
-		requireDnsSerial(t, ctx, root, 0)
+		requireDnsSerial(t, ctx, root, base)
 	})
 }
 

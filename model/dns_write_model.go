@@ -351,6 +351,8 @@ func DnsWriteInTx(ctx context.Context, tx server.PgTx, args *DnsWriteArgs) (*Dns
 	if err != nil {
 		return nil, err
 	}
+	// a name of the zone's network no write placed in the label map's serial order takes this one's
+	stampUnplacedDnsLabelsInTx(ctx, tx, args.Root, args.NetworkId, serial)
 	if args.AdminEvent != nil {
 		AddAdminEventInTx(ctx, tx, args.AdminEvent)
 	}

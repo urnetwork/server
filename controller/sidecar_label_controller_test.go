@@ -252,3 +252,74 @@ func TestSidecarLabelRefusesWithoutARoot(t *testing.T) {
 		})
 	})
 }
+
+// In a root that takes serials, the route's first draw writes the label's zone with it, so the label comes back
+// from a read of the label map since the cursor a tlsedge held before the request, at the zone's serial: a label
+// left at serial 0 there was never routed by a running tlsedge.
+func TestSidecarLabelDrawTakesItsPlaceInTheLabelMap(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		if !server.SidecarMg5Linked() {
+			return
+		}
+		ctx := context.Background()
+		root := testSidecarLabelRoot()
+		defer model.Testing_SetDnsUserRoot(root)()
+		if err := model.EnsureDnsRoot(ctx, root+"."); err != nil {
+			t.Fatal(err)
+		}
+		cursor, err := model.DnsLabelMapSnapshot(ctx, root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		networkId, network := testSidecarLabelNetwork(t, ctx)
+		answer, err := GetSidecarLabel(testSidecarLabelClientSession(ctx, network))
+		if err != nil {
+			t.Fatal(err)
+		}
+		since, err := model.DnsLabelMapSince(ctx, root, cursor.Serial)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(since.Entries) != 1 || since.Entries[0].Label != answer.Label || since.Entries[0].NetworkId == nil || *since.Entries[0].NetworkId != networkId || since.Entries[0].ChangeSerial <= cursor.Serial {
+			t.Fatalf("the read since %d after the draw of %q: %+v", cursor.Serial, answer.Label, since.Entries)
+		}
+	})
+}
+
+// While the root is restoring, a first request answers 503 unavailable and allocates nothing, since the draw would
+// write the label's zone and a restoring root refuses every write (§12.6); a network that has its label is answered
+// it, since that draws nothing.
+func TestSidecarLabelWhileRestoringRefusesAFirstDraw(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		if !server.SidecarMg5Linked() {
+			return
+		}
+		ctx := context.Background()
+		root := testSidecarLabelRoot()
+		defer model.Testing_SetDnsUserRoot(root)()
+		if err := model.EnsureDnsRoot(ctx, root+"."); err != nil {
+			t.Fatal(err)
+		}
+		_, labeledNetwork := testSidecarLabelNetwork(t, ctx)
+		labeled, err := GetSidecarLabel(testSidecarLabelClientSession(ctx, labeledNetwork))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := model.SetDnsRestoring(ctx, root+".", true); err != nil {
+			t.Fatal(err)
+		}
+		networkId, network := testSidecarLabelNetwork(t, ctx)
+		answer, err := GetSidecarLabel(testSidecarLabelClientSession(ctx, network))
+		var apiErr *sidecar.DnsApiError
+		if answer != nil || !errors.As(err, &apiErr) || apiErr.Status != http.StatusServiceUnavailable || apiErr.Code != sidecar.DnsApiCodeUnavailable {
+			t.Fatalf("a first draw while restoring: %+v, %v", answer, err)
+		}
+		if rows := testSidecarLabelRows(ctx, networkId, root); len(rows) != 0 {
+			t.Fatalf("a refused draw left labels %v", rows)
+		}
+		again, err := GetSidecarLabel(testSidecarLabelClientSession(ctx, labeledNetwork))
+		if err != nil || *again != *labeled {
+			t.Fatalf("a labeled network while restoring: %+v, %v; before %+v", again, err, labeled)
+		}
+	})
+}

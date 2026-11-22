@@ -2,10 +2,11 @@ package model
 
 // A network's zone in a root (DNS-M5-11; plan reading 2): network_dns_zone's
 // row, its label, and §12.7's system set written from the row's state. A zone
-// comes to be on first need, as its label does (§12.5): a first publish or
-// order, or /mail/enable. Every change of its state recomputes the whole set
-// (dns_system_records_model.go) and writes one journal row when it changed and
-// none otherwise.
+// comes to be with its label, on the label's first need (§12.5): a read, a
+// first publish or order, or /mail/enable. Its first write is the one that
+// places the label in the label map's serial order (dns_label_model.go). Every
+// change of its state recomputes the whole set (dns_system_records_model.go)
+// and writes one journal row when it changed and none otherwise.
 //
 // One input of the set is not the zone's own: _mta-sts follows the network's
 // verification (owner decision 630), which changes with no write to the zone,
@@ -106,7 +107,8 @@ func ensureNetworkZoneInTx(ctx context.Context, tx server.PgTx, networkId server
 		ttl = dnsZoneTtl()
 	}
 	root = dnsLabelRoot(root)
-	label, err := EnsureNetworkLabelInTx(ctx, tx, networkId, root)
+	// this write is the one that places a new label in the root's serial order
+	label, err := ensureNetworkLabelForZoneInTx(ctx, tx, networkId, root)
 	if err != nil {
 		return nil, err
 	}
@@ -261,8 +263,8 @@ func DnsSyncEdgeRecordsInTx(ctx context.Context, tx server.PgTx, networkId serve
 		return nil, ErrDnsUnlinked
 	}
 	root = dnsLabelRoot(root)
-	// the label's lock, then the zone's, as EnsureNetworkZoneInTx takes them
-	if _, err := EnsureNetworkLabelInTx(ctx, tx, networkId, root); err != nil {
+	// the label's lock, then the zone's, as EnsureNetworkZoneInTx takes them; its write places a new label
+	if _, err := ensureNetworkLabelForZoneInTx(ctx, tx, networkId, root); err != nil {
 		return nil, err
 	}
 	lockDnsZoneInTx(ctx, tx, root, networkId)

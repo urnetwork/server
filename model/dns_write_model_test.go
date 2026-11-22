@@ -77,6 +77,8 @@ func TestDnsWritersInOneRootTakeConsecutiveSerials(t *testing.T) {
 		root := testDnsRoot(t, ctx)
 		firstNetworkId, firstApex := testDnsNetwork(t, ctx, root)
 		secondNetworkId, secondApex := testDnsNetwork(t, ctx, root)
+		// each label was drawn with its zone, at a serial of its own
+		base := testDnsRootSerial(t, ctx, root)
 
 		held := make(chan struct{})
 		release := make(chan struct{})
@@ -121,8 +123,8 @@ func TestDnsWritersInOneRootTakeConsecutiveSerials(t *testing.T) {
 			results <- result
 			errs <- err
 		}()
-		// the second reaches the row lock while the first holds serial 1 uncommitted: had it not waited
-		// there, it would read serial 0 too and its journal row would collide
+		// the second reaches the row lock while the first holds the next serial uncommitted: had it not
+		// waited there, it would read the same serial too and its journal row would collide
 		<-secondBefore
 		close(release)
 		<-secondDone
@@ -133,11 +135,11 @@ func TestDnsWritersInOneRootTakeConsecutiveSerials(t *testing.T) {
 			}
 			serials[(<-results).Serial] = true
 		}
-		if !serials[1] || !serials[2] {
-			t.Fatalf("serials %v", serials)
+		if !serials[base+1] || !serials[base+2] {
+			t.Fatalf("serials %v from %d", serials, base)
 		}
-		if rows := testDnsJournal(t, ctx, root, 0); len(rows) != 2 || rows[0].Serial != 1 || rows[1].Serial != 2 {
-			t.Fatalf("journal %+v", rows)
+		if rows := testDnsJournal(t, ctx, root, base); len(rows) != 2 || rows[0].Serial != base+1 || rows[1].Serial != base+2 {
+			t.Fatalf("journal %+v from %d", rows, base)
 		}
 	})
 }
@@ -149,6 +151,8 @@ func TestDnsWriteCommitsBeforeTheRaise(t *testing.T) {
 		ctx := context.Background()
 		root := testDnsRoot(t, ctx)
 		networkId, apex := testDnsNetwork(t, ctx, root)
+		// the label's zone, written and raised with the draw
+		base := testDnsRootSerial(t, ctx, root)
 
 		atRaise := make(chan struct{})
 		release := make(chan struct{})
@@ -166,22 +170,22 @@ func TestDnsWriteCommitsBeforeTheRaise(t *testing.T) {
 			done <- err
 		}()
 		<-atRaise
-		if rows := testDnsJournal(t, ctx, root, 0); len(rows) != 1 {
+		if rows := testDnsJournal(t, ctx, root, base); len(rows) != 1 {
 			t.Fatalf("the committed row reads as %+v", rows)
 		}
 		raised, err := GetDnsRaisedSerial(ctx, nil, root)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if raised != 0 {
-			t.Fatalf("the key holds %d before the raise", raised)
+		if raised != base {
+			t.Fatalf("the key holds %d before the raise, from %d", raised, base)
 		}
 		close(release)
 		if err := <-done; err != nil {
 			t.Fatal(err)
 		}
-		if raised, _ := GetDnsRaisedSerial(ctx, nil, root); raised != 1 {
-			t.Fatalf("the key holds %d after the raise", raised)
+		if raised, _ := GetDnsRaisedSerial(ctx, nil, root); raised != base+1 {
+			t.Fatalf("the key holds %d after the raise, from %d", raised, base)
 		}
 	})
 }
@@ -238,11 +242,12 @@ func TestDnsLintRefusalRollsTheWriteBack(t *testing.T) {
 		ctx := context.Background()
 		root := testDnsRoot(t, ctx)
 		networkId, apex := testDnsNetwork(t, ctx, root)
-		if _, err := DnsWrite(ctx, &DnsWriteArgs{Root: root, NetworkId: networkId, Upserts: []dnsservice.DnsRecordSet{testDnsTxt("www."+apex, "one")}}); err != nil {
+		written, err := DnsWrite(ctx, &DnsWriteArgs{Root: root, NetworkId: networkId, Upserts: []dnsservice.DnsRecordSet{testDnsTxt("www."+apex, "one")}})
+		if err != nil {
 			t.Fatal(err)
 		}
 		gateRan := false
-		_, err := DnsWrite(ctx, &DnsWriteArgs{
+		_, err = DnsWrite(ctx, &DnsWriteArgs{
 			Root:      root,
 			NetworkId: networkId,
 			Upserts: []dnsservice.DnsRecordSet{{
@@ -261,7 +266,7 @@ func TestDnsLintRefusalRollsTheWriteBack(t *testing.T) {
 		if !gateRan {
 			t.Fatal("the gate did not run first")
 		}
-		requireDnsSerial(t, ctx, root, 1)
+		requireDnsSerial(t, ctx, root, written.Serial)
 		var mapVersion int64
 		server.Db(ctx, func(conn server.PgConn) {
 			server.Raise(conn.QueryRow(ctx, `SELECT custom_host_map_version FROM dns_root WHERE root = $1`, root).Scan(&mapVersion))
@@ -278,6 +283,7 @@ func TestDnsGateAnswerWritesNothing(t *testing.T) {
 		ctx := context.Background()
 		root := testDnsRoot(t, ctx)
 		networkId, apex := testDnsNetwork(t, ctx, root)
+		base := testDnsRootSerial(t, ctx, root)
 		result, err := DnsWrite(ctx, &DnsWriteArgs{
 			Root:      root,
 			NetworkId: networkId,
@@ -289,7 +295,7 @@ func TestDnsGateAnswerWritesNothing(t *testing.T) {
 		if err != nil || !result.Answered || result.Serial != 0 {
 			t.Fatalf("result %+v, err %v", result, err)
 		}
-		requireDnsSerial(t, ctx, root, 0)
+		requireDnsSerial(t, ctx, root, base)
 	})
 }
 
@@ -300,6 +306,7 @@ func TestDnsWriteWhileRestoringTakesNoSerial(t *testing.T) {
 		ctx := context.Background()
 		root := testDnsRoot(t, ctx)
 		networkId, apex := testDnsNetwork(t, ctx, root)
+		base := testDnsRootSerial(t, ctx, root)
 		if err := SetDnsRestoring(ctx, root, true); err != nil {
 			t.Fatal(err)
 		}
@@ -307,8 +314,8 @@ func TestDnsWriteWhileRestoringTakesNoSerial(t *testing.T) {
 		if !errors.Is(err, dnsservice.ErrDnsRestoring) {
 			t.Fatalf("a write while restoring answered %v", err)
 		}
-		requireDnsSerial(t, ctx, root, 0)
-		if rows := testDnsJournal(t, ctx, root, 0); len(rows) != 0 {
+		requireDnsSerial(t, ctx, root, base)
+		if rows := testDnsJournal(t, ctx, root, base); len(rows) != 0 {
 			t.Fatalf("journal %+v", rows)
 		}
 	})
@@ -390,13 +397,15 @@ func TestDnsJournalPurgeLeavesAGap(t *testing.T) {
 		ctx := context.Background()
 		root := testDnsRoot(t, ctx)
 		networkId, apex := testDnsNetwork(t, ctx, root)
+		// the label's zone took the serials up to base; the three writes take the next three
+		base := testDnsRootSerial(t, ctx, root)
 		for index := range 3 {
 			if _, err := DnsWrite(ctx, &DnsWriteArgs{Root: root, NetworkId: networkId, Upserts: []dnsservice.DnsRecordSet{testDnsTxt(fmt.Sprintf("w%d.", index)+apex, "one")}}); err != nil {
 				t.Fatal(err)
 			}
 		}
 		server.Db(ctx, func(conn server.PgConn) {
-			server.RaisePgResult(conn.Exec(ctx, `UPDATE dns_zone_journal SET commit_time = $2 WHERE root = $1 AND serial <= 2`, root, server.NowUtc().Add(-8*24*time.Hour)))
+			server.RaisePgResult(conn.Exec(ctx, `UPDATE dns_zone_journal SET commit_time = $2 WHERE root = $1 AND serial <= $3`, root, server.NowUtc().Add(-8*24*time.Hour), int64(base+2)))
 		})
 		purgedCount, err := PurgeDnsJournals(ctx, server.NowUtc())
 		if err != nil {
@@ -412,7 +421,7 @@ func TestDnsJournalPurgeLeavesAGap(t *testing.T) {
 		if !read.Gap {
 			t.Fatalf("a reader below the purge: %+v", read)
 		}
-		if rows := testDnsJournal(t, ctx, root, 2); len(rows) != 1 {
+		if rows := testDnsJournal(t, ctx, root, base+2); len(rows) != 1 {
 			t.Fatalf("a reader at the purge: %+v", rows)
 		}
 	})
