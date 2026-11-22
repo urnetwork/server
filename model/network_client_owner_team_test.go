@@ -6,10 +6,15 @@ package model
 // TEAM-M6-02), on Postgres with MG0, MG1 and MG6. A team's admin_user_id is a
 // synthetic owner of record that never signs in, so a credential that names a
 // key's creator without its member_id is refused by the state check in a team.
-// Every enrollment there mints on the creator's live membership, the
+// Every enrollment there runs on the creator's live membership, the
 // credential §7.5 puts member_id in, whatever the key is; a key whose creator
 // holds no live membership enrolls nothing and answers 401 auth_key_invalid,
-// never 500. A personal network's enrollment is unchanged.
+// never 500. An untagged client's token, ephemeral or not, names that
+// membership. A tagged client is the network's (owner decision 83), so its
+// token names the team's owner of record with no member_id (QD-1194), which
+// the state check takes only as a tagged lineage's client credential, and it
+// outlives its sponsor's membership. A personal network's enrollment is
+// unchanged.
 
 import (
 	"bytes"
@@ -197,12 +202,14 @@ func denyTeamEnrollMember(t testing.TB, ctx context.Context, networkId server.Id
 	return denied
 }
 
-// A team's tagged enrollment lands on the key creator's membership: its token
-// names the team and the creator's member_id, which the state check takes, so
-// the mint answers the client rather than 500; its owner row has no owner and
-// the creator for its sponsor (§7.7); and the client's own token mints its
-// window client, as a tagged sidecar's does in a personal network.
-func TestTeamTaggedEnrollmentMintsOnTheCreatorsMembership(t *testing.T) {
+// A team's tagged enrollment runs on the key creator's membership and lands on
+// the team's own identity (QD-1194): its token names the team's owner of
+// record with no member_id, which the state check takes as a tagged client's
+// credential, so the mint answers the client rather than 500; its owner row
+// has no owner and the creator for its sponsor (§7.7); and the client's own
+// token mints its window client, whose token names the owner of record too and
+// validates, as a tagged sidecar's does in a personal network.
+func TestTeamTaggedEnrollmentMintsOnTheOwnerOfRecord(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		self := newTeamEnrollFixture(t, NetworkMemberRoleAdmin)
 		bearer, authKeyId := newTeamEnrollAuthKey(t, self.creatorSession, &CreateAuthKeyArgs{Tags: []string{teamEnrollTagHex}})
@@ -218,10 +225,11 @@ func TestTeamTaggedEnrollmentMintsOnTheCreatorsMembership(t *testing.T) {
 
 		byJwt := requireTeamEnrollCredential(t, self.ctx, result)
 		connect.AssertEqual(t, byJwt.NetworkId, self.networkId)
-		connect.AssertEqual(t, byJwt.UserId, self.creatorUserId)
-		if byJwt.MemberId == nil || *byJwt.MemberId != self.creator.MemberId {
-			t.Fatalf("the tagged credential names member %v, not the creator's %s", byJwt.MemberId, self.creator.MemberId)
+		connect.AssertEqual(t, byJwt.UserId, self.ownerOfRecordId)
+		if byJwt.MemberId != nil {
+			t.Fatalf("the tagged credential names member %s, not the team's own identity", *byJwt.MemberId)
 		}
+		connect.AssertEqual(t, byJwt.RootClientId != nil && *byJwt.RootClientId == result.ClientId, true)
 
 		row := readTeamEnrollOwnerRow(t, self.ctx, result.ClientId)
 		connect.AssertEqual(t, row.tagged, true)
@@ -243,10 +251,18 @@ func TestTeamTaggedEnrollmentMintsOnTheCreatorsMembership(t *testing.T) {
 			Description:    "window",
 			DeviceSpec:     "team sidecar",
 		}, enrolledSession)
-		if err != nil || child.Error != nil || child.ClientId == nil {
+		if err != nil || child.Error != nil || child.ClientId == nil || child.ByClientJwt == nil {
 			t.Fatalf("the tagged sidecar's window client: %v %+v", err, child)
 		}
 		connect.AssertEqual(t, child.AdminRefused && child.StrictExp, true)
+		childJwt, err := session.ParseByJwt(self.ctx, *child.ByClientJwt)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, childJwt.UserId, self.ownerOfRecordId)
+		connect.AssertEqual(t, childJwt.MemberId == nil, true)
+		connect.AssertEqual(t, childJwt.RootClientId != nil && *childJwt.RootClientId == result.ClientId, true)
+		if err := session.ValidateByJwtState(self.ctx, childJwt, true); err != nil {
+			t.Fatalf("the window client's credential: %v", err)
+		}
 	})
 }
 
@@ -257,7 +273,8 @@ func TestTeamTaggedEnrollmentMintsOnTheCreatorsMembership(t *testing.T) {
 // member's recovery scope, its evs access being §8.6's ceiling that its
 // admission sets. The member's removal ends it with the member's devices. A
 // tagged ephemeral key's client is tagged and ephemeral, sponsored by the
-// creator.
+// creator, and the network's: its token names the team's owner of record, and
+// it and its credential outlive the member's removal (QD-1194).
 func TestTeamEphemeralEnrollmentIsItsCreatorsMemberDevice(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		self := newTeamEnrollFixture(t, NetworkMemberRoleMember)
@@ -298,7 +315,9 @@ func TestTeamEphemeralEnrollmentIsItsCreatorsMemberDevice(t *testing.T) {
 		if err != nil {
 			t.Fatalf("the team's tagged ephemeral enrollment: %v", err)
 		}
-		requireTeamEnrollCredential(t, self.ctx, tagged)
+		taggedJwt := requireTeamEnrollCredential(t, self.ctx, tagged)
+		connect.AssertEqual(t, taggedJwt.UserId, self.ownerOfRecordId)
+		connect.AssertEqual(t, taggedJwt.MemberId == nil, true)
 		taggedRow := readTeamEnrollOwnerRow(t, self.ctx, tagged.ClientId)
 		connect.AssertEqual(t, taggedRow.tagged && taggedRow.ephemeral, true)
 		connect.AssertEqual(t, taggedRow.ownerUserId == nil && taggedRow.memberId == nil, true)
@@ -306,13 +325,17 @@ func TestTeamEphemeralEnrollmentIsItsCreatorsMemberDevice(t *testing.T) {
 		connect.AssertEqual(t, tagged.Close != "", true)
 
 		// the member's removal deactivates its untagged ephemeral device, and its
-		// credential with it; the tagged agent's client stays (owner decision 83)
+		// credential with it; the tagged agent's client stays (owner decision 83),
+		// and so does its credential
 		denied := denyTeamEnrollMember(t, self.ctx, self.networkId, self.creator.MemberId)
 		connect.AssertEqual(t, denied.DeactivatedClientCount, int64(1))
 		connect.AssertEqual(t, readTeamEnrollClientActive(t, self.ctx, result.ClientId), false)
 		connect.AssertEqual(t, readTeamEnrollClientActive(t, self.ctx, tagged.ClientId), true)
 		if err := session.ValidateByJwtState(self.ctx, byJwt, true); err == nil {
 			t.Fatal("the removed member's ephemeral device's credential still validates")
+		}
+		if err := session.ValidateByJwtState(self.ctx, taggedJwt, true); err != nil {
+			t.Fatalf("the tagged ephemeral agent's credential past its sponsor's removal: %v", err)
 		}
 	})
 }
@@ -363,12 +386,32 @@ func TestTeamEnrollmentOfAKeyWhoseCreatorLeftIsRefused(t *testing.T) {
 	})
 }
 
-// A team's tagged agent outlives its sponsor's membership as a client (owner
-// decision 83), and api keeps it active; its credential, which names that
-// membership, is refused by the state check once the membership is gone. That
-// end fails closed until questions/team-tagged-enroll-tagged-credential-past-sponsor.md
-// is answered.
-func TestTeamTaggedCredentialFailsClosedPastItsSponsor(t *testing.T) {
+// A window client the token mints, its credential parsed.
+func mintTeamEnrollWindowClient(t testing.TB, enrolledSession *session.ClientSession, sourceClientId server.Id) *session.ByJwt {
+	t.Helper()
+	child, err := AuthNetworkClient(&AuthNetworkClientArgs{
+		SourceClientId: &sourceClientId,
+		Description:    "window",
+		DeviceSpec:     "team sidecar",
+	}, enrolledSession)
+	if err != nil || child.Error != nil || child.ByClientJwt == nil {
+		t.Fatalf("the tagged sidecar's window client: %v %+v", err, child)
+	}
+	childJwt, err := session.ParseByJwt(enrolledSession.Ctx, *child.ByClientJwt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return childJwt
+}
+
+// A team's tagged agent outlives its sponsor's membership as a client and at
+// api (owner decision 83; QD-1194): once the sponsor is removed, api keeps the
+// client and its window client active, and its credential, which names the
+// team's owner of record, still passes the state check, refreshes, and mints a
+// window client, on SQL and on the revocation record alike, as a window
+// client minted before the removal still does. The client's removal ends every
+// one of them.
+func TestTeamTaggedCredentialOutlivesItsSponsor(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		self := newTeamEnrollFixture(t, NetworkMemberRoleAdmin)
 		bearer, _ := newTeamEnrollAuthKey(t, self.creatorSession, &CreateAuthKeyArgs{Tags: []string{teamEnrollTagHex}})
@@ -377,12 +420,65 @@ func TestTeamTaggedCredentialFailsClosedPastItsSponsor(t *testing.T) {
 			t.Fatal(err)
 		}
 		byJwt := requireTeamEnrollCredential(t, self.ctx, result)
+		enrolledSession := session.NewLocalClientSession(self.ctx, "192.0.2.9:1", byJwt)
+		defer enrolledSession.Cancel()
+		windowBefore := mintTeamEnrollWindowClient(t, enrolledSession, result.ClientId)
 
 		denied := denyTeamEnrollMember(t, self.ctx, self.networkId, self.creator.MemberId)
 		connect.AssertEqual(t, denied.DeactivatedClientCount, int64(0))
 		connect.AssertEqual(t, readTeamEnrollClientActive(t, self.ctx, result.ClientId), true)
-		if err := session.ValidateByJwtState(self.ctx, byJwt, true); err == nil {
-			t.Fatal("a tagged credential naming a removed membership validates")
+		connect.AssertEqual(t, readTeamEnrollClientActive(t, self.ctx, *windowBefore.ClientId), true)
+		if err := session.ValidateByJwtState(self.ctx, byJwt, true); err != nil {
+			t.Fatalf("the tagged credential past its sponsor's removal: %v", err)
+		}
+		if err := session.ValidateByJwtState(self.ctx, windowBefore, true); err != nil {
+			t.Fatalf("its window client's credential past its sponsor's removal: %v", err)
+		}
+
+		// the refresh, whose token names the owner of record again
+		signed, err := session.RenewSessionCredential(enrolledSession, "team", false)
+		if err != nil {
+			t.Fatalf("the tagged credential's refresh past its sponsor's removal: %v", err)
+		}
+		renewed, err := session.ParseByJwt(self.ctx, signed)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, renewed.UserId, self.ownerOfRecordId)
+		connect.AssertEqual(t, renewed.MemberId == nil, true)
+		if err := session.ValidateByJwtState(self.ctx, renewed, true); err != nil {
+			t.Fatalf("the renewed credential: %v", err)
+		}
+		// auth-client, a window client of its own
+		windowAfter := mintTeamEnrollWindowClient(t, enrolledSession, result.ClientId)
+		if err := session.ValidateByJwtState(self.ctx, windowAfter, true); err != nil {
+			t.Fatalf("a window client minted past its sponsor's removal: %v", err)
+		}
+
+		// the revocation record answers the same, its first check the state query's
+		func() {
+			defer session.Testing_SetRevocationRecordEnabled(true)()
+			for attempt := range 2 {
+				for _, credential := range []*session.ByJwt{byJwt, renewed, windowBefore, windowAfter} {
+					if err := session.ValidateByJwtState(self.ctx, credential, true); err != nil {
+						t.Fatalf("check %d on the revocation record: %v", attempt, err)
+					}
+				}
+			}
+		}()
+
+		// the client's removal ends its credentials and its window clients'
+		removed, err := RemoveNetworkClient(&RemoveNetworkClientArgs{ClientId: result.ClientId}, enrolledSession)
+		if err != nil || removed.Error != nil {
+			t.Fatalf("the tagged client's removal: %v %+v", err, removed)
+		}
+		for _, recordEnabled := range []bool{false, true} {
+			func() {
+				defer session.Testing_SetRevocationRecordEnabled(recordEnabled)()
+				for _, credential := range []*session.ByJwt{byJwt, renewed, windowBefore, windowAfter} {
+					if err := session.ValidateByJwtState(self.ctx, credential, true); err == nil {
+						t.Fatalf("a removed tagged lineage's credential validates (record %t)", recordEnabled)
+					}
+				}
+			}()
 		}
 	})
 }

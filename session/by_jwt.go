@@ -719,10 +719,57 @@ func validateByJwtStateIdentity(byJwt *ByJwt, requireClient bool) error {
 	return nil
 }
 
+// QD-1194's exception (owner decision 83, D-TEAM-2). A team's tagged client is
+// the network's, not a member's, so its enrollment mints it on the team's own
+// identity, its owner of record, which no person signs in as and whose
+// credential_change_time lies past every token's creation. The state check
+// takes a credential naming the owner of record only as a client credential
+// of a tagged lineage of that team: sidecar-held (strict_exp), descended from
+// no API key, naming no member, its root claim naming an active client of the
+// network whose owner row is tagged, the client the sidecar enrolled, from
+// which its window and forwarding clients descend. Such a credential takes no
+// rotation, since the owner of record's change time refuses every token by
+// design: the client's removal ends it. Every other credential naming the
+// owner of record stays refused by that change time.
+//
+// The exception is keyed by client. Each fact it reads is the root client's,
+// and none comes back once gone: a client is never reactivated, its tagged
+// mark and lineage are written once, and network_team lasts the network's
+// life. So a refusal stays permanent for the credential, and the refusal cache
+// stays sound (state_refusal_cache.go). A credential the exception does not
+// take is refused as rotated, which is never remembered.
+func ownerOfRecordTaggedEligible(byJwt *ByJwt) bool {
+	return byJwt.ClientId != nil && byJwt.RootClientId != nil && byJwt.StrictExp && byJwt.ApiKeyId == nil && byJwt.MemberId == nil
+}
+
+// The SQL condition that rootParam names an active tagged client of
+// networkParam and that networkParam is a team (ownerOfRecordTaggedEligible).
+// False in a binary that does not link MG6, which has no teams.
+func ownerOfRecordTaggedRootSql(networkParam string, rootParam string) string {
+	if !server.SidecarMg6Linked() {
+		return "false"
+	}
+	return `(
+		EXISTS (SELECT 1 FROM network_team WHERE network_team.network_id = ` + networkParam + `) AND
+		EXISTS (
+			SELECT 1
+			FROM network_client_owner tagged_root_owner
+			INNER JOIN network_client tagged_root ON tagged_root.client_id = tagged_root_owner.client_id
+			WHERE
+				tagged_root_owner.client_id = ` + rootParam + `::uuid AND
+				tagged_root_owner.tagged AND
+				tagged_root.network_id = ` + networkParam + ` AND
+				tagged_root.active
+		)
+	)`
+}
+
 // One entered SQL query owns one observation, through a connection or a
 // transaction. Operational failures still unwind to the owning DB boundary.
 // noActiveRow is the completed query's definitive verdict that no active row
-// matched; a rotated credential is refused without it.
+// matched; a rotated credential is refused without it. A client credential of
+// a team's tagged lineage, naming its owner of record, takes no rotation
+// (ownerOfRecordTaggedEligible).
 func validateByJwtStateQuery(ctx context.Context, conn server.PgCanQuery, byJwt *ByJwt, parentClientId *server.Id) (noActiveRow bool, err error) {
 	if byJwt.MemberId != nil {
 		return validateMemberByJwtStateQuery(ctx, conn, byJwt, parentClientId)
@@ -760,7 +807,9 @@ func validateByJwtStateQuery(ctx context.Context, conn server.PgCanQuery, byJwt 
 			 SELECT client_id, source_client_id, network_id, active, 1 AS depth FROM network_client WHERE client_id=$3 AND $6::uuid IS NULL AND $7::uuid IS NULL
 			 UNION ALL SELECT c.client_id,c.source_client_id,c.network_id,c.active,a.depth+1 FROM network_client c JOIN ancestors a ON c.client_id=a.source_client_id WHERE a.depth < 1024
 			)
-			SELECT network_user.credential_change_time
+			SELECT
+				network_user.credential_change_time,
+				$9::boolean AND `+ownerOfRecordTaggedRootSql("$2", "$7")+`
 			FROM network_user
 			INNER JOIN network ON
 				network.admin_user_id = network_user.user_id AND
@@ -778,10 +827,16 @@ func validateByJwtStateQuery(ctx context.Context, conn server.PgCanQuery, byJwt 
 				 EXISTS (SELECT 1 FROM network_client root WHERE root.client_id=$7 AND root.network_id=$2 AND root.active)
 				 ELSE NOT EXISTS (SELECT 1 FROM ancestors WHERE NOT active OR network_id<>$2) AND
 				 EXISTS (SELECT 1 FROM ancestors WHERE source_client_id IS NULL) END)
-		`, byJwt.UserId, byJwt.NetworkId, *byJwt.ClientId, byJwt.DeviceId, parentClientId, byJwt.SessionId, byJwt.RootClientId, byJwt.ApiKeyId)
+		`, byJwt.UserId, byJwt.NetworkId, *byJwt.ClientId, byJwt.DeviceId, parentClientId, byJwt.SessionId, byJwt.RootClientId, byJwt.ApiKeyId, ownerOfRecordTaggedEligible(byJwt))
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
-				server.Raise(result.Scan(&credentialChangeTime))
+				ownerOfRecordTagged := false
+				server.Raise(result.Scan(&credentialChangeTime, &ownerOfRecordTagged))
+				if ownerOfRecordTagged {
+					// a team's tagged lineage on its owner of record takes no
+					// rotation (ownerOfRecordTaggedEligible)
+					credentialChangeTime = time.Time{}
+				}
 				valid = true
 				queryFound = true
 			}

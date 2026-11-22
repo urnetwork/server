@@ -403,9 +403,14 @@ func authNetworkClient(authClient *AuthNetworkClientArgs, clientSession *session
 // Parent validation belongs to the transaction that creates the child. Other
 // entry points keep their existing caller-owned authentication boundary.
 func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientSession *session.ClientSession, registration *networkClientRegistrationOwner, validateParent bool, internalProbe ...bool) (authClientResult *AuthNetworkClientResult, authClientError error) {
-	mintCredential := clientSession.ByJwt.Renew()
 	probe := len(internalProbe) > 0 && internalProbe[0]
 	enrollment := authClient.enrollment
+	mintCredential := clientSession.ByJwt.Renew()
+	if enrollment != nil && enrollment.credential != nil {
+		// a team's tagged client names the team's owner of record, while the
+		// mint runs on its sponsor's sign-in (EnrollNetworkClient; QD-1194)
+		mintCredential = enrollment.credential.Renew()
+	}
 	if !probe {
 		// an enrollment is a sign-in of its own, by an auth key
 		session.PrepareSessionMint(mintCredential, clientSession.ApiKeyAuthenticated || clientSession.UnsignedIdentity || enrollment != nil)
@@ -946,7 +951,10 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 					}
 					server.Raise(err)
 					// the key names the network and creator this mint is for;
-					// both are immutable, so a difference rolls the spend back
+					// both are immutable, so a difference rolls the spend back.
+					// The mint runs on the creator's sign-in, a tagged client's
+					// sponsor, even where the client's token names a team's
+					// owner of record (QD-1194)
 					if authKey.AuthKeyId != enrollment.authKeyId || authKey.NetworkId != clientSession.ByJwt.NetworkId || authKey.CreatorUserId != clientSession.ByJwt.UserId {
 						server.Raise(errors.New("an auth key changed its network or creator"))
 					}

@@ -14,7 +14,13 @@
 //   - n:user, the network's admin user id, and n:cred, the user's
 //     credential_change_time in Unix microseconds. Both come from a SQL
 //     fallback; n:cred only ever rises. n:del marks a deleted network.
-//   - c:<client>, "a <device> <source client>" for an active client.
+//   - c:<client>, "a <device> <source client>" for an active client, and
+//     "a <device> <source client> t" for one of a team's tagged lineages,
+//     whose credentials name the team's owner of record and take no rotation
+//     (by_jwt.go's ownerOfRecordTaggedEligible, QD-1194). The mark is the
+//     client's, never the credential's: a check still asks the credential's
+//     own claims for the exception, and a binary that reads three parts alone
+//     takes a marked field for a miss, which its SQL fallback answers.
 //   - r:<root>, "a" for an active root client.
 //   - s:<session>, "a" for a session the network has not revoked.
 //
@@ -96,6 +102,8 @@ const (
 	revocationTombstone       = "x"
 	revocationActive          = "a"
 	revocationAbsent          = "-"
+	// a client field's last part: a team's tagged lineage (see the header)
+	revocationOwnerOfRecordTagged = "t"
 )
 
 // The kinds of a network-wide write.
@@ -270,6 +278,9 @@ func (self *revocationRecordQuery) verdict(byJwt *ByJwt, values []any) (revocati
 	if err != nil {
 		return revocationMiss, time.Time{}
 	}
+	// the client's mark of a team's tagged lineage, which the credential's own
+	// claims must take too (ownerOfRecordTaggedEligible)
+	ownerOfRecordTagged := false
 	if 0 <= self.clientIndex {
 		client, ok := value(self.clientIndex)
 		if !ok {
@@ -279,6 +290,10 @@ func (self *revocationRecordQuery) verdict(byJwt *ByJwt, values []any) (revocati
 			return revocationNoActiveRow, time.Time{}
 		}
 		parts := strings.Fields(client)
+		if len(parts) == 4 && parts[3] == revocationOwnerOfRecordTagged {
+			ownerOfRecordTagged = true
+			parts = parts[:3]
+		}
 		if len(parts) != 3 || parts[0] != revocationActive {
 			return revocationMiss, time.Time{}
 		}
@@ -305,6 +320,10 @@ func (self *revocationRecordQuery) verdict(byJwt *ByJwt, values []any) (revocati
 		if root != revocationActive {
 			return revocationMiss, time.Time{}
 		}
+	}
+	if ownerOfRecordTagged && ownerOfRecordTaggedEligible(byJwt) {
+		// the SQL query's exception, as its fallback projected it
+		return revocationValid, time.Time{}
 	}
 	credentialChangeTime := time.UnixMicro(credentialMicros).UTC()
 	if byJwt.CreateTime.Before(credentialChangeTime) {
@@ -415,6 +434,9 @@ type revocationRecordFacts struct {
 	deviceId             *server.Id
 	sourceClientId       *server.Id
 	rootMatches          bool
+	// the client is of a team's tagged lineage, as the state query's exception
+	// reads it (ownerOfRecordTaggedEligible)
+	ownerOfRecordTagged bool
 }
 
 // The SQL state query decides; the record learns from a valid answer. A
@@ -465,7 +487,9 @@ func validateByJwtStateRecordFallback(ctx context.Context, settings *RevocationR
 // Reads what the projection stores, after the state query found the
 // credential valid. A client that is no longer active, or a root claim that
 // is not the client's actual root, is not projected: deactivation tombstones
-// only the actual root's shard.
+// only the actual root's shard. A client of a team's tagged lineage, whose
+// credential the state query took by its exception, is projected with its
+// mark (ownerOfRecordTaggedEligible).
 func readRevocationRecordFacts(ctx context.Context, conn server.PgCanQuery, byJwt *ByJwt, lineage server.Id) *revocationRecordFacts {
 	facts := &revocationRecordFacts{}
 	var clientId *server.Id
@@ -477,7 +501,8 @@ func readRevocationRecordFacts(ctx context.Context, conn server.PgCanQuery, byJw
 			network_user.credential_change_time,
 			network_client.client_id IS NOT NULL,
 			network_client.device_id,
-			network_client.source_client_id
+			network_client.source_client_id,
+			network_client.client_id IS NOT NULL AND $4::boolean AND `+ownerOfRecordTaggedRootSql("$2", "$5")+`
 		FROM network_user
 		INNER JOIN network ON
 			network.admin_user_id = network_user.user_id AND
@@ -487,11 +512,11 @@ func readRevocationRecordFacts(ctx context.Context, conn server.PgCanQuery, byJw
 			network_client.network_id = network.network_id AND
 			network_client.active
 		WHERE network_user.user_id = $1
-	`, byJwt.UserId, byJwt.NetworkId, clientId)
+	`, byJwt.UserId, byJwt.NetworkId, clientId, ownerOfRecordTaggedEligible(byJwt), byJwt.RootClientId)
 	found := false
 	server.WithPgResult(result, err, func() {
 		if result.Next() {
-			server.Raise(result.Scan(&facts.credentialChangeTime, &facts.clientActive, &facts.deviceId, &facts.sourceClientId))
+			server.Raise(result.Scan(&facts.credentialChangeTime, &facts.clientActive, &facts.deviceId, &facts.sourceClientId, &facts.ownerOfRecordTagged))
 			found = true
 		}
 	})
@@ -550,7 +575,11 @@ func projectRevocationRecord(ctx context.Context, settings *RevocationRecordSett
 		settings.KeyTtl.Milliseconds(),
 	}
 	if byJwt.ClientId != nil && facts.clientActive && facts.rootMatches {
-		args = append(args, revocationClientField(*byJwt.ClientId), fmt.Sprintf("%s %s %s", revocationActive, revocationIdOrAbsent(facts.deviceId), revocationIdOrAbsent(facts.sourceClientId)))
+		clientValue := fmt.Sprintf("%s %s %s", revocationActive, revocationIdOrAbsent(facts.deviceId), revocationIdOrAbsent(facts.sourceClientId))
+		if facts.ownerOfRecordTagged {
+			clientValue += " " + revocationOwnerOfRecordTagged
+		}
+		args = append(args, revocationClientField(*byJwt.ClientId), clientValue)
 		if byJwt.SessionId == nil && lineage != *byJwt.ClientId {
 			// the state query found this root active in the network
 			args = append(args, revocationRootField(lineage), revocationActive)
