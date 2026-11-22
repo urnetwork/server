@@ -121,13 +121,15 @@
 // (config-replay-base-signer), which the case keeps out of the way by having each network's first device save its
 // documents (PersonalAclSaverCount, TeamAclSaverCount).
 //
-// A failure from a product bug stays failing. As the case landed (2026-11-22, runs of about six minutes each), it
-// failed on these, each with its evidence, every other check passing:
+// A failure from a product bug stays failing. As the case landed (2026-11-22, runs of four to six minutes, on the
+// sidecar branches as they stood after team-tagged-enroll and write-budget-close-report landed), it failed on these,
+// each with its evidence, every other check passing:
 //
-//   - a group mailbox's message lost: a message to a's group "team", the internet sender's in one run (round 0, before
-//     any chaos) and a same-network send in another (after an api restart), answered delivered and never listed in the
-//     group's mailbox, while evs answered the mailbox repo's racing ingest pushes 429 RESOURCE_EXHAUSTED and 409
-//     PATH_CONFLICT; ACL saves on a ran in the same rounds;
+//   - a group mailbox's message lost, in three runs of five: a message to a personal network's group "team" (the
+//     internet sender's to a's in round 0, before any chaos; a same-network send to b's in round 0, and to a's after an
+//     api restart), answered delivered and never listed in the group's mailbox through the end, while evs answered the
+//     mailbox repo's racing ingest pushes 429 RESOURCE_EXHAUSTED and 409 PATH_CONFLICT and once a listing's read "reply
+//     invalid: a read reply that ends before its last frame"; ACL saves ran in the same rounds;
 //   - api's write budget one log object's price (9216 B) past the objects api wrote, in every run with the it bridge
 //     network and in none without it: model's ConfigLogSequencer issues P0 before each PUT, so a base whose rows equal
 //     an earlier base's (the bridge's block base after its first) spends on a projrows/ PutImmutable that makes
