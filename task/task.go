@@ -628,11 +628,16 @@ func RaiseRunOnceMaxTimeInTx(ctx context.Context, tx server.PgTx, runOnce *RunOn
 // before scheduling, so it never adds a successor to a task still queued or
 // running. One read on pending_task's unique run_once_key.
 func PendingRunOnceKeys(ctx context.Context, keys []string) map[string]bool {
+	return PendingRunOnceKeysInConn(nil, ctx, keys)
+}
+
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func PendingRunOnceKeysInConn(connOwner server.PgConn, ctx context.Context, keys []string) map[string]bool {
 	pending := map[string]bool{}
 	if len(keys) == 0 {
 		return pending
 	}
-	server.Db(ctx, func(conn server.PgConn) {
+	server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
 		result, err := conn.Query(ctx, `SELECT run_once_key FROM pending_task WHERE run_once_key = ANY($1)`, keys)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {

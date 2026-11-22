@@ -51,6 +51,14 @@ const (
 	// written once per session, under store stripe. Not an alarm: most are
 	// checkouts the buyer left.
 	PaymentReconcileActionCheckoutExpired = "checkout_expired"
+	// A Google Play data plan with a data window open had no renewal poll
+	// pending, and its poll was scheduled again at the expiry Play reports
+	// (controller reconcilePlayDataPlans). A data plan writes no renewal row,
+	// so nothing else checks it: its poll and its notifications are all that
+	// credit its renewals. Evidence is the purchase token. The dry run records
+	// would_rearm_poll.
+	PaymentReconcileActionPollRearmed    = "poll_rearmed"
+	PaymentReconcileActionWouldRearmPoll = "would_rearm_poll"
 )
 
 // Webhook-written operator events (UPGRADE.md §2 S7/S11) that join the
@@ -728,6 +736,74 @@ func GetReconcileSubscriptionRenewalsInConn(connOwner server.PgConn,
 		})
 	})
 	return renewals
+}
+
+// A Google Play data plan purchase with a data window open now.
+type ActivePlayDataPlan struct {
+	NetworkId     server.Id
+	PurchaseToken string
+	// the end of the purchase's latest data window, the store's expiry plus
+	// the grace the credit added
+	EndTime time.Time
+}
+
+// GetActivePlayDataPlansInConn is every Google Play data plan purchase with a
+// data window open at now, on a network that still exists, latest window end
+// first, bounded by limit. A data plan is a Play product that credits data
+// only (controller playCreditWindowInTx): each paid window is a balance that
+// carries the purchase token, no Pro, data bytes and no net revenue (its
+// revenue is subsidy revenue), and it writes no renewal row, so the reconciler's
+// renewal rows never name it. No other writer leaves that shape: a Pro period
+// writes a renewal row, an x402 data grant records net revenue, and a code or
+// gift grant carries no purchase token.
+//
+// Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+func GetActivePlayDataPlansInConn(connOwner server.PgConn,
+	ctx context.Context,
+	now time.Time,
+	limit int,
+) []*ActivePlayDataPlan {
+	plans := []*ActivePlayDataPlan{}
+	server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			/* active-play-data-plans */
+			SELECT balance.network_id, balance.purchase_token, max(balance.end_time)
+			FROM transfer_balance balance
+			INNER JOIN network ON network.network_id = balance.network_id
+			WHERE balance.purchase_token IS NOT NULL
+			  AND balance.purchase_token <> ''
+			  AND NOT balance.pro
+			  AND 0 < balance.start_balance_byte_count
+			  AND balance.net_revenue_nano_cents = 0
+			  AND balance.start_time <= $1
+			  AND $1 < balance.end_time
+			  AND NOT EXISTS (
+			      SELECT 1
+			      FROM subscription_renewal renewal
+			      WHERE renewal.purchase_token = balance.purchase_token
+			  )
+			GROUP BY balance.network_id, balance.purchase_token
+			ORDER BY max(balance.end_time) DESC
+			LIMIT $2
+			`,
+			now,
+			limit,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				plan := &ActivePlayDataPlan{}
+				server.Raise(result.Scan(
+					&plan.NetworkId,
+					&plan.PurchaseToken,
+					&plan.EndTime,
+				))
+				plans = append(plans, plan)
+			}
+		})
+	})
+	return plans
 }
 
 // Whether the dispute's clawback ended a window: its disputed event in the
