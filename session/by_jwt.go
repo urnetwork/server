@@ -744,10 +744,11 @@ func ownerOfRecordTaggedEligible(byJwt *ByJwt) bool {
 
 // The SQL condition that rootParam names an active tagged client of
 // networkParam and that networkParam is a team (ownerOfRecordTaggedEligible).
-// False in a binary that does not link MG6, which has no teams.
+// False in a binary that does not link MG6, which has no teams; it names both
+// parameters still, so a query takes the same arguments in every binary.
 func ownerOfRecordTaggedRootSql(networkParam string, rootParam string) string {
 	if !server.SidecarMg6Linked() {
-		return "false"
+		return `(false AND ` + networkParam + `::uuid IS NOT NULL AND ` + rootParam + `::uuid IS NOT NULL)`
 	}
 	return `(
 		EXISTS (SELECT 1 FROM network_team WHERE network_team.network_id = ` + networkParam + `) AND
