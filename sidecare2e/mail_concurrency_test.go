@@ -8,16 +8,15 @@
 //
 //	network   a personal network of one member with several mailboxes: the member's, which every alias of the network
 //	          names, and a group's for each of Groups, a group repo of its own whose address names it, the member
-//	          joined to it (§15.8): its owner turns mail on, makes the aliases and reads every mailbox, the groups'
-//	          messages through its view's r/ references; its second sidecar is the member's prover host
-//	          (WorldMailSender); its last is its receiver, which creates the groups (setUpMailNetwork's header) and
-//	          deposits in each; every other sidecar sends, and every one with mail started ingests the deposits, as
-//	          racing readers do (§15.7)
+//	          joined to it (§15.8): its owner turns mail on, makes the aliases and the groups (setUpMailNetwork's
+//	          header) and reads every mailbox, the groups' messages through its view's r/ references; its second
+//	          sidecar is the member's prover host (WorldMailSender); its last is its receiver, which deposits in each
+//	          mailbox, a group's by the deposit grant group-create files to the member's devices (QD-1177); every
+//	          other sidecar sends, and every one with mail started ingests the deposits, as racing readers do (§15.7)
 //	sends     one burst a sending device, one goroutine each, random pauses between its sends (RunBursts): each send
-//	          names an address of one of its own network's mailboxes (an alias, or with OwnGroupSends a group too,
-//	          off while question e2e-mail-concurrency-personal-group-deposit stands) and one of another network's,
-//	          alias or group, and every other send the internet sender's inbox too, so each is a same-network deposit
-//	          and internet mail through smtpedge under one effect key (§15.10)
+//	          names an address of one of its own network's mailboxes (an alias, or with OwnGroupSends a group too) and
+//	          one of another network's, alias or group, and every other send the internet sender's inbox too, so each
+//	          is a same-network deposit and internet mail through smtpedge under one effect key (§15.10)
 //	internet  one burst a kind of internet sender (worldSenderKind): each delivery through the lb to mxedge's router on
 //	          25 and STARTTLS to the network's mail host, retried while it is refused, as an MTA retries; every other
 //	          one names every address of the network, one transaction the receiver deposits in each of its mailboxes;
@@ -94,9 +93,8 @@ type mailConcurrencySettings struct {
 	// network's (§15.8's group, `ur id group-add`), so a network holds several mailboxes.
 	Groups []string
 	// Whether a send may name its own network's groups, a same-network deposit the sending device makes itself
-	// (§15.10). Off while nothing grants a personal network's devices but the group's creator deposit on a group repo:
-	// every such send is answered MailSendNoDepositRight (question e2e-mail-concurrency-personal-group-deposit). The
-	// other networks' groups take it through smtpedge and their receivers, which create them.
+	// (§15.10), which group-create's deposit grant to a personal network's member's devices allows every sending device
+	// (QD-1177). The other networks' groups take it through smtpedge and their receivers.
 	OwnGroupSends bool
 	// The internet sender's inbox, which a network's internet mail names.
 	InternetTo string
@@ -177,7 +175,7 @@ func defaultMailConcurrencySettings() *mailConcurrencySettings {
 		ClientsPerNetwork:         4,
 		Aliases:                   []string{"inbox", "orders"},
 		Groups:                    []string{"team"},
-		OwnGroupSends:             false,
+		OwnGroupSends:             true,
 		InternetTo:                "inbox",
 		SendsPerDevice:            3,
 		InternetDeliveriesPerKind: 3,
@@ -488,10 +486,10 @@ func mailOutcomeEnded(kind sidecar.SmtpOutcomeKind) bool {
 // before its first preamble, its aliases, its groups, its receiver serving smtp/25/mx with its TLSA live in the dns
 // edge's answers, every sender's mail started and holding every address, and its prover host composed.
 //
-// The receiver's device creates each group: on a personal network nothing grants another device deposit on a group
-// repo (§15.8 files the group's deposit grant, to tag:mail, in a team network alone), and its creating device is its
-// admin, so a writer, which deposits where the repo takes deposits (QD-1173), as the device that runs a network's
-// receiver would create its groups (question e2e-mail-concurrency-personal-group-deposit).
+// The owner's device creates each group, as a person would from any of their devices: on a personal network
+// group-create grants the group's deposit to the member's devices (autogroup:member; QD-1177), so the receiver, on
+// another of them, deposits the group's mail, and with OwnGroupSends so does every sending device, each awaited in its
+// own verified state before any mail goes.
 func setUpMailNetwork(ctx context.Context, world *World, settings *mailConcurrencySettings, network *WorldNetwork) (*mailNetwork, error) {
 	last := len(network.Clients) - 1
 	set := &mailNetwork{
@@ -511,9 +509,9 @@ func setUpMailNetwork(ctx context.Context, world *World, settings *mailConcurren
 		}
 		set.SenderGates = append(set.SenderGates, gate)
 	}
-	// the receiver's listen on smtp/25/mx goes through the stock gate, under the standing grant; a group's address,
-	// an alias's creation, is held for a person, whom the stand-in plays
-	if _, err := world.InstallDeviceGate(ctx, set.Receiver, sidecar.SidecarActionAliasCreate); err != nil {
+	// the receiver's listen on smtp/25/mx goes through the stock gate, under the standing grant, and it creates no
+	// address, so nothing of it is held for a person
+	if _, err := world.InstallApprovalGate(ctx, set.Receiver); err != nil {
 		return nil, err
 	}
 	readerMail, err := world.StartMail(ctx, set.Reader, false, settings.Mail)
@@ -538,22 +536,22 @@ func setUpMailNetwork(ctx context.Context, world *World, settings *mailConcurren
 		}
 		set.Addresses = append(set.Addresses, alias+"@"+set.Domain)
 	}
-	receiverMail, err := world.StartMail(ctx, set.Receiver, true, settings.Mail)
-	if err != nil {
-		return nil, err
-	}
-	set.ReceiverMail = receiverMail
-	// each group, through the receiver's device (the function's header): its address and its repo (`ur id
-	// group-create`, confirmed as a person confirms it at /dev/tty), and the network's member joined to it (`ur id
-	// group-add`), so the member's readers list its mail through their r/ references
+	// each group, through the owner's device (the function's header): its address and its repo (`ur id
+	// group-create`, confirmed as a person confirms it at /dev/tty, with its deposit grant), and the network's member
+	// joined to it (`ur id group-add`), so the member's readers list its mail through their r/ references
 	groups := []*mailMailbox{}
 	for _, group := range settings.Groups {
-		repo, err := mailCreateGroup(ctx, receiverMail, group, network.MemberId(), settings.Mail)
+		repo, err := mailCreateGroup(ctx, readerMail, group, network.MemberId(), settings.Mail)
 		if err != nil {
 			return nil, fmt.Errorf("%s's group %s: %w", network.Name, group, err)
 		}
 		groups = append(groups, &mailMailbox{Name: network.Name + "'s group " + group, Network: set, RepoId: repo.RepoId(), Addresses: []string{group + "@" + set.Domain}})
 	}
+	receiverMail, err := world.StartMail(ctx, set.Receiver, true, settings.Mail)
+	if err != nil {
+		return nil, err
+	}
+	set.ReceiverMail = receiverMail
 	if _, err := world.AwaitMailReceiver(ctx, set.Receiver, receiverMail, settings.Mail); err != nil {
 		return nil, err
 	}
@@ -587,6 +585,17 @@ func setUpMailNetwork(ctx context.Context, world *World, settings *mailConcurren
 	for index, client := range set.SenderMails {
 		if err := awaitMailAliases(ctx, set.Senders[index], client, set.AllAddresses(), settings.Mail); err != nil {
 			return nil, err
+		}
+	}
+	// a send to the network's own group deposits from the sending device, by the group's deposit grant, or the owner's
+	// device by its write as the group repo's admin (QD-1173)
+	if settings.OwnGroupSends {
+		for _, device := range set.Senders {
+			for _, group := range groups {
+				if err := awaitMailDepositRight(ctx, device, group, settings.Mail); err != nil {
+					return nil, err
+				}
+			}
 		}
 	}
 	// the receiver answers RCPT from its own mailcfg (§15.5), 550 5.1.1 for an address it does not hold yet
@@ -639,20 +648,20 @@ func mailCreateGroup(ctx context.Context, client *sidecar.MailClient, group stri
 	}
 }
 
-// Waits until receiver's verified state grants it deposit on mailbox's repo, which every deposit's
-// repo:<id>:deposit token asks (evs_deposit.go): a group repo's statements reach the receiver's follower with no hook
-// a test reads, so its state is read every RetryInterval within Timeout.
-func awaitMailDepositRight(ctx context.Context, receiver *sidecart3.T3Device, mailbox *mailMailbox, settings *WorldMailSettings) error {
+// Waits until device's verified state grants it deposit on mailbox's repo, which every deposit's repo:<id>:deposit
+// token asks (evs_deposit.go), a receiver's and a same-network sender's alike: a group repo's statements reach the
+// device's follower with no hook a test reads, so its state is read every RetryInterval within Timeout.
+func awaitMailDepositRight(ctx context.Context, device *sidecart3.T3Device, mailbox *mailMailbox, settings *WorldMailSettings) error {
 	ctx, cancel := context.WithTimeout(ctx, settings.Timeout)
 	defer cancel()
 	for {
-		access := worldEvsAccess(receiver, mailbox.RepoId)
+		access := worldEvsAccess(device, mailbox.RepoId)
 		if access.Rights.Has(sidecar.AclEvsDeposit) {
 			return nil
 		}
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("%s, %s's receiver, never held deposit on %s: it holds %b (%w)", receiver.Name, mailbox.Network.Name, mailbox.Name, access.Rights, ctx.Err())
+			return fmt.Errorf("%s, of %s, never held deposit on %s: it holds %b (%w)", device.Name, mailbox.Network.Name, mailbox.Name, access.Rights, ctx.Err())
 		case <-time.After(settings.RetryInterval):
 		}
 	}
