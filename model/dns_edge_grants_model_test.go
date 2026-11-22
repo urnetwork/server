@@ -315,6 +315,12 @@ func TestReconcileDnsEdgeRecordsFollowsEachNetworksGrants(t *testing.T) {
 			t.Fatalf("a second pass did %+v, %v", result, err)
 		}
 		requireDnsSerial(t, ctx, root, serial)
+
+		// non-positive bounds still move the walk on, a network a run
+		result, err = ReconcileDnsEdgeRecords(ctx, now, nil, &DnsEdgeRecordsReconcileSettings{})
+		if err != nil || result.NetworkCount != 1 || result.AfterNetworkId == nil || *result.AfterNetworkId != networkIds[0] {
+			t.Fatalf("a run with no bounds did %+v, %v", result, err)
+		}
 	})
 }
 

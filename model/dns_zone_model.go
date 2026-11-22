@@ -256,8 +256,8 @@ func EnsureNetworkZone(ctx context.Context, networkId server.Id, root string) (*
 // plan-DNS-edge-record-trigger: * while the zone's set holds any host but @
 // or the system publish, @ while it holds @), creating the zone on first need,
 // in the caller's transaction. One journal write a transition, none otherwise.
-// Its caller is api's recompute after each accepted config delta and the
-// hourly pass over the published names, which are other tasks'.
+// Its callers are api's sync after each accepted config entry and the hourly
+// pass over the published names (dns_edge_grants_model.go).
 func DnsSyncEdgeRecordsInTx(ctx context.Context, tx server.PgTx, networkId server.Id, root string, wildcard bool, apex bool, ttl *dnsservice.DnsTtlSettings) (*DnsWriteResult, error) {
 	if !server.SidecarMg2Linked() || !server.SidecarMg5Linked() {
 		return nil, ErrDnsUnlinked

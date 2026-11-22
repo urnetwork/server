@@ -167,9 +167,10 @@ func SyncDnsEdgeRecordsAtTip(ctx context.Context, sequencer *ConfigLogSequencer,
 
 // Tunables of the hourly pass.
 type DnsEdgeRecordsReconcileSettings struct {
-	// Networks read from network_acl_head, and their zones' flags, at a time.
+	// Networks read from network_acl_head, and their zones' flags, at a time. Non-positive reads one at a time.
 	NetworkBatchCount int
 	// The most networks one run reads; past it the run answers where it stopped and the next run resumes there.
+	// Non-positive reads one a run, so a run always moves the walk on.
 	RunNetworkMaxCount int
 }
 
@@ -242,8 +243,10 @@ func ReconcileDnsEdgeRecords(
 	if afterNetworkId != nil {
 		after = *afterNetworkId
 	}
+	batchCount := max(settings.NetworkBatchCount, 1)
+	runMaxCount := max(settings.RunNetworkMaxCount, 1)
 	for {
-		limit := min(settings.NetworkBatchCount, settings.RunNetworkMaxCount-result.NetworkCount)
+		limit := min(batchCount, runMaxCount-result.NetworkCount)
 		if limit <= 0 {
 			stopped := after
 			result.AfterNetworkId = &stopped
