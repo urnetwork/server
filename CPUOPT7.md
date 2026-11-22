@@ -192,7 +192,8 @@ Both hosts, matched windows A (11-16 00–06Z) and B (11-22 00–05Z), Mimir:
   - The 11-21 session-check change: the revocation read is 0.1–0.2% of a process and the
     session package 0.9%. The 2 s budget took the unchecked share from 9% to 0.01% with no
     CPU step.
-  - alt: it left the proxy hosts on 11-20.
+  - alt: there is no alt container on crisp (05:16Z census), and no alt series from either
+    proxy host since 11-20.
   - The proxy build: the hotfix changed only the session budget.
 
 ## 4. What changed
