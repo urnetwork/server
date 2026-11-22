@@ -930,6 +930,17 @@ func (self *routeEnvironment) newClient(
 	webRtcNetwork transport.Net,
 	useExtender bool,
 ) *routeClient {
+	return self.newClientWithSettings(description, mode, webRtcNetwork, useExtender, nil)
+}
+
+// Installs a case-local observer before the production client starts.
+func (self *routeEnvironment) newClientWithSettings(
+	description string,
+	mode clientconnect.P2pDataPlaneMode,
+	webRtcNetwork transport.Net,
+	useExtender bool,
+	configureSettings func(*clientconnect.ClientSettings),
+) *routeClient {
 	clientId, clientJwt := self.authClient(description)
 	tun, strategy := self.newClientNode(useExtender)
 	settings := clientconnect.DefaultClientSettings()
@@ -950,6 +961,9 @@ func (self *routeEnvironment) newClient(
 		settings.WebRtcSettings.UseLoopbackOnlyIceInterfaces = true
 	} else {
 		settings.WebRtcSettings.Network = webRtcNetwork
+	}
+	if configureSettings != nil {
+		configureSettings(settings)
 	}
 	client := clientconnect.NewClient(
 		self.ctx,

@@ -843,7 +843,7 @@ func (self *fullTunPath) setAllowProviderDatagramPackFailures(allow bool) bool {
 	return previous
 }
 
-// Only the healthy native correctness fixture accepts proven ready-only
+// Only the native duplicate-ACK diagnostic accepts proven ready-only
 // pure ACK refusals and detached ACK retries superseded before serialization.
 func (self *fullTunPath) setAllowDeviceNativeAckPressure(allow bool) bool {
 	self.measurementLock.Lock()

@@ -18,10 +18,10 @@ import (
 func TestConnectionAnnounceMarksADeclaredProxyEgress(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		// one address each, so the first client's lease never shares the second's
-		for proxiedEgress, clientAddress := range map[bool]string{true: "192.0.2.11:20000", false: "192.0.2.12:20000"} {
+		checkDeclaration := func(proxiedEgress bool, clientAddress string) {
 			testCtx, testCancel := context.WithTimeout(ctx, 30*time.Second)
-			fixture := newLocationAnnounceFixture(ctx)
+			defer testCancel()
+			fixture := newLocationAnnounceFixture(testCtx)
 			verifySettings := model.DefaultVerifySettings()
 			verifySettings.EgressHashKey = []byte("announce-egress-proxy-test")
 			fixture.settings.verifySettingsForTest = func() (*model.VerifySettings, bool) {
@@ -44,6 +44,7 @@ func TestConnectionAnnounceMarksADeclaredProxyEgress(t *testing.T) {
 				V0TestConfig(),
 				fixture.settings,
 			)
+			defer fixture.announce.CloseAndWait()
 			ip, ok := model.ParseVerifyEgressIp(clientAddress)
 			if !ok {
 				t.Fatal("the fixture address does not parse")
@@ -51,7 +52,7 @@ func TestConnectionAnnounceMarksADeclaredProxyEgress(t *testing.T) {
 			// once the lease attributes the address, the mark is what the
 			// transport declared
 			for {
-				if owner := model.ResolveVerifyEgress(ctx, ip, verifySettings); owner != nil && *owner == fixture.clientId {
+				if owner := model.ResolveVerifyEgress(testCtx, ip, verifySettings); owner != nil && *owner == fixture.clientId {
 					break
 				}
 				select {
@@ -60,11 +61,13 @@ func TestConnectionAnnounceMarksADeclaredProxyEgress(t *testing.T) {
 				case <-time.After(20 * time.Millisecond):
 				}
 			}
-			if marked := model.GetVerifyProxiedEgress(ctx, []server.Id{fixture.clientId})[fixture.clientId]; marked != proxiedEgress {
+			if marked := model.GetVerifyProxiedEgress(testCtx, []server.Id{fixture.clientId})[fixture.clientId]; marked != proxiedEgress {
 				t.Fatalf("a transport that declared a proxy egress %v left its client marked %v", proxiedEgress, marked)
 			}
-			fixture.announce.CloseAndWait()
-			testCancel()
+		}
+		// one address each, so the first client's lease never shares the second's
+		for proxiedEgress, clientAddress := range map[bool]string{true: "192.0.2.11:20000", false: "192.0.2.12:20000"} {
+			checkDeclaration(proxiedEgress, clientAddress)
 		}
 	})
 }

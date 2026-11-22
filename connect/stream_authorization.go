@@ -47,6 +47,7 @@ func (self *Resident) runStreamAuthorizations(snapshots <-chan []model.StreamHop
 				continue
 			}
 			open := streamHopToProtocol(hop)
+			open.PathHasIntermediaries = &grant.HasIntermediaries
 			if !grant.Legacy {
 				open.AuthorizationGeneration = grant.Generation.Bytes()
 				open.AuthorizationLeaseMillis = grant.LeaseMillis
