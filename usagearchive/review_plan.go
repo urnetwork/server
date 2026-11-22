@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"golang.org/x/sys/unix"
 )
 
@@ -86,6 +87,25 @@ func (self *ReviewPlanReport) Json() string {
 		return fmt.Sprintf("%+v", *self)
 	}
 	return string(data)
+}
+
+// The tied contracts minted in [$1, $2): each payment's sweeps and distinct
+// contracts, with each payment's range of the sweep index read once, and the
+// distinct contracts of all of them. A contract's sweeps share its id, so the
+// counts of disjoint chunks add up exactly.
+func reviewPlanChunkSql(paymentIds []string) string {
+	ctes := []string{}
+	sweeps := []string{}
+	contracts := []string{}
+	union := []string{}
+	for i, paymentId := range paymentIds {
+		name := fmt.Sprintf("paid_%d", i)
+		ctes = append(ctes, name+` AS MATERIALIZED (SELECT contract_id FROM transfer_escrow_sweep WHERE payment_id = '`+paymentId+`'::uuid AND $1::uuid <= contract_id AND contract_id < $2::uuid)`)
+		sweeps = append(sweeps, `(SELECT count(*) FROM `+name+`)`)
+		contracts = append(contracts, `(SELECT count(DISTINCT contract_id) FROM `+name+`)`)
+		union = append(union, `SELECT contract_id FROM `+name)
+	}
+	return `WITH ` + strings.Join(ctes, ", ") + ` SELECT ARRAY[` + strings.Join(sweeps, ", ") + `]::bigint[], ARRAY[` + strings.Join(contracts, ", ") + `]::bigint[], (SELECT count(*) FROM (` + strings.Join(union, " UNION ") + `) AS tied)`
 }
 
 // The Monday 00:00 UTC of t's week.
@@ -190,26 +210,53 @@ func PlanReview(ctx context.Context, conn *pgx.Conn, paymentIds []string, dir st
 			return nil, err
 		}
 		weeks := map[time.Time]*ReviewPlanWeek{}
-		perPayment := []string{}
-		perPaymentDistinct := []string{}
-		union := []string{}
-		for _, paymentId := range paymentIds {
-			rangeSql := `FROM transfer_escrow_sweep WHERE payment_id = '` + paymentId + `'::uuid AND $1::uuid <= contract_id AND contract_id < $2::uuid`
-			perPayment = append(perPayment, `(SELECT count(*) `+rangeSql+`)`)
-			perPaymentDistinct = append(perPaymentDistinct, `(SELECT count(DISTINCT contract_id) `+rangeSql+`)`)
-			union = append(union, `SELECT contract_id `+rangeSql)
+		chunkSql := reviewPlanChunkSql(paymentIds)
+		// one statement per chunk of mint time; a chunk whose statement times
+		// out is counted again as halves, down to MinPlanChunk
+		var countChunk func(start time.Time, end time.Time) (sweeps []int64, contracts []int64, union int64, returnErr error)
+		countChunk = func(start time.Time, end time.Time) (sweeps []int64, contracts []int64, union int64, returnErr error) {
+			err := reviewReadTx(ctx, conn, settings, pgx.ReadCommitted, func(tx pgx.Tx) error {
+				return tx.QueryRow(ctx, chunkSql, ContractIdFloor(start), ContractIdFloor(end)).Scan(&sweeps, &contracts, &union)
+			})
+			var pgErr *pgconn.PgError
+			if err == nil || ctx.Err() != nil || !errors.As(err, &pgErr) || pgErr.Code != "57014" || end.Sub(start) <= settings.MinPlanChunk {
+				return sweeps, contracts, union, err
+			}
+			middle := start.Add(end.Sub(start) / 2).Truncate(time.Millisecond)
+			firstSweeps, firstContracts, firstUnion, err := countChunk(start, middle)
+			if err != nil {
+				return nil, nil, 0, err
+			}
+			secondSweeps, secondContracts, secondUnion, err := countChunk(middle, end)
+			if err != nil {
+				return nil, nil, 0, err
+			}
+			for i := range firstSweeps {
+				firstSweeps[i] += secondSweeps[i]
+				firstContracts[i] += secondContracts[i]
+			}
+			return firstSweeps, firstContracts, firstUnion + secondUnion, nil
 		}
-		daySql := `SELECT ARRAY[` + strings.Join(perPayment, ", ") + `]::bigint[], ARRAY[` + strings.Join(perPaymentDistinct, ", ") + `]::bigint[], (SELECT count(*) FROM (` + strings.Join(union, " UNION ") + `) AS tied)`
 		day := time.Date(firstTime.Year(), firstTime.Month(), firstTime.Day(), 0, 0, 0, 0, time.UTC)
 		for !lastTime.Before(day) {
 			next := day.AddDate(0, 0, 1)
-			var sweeps, contracts []int64
+			sweeps := make([]int64, len(paymentIds))
+			contracts := make([]int64, len(paymentIds))
 			var dayContracts int64
-			err := reviewReadTx(ctx, conn, settings, pgx.ReadCommitted, func(tx pgx.Tx) error {
-				return tx.QueryRow(ctx, daySql, ContractIdFloor(day), ContractIdFloor(next)).Scan(&sweeps, &contracts, &dayContracts)
-			})
-			if err != nil {
-				return nil, fmt.Errorf("the tied contracts of %s: %w", day.Format(time.DateOnly), err)
+			for start := day; start.Before(next); start = start.Add(settings.PlanChunk) {
+				end := start.Add(settings.PlanChunk)
+				if next.Before(end) {
+					end = next
+				}
+				chunkSweeps, chunkContracts, chunkUnion, err := countChunk(start, end)
+				if err != nil {
+					return nil, fmt.Errorf("the tied contracts of %s to %s: %w", start.Format(time.RFC3339), end.Format(time.RFC3339), err)
+				}
+				for i := range paymentIds {
+					sweeps[i] += chunkSweeps[i]
+					contracts[i] += chunkContracts[i]
+				}
+				dayContracts += chunkUnion
 			}
 			for i, planned := range report.Payments {
 				planned.Sweeps += sweeps[i]

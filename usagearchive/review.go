@@ -145,6 +145,11 @@ type ReviewSettings struct {
 	MaxVerificationAge time.Duration
 	// Tied contracts the plan reads rows of, as a sample of one batch.
 	SampleContracts int
+	// The plan counts tied contracts by chunks of mint time this long; a chunk
+	// whose statement times out is counted again as halves, down to
+	// MinPlanChunk.
+	PlanChunk    time.Duration
+	MinPlanChunk time.Duration
 	// now; nil is time.Now
 	Clock func() time.Time
 	// Nil in production. Tests stop an export at an exact point: after the
@@ -173,6 +178,10 @@ func DefaultReviewSettings() *ReviewSettings {
 		Concurrency:           2,
 		MaxVerificationAge:    24 * time.Hour,
 		SampleContracts:       10000,
+		// a whole day of Main's densest days (about a million tied contracts)
+		// took over 25 s
+		PlanChunk:    6 * time.Hour,
+		MinPlanChunk: 15 * time.Minute,
 	}
 }
 

@@ -406,6 +406,58 @@ func TestReviewExportWritesEveryRowOnceAcrossAResume(t *testing.T) {
 	})
 }
 
+// The plan counts each payment's sweeps and contracts and the contracts of
+// both exactly, from chunks of mint time (here a minute, so the fixture spans
+// several), counts one sample batch's rows of each table, and names a payment
+// not under review as a blocker. It reads only.
+func TestReviewPlanCountsTheTiedContracts(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		fixture := newReviewTestFixture(t, ctx, true)
+		settings := reviewTestSettings()
+		settings.PlanChunk = time.Minute
+		settings.MinPlanChunk = time.Second
+		settings.SampleContracts = 100
+		var report *usagearchive.ReviewPlanReport
+		var err error
+		withReviewTestConn(ctx, func(conn *pgx.Conn) {
+			report, err = usagearchive.PlanReview(ctx, conn, fixture.paymentIds(), "", settings, io.Discard)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		byPayment := map[string]*usagearchive.ReviewPlanPayment{}
+		for _, planned := range report.Payments {
+			byPayment[planned.PaymentId] = planned
+		}
+		// A paid five contracts and B's second sweep of a sixth; B three and the
+		// orphan sweep
+		a, b := byPayment[fixture.reviewA.String()], byPayment[fixture.reviewB.String()]
+		if a.Contracts != 6 || a.Sweeps != 6 || b.Contracts != 4 || b.Sweeps != 4 || report.Contracts != 9 || 0 < len(report.Blockers) {
+			t.Fatalf("plan: %s", report.Json())
+		}
+		var weeks int64
+		for _, week := range report.Weeks {
+			weeks += week.Contracts
+		}
+		rows := map[string]int64{}
+		for _, table := range report.Tables {
+			rows[table.Table] = table.SampleRows
+		}
+		if weeks != 9 || report.SampleContracts != 9 || rows["transfer_contract"] != 8 || rows["transfer_escrow_sweep"] != 10 || rows["contract_close"] != 18 {
+			t.Fatalf("plan weeks %d, sample %d, rows %v", weeks, report.SampleContracts, rows)
+		}
+		withReviewTestConn(ctx, func(conn *pgx.Conn) {
+			report, err = usagearchive.PlanReview(ctx, conn, reviewTestPaymentIds(fixture.reviewA, fixture.ordinary), "", settings, io.Discard)
+		})
+		if err != nil || len(report.Blockers) != 1 || !strings.Contains(report.Blockers[0], "not under attribution review") {
+			t.Fatalf("a payment not under review was not a blocker: %v, %v", report, err)
+		}
+	})
+}
+
 // The clear refuses, writing nothing, while the export is partial, before it
 // is verified, while its newest verification failed or is of other batches,
 // and once a contract the export does not hold is paid by a payment of the
