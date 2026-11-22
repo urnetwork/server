@@ -19,8 +19,8 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// A zone's first need allocates its label and writes §12.7's set in one journal row, moving the label
-// map's cursor; a second need writes nothing.
+// A zone's first need allocates its label and writes §12.7's set in one journal row, with _dmarc's copy
+// (QD-1190), moving the label map's cursor; a second need writes nothing.
 func TestEnsureNetworkZoneWritesItsSetOnce(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -31,7 +31,7 @@ func TestEnsureNetworkZoneWritesItsSetOnce(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if result == nil || result.Serial != 1 || len(result.Upserts) != 4 {
+		if result == nil || result.Serial != 1 || len(result.Upserts) != len(dnsTestMailOffLines)+len(dnsTestMailOffCopyOwners) {
 			t.Fatalf("first need %+v", result)
 		}
 		labelMap, err := DnsLabelMapSince(ctx, root, 0)
@@ -149,11 +149,42 @@ func testDnsGoldenLines(lines []string, root string, apex string) []string {
 	return moved
 }
 
+// The owners of dnsTestMailOffLines a zone serves with a copy row (QD-1190), as the goldens name them: those
+// with no address of their own under *, which with mail off is _dmarc alone.
+var dnsTestMailOffCopyOwners = []string{"_dmarc.abcdefghij.zone.example."}
+
+// dnsTestMailOnLines' owners served with a copy row: _dmarc and b. mx's router addresses are its own.
+var dnsTestMailOnCopyOwners = []string{"_dmarc.abcdefghij.zone.example.", "b.abcdefghij.zone.example."}
+
+// lines with a copy row's line at each of owners beside them, sorted.
+func testDnsWithCopyLines(lines []string, owners ...string) []string {
+	copies := []dnsservice.DnsRecordSet{}
+	for _, owner := range owners {
+		copies = append(copies, dnsservice.DnsRecordSet{Owner: owner, Type: dnsservice.DnsCopyType, Kind: dnsservice.DnsRecordKindCopy})
+	}
+	withCopies := append(slices.Clone(lines), dnsSystemRecordLines(copies)...)
+	slices.Sort(withCopies)
+	return withCopies
+}
+
+// mail off's golden set as a zone serves it, its copy rows beside it, moved to apex in root.
+func testDnsMailOffServedGolden(root string, apex string) []string {
+	return testDnsGoldenLines(testDnsWithCopyLines(dnsTestMailOffLines, dnsTestMailOffCopyOwners...), root, apex)
+}
+
+// mail on's golden set without _mta-sts as a zone serves it, its copy rows beside it, moved to apex in root.
+func testDnsMailOnServedGolden(root string, apex string) []string {
+	return testDnsGoldenLines(testDnsWithCopyLines(dnsTestMailOnLines, dnsTestMailOnCopyOwners...), root, apex)
+}
+
 // mail on's golden set as the model writes it in a test process, which holds no dns.yml: M7's rows and M8's
-// _mta-sts for the zone's own mail host, with no report host and so no rua or _smtp._tls (DNS-M8-01).
+// _mta-sts for the zone's own mail host, with no report host and so no rua or _smtp._tls (DNS-M8-01), and the
+// copy rows a zone serves beside them, _mta-sts's among them.
 func testDnsMailOnGolden(root string, apex string) []string {
 	id := sidecar.MtaStsPolicyId(sidecar.MtaStsPolicy("mx."+apex, nil), nil)
-	return testDnsGoldenLines(append(slices.Clone(dnsTestMailOnLines), "_mta-sts.abcdefghij.zone.example. TXT system \"v=STSv1; id="+id+"\""), root, apex)
+	lines := append(slices.Clone(dnsTestMailOnLines), "_mta-sts.abcdefghij.zone.example. TXT system \"v=STSv1; id="+id+"\"")
+	copyOwners := append(slices.Clone(dnsTestMailOnCopyOwners), "_mta-sts.abcdefghij.zone.example.")
+	return testDnsGoldenLines(testDnsWithCopyLines(lines, copyOwners...), root, apex)
 }
 
 // Whether network_dns_zone says mail is on.
@@ -172,8 +203,8 @@ func testDnsZoneMail(t testing.TB, ctx context.Context, root string, networkId s
 }
 
 // Mail on as a zone's first need allocates its label and writes M7's set in one journal row; on again
-// writes nothing; off writes one row that takes mx and b away and puts the null MX back, M5's set
-// exactly. No row of either set is a user's, so none counts as an entry.
+// writes nothing; off writes one row that takes mx and b away, with b's copy and _mta-sts's, and puts the
+// null MX back, M5's set exactly. No row of either set is a user's, so none counts as an entry.
 func TestDnsSetMailRecordsTransitions(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -226,8 +257,12 @@ func TestDnsSetMailRecordsTransitions(t *testing.T) {
 			deleted = append(deleted, key.Owner+" "+dns.TypeToString[key.Type])
 		}
 		slices.Sort(deleted)
-		// M8's _mta-sts goes with mail (DNS-M8-01)
-		wantDeleted := []string{"_mta-sts." + apex + " TXT", "b." + apex + " MX", "b." + apex + " TXT", "mx." + apex + " A", "mx." + apex + " AAAA"}
+		// M8's _mta-sts goes with mail (DNS-M8-01), and it and b take their copies with them (QD-1190)
+		wantDeleted := []string{
+			"_mta-sts." + apex + " None", "_mta-sts." + apex + " TXT",
+			"b." + apex + " MX", "b." + apex + " None", "b." + apex + " TXT",
+			"mx." + apex + " A", "mx." + apex + " AAAA",
+		}
 		if !slices.Equal(deleted, wantDeleted) {
 			t.Errorf("mail off deleted %v, want %v", deleted, wantDeleted)
 		}
@@ -236,7 +271,7 @@ func TestDnsSetMailRecordsTransitions(t *testing.T) {
 				t.Errorf("mail off wrote %+v", set)
 			}
 		}
-		if got, want := testDnsZoneLines(t, ctx, root, apex), testDnsGoldenLines(dnsTestMailOffLines, root, apex); !slices.Equal(got, want) {
+		if got, want := testDnsZoneLines(t, ctx, root, apex), testDnsMailOffServedGolden(root, apex); !slices.Equal(got, want) {
 			t.Fatalf("mail off serves\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 		}
 		if testDnsZoneMail(t, ctx, root, networkId) {
@@ -354,7 +389,7 @@ func TestDnsSetMailRecordsWaitsOutASuspension(t *testing.T) {
 		if err := Restore(ctx, networkId, ""); err != nil {
 			t.Fatal(err)
 		}
-		if got, want := testDnsZoneLines(t, ctx, root, apex), testDnsGoldenLines(dnsTestMailOffLines, root, apex); !slices.Equal(got, want) {
+		if got, want := testDnsZoneLines(t, ctx, root, apex), testDnsMailOffServedGolden(root, apex); !slices.Equal(got, want) {
 			t.Fatalf("restored\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 		}
 		if _, err := DnsSetMailRecords(ctx, networkId, root, true); err != nil {

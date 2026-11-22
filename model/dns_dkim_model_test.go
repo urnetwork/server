@@ -145,10 +145,11 @@ func TestDnsDkimSelectorWrites(t *testing.T) {
 }
 
 // S10 through the journal: mail on, a replying burner's first selector writes itself and <blabel>'s copy, and
-// _domainkey.<blabel>'s, in one write; a second selector writes itself alone; the first one's removal writes its
-// delete alone; the last one's removal takes both copies in its own write, back to the wildcard alone. Through the
-// edge's answer path, the label answers *'s MX and the healthy addresses, a health drop reaching it with no write,
-// and the selector answers its key. A receive-only burner has no row at all.
+// _domainkey.<blabel>'s and its own, in one write (QD-1190); a second selector writes itself and its copy alone; the
+// first one's removal writes its delete and its copy's alone; the last one's removal takes every copy in its own
+// write, back to the wildcard alone. Through the edge's answer path, the label answers *'s MX and the healthy
+// addresses, a health drop reaching it with no write, and the selector answers its key. A receive-only burner has
+// no row at all.
 func TestDnsBurnerSelectorsKeepTheLabelsMail(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -179,7 +180,7 @@ func TestDnsBurnerSelectorsKeepTheLabelsMail(t *testing.T) {
 		if _, err := testDkimWrite(ctx, DnsPutBurnerSelectorInTx, selector("s1")); err != nil {
 			t.Fatal(err)
 		}
-		requireRow([]string{"_domainkey.maple-1234 copy", "maple-1234 copy", "s1._domainkey.maple-1234 key"}, nil)
+		requireRow([]string{"_domainkey.maple-1234 copy", "maple-1234 copy", "s1._domainkey.maple-1234 copy", "s1._domainkey.maple-1234 key"}, nil)
 
 		view, _ := world.view(t, ctx)
 		both := dnsservice.NewHealthySet([]dnsservice.DnsLbInterface{
@@ -200,15 +201,15 @@ func TestDnsBurnerSelectorsKeepTheLabelsMail(t *testing.T) {
 		if _, err := testDkimWrite(ctx, DnsPutBurnerSelectorInTx, selector("s2")); err != nil {
 			t.Fatal(err)
 		}
-		requireRow([]string{"s2._domainkey.maple-1234 key"}, nil)
+		requireRow([]string{"s2._domainkey.maple-1234 copy", "s2._domainkey.maple-1234 key"}, nil)
 		if _, err := testDkimWrite(ctx, DnsDeleteBurnerSelectorInTx, selector("s1")); err != nil {
 			t.Fatal(err)
 		}
-		requireRow(nil, []string{"s1._domainkey.maple-1234"})
+		requireRow(nil, []string{"s1._domainkey.maple-1234", "s1._domainkey.maple-1234"})
 		if _, err := testDkimWrite(ctx, DnsDeleteBurnerSelectorInTx, selector("s2")); err != nil {
 			t.Fatal(err)
 		}
-		requireRow(nil, []string{"_domainkey.maple-1234", "maple-1234", "s2._domainkey.maple-1234"})
+		requireRow(nil, []string{"_domainkey.maple-1234", "maple-1234", "s2._domainkey.maple-1234", "s2._domainkey.maple-1234"})
 		for key := range testDnsSnapshotRows(t, ctx, world.root) {
 			if strings.Contains(key.Owner, "maple-1234") || strings.Contains(key.Owner, "cedar-0042") {
 				t.Errorf("a burner left %s %s", key.Owner, dns.TypeToString[key.Type])

@@ -158,11 +158,23 @@ func (self *testDowngradeWorld) customHostStates(ctx context.Context) map[string
 	return states
 }
 
-// The zone's rows that are no user's: mail's, the key's and the system's.
+// The zone's rows that are no user's: mail's, the key's and the system's. Copy rows are left out, since they
+// follow the users' rows: a withheld host's last record takes its copy (QD-1190), as copyLines shows.
 func (self *testDowngradeWorld) systemLines(ctx context.Context) []string {
 	lines := []string{}
 	for _, line := range self.zoneLines(ctx) {
-		if !strings.Contains(line, " "+string(dnsservice.DnsRecordKindUser)+" ") {
+		if !strings.Contains(line, " "+string(dnsservice.DnsRecordKindUser)+" ") && !strings.Contains(line, " "+string(dnsservice.DnsRecordKindCopy)+" ") {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+// The zone's copy rows, each a line.
+func (self *testDowngradeWorld) copyLines(ctx context.Context) []string {
+	lines := []string{}
+	for _, line := range self.zoneLines(ctx) {
+		if strings.Contains(line, " "+string(dnsservice.DnsRecordKindCopy)+" ") {
 			lines = append(lines, line)
 		}
 	}
@@ -205,6 +217,7 @@ func TestApplyNetworkDowngradesTeamLapse(t *testing.T) {
 		lapse := world.teamGrantEnded(t, ctx, server.NowUtc().Add(-time.Hour)).EndTime
 		connect.AssertEqual(t, NetworkTierOfFresh(ctx, world.networkId), NetworkTierFree)
 		systemLines := world.systemLines(ctx)
+		copyLines := world.copyLines(ctx)
 		customHostMap := world.customHostMap(t, ctx)
 
 		// at once, with no clock: storage, and nothing else
@@ -247,6 +260,14 @@ func TestApplyNetworkDowngradesTeamLapse(t *testing.T) {
 		connect.AssertEqual(t, DnsEntryCount(ctx, world.networkId), int64(5))
 		// no inbound address broken: mail's records, the TLSA and the strict-mode MX host as they were
 		connect.AssertEqual(t, world.systemLines(ctx), systemLines)
+		// each withheld host's only record takes its copy with it (QD-1190)
+		servedCopyLines := slices.DeleteFunc(slices.Clone(copyLines), func(line string) bool {
+			return strings.HasPrefix(line, "h3.") || strings.HasPrefix(line, "h4.") || strings.HasPrefix(line, "h5.")
+		})
+		if len(servedCopyLines) != len(copyLines)-3 {
+			t.Fatalf("the copies before the withholding %v", copyLines)
+		}
+		connect.AssertEqual(t, world.copyLines(ctx), servedCopyLines)
 		connect.AssertEqual(t, world.customHostStates(ctx), map[string]string{"a": DnsCustomHostStateWithheld, "s": DnsCustomHostStateWithheld, "mx": sidecar.DnsCustomHostStateActive})
 		if withheldMap := world.customHostMap(t, ctx); withheldMap.Version != customHostMap.Version+1 {
 			t.Fatalf("the map after withholding %+v", withheldMap)
@@ -278,6 +299,7 @@ func TestApplyNetworkDowngradesTeamLapse(t *testing.T) {
 		}
 		connect.AssertEqual(t, world.storageOver(t, ctx), false)
 		connect.AssertEqual(t, world.systemLines(ctx), systemLines)
+		connect.AssertEqual(t, world.copyLines(ctx), copyLines)
 		result = testDowngradePass(t, ctx, lapse.Add(21*testDowngradeDay))
 		connect.AssertEqual(t, testDowngradeEffects(result), ApplyNetworkDowngradesResult{})
 	})

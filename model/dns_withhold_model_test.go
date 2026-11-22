@@ -109,8 +109,20 @@ func TestDnsWithholdOverQuotaWithholdsTheNewest(t *testing.T) {
 		if withheld, served := world.withheldHosts(t, ctx); !slices.Equal(withheld, []string{"h4", "h5"}) || !slices.Equal(served, []string{"h1", "h2", "h3"}) {
 			t.Fatalf("withheld %v served %v", withheld, served)
 		}
+		// each withheld TXT leaves with its host's copy, the host holding nothing else (QD-1190)
 		journal := testDnsJournal(t, ctx, world.root, before)
-		if len(journal) != 1 || len(journal[0].Deletes) != 2 {
+		if len(journal) != 1 {
+			t.Fatalf("journal %+v", journal)
+		}
+		withheldCopies := []dnsservice.DnsRecordKey{}
+		for _, key := range journal[0].Deletes {
+			if key.Type == dnsservice.DnsCopyType {
+				withheldCopies = append(withheldCopies, key)
+			}
+		}
+		wantCopies := []dnsservice.DnsRecordKey{{Owner: "h4." + world.apex, Type: dnsservice.DnsCopyType}, {Owner: "h5." + world.apex, Type: dnsservice.DnsCopyType}}
+		slices.SortFunc(withheldCopies, func(first dnsservice.DnsRecordKey, second dnsservice.DnsRecordKey) int { return strings.Compare(first.Owner, second.Owner) })
+		if len(journal[0].Deletes) != 4 || !slices.Equal(withheldCopies, wantCopies) {
 			t.Fatalf("journal %+v", journal)
 		}
 		if count := DnsEntryCount(ctx, world.networkId); count != 5 {

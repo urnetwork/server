@@ -75,7 +75,7 @@ func TestDnsMtaStsUnverifiedNetworkPublishesNone(t *testing.T) {
 		if _, err := DnsSetMailRecords(ctx, networkId, root, true); err != nil {
 			t.Fatal(err)
 		}
-		if got, want := testDnsZoneLines(t, ctx, root, apex), testDnsGoldenLines(dnsTestMailOnLines, root, apex); !slices.Equal(got, want) {
+		if got, want := testDnsZoneLines(t, ctx, root, apex), testDnsMailOnServedGolden(root, apex); !slices.Equal(got, want) {
 			t.Fatalf("an unverified network's mail on serves\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 		}
 		before := testDnsSerialNow(t, ctx, root)
@@ -89,10 +89,10 @@ func TestDnsMtaStsUnverifiedNetworkPublishesNone(t *testing.T) {
 	})
 }
 
-// The refresh that verifies a network with mail on publishes _mta-sts, in one journal row holding only it, after
-// which the zone serves DNS-M8-01's set; a refresh with nothing changed writes nothing; and the refresh after the
-// verification is cleared takes the record away in one row, the rest of the set standing. Until a refresh, the
-// zone's set moves only at a write.
+// The refresh that verifies a network with mail on publishes _mta-sts, in one journal row holding only it and its
+// copy (QD-1190), after which the zone serves DNS-M8-01's set; a refresh with nothing changed writes nothing; and
+// the refresh after the verification is cleared takes the record and its copy away in one row, the rest of the set
+// standing. Until a refresh, the zone's set moves only at a write.
 func TestDnsMtaStsFollowsVerificationAtTheRefresh(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -102,6 +102,22 @@ func TestDnsMtaStsFollowsVerificationAtTheRefresh(t *testing.T) {
 			t.Fatal(err)
 		}
 		mtaStsKey := dnsservice.DnsRecordKey{Owner: dnsMtaStsLabel + "." + apex, Type: dns.TypeTXT}
+		mtaStsCopyKey := dnsservice.DnsRecordKey{Owner: dnsMtaStsLabel + "." + apex, Type: dnsservice.DnsCopyType}
+		// in type order, the copy's first
+		sortedKeys := func(keys []dnsservice.DnsRecordKey) []dnsservice.DnsRecordKey {
+			keys = slices.Clone(keys)
+			slices.SortFunc(keys, func(first dnsservice.DnsRecordKey, second dnsservice.DnsRecordKey) int {
+				return int(first.Type) - int(second.Type)
+			})
+			return keys
+		}
+		upsertKeys := func(row dnsservice.DnsJournalRow) []dnsservice.DnsRecordKey {
+			keys := []dnsservice.DnsRecordKey{}
+			for _, set := range row.Upserts {
+				keys = append(keys, set.Key())
+			}
+			return sortedKeys(keys)
+		}
 
 		testAddPasswordAuth(t, ctx, adminUserId, UserAuthTypeEmail, true)
 		if rows := testDnsMtaStsRows(t, ctx, root, networkId); len(rows) != 0 {
@@ -112,7 +128,7 @@ func TestDnsMtaStsFollowsVerificationAtTheRefresh(t *testing.T) {
 			t.Fatal("a verified email did not verify")
 		}
 		journal := testDnsJournal(t, ctx, root, before)
-		if len(journal) != 1 || len(journal[0].Upserts) != 1 || journal[0].Upserts[0].Key() != mtaStsKey || len(journal[0].Deletes) != 0 {
+		if len(journal) != 1 || !slices.Equal(upsertKeys(journal[0]), []dnsservice.DnsRecordKey{mtaStsCopyKey, mtaStsKey}) || len(journal[0].Deletes) != 0 {
 			t.Fatalf("the verifying refresh wrote %+v", journal)
 		}
 		if got, want := testDnsZoneLines(t, ctx, root, apex), testDnsMailOnGolden(root, apex); !slices.Equal(got, want) {
@@ -130,10 +146,10 @@ func TestDnsMtaStsFollowsVerificationAtTheRefresh(t *testing.T) {
 			t.Fatal("an unverified email still verifies")
 		}
 		journal = testDnsJournal(t, ctx, root, verifiedSerial)
-		if len(journal) != 1 || len(journal[0].Upserts) != 0 || len(journal[0].Deletes) != 1 || journal[0].Deletes[0] != mtaStsKey {
+		if len(journal) != 1 || len(journal[0].Upserts) != 0 || !slices.Equal(sortedKeys(journal[0].Deletes), []dnsservice.DnsRecordKey{mtaStsCopyKey, mtaStsKey}) {
 			t.Fatalf("the clearing refresh wrote %+v", journal)
 		}
-		if got, want := testDnsZoneLines(t, ctx, root, apex), testDnsGoldenLines(dnsTestMailOnLines, root, apex); !slices.Equal(got, want) {
+		if got, want := testDnsZoneLines(t, ctx, root, apex), testDnsMailOnServedGolden(root, apex); !slices.Equal(got, want) {
 			t.Fatalf("cleared serves\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 		}
 	})
@@ -247,8 +263,9 @@ func TestDnsMtaStsScopeFollowsVerification(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := testDnsZoneLinesBelow(t, ctx, root, networkId, engApex); !slices.Equal(got, dnsSystemRecordLines(wantScope)) {
-			t.Fatalf("the scope's rows\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(dnsSystemRecordLines(wantScope), "\n"))
+		wantScopeLines := testDnsWithCopyLines(dnsSystemRecordLines(wantScope), "_dmarc."+engApex, "b."+engApex, dnsMtaStsLabel+"."+engApex)
+		if got := testDnsZoneLinesBelow(t, ctx, root, networkId, engApex); !slices.Equal(got, wantScopeLines) {
+			t.Fatalf("the scope's rows\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(wantScopeLines, "\n"))
 		}
 
 		testDnsSetPasswordAuthVerified(t, ctx, adminUserId, false)
@@ -344,7 +361,7 @@ func TestDnsMtaStsRefreshWaitsOutAReconcileInFlight(t *testing.T) {
 		if rows := testDnsMtaStsRows(t, ctx, root, networkId); len(rows) != 0 {
 			t.Fatalf("the zone kept %v after its network lost verification", rows)
 		}
-		if got, want := testDnsZoneLines(t, ctx, root, apex), testDnsGoldenLines(dnsTestMailOnLines, root, apex); !slices.Equal(got, want) {
+		if got, want := testDnsZoneLines(t, ctx, root, apex), testDnsMailOnServedGolden(root, apex); !slices.Equal(got, want) {
 			t.Fatalf("serves\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 		}
 	})

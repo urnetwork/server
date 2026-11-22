@@ -68,8 +68,10 @@ func TestDnsSetScopeRecordsWritesTheScopesSet(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := testDnsZoneLinesBelow(t, ctx, root, networkId, scopeApex); !slices.Equal(got, dnsSystemRecordLines(want)) {
-			t.Fatalf("the scope's rows:\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(dnsSystemRecordLines(want), "\n"))
+		// the scope's apex takes no copy, and _dmarc keeps *.<scope>'s records through one (QD-1190)
+		wantLines := testDnsWithCopyLines(dnsSystemRecordLines(want), "_dmarc."+scopeApex)
+		if got := testDnsZoneLinesBelow(t, ctx, root, networkId, scopeApex); !slices.Equal(got, wantLines) {
+			t.Fatalf("the scope's rows:\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(wantLines, "\n"))
 		}
 		if again, err := DnsSetScopeRecords(ctx, &DnsScopeArgs{Root: root, NetworkId: networkId, Scope: "eng"}); err != nil || again != nil {
 			t.Fatalf("the same state again wrote %+v %v", again, err)
@@ -89,7 +91,10 @@ func TestDnsSetScopeRecordsWritesTheScopesSet(t *testing.T) {
 		// the edge rows stood through the mail write: the state is read back from the scope's rows
 		state.EdgeWildcard = true
 		state.Mail = true
-		if want, _ := DnsScopeRecords(state, dnsZoneTtl()); !slices.Equal(lines, dnsSystemRecordLines(want)) {
+		// _dmarc, b and the verified network's _mta-sts keep *.<scope>'s records through copies; mx's router addresses
+		// are its own
+		copyOwners := []string{"_dmarc." + scopeApex, "b." + scopeApex, dnsMtaStsLabel + "." + scopeApex}
+		if want, _ := DnsScopeRecords(state, dnsZoneTtl()); !slices.Equal(lines, testDnsWithCopyLines(dnsSystemRecordLines(want), copyOwners...)) {
 			t.Errorf("after edge and mail:\n%s", strings.Join(lines, "\n"))
 		}
 		// none of it is an entry

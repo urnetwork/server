@@ -43,7 +43,7 @@ func testDnsLabelMapEntries(labelMap *DnsLabelMap, networkId server.Id) []*DnsLa
 
 // A label drawn alone, as GET /sidecar/label's and GET /dns/zone's first need draws it, after a reader took its
 // cursor, comes back from the reader's next read at the serial of its zone's one journal write, which holds the
-// zone's §12.7 set under the label's apex.
+// zone's §12.7 set under the label's apex and _dmarc's copy (QD-1190).
 func TestDnsLabelDrawnAloneTakesItsZonesSerial(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -81,7 +81,8 @@ func TestDnsLabelDrawnAloneTakesItsZonesSerial(t *testing.T) {
 			t.Fatalf("the draw's journal %+v", rows)
 		}
 		for _, set := range rows[0].Upserts {
-			if set.Kind != dnsservice.DnsRecordKindSystem || !dnsOwnerAtOrBelow(set.Owner, secondApex) {
+			dmarcCopy := set.Kind == dnsservice.DnsRecordKindCopy && set.Owner == "_dmarc."+secondApex
+			if (set.Kind != dnsservice.DnsRecordKindSystem && !dmarcCopy) || !dnsOwnerAtOrBelow(set.Owner, secondApex) {
 				t.Fatalf("the draw wrote %+v", set)
 			}
 		}
