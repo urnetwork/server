@@ -86,7 +86,7 @@
 // drain losing its step 8, its stored-byte delta, hints and a DROP's table append (evs-drain-step8, sidecar 75f66a56),
 // which the drop's listing no longer covers with a fresh read of its path.
 //
-// On those fixes it fails, in one run of three (e2e-evs-verify's, 2026-11-22), on one more:
+// On those fixes it fails, in one run of six (e2e-evs-verify's, 2026-11-22), on one more:
 //
 //   - a read beside the races, or a write whose plan reads the head, refused by the device's own verifier "config pin
 //     ahead of the state: gkm auth pin ahead of the state: 13 above 12", at the base the first race round's save had
