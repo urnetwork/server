@@ -34,7 +34,8 @@ func (self *testFrontEnv) quicGroup(address netip.Addr, portKind string) *frontQ
 // it and its group's fan-in: the quic port's are the members of the group's
 // quic.ConnGroup, which quic-go reads through its oob path, and the whodis
 // port's the members of the group's fan-in, under its one translation. Each
-// group's transport reads its ConnGroup or its translation.
+// group's transport reads its ConnGroup or its translation, which only the
+// timing of its writes wraps.
 func TestFrontQuicGroupSocketsAreReadAsBound(t *testing.T) {
 	env := newTestFrontEnv(t, nil)
 	env.waitSocketsUp(len(env.frontServer.sockets))
@@ -45,7 +46,13 @@ func TestFrontQuicGroupSocketsAreReadAsBound(t *testing.T) {
 		if quicGroup.key.portKind == frontPortWhodis {
 			transportConn = run.translation
 		}
-		if transportConn == nil || !slices.Contains(transportConns, transportConn) {
+		read := slices.ContainsFunc(transportConns, func(conn net.PacketConn) bool {
+			if timedConn, ok := conn.(*frontWhodisTimedConn); ok {
+				conn = timedConn.PacketConn
+			}
+			return conn == transportConn
+		})
+		if transportConn == nil || !read {
 			t.Fatalf("the transport of %s reads neither its group's ConnGroup nor its translation", quicGroup)
 		}
 	}

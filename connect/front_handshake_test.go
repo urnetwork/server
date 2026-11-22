@@ -194,17 +194,18 @@ func observeTestFrontTlsHandshakes(env *testFrontEnv) chan testFrontTlsHandshake
 // One completed QUIC handshake of an accepted connection, as the front
 // counted it.
 type testFrontQuicHandshake struct {
-	portKind string
-	version  string
-	resumed  string
+	interfaceName string
+	portKind      string
+	version       string
+	resumed       string
 }
 
 // The completed QUIC handshakes the env's accepted connections count.
 func observeTestFrontQuicHandshakes(env *testFrontEnv) chan testFrontQuicHandshake {
 	handshakes := make(chan testFrontQuicHandshake, 64)
-	env.settings.quicHandshakeObserverForTest = func(portKind string, version string, resumed string) {
+	env.settings.quicHandshakeObserverForTest = func(interfaceName string, portKind string, version string, resumed string) {
 		select {
-		case handshakes <- testFrontQuicHandshake{portKind: portKind, version: version, resumed: resumed}:
+		case handshakes <- testFrontQuicHandshake{interfaceName: interfaceName, portKind: portKind, version: version, resumed: resumed}:
 		default:
 		}
 	}
@@ -503,7 +504,7 @@ func TestFrontQuicCountsCompletedHandshakesByVersionAndResumption(t *testing.T) 
 	// client's connection, open
 	handshake := func(what string, portKind string, tlsConfig *tls.Config, quicConfig *quic.Config, want testFrontQuicHandshake) *quic.Conn {
 		t.Helper()
-		counter := frontQuicHandshakesCounter.WithLabelValues(want.portKind, want.version, want.resumed)
+		counter := frontQuicHandshakesCounter.WithLabelValues(want.interfaceName, want.portKind, want.version, want.resumed)
 		before := testutil.ToFloat64(counter)
 		target := net.UDPAddrFromAddrPort(netip.MustParseAddrPort(env.bindAddress(address, portKind)))
 		conn, err := env.dialQuicToWithConfig(env.clientPacketConn(address), target, portKind, tlsConfig, quicConfig)
@@ -526,7 +527,7 @@ func TestFrontQuicCountsCompletedHandshakesByVersionAndResumption(t *testing.T) 
 			what := fmt.Sprintf("a %s connection, resumed %t", portKind, resumed)
 			tlsConfig := env.clientTlsConfig(testFrontConnectName, nil)
 			tlsConfig.ClientSessionCache = sessionCache
-			want := testFrontQuicHandshake{portKind: portKind, version: frontQuicVersionV1, resumed: strconv.FormatBool(resumed)}
+			want := testFrontQuicHandshake{interfaceName: testFrontInterfaceA, portKind: portKind, version: frontQuicVersionV1, resumed: strconv.FormatBool(resumed)}
 			conn := handshake(what, portKind, tlsConfig, testFrontClientQuicConfig(), want)
 			if conn.ConnectionState().TLS.DidResume != resumed {
 				t.Fatalf("%s: the client resumed %t", what, conn.ConnectionState().TLS.DidResume)
@@ -541,7 +542,7 @@ func TestFrontQuicCountsCompletedHandshakesByVersionAndResumption(t *testing.T) 
 
 	quicConfig := testFrontClientQuicConfig()
 	quicConfig.Versions = []quic.Version{quic.Version2}
-	want := testFrontQuicHandshake{portKind: frontPortQuic, version: frontQuicVersionV2, resumed: "false"}
+	want := testFrontQuicHandshake{interfaceName: testFrontInterfaceA, portKind: frontPortQuic, version: frontQuicVersionV2, resumed: "false"}
 	conn := handshake("a client of QUIC v2", frontPortQuic, env.clientTlsConfig(testFrontConnectName, nil), quicConfig, want)
 	if version := conn.ConnectionState().Version; version != quic.Version2 {
 		t.Fatalf("the client of QUIC v2 negotiated %#x", uint32(version))
@@ -659,7 +660,7 @@ func TestFrontQuicLabelsRealFailedHandshakesByReason(t *testing.T) {
 		case <-time.After(testFrontProgressTimeout):
 			t.Fatalf("%s: the dial never ended", c.what)
 		}
-		want := testFrontConnectionResult{portKind: frontPortQuic, result: frontQuicResultHandshakeFailed, reason: c.reason}
+		want := testFrontConnectionResult{interfaceName: testFrontInterfaceA, portKind: frontPortQuic, result: frontQuicResultHandshakeFailed, reason: c.reason, class: frontQuicHandshakeClassNone}
 		if result := nextTestFrontConnectionResult(t, results); result != want {
 			t.Fatalf("%s was counted as %+v, want %+v", c.what, result, want)
 		}
@@ -710,7 +711,7 @@ func TestFrontQuicCountsAClientGoneSilentAsAnIdleTimeout(t *testing.T) {
 	if dispatch := env.nextDispatch(); dispatch.nameClass != nginx.NameClassConnect {
 		t.Fatalf("dispatch = %+v", dispatch)
 	}
-	want := testFrontConnectionResult{portKind: frontPortQuic, result: frontQuicResultHandshakeFailed, reason: frontQuicHandshakeReasonIdleTimeout}
+	want := testFrontConnectionResult{interfaceName: testFrontInterfaceA, portKind: frontPortQuic, result: frontQuicResultHandshakeFailed, reason: frontQuicHandshakeReasonIdleTimeout, class: frontQuicHandshakeClassNone}
 	if result := nextTestFrontConnectionResult(t, results); result != want {
 		t.Fatalf("a client gone silent was counted as %+v, want %+v", result, want)
 	}
@@ -738,7 +739,7 @@ func TestFrontQuicCountsAHandshakeTheFrontStoppedAsCanceled(t *testing.T) {
 		t.Fatalf("dispatch = %+v", dispatch)
 	}
 	env.frontServer.close()
-	want := testFrontConnectionResult{portKind: frontPortQuic, result: frontQuicResultHandshakeFailed, reason: frontQuicHandshakeReasonCanceled}
+	want := testFrontConnectionResult{interfaceName: testFrontInterfaceA, portKind: frontPortQuic, result: frontQuicResultHandshakeFailed, reason: frontQuicHandshakeReasonCanceled, class: frontQuicHandshakeClassNone}
 	if result := nextTestFrontConnectionResult(t, results); result != want {
 		t.Fatalf("a handshake the front stopped was counted as %+v, want %+v", result, want)
 	}
@@ -848,6 +849,7 @@ func TestFrontQuicCountsClientHellosByNameClass(t *testing.T) {
 	}
 	for _, c := range cases {
 		labels := map[string]string{
+			"interface":  testFrontInterfaceA,
 			"port":       c.portKind,
 			"name_class": c.nameClass,
 			"h3_offered": strconv.FormatBool(slices.Contains(c.nextProtos, http3.NextProtoH3)),

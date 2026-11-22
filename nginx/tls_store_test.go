@@ -599,7 +599,7 @@ func TestLoadCertificateStoreServesALeafNotValidNow(t *testing.T) {
 			t.Errorf("%s: EarliestExpiry() = %s, want the lapsed %s", c.name, certificateStore.EarliestExpiry(), pair.leaf.NotAfter)
 		}
 
-		tlsConfig, _ := newTlsConfigs(certificateStore, newNameMatcher(vault.routeTable), vault.routeTable.Lb.Names[0], vault.routeTable.Listen, DefaultTlsSettings(), newFrontMetrics(prometheus.NewRegistry()), time.Now)
+		tlsConfig, _ := newTlsConfigs(certificateStore, newNameMatcher(vault.routeTable), vault.routeTable.Lb.Names[0], vault.routeTable.Listen, vault.routeTable.Interfaces, DefaultTlsSettings(), newFrontMetrics(prometheus.NewRegistry()), time.Now)
 		listener := listenTestTls(t, tlsConfig)
 		for _, serverName := range []string{c.wantNotValidNames[0], "test-api.service.example", "test-lb.service.example"} {
 			_, err := listener.exchange(t, &tls.Config{

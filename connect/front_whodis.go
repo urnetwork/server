@@ -23,6 +23,10 @@ package connect
 // dropped, as the translation drops one it can't write: only the fan-in's own
 // close ends the translation's encoder. The buffer sizes quic-go asks of the
 // translation reach every socket, including those that join later.
+//
+// The fan-in counts each datagram it wrote, the group's DNS responses, and
+// quic-go writes through frontWhodisTimedConn, which times how long each of
+// its writes waited on the translation.
 
 import (
 	"encoding/binary"
@@ -33,6 +37,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/glog"
@@ -59,6 +65,8 @@ type frontWhodisFanIn struct {
 	localAddr net.Addr
 	settings  *FrontServerSettings
 	writeSeed maphash.Seed
+	// counts each datagram a socket wrote
+	responses prometheus.Counter
 
 	datagrams chan frontWhodisDatagram
 	closed    chan struct{}
@@ -96,12 +104,14 @@ type frontWhodisFanInMember struct {
 
 var _ net.PacketConn = (*frontWhodisFanIn)(nil)
 
-// A fan-in with no socket, for sockets bound to localAddr.
-func newFrontWhodisFanIn(localAddr net.Addr, settings *FrontServerSettings) *frontWhodisFanIn {
+// A fan-in with no socket, for sockets bound to localAddr, counting the
+// datagrams it writes in responses.
+func newFrontWhodisFanIn(localAddr net.Addr, settings *FrontServerSettings, responses prometheus.Counter) *frontWhodisFanIn {
 	fanIn := &frontWhodisFanIn{
 		localAddr: localAddr,
 		settings:  settings,
 		writeSeed: maphash.MakeSeed(),
+		responses: responses,
 		datagrams: make(chan frontWhodisDatagram, settings.WhodisFanInQueueLength),
 		closed:    make(chan struct{}),
 	}
@@ -290,10 +300,11 @@ func (self *frontWhodisFanIn) ReadFrom(p []byte) (int, net.Addr, error) {
 	}
 }
 
-// net.PacketConn: writes through one live socket, picked by a hash of addr. A
-// socket closed under the write is skipped for the next one. With no socket
-// left the datagram is dropped, and once the fan-in is closed the write fails
-// with net.ErrClosed. Every other error is the socket's, unchanged.
+// net.PacketConn: writes through one live socket, picked by a hash of addr,
+// and counts the datagram once a socket wrote it. A socket closed under the
+// write is skipped for the next one. With no socket left the datagram is
+// dropped, and once the fan-in is closed the write fails with net.ErrClosed.
+// Every other error is the socket's, unchanged.
 func (self *frontWhodisFanIn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	members := *self.writeMembers.Load()
 	if len(members) != 0 {
@@ -303,6 +314,9 @@ func (self *frontWhodisFanIn) WriteTo(p []byte, addr net.Addr) (int, error) {
 			n, err := member.packetConn.WriteTo(p, addr)
 			if errors.Is(err, net.ErrClosed) {
 				continue
+			}
+			if err == nil {
+				self.responses.Inc()
 			}
 			return n, err
 		}
@@ -429,4 +443,34 @@ func (self *frontWhodisFanIn) Close() error {
 			return nil
 		}
 	}
+}
+
+// A whodis group's translation as its transport reads and writes it, timing
+// each write: the translation returns a write once its one encoder has
+// written every DNS response of the packet, so the time is the encoder's
+// queue, its pace and the socket writes (connect's waitForWireWrite). Reads,
+// deadlines and the rest are the translation's.
+type frontWhodisTimedConn struct {
+	net.PacketConn
+	writeSeconds prometheus.Observer
+}
+
+// net.PacketConn: the translation's write, timed.
+func (self *frontWhodisTimedConn) WriteTo(p []byte, addr net.Addr) (int, error) {
+	startTime := time.Now()
+	n, err := self.PacketConn.WriteTo(p, addr)
+	self.writeSeconds.Observe(time.Since(startTime).Seconds())
+	return n, err
+}
+
+// Sizes the read buffers under the translation, as quic-go asks of the
+// socket it is given.
+func (self *frontWhodisTimedConn) SetReadBuffer(byteCount int) error {
+	return setFrontReadBuffer(self.PacketConn, byteCount)
+}
+
+// Sizes the write buffers under the translation, as quic-go asks of the
+// socket it is given.
+func (self *frontWhodisTimedConn) SetWriteBuffer(byteCount int) error {
+	return setFrontWriteBuffer(self.PacketConn, byteCount)
 }

@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	quic "github.com/urnetwork/quic-go"
 	"github.com/urnetwork/quic-go/http3"
 	"github.com/urnetwork/quic-go/quicvarint"
@@ -324,13 +325,18 @@ func (self *testFrontEnv) dialSilently(address netip.Addr) *testFrontSilentSourc
 // One unvalidated-handshake limit stands behind every socket of the block:
 // with a maximum of two, two silent sources on two interfaces hold it, and a
 // third and a fourth source, one on each interface, are sent a Retry. A
-// limit per socket would have counted them instead.
+// limit per socket would have counted them instead. Each group counts the
+// Retry it asked for under its interface.
 func TestFrontQuicSharesOneHandshakeAdmissionLimit(t *testing.T) {
 	env := newTestFrontEnv(t, func(env *testFrontEnv) {
 		env.connectQuic.handshakeLimit = newConnectQuicHandshakeLimit(2)
 	})
 	addressA, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
 	addressB, _ := env.address(testFrontInterfaceB, frontFamilyIpv6)
+	retriesA := frontQuicRetriesCounter.WithLabelValues(testFrontInterfaceA, frontPortQuic)
+	retriesB := frontQuicRetriesCounter.WithLabelValues(testFrontInterfaceB, frontPortQuic)
+	retriesBeforeA := testutil.ToFloat64(retriesA)
+	retriesBeforeB := testutil.ToFloat64(retriesB)
 
 	held := []*testFrontSilentSource{}
 	for _, address := range []netip.Addr{addressA, addressB} {
@@ -341,9 +347,17 @@ func TestFrontQuicSharesOneHandshakeAdmissionLimit(t *testing.T) {
 			t.Fatalf("the handshake from %s was not counted", address)
 		}
 	}
+	if retries := testutil.ToFloat64(retriesA) + testutil.ToFloat64(retriesB) - retriesBeforeA - retriesBeforeB; retries != 0 {
+		t.Fatalf("%v Retries counted under the maximum", retries)
+	}
 	for _, address := range []netip.Addr{addressA, addressB} {
 		source := env.dialSilently(address)
 		testFrontWait(t, source.retry, "a Retry at the shared maximum on "+address.String())
+	}
+	// at least the first Initial of each was refused with a Retry; the
+	// source answers none, so its retransmissions may be refused again
+	if testutil.ToFloat64(retriesA) <= retriesBeforeA || testutil.ToFloat64(retriesB) <= retriesBeforeB {
+		t.Fatalf("Retries counted %v under %s and %v under %s", testutil.ToFloat64(retriesA)-retriesBeforeA, testFrontInterfaceA, testutil.ToFloat64(retriesB)-retriesBeforeB, testFrontInterfaceB)
 	}
 	for _, source := range held {
 		select {
@@ -588,17 +602,19 @@ func TestFrontQuicReturnsTheWindowOfConnectionsConnectDidNotServe(t *testing.T) 
 
 // One accepted QUIC connection's result, as the front counted it.
 type testFrontConnectionResult struct {
-	portKind string
-	result   string
-	reason   string
+	interfaceName string
+	portKind      string
+	result        string
+	reason        string
+	class         string
 }
 
 // The results the env's QUIC connections are counted with.
 func observeTestFrontConnectionResults(env *testFrontEnv) chan testFrontConnectionResult {
 	results := make(chan testFrontConnectionResult, 64)
-	env.settings.connectionResultObserverForTest = func(portKind string, result string, reason string) {
+	env.settings.connectionResultObserverForTest = func(interfaceName string, portKind string, result string, reason string, class string) {
 		select {
-		case results <- testFrontConnectionResult{portKind: portKind, result: result, reason: reason}:
+		case results <- testFrontConnectionResult{interfaceName: interfaceName, portKind: portKind, result: result, reason: reason, class: class}:
 		default:
 		}
 	}
@@ -658,7 +674,7 @@ func TestFrontQuicCountsAnUnknownNameOnceItsHandshakeCompletes(t *testing.T) {
 	case <-time.After(testFrontProgressTimeout):
 		t.Fatal("the refusing dial never ended")
 	}
-	wantFailed := testFrontConnectionResult{portKind: frontPortQuic, result: frontQuicResultHandshakeFailed, reason: frontQuicHandshakeReasonCertificate}
+	wantFailed := testFrontConnectionResult{interfaceName: testFrontInterfaceA, portKind: frontPortQuic, result: frontQuicResultHandshakeFailed, reason: frontQuicHandshakeReasonCertificate, class: frontQuicHandshakeClassNone}
 	if result := nextTestFrontConnectionResult(t, results); result != wantFailed {
 		t.Fatalf("a refused name whose handshake failed counted as %+v, want %+v", result, wantFailed)
 	}
@@ -669,7 +685,7 @@ func TestFrontQuicCountsAnUnknownNameOnceItsHandshakeCompletes(t *testing.T) {
 		t.Fatalf("closed with %#x", code)
 	}
 	env.nextDispatch()
-	wantRefused := testFrontConnectionResult{portKind: frontPortQuic, result: frontQuicResultUnknownName, reason: frontQuicResultReasonNone}
+	wantRefused := testFrontConnectionResult{interfaceName: testFrontInterfaceA, portKind: frontPortQuic, result: frontQuicResultUnknownName, reason: frontQuicResultReasonNone, class: frontQuicHandshakeClassNone}
 	if result := nextTestFrontConnectionResult(t, results); result != wantRefused {
 		t.Fatalf("a name refused with 0x1000 counted as %+v, want %+v", result, wantRefused)
 	}

@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // A udp socket on loopback, closed with the test.
@@ -29,7 +31,7 @@ func newTestFrontWhodisSocket(t testing.TB) *net.UDPConn {
 func newTestFrontWhodisFanIn(t testing.TB, localAddr net.Addr) *frontWhodisFanIn {
 	settings := DefaultFrontServerSettings()
 	settings.SocketRestartInitialDelay = time.Millisecond
-	fanIn := newFrontWhodisFanIn(localAddr, settings)
+	fanIn := newFrontWhodisFanIn(localAddr, settings, prometheus.NewCounter(prometheus.CounterOpts{Name: "test_front_whodis_responses_total"}))
 	t.Cleanup(func() { fanIn.Close() })
 	return fanIn
 }

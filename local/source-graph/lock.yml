@@ -15,7 +15,7 @@ siblings:
   # github.com/urnetwork/quic-go from this sibling.
   - repository: urnetwork/quic-go
     path: quic-go
-    ref: 981433dd3ad638089c757ee40318d7ab8787bde5
+    ref: 62b2f421e86686e0191b7d3d1c46ccf10e77438d
   - repository: urnetwork/glog
     path: glog
     ref: 818f60489ac279ab01f2a625b6428ab1b4e24dd2

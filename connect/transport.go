@@ -83,6 +83,20 @@ var h3ListenerFailuresCounter = prometheus.NewCounterVec(
 	[]string{"transport", "stage"},
 )
 
+// The handshakes the connect handlers' QUIC listeners hold from addresses not
+// yet validated, the count their unvalidated-handshake limit bounds
+// (connectQuicHandshakeLimit), across every handler of the process: one in
+// production. Past the limit a new source must answer a Retry
+// (urnetwork_connect_front_quic_retries_total).
+var connectQuicUnvalidatedHandshakesGauge = prometheus.NewGauge(
+	prometheus.GaugeOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "quic_unvalidated_handshakes",
+		Help:      "QUIC handshakes the connect handler's listeners, its own and the lb_alt front's, hold from source addresses not yet validated: past H3MaxUnvalidatedHandshakeCount a new source must first answer a Retry",
+	},
+)
+
 var defaultConnectH3DatagramStats = &connect.H3DatagramStats{}
 
 // connectH3DatagramCollector exports the shared candidate-carrier counters
@@ -473,6 +487,7 @@ func init() {
 	prometheus.MustRegister(h3ListenerUpGauge)
 	prometheus.MustRegister(h3ListenerRestartsCounter)
 	prometheus.MustRegister(h3ListenerFailuresCounter)
+	prometheus.MustRegister(connectQuicUnvalidatedHandshakesGauge)
 	prometheus.MustRegister(newConnectH3DatagramCollector(defaultConnectH3DatagramStats))
 }
 
@@ -817,7 +832,7 @@ func (self *connectQuicHandshakeLimit) verifySourceAddress(net.Addr) bool {
 // quic.Transport.ConnContext. quic-go cancels ctx when the connection closes.
 // The returned context carries the release AwaitQuicHandshake runs once the
 // handshake completes; the close runs it otherwise, and only the first of the
-// two counts.
+// two counts. The process's gauge follows the count.
 func (self *connectQuicHandshakeLimit) connContext(
 	ctx context.Context,
 	info *quic.ClientInfo,
@@ -826,10 +841,15 @@ func (self *connectQuicHandshakeLimit) connContext(
 		return ctx, nil
 	}
 	self.count.Add(1)
-	stop := context.AfterFunc(ctx, func() { self.count.Add(-1) })
+	connectQuicUnvalidatedHandshakesGauge.Inc()
+	stop := context.AfterFunc(ctx, func() {
+		self.count.Add(-1)
+		connectQuicUnvalidatedHandshakesGauge.Dec()
+	})
 	release := func() {
 		if stop() {
 			self.count.Add(-1)
+			connectQuicUnvalidatedHandshakesGauge.Dec()
 		}
 	}
 	return context.WithValue(ctx, connectQuicHandshakeReleaseKey{}, release), nil
