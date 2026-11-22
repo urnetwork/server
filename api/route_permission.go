@@ -132,10 +132,12 @@ var routePermissionByRoute = map[string]model.RolePermission{
 	"GET /network/oauth-clients":        model.RolePermissionKeys,
 	"POST /network/oauth-clients":       model.RolePermissionKeys,
 	"POST /network/oauth-client-revoke": model.RolePermissionKeys,
-	"POST /oauth/authorize":             model.RolePermissionKeys,
-	"POST /oauth/consent":               model.RolePermissionKeys,
-	"POST /oauth/device_consent":        model.RolePermissionKeys,
-	"POST /oauth/device_approve":        model.RolePermissionKeys,
+	// the consent page's four routes, which also admit any member to an edge
+	// sign-in and to `ur login`'s one command (refuseRolePermission)
+	"POST /oauth/authorize":      model.RolePermissionKeys,
+	"POST /oauth/consent":        model.RolePermissionKeys,
+	"POST /oauth/device_consent": model.RolePermissionKeys,
+	"POST /oauth/device_approve": model.RolePermissionKeys,
 
 	// billing, payouts and wallets
 	"GET /account/balance-codes":          model.RolePermissionBilling,
@@ -314,6 +316,23 @@ func refuseRolePermission(r *http.Request, routeKey string) bool {
 			(routeKey == "POST /oauth/consent" || routeKey == "POST /oauth/authorize") &&
 			oauth.IsEdgeSignInRequest(r) {
 			return false
+		}
+		// The consent page's routes also approve `ur login`'s one command, a
+		// single-use key for the person's own devices, which every role makes:
+		// the admin token it leads to creates only that key, which the auth key
+		// model holds to the member's own devices (oauth/urcli_own_key.go).
+		if refused && ok && credential.signedInPerson &&
+			model.RoleAndScopesPermit(role, credential.scopes, model.RolePermissionOwnDevices) {
+			switch routeKey {
+			case "POST /oauth/consent", "POST /oauth/authorize":
+				if oauth.IsUrcliOwnKeyRequest(r) {
+					return false
+				}
+			case "POST /oauth/device_consent", "POST /oauth/device_approve":
+				if oauth.IsUrcliOwnKeyDeviceRequest(r) {
+					return false
+				}
+			}
 		}
 	}
 	if refused {
