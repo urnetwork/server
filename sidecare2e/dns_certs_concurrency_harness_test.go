@@ -30,6 +30,7 @@ import (
 	"github.com/miekg/dns"
 
 	"github.com/urnetwork/sidecar"
+	"github.com/urnetwork/sidecar/certsservice"
 	"github.com/urnetwork/sidecar/dnsservice"
 
 	"github.com/urnetwork/server"
@@ -559,4 +560,81 @@ func dnsCertsChangesRefusal(err error) *sidecar.QuotaRefusal {
 		return apiErr.Refusal
 	}
 	return nil
+}
+
+// The network's certificate rows as network_tls_cert holds them (model.NewCertsStore's ListNetworkCerts), oldest
+// first.
+func dnsCertsNetworkCerts(ctx context.Context, networkId server.Id) (rows []*sidecar.TlsCertRecord, returnErr error) {
+	server.HandleError(func() {
+		rows, returnErr = model.NewCertsStore(nil).ListNetworkCerts(ctx, sidecar.Id(networkId))
+	}, func(err error) {
+		returnErr = fmt.Errorf("the certificate rows: %w", err)
+	})
+	return
+}
+
+// publisher's own certificate rows, oldest first.
+func dnsCertsSidecarCerts(ctx context.Context, publisher *dnsCertsPublisher) ([]*sidecar.TlsCertRecord, error) {
+	rows, err := dnsCertsNetworkCerts(ctx, publisher.Network.NetworkId)
+	if err != nil {
+		return nil, err
+	}
+	return slices.DeleteFunc(rows, func(row *sidecar.TlsCertRecord) bool { return row.SidecarId != publisher.SidecarId }), nil
+}
+
+// rows as one line each for a failure's message: id, state, CA, serial, successor and chain length.
+func dnsCertsDescribeRows(rows []*sidecar.TlsCertRecord) string {
+	lines := []string{}
+	for _, row := range rows {
+		lines = append(lines, fmt.Sprintf("%s %s ca %q serial %q successor %s chain %d", row.CertId, row.State, row.Ca, row.Serial, row.SuccessorCertId, len(row.Chain)))
+	}
+	if len(lines) == 0 {
+		return "none"
+	}
+	return strings.Join(lines, "; ")
+}
+
+// Waits until want holds for each publisher's rows, read every CertPollInterval: a row moves at a pass, with no hook
+// a test reads.
+func dnsCertsAwaitRows(ctx context.Context, publishers []*dnsCertsPublisher, settings *dnsCertsSettings, want func(publisher *dnsCertsPublisher, rows []*sidecar.TlsCertRecord) bool) error {
+	for {
+		waiting := []string{}
+		for _, publisher := range publishers {
+			rows, err := dnsCertsSidecarCerts(ctx, publisher)
+			if err != nil {
+				return err
+			}
+			if !want(publisher, rows) {
+				waiting = append(waiting, fmt.Sprintf("%s (%s)", publisher.Device.Name, dnsCertsDescribeRows(rows)))
+			}
+		}
+		if len(waiting) == 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("the certificate rows of %s never were as wanted: %w", strings.Join(waiting, ", "), ctx.Err())
+		case <-time.After(settings.CertPollInterval):
+		}
+	}
+}
+
+// Reads a sorted set's members in full.
+var dnsCertsBudgetMembersScript = &sidecar.RedisScript{
+	Name:   "e2e_certs_budget_members",
+	Source: `return redis.call('ZRANGE', KEYS[1], 0, -1)`,
+}
+
+// The members of root's budget at ca, {tcb_<ca>_<root>} (certsservice's budget.go): each order that spent a unit, by
+// its cert_id, and the marker of the key's rebuild.
+func dnsCertsBudgetMembers(ctx context.Context, world *World, ca certsservice.CertsCa, root string) ([]string, error) {
+	reply, err := world.T3().Host().Redis.RunScript(ctx, dnsCertsBudgetMembersScript, []string{fmt.Sprintf("{tcb_%s_%s}", ca, root)}, nil)
+	if err != nil {
+		return nil, err
+	}
+	members := []string{}
+	for _, member := range reply.Replies {
+		members = append(members, string(member.Bulk))
+	}
+	return members, nil
 }
