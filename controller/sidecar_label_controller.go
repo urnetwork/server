@@ -12,7 +12,9 @@ package controller
 //   - The root is dns.yml's one root, as /network/dns's routes serve it (networkDnsRoot); with none the route
 //     answers 503, never a label of another root.
 //   - The label is model.EnsureNetworkLabelInTx's, drawn under the network's label lock, so two first requests
-//     at once allocate one label and every later one draws nothing. The alias is
+//     at once allocate one label and every later one draws nothing. From M5 a draw writes the label's zone with
+//     it, which places the label in the label map's serial order for tlsedge, so a restoring root answers 503
+//     and a refusal rolls the draw back. The alias is
 //     model.GetNetworkDnsAliasNameInTx's, dns_label's live alias row, read in the same transaction and left out
 //     while the network has none.
 //   - A binary that does not link MG2 holds no dns_label, and the route answers 503 without a query, never a
@@ -27,6 +29,7 @@ import (
 	"net/http"
 
 	"github.com/urnetwork/sidecar"
+	"github.com/urnetwork/sidecar/dnsservice"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
@@ -53,21 +56,42 @@ func GetSidecarLabel(clientSession *session.ClientSession) (*sidecar.SidecarLabe
 	networkId := clientSession.ByJwt.NetworkId
 	answer := &sidecar.SidecarLabel{NetworkId: sidecar.Id(networkId)}
 	var labelErr error
-	server.Tx(ctx, func(tx server.PgTx) {
-		answer.Label, labelErr = model.EnsureNetworkLabelInTx(ctx, tx, networkId, root)
-		if labelErr != nil {
-			// nothing was written: each refused draw inserted no row
-			return
-		}
-		answer.Alias = model.GetNetworkDnsAliasNameInTx(ctx, tx, networkId, root)
-	}, server.TxReadCommitted)
+	func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				refusal, ok := recovered.(sidecarLabelRefusal)
+				if !ok {
+					panic(recovered)
+				}
+				labelErr = refusal.err
+			}
+		}()
+		server.Tx(ctx, func(tx server.PgTx) {
+			label, err := model.EnsureNetworkLabelInTx(ctx, tx, networkId, root)
+			if err != nil {
+				// rolled back, so a refusal writes nothing: a refused write of the zone a draw is placed with
+				// comes after the label's row went in
+				panic(sidecarLabelRefusal{err: err})
+			}
+			answer.Label = label
+			answer.Alias = model.GetNetworkDnsAliasNameInTx(ctx, tx, networkId, root)
+		}, server.TxReadCommitted)
+	}()
 	switch {
 	case errors.Is(labelErr, model.ErrDnsLabelUnlinked):
 		return nil, sidecarLabelUnavailable("network labels are not available")
 	case errors.Is(labelErr, model.ErrDnsLabelDrawsSpent):
 		return nil, sidecarLabelUnavailable("no label could be drawn")
+	case errors.Is(labelErr, dnsservice.ErrDnsRestoring):
+		// a first draw writes its zone, which a restoring root refuses as it refuses every write (§12.6)
+		return nil, sidecarLabelUnavailable("the dns root is restoring")
 	case labelErr != nil:
 		return nil, labelErr
 	}
 	return answer, nil
+}
+
+// A refusal carried out of server.Tx, which rolls the draw back.
+type sidecarLabelRefusal struct {
+	err error
 }

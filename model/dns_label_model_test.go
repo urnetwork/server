@@ -241,14 +241,23 @@ func TestDeletingANetworkWithdrawsItsRecords(t *testing.T) {
 			t.Fatal(err)
 		}
 		apex := label + "." + root
-		if _, err := DnsWrite(ctx, &DnsWriteArgs{Root: root, NetworkId: networkId, Upserts: []dnsservice.DnsRecordSet{testDnsTxt("a."+apex, "one"), testDnsTxt("b."+apex, "two")}}); err != nil {
+		written, err := DnsWrite(ctx, &DnsWriteArgs{Root: root, NetworkId: networkId, Upserts: []dnsservice.DnsRecordSet{testDnsTxt("a."+apex, "one"), testDnsTxt("b."+apex, "two")}})
+		if err != nil {
 			t.Fatal(err)
+		}
+		// the zone the label was drawn with holds its system set beside the two records
+		heldCount := 0
+		server.Db(ctx, func(conn server.PgConn) {
+			heldCount = len(getDnsZoneRowsInTx(ctx, conn, root, networkId))
+		})
+		if heldCount <= 2 {
+			t.Fatalf("the zone holds %d rows", heldCount)
 		}
 		if success, _ := RemoveNetwork(ctx, networkId, &userId); !success {
 			t.Fatal("the network was not removed")
 		}
-		rows := testDnsJournal(t, ctx, root, 1)
-		if len(rows) != 1 || len(rows[0].Deletes) != 2 || len(rows[0].Upserts) != 0 {
+		rows := testDnsJournal(t, ctx, root, written.Serial)
+		if len(rows) != 1 || len(rows[0].Deletes) != heldCount || len(rows[0].Upserts) != 0 {
 			t.Fatalf("the withdrawal's journal %+v", rows)
 		}
 		snapshot, err := OpenDnsSnapshot(ctx, root)
@@ -282,7 +291,8 @@ func TestDnsLabelMapDeltasInSerialOrder(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(labelMap.Entries) != 2 || labelMap.Serial != 0 {
+		// each label at the serial of the zone it was drawn with, the second's the newest
+		if len(labelMap.Entries) != 2 || labelMap.Serial != 2 || labelMap.Entries[0].ChangeSerial != 1 || labelMap.Entries[1].ChangeSerial != 2 {
 			t.Fatalf("snapshot %+v", labelMap)
 		}
 		var serials []uint64

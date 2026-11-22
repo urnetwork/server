@@ -530,7 +530,9 @@ func applyDnsRecordsInTx(
 		networkId,
 	))
 	dnsRecordsBarrier(DnsRecordsBarrierLocked, networkId)
-	label, err := EnsureNetworkLabelInTx(ctx, tx, networkId, root)
+	// step 9's zone write places a new label, after the compare-and-swap on the version the caller read, and every
+	// refusal before it rolls the label back
+	label, err := ensureNetworkLabelForZoneInTx(ctx, tx, networkId, root)
 	if err != nil {
 		return nil, err
 	}

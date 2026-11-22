@@ -303,8 +303,8 @@ func DnsSetMailRecordsInTx(ctx context.Context, tx server.PgTx, networkId server
 		return nil, ErrDnsUnlinked
 	}
 	root = dnsLabelRoot(root)
-	// the label's lock, then the zone's, as EnsureNetworkZoneInTx takes them
-	if _, err := EnsureNetworkLabelInTx(ctx, tx, networkId, root); err != nil {
+	// the label's lock, then the zone's, as EnsureNetworkZoneInTx takes them; its write places a new label
+	if _, err := ensureNetworkLabelForZoneInTx(ctx, tx, networkId, root); err != nil {
 		return nil, err
 	}
 	lockDnsZoneInTx(ctx, tx, root, networkId)

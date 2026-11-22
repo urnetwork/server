@@ -8,6 +8,13 @@ package model
 //     never derived from the network id, allocated on first need, immutable and
 //     never reassigned. A draw that hits a row or fails DnsNameScreen is drawn
 //     again (owner decision 97), up to DnsLabelSettings.DrawCount times.
+//   - The label map (DnsLabelMapSince) is ordered by the root's serial, which
+//     only a journal write takes, so from M5 a label is drawn with its zone: the
+//     draw writes the zone's §12.7 set through §12.6's path in its own
+//     transaction, and that write's serial is the label's change serial. A label
+//     drawn in a transaction that writes nothing else then still reaches every
+//     tlsedge following the map since its last serial, which a label left at
+//     serial 0 never did.
 //   - Labels and aliases share the key (root, label) in every state, and a row
 //     is never deleted, so no name a row holds, live, retiring or tombstoned,
 //     can be claimed again: by an alias, a rename (DnsNameHeldInTx, which
@@ -27,6 +34,7 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -143,10 +151,47 @@ func dnsLabelRoot(root string) string {
 // writer must hold none of the zone's (dns_zone_model.go). nil in production.
 var Testing_DnsLabelLockBarrier func(networkId server.Id)
 
+// Takes the network's label lock to the end of the transaction. Every writer
+// of the network's names or zones takes it first, before any zone's lock.
+func lockDnsLabelInTx(ctx context.Context, tx server.PgTx, networkId server.Id) {
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended('dns_label:' || $1::uuid::text, 0))`,
+		networkId,
+	))
+}
+
 // The network's label in root, allocating one on first need (§12.5): read,
 // first publish or order, or /mail/enable. Under the network's label lock, so
 // two first needs at once allocate one label.
+//
+// A new label is drawn in its root's serial order (the file header): with it
+// the draw writes the label's zone (ensureNetworkZoneInTx), whose write stamps
+// the label's change serial. Where there is no serial order the draw writes
+// nothing more and the label keeps change serial 0, which only a snapshot of
+// the map shows: in a binary that does not link MG5, whose labels a tlsedge,
+// which comes with MG5, snapshots at its start; and in a root with no dns_root
+// row, which takes no serial. A restoring root refuses the draw with
+// dnsservice.ErrDnsRestoring before anything is written, as it refuses every
+// write (§12.6). A zone a suspension holds takes no write until its Restore,
+// which moves the map's cursor for the network's names (§12.9), and the label
+// routes nothing meanwhile. Any other refusal of the zone's write returns its
+// error after the label's row went in, and the caller rolls back.
 func EnsureNetworkLabelInTx(ctx context.Context, tx server.PgTx, networkId server.Id, root string) (string, error) {
+	return ensureNetworkLabelInTx(ctx, tx, networkId, root, true)
+}
+
+// EnsureNetworkLabelInTx for a caller that writes the label's zone through
+// ensureNetworkZoneInTx later in the same transaction, or rolls it back: that
+// write places a new label in its root's serial order, so the draw writes
+// nothing of its own. It keeps the zone writers to one journal write a
+// transition, and the record API's compare-and-swap on the version its caller
+// read before the zone came to be.
+func ensureNetworkLabelForZoneInTx(ctx context.Context, tx server.PgTx, networkId server.Id, root string) (string, error) {
+	return ensureNetworkLabelInTx(ctx, tx, networkId, root, false)
+}
+
+func ensureNetworkLabelInTx(ctx context.Context, tx server.PgTx, networkId server.Id, root string, place bool) (string, error) {
 	if !server.SidecarMg2Linked() {
 		return "", ErrDnsLabelUnlinked
 	}
@@ -154,13 +199,19 @@ func EnsureNetworkLabelInTx(ctx context.Context, tx server.PgTx, networkId serve
 	if barrier := Testing_DnsLabelLockBarrier; barrier != nil {
 		barrier(networkId)
 	}
-	server.RaisePgResult(tx.Exec(
-		ctx,
-		`SELECT pg_advisory_xact_lock(hashtextextended('dns_label:' || $1::uuid::text, 0))`,
-		networkId,
-	))
+	lockDnsLabelInTx(ctx, tx, networkId)
 	if label := getNetworkLabelInTx(ctx, tx, networkId, root); label != "" {
 		return label, nil
+	}
+	// whether the draw writes the label's zone, judged before anything is written
+	placed := false
+	if place && server.SidecarMg5Linked() {
+		if state := getDnsRootStateInTx(ctx, tx, root); state != nil {
+			if state.Restoring {
+				return "", fmt.Errorf("%w: %s", dnsservice.ErrDnsRestoring, root)
+			}
+			placed = true
+		}
 	}
 	screen, random := currentDnsLabelDeps()
 	now := server.NowUtc()
@@ -189,19 +240,35 @@ func EnsureNetworkLabelInTx(ctx context.Context, tx server.PgTx, networkId serve
 			DnsLabelStateLive,
 			now,
 		))
-		if tag.RowsAffected() == 1 {
-			return label, nil
+		if tag.RowsAffected() != 1 {
+			continue
 		}
+		if placed {
+			// the zone's write, whose serial its touch of the label map stamps on the label
+			if _, err := ensureNetworkZoneInTx(ctx, tx, networkId, root, nil, nil); err != nil && !errors.Is(err, ErrDnsZoneSuspended) {
+				return "", err
+			}
+		}
+		return label, nil
 	}
 	return "", ErrDnsLabelDrawsSpent
 }
 
 // The network's label in root, allocating one on first need, in a transaction
-// of its own.
+// of its own, which a refusal rolls back.
 func EnsureNetworkLabel(ctx context.Context, networkId server.Id, root string) (label string, returnErr error) {
-	server.Tx(ctx, func(tx server.PgTx) {
-		label, returnErr = EnsureNetworkLabelInTx(ctx, tx, networkId, root)
-	}, server.TxReadCommitted)
+	returnErr = dnsCatchRefusal(func() {
+		server.Tx(ctx, func(tx server.PgTx) {
+			var err error
+			label, err = EnsureNetworkLabelInTx(ctx, tx, networkId, root)
+			if err != nil {
+				panic(dnsWriteRefusal{err: err})
+			}
+		}, server.TxReadCommitted)
+	})
+	if returnErr != nil {
+		label = ""
+	}
 	return
 }
 
@@ -389,6 +456,25 @@ func touchDnsLabelMapInTx(ctx context.Context, tx server.PgTx, root string, netw
 	server.RaisePgResult(tx.Exec(
 		ctx,
 		`UPDATE dns_label SET change_serial = $3 WHERE network_id = $1 AND root = $2`,
+		networkId,
+		root,
+		dnsSerialColumn(serial),
+	))
+}
+
+// Stamps serial on the network's names in root that no write has placed in the
+// label map's serial order yet, at change serial 0, in the transaction of the
+// zone's write that took serial. So a name drawn where it took no serial, in a
+// binary that did not link MG5, in a root then without its dns_root row, or by
+// a caller that committed past a refusal of its zone's write, comes into the map
+// at its zone's next write, whatever wrote it.
+func stampUnplacedDnsLabelsInTx(ctx context.Context, tx server.PgTx, root string, networkId server.Id, serial uint64) {
+	if !server.SidecarMg2Linked() || networkId == (server.Id{}) || serial == 0 {
+		return
+	}
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`UPDATE dns_label SET change_serial = $3 WHERE network_id = $1 AND root = $2 AND change_serial = 0`,
 		networkId,
 		root,
 		dnsSerialColumn(serial),
