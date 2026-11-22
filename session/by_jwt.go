@@ -598,7 +598,7 @@ func ValidateByJwtState(ctx context.Context, byJwt *ByJwt, requireClient bool) e
 		}
 		return validateByJwtStateRecord(ctx, byJwt, nil)
 	}
-	markerUnchecked, err := validateSessionAuthority(ctx, byJwt)
+	markerUnchecked, err := validateSessionAuthority(ctx, byJwt, revocationCheckBudget(ctx))
 	if err != nil {
 		return err
 	}
@@ -624,7 +624,7 @@ func validateByJwtStateBeforeQuery(ctx context.Context, byJwt *ByJwt, requireCli
 		if err := validateSessionHorizon(byJwt, server.NowUtc()); err != nil {
 			return false, err
 		}
-	} else if markerUnchecked, err = validateSessionAuthority(ctx, byJwt); err != nil {
+	} else if markerUnchecked, err = validateSessionAuthority(ctx, byJwt, revocationCheckBudget(ctx)); err != nil {
 		return false, err
 	}
 	return markerUnchecked, refuseRememberedByJwtState(ctx, byJwt, nil)
@@ -655,7 +655,7 @@ func ValidateByJwtStateForParent(ctx context.Context, byJwt *ByJwt, parentClient
 		}
 		return validateByJwtStateRecord(ctx, byJwt, &parentClientId)
 	}
-	markerUnchecked, err := validateSessionAuthority(ctx, byJwt)
+	markerUnchecked, err := validateSessionAuthority(ctx, byJwt, revocationCheckBudget(ctx))
 	if err != nil {
 		return err
 	}
@@ -668,11 +668,14 @@ func ValidateByJwtStateForParent(ctx context.Context, byJwt *ByJwt, parentClient
 
 // Checks the same live state through the caller's already-owned transaction.
 // This grants no cached authority: each transaction attempt runs the query.
+// The session marker waits the transaction's Redis budget
+// (SessionMintRedisBudgetFor), never the hosted path's longer check budget: a
+// hosted child's mint holds a registration slot for its transaction.
 func ValidateByJwtStateInTx(ctx context.Context, tx server.PgTx, byJwt *ByJwt, requireClient bool) error {
 	if err := validateByJwtStateIdentity(byJwt, requireClient); err != nil {
 		return err
 	}
-	markerUnchecked, err := validateSessionAuthority(ctx, byJwt)
+	markerUnchecked, err := validateSessionAuthority(ctx, byJwt, SessionMintRedisBudgetFor(ctx))
 	if err != nil {
 		return err
 	}
@@ -683,16 +686,16 @@ func ValidateByJwtStateInTx(ctx context.Context, tx server.PgTx, byJwt *ByJwt, r
 	return nil
 }
 
-// The horizon, then the session's revocation marker. markerUnchecked is true
-// when Redis did not answer the marker while the caller still waits: the
-// credential's other checks decide, and an acceptance is counted
-// (decision 3, revocation_check.go).
-func validateSessionAuthority(ctx context.Context, byJwt *ByJwt) (markerUnchecked bool, err error) {
+// The horizon, then the session's revocation marker, read within budget.
+// markerUnchecked is true when Redis did not answer the marker while the
+// caller still waits: the credential's other checks decide, and an acceptance
+// is counted (decision 3, revocation_check.go).
+func validateSessionAuthority(ctx context.Context, byJwt *ByJwt, budget time.Duration) (markerUnchecked bool, err error) {
 	if err := validateSessionHorizon(byJwt, server.NowUtc()); err != nil {
 		return false, err
 	}
 	if byJwt.SessionId != nil {
-		return checkSessionWithinBudget(ctx, byJwt)
+		return checkSessionWithinBudget(ctx, byJwt, budget)
 	}
 	return false, nil
 }
