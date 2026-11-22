@@ -30,7 +30,10 @@
 // the client's table needs an entry of the subnet's prefix linked to the subnet's device, and that device's rows a
 // route row of the client's under the grant (rule 6). After a grant ends, past LeaveBound, nothing reaches the subnet
 // from the client: the oracle (ItBridgeWorld.Check) holds every answer and arrival to the document's grants and the
-// grants' timelines.
+// grants' timelines. Beside the forwarding role, the save's side of QD-1164 (§8.8's Saving): the owner's `ur acl test`
+// over the document with an ip: accept and an ip: deny of the grant's prefix for its client judges the activated grant
+// by its sealed detail, so before the grants the accept fails and the deny passes, and while a grant is in force the
+// accept passes and the deny fails: an accept the save counts is then one the forwarding role must serve.
 
 package sidecare2e
 
@@ -38,6 +41,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -354,6 +358,11 @@ func (self *ItBridgeWorld) RevokeRouteGrant(ctx context.Context, grant *itBridge
 // error.
 func (self *ItBridgeWorld) RouteGrantCycle(ctx context.Context, t testing.TB) {
 	t.Helper()
+	for _, grant := range self.routeGrants {
+		for _, err := range self.routeGrantSaveTests(ctx, grant, false) {
+			t.Errorf("%s before it: %v", grant.name, err)
+		}
+	}
 	var group sync.WaitGroup
 	errs := make([]error, len(self.routeGrants))
 	for index, grant := range self.routeGrants {
@@ -366,6 +375,14 @@ func (self *ItBridgeWorld) RouteGrantCycle(ctx context.Context, t testing.TB) {
 		self.FailProgress(t, "the route grants' activations", err, nil)
 	}
 	for _, grant := range self.routeGrants {
+		if errs := self.routeGrantSaveTests(ctx, grant, true); 0 < len(errs) {
+			for _, err := range errs {
+				t.Errorf("%s in force: %v", grant.name, err)
+			}
+		} else {
+			t.Logf("%s: the owner's ur acl test counts it, an ip: accept of %s for %s passing and a deny failing (QD-1164)",
+				grant.name, grant.subnet.prefix, grant.client.name)
+		}
 		for _, err := range self.routeGrantRows(grant) {
 			t.Errorf("%s: %v", grant.name, err)
 		}
@@ -486,6 +503,54 @@ func (self *ItBridgeWorld) routeGrantRows(grant *itBridgeRouteGrant) []error {
 		errs = append(errs, fmt.Errorf("%s's rows give %s no route row of %s under the grant, so its forwarding role refuses the grant's flows "+
 			"(rule 6; bridge_compile_rows.go's reachRows reads an activated grant's prefixes from the head's local policy, which holds none for it, so "+
 			"routeRowPrefixes gives it none), %d route rows", router.name, grant.client.name, prefix, len(rows)))
+	}
+	return errs
+}
+
+// The save's side of QD-1164 for grant (the file's header): the owner's `ur acl test` (Sidecar.TestAclPolicy, a config
+// writer's plan over the verified base) of the document with test 0 accepting, and test 1 denying, the grant's prefix by
+// route for its client. With inForce the accept must pass and the deny fail, the grant counted by its sealed detail;
+// without, the accept must fail and the deny pass, the document alone. One error for each that does not.
+func (self *ItBridgeWorld) routeGrantSaveTests(ctx context.Context, grant *itBridgeRouteGrant, inForce bool) []error {
+	document := map[string]any{}
+	if err := json.Unmarshal([]byte(self.policy), &document); err != nil {
+		return []error{err}
+	}
+	src := "sidecar:" + grant.client.SidecarId().String()
+	check := "ip:" + grant.subnet.prefix.String() + "#route"
+	document["tests"] = []map[string]any{{"src": src, "accept": []string{check}}, {"src": src, "deny": []string{check}}}
+	source, err := json.Marshal(document)
+	if err != nil {
+		return []error{err}
+	}
+	report, err := self.owner.t3.Sidecar().TestAclPolicy(ctx, source)
+	if err != nil {
+		return []error{fmt.Errorf("the owner's ur acl test: %w", err)}
+	}
+	failed := func(test int) *sidecar.AclPolicyTestFailure {
+		for index := range report.Failures {
+			if report.Failures[index].Test == test {
+				return &report.Failures[index]
+			}
+		}
+		return nil
+	}
+	errs := []error{}
+	accept, deny := failed(0), failed(1)
+	switch {
+	case inForce && accept != nil:
+		errs = append(errs, fmt.Errorf("the owner's ur acl test fails an accept of %s for %s, which the grant routes (QD-1164): %+v", check, grant.client.name, *accept))
+	case !inForce && accept == nil:
+		errs = append(errs, fmt.Errorf("the owner's ur acl test passes an accept of %s for %s, which the document denies", check, grant.client.name))
+	}
+	switch {
+	case inForce && deny == nil:
+		errs = append(errs, fmt.Errorf("the owner's ur acl test passes a deny of %s for %s, which the grant routes (QD-1164)", check, grant.client.name))
+	case !inForce && deny != nil:
+		errs = append(errs, fmt.Errorf("the owner's ur acl test fails a deny of %s for %s, which the document denies: %+v", check, grant.client.name, *deny))
+	}
+	if report.DocumentAlone {
+		errs = append(errs, errors.New("the owner's ur acl test ran over the document alone, no state of the network's"))
 	}
 	return errs
 }
