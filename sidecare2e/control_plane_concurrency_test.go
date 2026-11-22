@@ -44,7 +44,8 @@
 //     rows and the exchange agree on who is a member and who is admitted; a revoked or removed device is refused at the
 //     exchange's projection (controlPlaneExchange, since a device that learned of its revocation asks for nothing), and
 //     a removed member's devices are revoked in every live device's state (§7.10: a MemberRevoke revokes the member's
-//     untagged devices) and their clients deactivated at api; the share's subject is granted the vault's read and takes
+//     untagged devices) and their clients deactivated at api, and api holds every rev/ object its removal owes within
+//     RevocationSettleTimeout; the share's subject is granted the vault's read and takes
 //     its key while the share stands, is refused the read once it is revoked, and takes no later generation; at the
 //     next rotation of the config repo every live device, the team's tagged sidecars among them, takes the new
 //     generation while no revoked or removed one does; and the team's tagged sidecars, the Admin's keys, outlive the
@@ -60,9 +61,11 @@
 // A failure from a product bug stays failing, and the case runs on so one finding does not hide the next. As the case
 // landed (e2e-control-plane-concurrency, 2026-11-22) it failed on two findings, which kept every team device but the
 // Owner's and the Admin's out of it: a Member's own auth key refused 403 (finding A) and a tagged enrollment in a team
-// answered 500 (finding B). Both fixes have landed,
-// team-member-own-auth-key (server c5579f826 to 927a07e0d) and team-tagged-enroll (server c730a0441 to e9b9598d1,
-// QD-1194), and the case now runs what they blocked; e2e-control-plane-verify (2026-11-22) widened it so. Three parts
+// answered 500 (finding B). Both fixes have landed, team-member-own-auth-key (server c5579f826 to 927a07e0d) and
+// team-tagged-enroll (server c730a0441 to e9b9598d1, QD-1194), and the case now runs what they blocked;
+// e2e-control-plane-verify (2026-11-22) widened it so, and ran it and the three cases below seven times (server
+// 3a453b5dd to a130c0cf1): each passed in every run but the first, where this case's budget check took a designed raise
+// of a rev/ object for a double spend before it counted raises (control_plane_concurrency_harness_test.go). Three parts
 // are cases of their own: the chaos, api and a member device restarted mid-save, mid-invite, mid-removal and
 // mid-statement on their stores (TestE2eControlPlaneConcurrencyChaos), a reader starting cold at a base a later config
 // writer signed (TestE2eControlPlaneConcurrencyColdGate, finding C), and the other quotas §20 names under concurrent
@@ -138,6 +141,10 @@ type controlPlaneSettings struct {
 	// How long a device's key client may take to hold a rotated generation, and how often it is asked meanwhile.
 	RotationSettleTimeout  time.Duration
 	RotationSettleInterval time.Duration
+	// How long a member's removal may take to land every rev/ object it owes (§7.10), its MemberRevoke's effects
+	// writing theirs as a task does, with no hook a test reads, and how often the store is asked meanwhile.
+	RevocationSettleTimeout  time.Duration
+	RevocationSettleInterval time.Duration
 	// How a preview is asked again while evs answers unavailable.
 	Retry *controlPlaneRetrySettings
 	// The team's settings.
@@ -176,16 +183,18 @@ func defaultControlPlaneSettings() *controlPlaneSettings {
 		RaceGrant: func(index int) string {
 			return fmt.Sprintf(`{"src": ["autogroup:member"], "dst": ["dns:race-%d"], "allow": ["admin"]}`, index)
 		},
-		GateBound:              5 * time.Second,
-		ReadSettleTimeout:      90 * time.Second,
-		ReadSettleInterval:     500 * time.Millisecond,
-		RotationSettleTimeout:  90 * time.Second,
-		RotationSettleInterval: 250 * time.Millisecond,
-		Retry:                  &controlPlaneRetrySettings{Timeout: 2 * time.Minute, Interval: 500 * time.Millisecond},
-		Team:                   team,
-		Ledgers:                defaultControlPlaneLedgerSettings(),
-		Bursts:                 DefaultWorldBurstSettings(),
-		PhaseTimeout:           4 * time.Minute,
+		GateBound:                5 * time.Second,
+		ReadSettleTimeout:        90 * time.Second,
+		ReadSettleInterval:       500 * time.Millisecond,
+		RotationSettleTimeout:    90 * time.Second,
+		RotationSettleInterval:   250 * time.Millisecond,
+		RevocationSettleTimeout:  60 * time.Second,
+		RevocationSettleInterval: 250 * time.Millisecond,
+		Retry:                    &controlPlaneRetrySettings{Timeout: 2 * time.Minute, Interval: 500 * time.Millisecond},
+		Team:                     team,
+		Ledgers:                  defaultControlPlaneLedgerSettings(),
+		Bursts:                   DefaultWorldBurstSettings(),
+		PhaseTimeout:             4 * time.Minute,
 	}
 }
 

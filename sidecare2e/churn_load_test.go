@@ -137,13 +137,19 @@
 //     mail component's pass, 2 s in this world, which mail-group-hint-watch, queued, watches hints for); and an evs
 //     writer's second write of a path refused 409 PATH_CONFLICT 48 ms after its first was answered, its plan read on
 //     evs's cache before its own push reached it (evs-write-update-stale-cache, sidecar af2e0136, 52848695; plain reads
-//     right after a device's own push wait on evs-read-own-writes, queued)
-//   - running: a commit answered just before a drain losing its stored-byte delta (evs-drain-step8, committed on its
-//     track, sidecar 75f66a56, not landed as this refresh ran)
+//     right after a device's own push wait on evs-read-own-writes, queued); and a commit answered just before a drain
+//     losing its stored-byte delta (evs-drain-step8, sidecar 75f66a56, landed as this refresh's last runs ended)
 //   - queued: api's write budget one log object's price (9216 B) past the objects api wrote, in every run with the it
 //     bridge network and in none without it (api-budget-p0-double-spend: model's ConfigLogSequencer issues P0 before
 //     each PUT, so a base whose rows equal an earlier base's spends on a projrows/ PutImmutable that makes nothing, or
 //     an append whose outcome was unknown and which landed spends twice)
+//
+// As e2e-control-plane-verify ran it (2026-11-22, four runs of four and a half minutes, server 3a453b5dd and
+// c8ce7dea9 on sidecar 2463dbb4 and ac737277, with every device saving and the members' own devices), each run failed
+// on api-budget-p0-double-spend's 9216 B alone, every other check passing. In two of them api restarted after bases a
+// later device signed, the team's second Owner device's in both and b's second, third and fourth devices' in one, and
+// every network loaded at api's gate and converged after it. Every enrollment step landed, five bursts of two steps
+// across the runs, so none met the 503 at POST /network/config/delta the case's first sitting saw once.
 //
 // Run it through the build's wrapper: -tags 'sidecar_e2e sidecar_pending sidecar_localstack' -run TestE2eChurnLoad.
 

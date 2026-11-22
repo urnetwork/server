@@ -11,7 +11,10 @@
 //     credential names the team's owner of record with no member_id (QD-1194; team-tagged-enroll) and keeps working at
 //     api past its sponsor's removal: the state check, its refresh, a window client of its own, and the exchange
 //   - a removed member's devices: its MemberRevoke revokes its untagged devices in every live device's state (§7.10),
-//     POST /network/member-remove deactivates their clients at api, and the exchange refuses them (invalid_grant)
+//     POST /network/member-remove deactivates their clients at api, the exchange refuses them (invalid_grant), and
+//     api's first metadata cluster holds every rev/ object the removal owes: the member's, written by the denial, and
+//     each device's client's, written as the denial deactivates it, and sidecar's, written by the MemberRevoke's
+//     effects at the entry's time
 //
 // A failure from a product bug stays failing.
 
@@ -21,7 +24,9 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/urnetwork/sidecar"
 
@@ -161,9 +166,11 @@ func (self *controlPlaneCase) checkTaggedAgent(ctx context.Context, device *side
 
 // member's removal took devices with it: every live device of the team's state holds each one revoked (§7.10: its
 // MemberRevoke revokes its untagged devices), api holds none of their clients active (POST /network/member-remove
-// deactivates them), and the exchange refuses each whole (invalid_grant).
+// deactivates them), the exchange refuses each whole (invalid_grant), and api holds every rev/ object the removal owes
+// (awaitRemovalRevocations).
 func (self *controlPlaneCase) checkMemberDevicesRemoved(ctx context.Context, member *WorldTeamMember, devices []*sidecart3.T3Device) {
 	t := self.t
+	self.awaitRemovalRevocations(ctx, member, devices)
 	active, err := worldNetworkActiveClientIds(ctx, self.team.NetworkId)
 	if err != nil {
 		t.Errorf("the team's clients: %v", err)
@@ -182,4 +189,50 @@ func (self *controlPlaneCase) checkMemberDevicesRemoved(ctx context.Context, mem
 		self.checkExchangeRefused(ctx, device, "its member removed")
 	}
 	t.Logf("%s's removal: its %d devices revoked, deactivated at api and refused at the exchange", member.Name, len(devices))
+}
+
+// Waits until api's first metadata cluster holds every rev/ object member's removal owes (§7.10's revocation objects):
+// the member's, which api's denial writes and its MemberRevoke's effects raise, and each of devices' client's, which
+// the denial writes as it deactivates the client, and sidecar's, which the MemberRevoke's effects write at the entry's
+// time; within RevocationSettleTimeout, asking every RevocationSettleInterval, since the effects run as a task with no
+// hook a test reads. How long they took to stand is logged; the objects still missing at the bound are an error.
+func (self *controlPlaneCase) awaitRemovalRevocations(ctx context.Context, member *WorldTeamMember, devices []*sidecart3.T3Device) {
+	t := self.t
+	cluster, err := self.world.T3().Host().Blobs.FirstCluster()
+	if err != nil {
+		t.Errorf("the first metadata cluster: %v", err)
+		return
+	}
+	networkId := sidecar.Id(self.team.NetworkId)
+	owed := map[string]string{sidecar.RevocationKey(networkId, sidecar.RevocationKindMember, member.MemberId): member.Name + "'s member"}
+	for _, device := range devices {
+		identity := device.Sidecar().Identity()
+		owed[sidecar.RevocationKey(networkId, sidecar.RevocationKindClient, identity.ClientId)] = device.Name + "'s client"
+		owed[sidecar.RevocationKey(networkId, sidecar.RevocationKindSidecar, identity.SidecarId)] = device.Name + "'s sidecar"
+	}
+	startedAt := time.Now()
+	ctx, cancel := context.WithTimeout(ctx, self.settings.RevocationSettleTimeout)
+	defer cancel()
+	for {
+		missing := []string{}
+		for key, what := range owed {
+			if _, err := cluster.Head(ctx, key); errors.Is(err, sidecar.ErrBlobNotFound) {
+				missing = append(missing, what)
+			} else if err != nil && ctx.Err() == nil {
+				t.Errorf("%s's removal: the rev/ object of %s: %v", member.Name, what, err)
+				return
+			}
+		}
+		if len(missing) == 0 {
+			t.Logf("%s's removal: its %d rev/ objects stand, %s after its check began", member.Name, len(owed), time.Since(startedAt).Round(time.Millisecond))
+			return
+		}
+		select {
+		case <-ctx.Done():
+			slices.Sort(missing)
+			t.Errorf("%s's removal: api holds no rev/ object of %s past %s (§7.10)", member.Name, strings.Join(missing, ", "), self.settings.RevocationSettleTimeout)
+			return
+		case <-time.After(self.settings.RevocationSettleInterval):
+		}
+	}
 }
