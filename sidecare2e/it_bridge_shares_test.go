@@ -404,7 +404,7 @@ func (self *itBridgeShare) checkTables(accepted *sidecar.BridgeShareAccepted, pr
 
 // Waits until the compiles hold the share, or with held false hold it no more: each target host's rules hold the
 // share with its targets there at their aliases, and each reacher's table an entry of each alias linked to its target's
-// host under the share. A host holds a revoked share no more once its rules drop it or once its role's posture holds
+// host under the share; Y's other clients' tables link no alias under it either way. A host holds a revoked share no more once its rules drop it or once its role's posture holds
 // the GrantRevoke of the share's grant as a denial, which is how §17.8's forwarding roles apply one between compiles,
 // so its rules may keep the share until the next compile. Bounded by AdoptTimeout; the error names what each compile
 // held.
@@ -469,6 +469,24 @@ func (self *itBridgeShare) compiledMissing(held bool) []error {
 		if served != held {
 			errs = append(errs, fmt.Errorf("%s's rules serve the share %t, %d shares, its role denies the share's grant %t", host.name, served,
 				len(rules.GetShares()), self.revokedAtRole(host)))
+		}
+	}
+	// a client of Y's its document lets reach no other network links no alias under the share, held or not
+	for _, client := range self.y.clients {
+		if slices.Contains(self.reachers, client) {
+			continue
+		}
+		rules, err := compiledBridgeRules(client)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if slices.ContainsFunc(rules.GetEntries(), func(entry *bridge.BridgeRuleEntry) bool {
+			return slices.ContainsFunc(entry.GetLinks(), func(link *bridge.BridgeRuleLink) bool {
+				return bytes.Equal(link.GetShareId(), shareId.Bytes())
+			})
+		}) {
+			errs = append(errs, fmt.Errorf("%s's table links an alias under the share, and its document lets it reach no other network", client.name))
 		}
 	}
 	for _, reacher := range self.reachers {
