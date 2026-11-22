@@ -1558,6 +1558,12 @@ type PlaySubscriptionRenewalResult struct {
 	NetworkDeleted bool `json:"network_deleted,omitempty"`
 }
 
+// The one renewal poll of a Play purchase: every schedule of it merges into
+// the pending one.
+func playRenewalPollRunOnce(purchaseToken string) *task.RunOnceOption {
+	return task.RunOnce("play_subscription_renewal", purchaseToken)
+}
+
 func SchedulePlaySubscriptionRenewal(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
@@ -1568,7 +1574,7 @@ func SchedulePlaySubscriptionRenewal(
 		PlaySubscriptionRenewal,
 		playSubscriptionRenewal,
 		clientSession,
-		task.RunOnce("play_subscription_renewal", playSubscriptionRenewal.PurchaseToken),
+		playRenewalPollRunOnce(playSubscriptionRenewal.PurchaseToken),
 		task.RunAt(playSubscriptionRenewal.CheckTime),
 	)
 }
