@@ -388,8 +388,21 @@ func getEnrolledClientPublicKeyInTx(ctx context.Context, tx server.PgTx, clientI
 //	marks     an enrolled client is a sidecar's: admin_refused and strict_exp
 //	          whatever the request says (I-6, D-TEAM-14), so outside
 //	          sidecar.yml's preview_networks it is refused (D-TRUST-3)
-//	owner     untagged: the key's creator owns it, its member in a personal
-//	          network; tagged: no owner, the creator its sponsor (§7.7)
+//	creator   every key mints on its creator's sign-in in the key's network,
+//	          tagged and ephemeral ones too: a personal network's owner, whose
+//	          credential names no member, or a team's live membership, whose
+//	          member_id the credential carries (§7.5), since a team's
+//	          admin_user_id is a synthetic owner of record the state check
+//	          refuses; a credential naming the creator without it would fail
+//	          the mint's own state check. A creator with no sign-in there,
+//	          removed, JIT pending or past its reauth_deadline, holds no key
+//	          any longer (§7.10), so its key answers auth_key_invalid, and so
+//	          does one whose sign-in ends before the mint's transaction
+//	owner     untagged, ephemeral or not: the key's creator owns it, its
+//	          member the creator's membership in a team, its user in a personal
+//	          network; tagged: no owner, the creator its sponsor (§7.7), the
+//	          client being the network's, which a removal of the sponsor
+//	          leaves active (owner decision 83)
 //	genesis   a tagged or ephemeral enrollment before the network's base 1
 //	          answers no_genesis, so base 1's signer is never one (§7.9's who)
 //	bundle    the request has no field for a key's #<bundle>: a bearer holding
@@ -520,13 +533,17 @@ type networkClientEnrollment struct {
 	bearer      string
 	authKeyId   server.Id
 	declaresKey []byte
-	memberId    *server.Id // an untagged durable team client's live membership at enrollment
+	// the key creator's live membership at enrollment in a team, which the
+	// credential carries whatever the key is; nil in a personal network
+	memberId *server.Id
 	// set in the mint's transaction: the key it spent, or why it spent none
 	authKey *NetworkAuthKey
 	refusal error
 }
 
-// Order a team device mint with removal or reauthentication of the exact membership it will carry.
+// Spends the key, first ordering a team mint with a removal or
+// reauthentication of the exact membership its credential carries: one that
+// ended refuses the key, as the removal ended the creator's keys (§7.10).
 func (self *networkClientEnrollment) consume(ctx context.Context, tx server.PgTx, creator *session.ByJwt) (*NetworkAuthKey, error) {
 	if self.memberId != nil {
 		rows, err := tx.Query(ctx, `SELECT member_id FROM network_member
@@ -554,11 +571,12 @@ func (self *networkClientEnrollment) ownerRow(marks clientMarks) *clientOwnerIns
 		clientPublicKey: self.declaresKey,
 	}
 	if row.tagged {
-		// a tagged client has no owner; its admitting member sponsors it (§7.7)
+		// a tagged client has no owner, and is the network's, not the
+		// member's (owner decision 83); its admitting member sponsors it (§7.7)
 		row.sponsorUserId = &creatorUserId
 	} else {
-		// the creator's own device; its member is the creator's user in a
-		// personal network (§7.5)
+		// the creator's own device, ephemeral or not: its member is the
+		// creator's membership in a team, its user in a personal network (§7.5)
 		row.ownerUserId = &creatorUserId
 		row.memberId = self.memberId
 		if row.memberId == nil {
@@ -571,6 +589,11 @@ func (self *networkClientEnrollment) ownerRow(marks clientMarks) *clientOwnerIns
 // Called in an enrollment's mint transaction just before it spends its key:
 // the barrier racing enrollments wait at. nil in production.
 var Testing_EnrollBeforeConsume func()
+
+// Called once an enrollment has read its key creator's sign-in and before the
+// mint's transaction: where a test ends the creator's membership. nil in
+// production.
+var Testing_EnrollAfterSignIn func()
 
 // What an enrollment reads of its key before the mint: the network and creator
 // the mint is for, and whether the key is tagged or ephemeral. No lock and no
@@ -668,13 +691,16 @@ func EnrollNetworkClient(ctx context.Context, enroll *NetworkEnrollArgs, clientA
 	if refusal := SidecarClientsExceeded(ctx, key.networkId); refusal != nil {
 		return nil, NewQuotaRefusalError(refusal)
 	}
-	creator := session.NewByJwt(key.networkId, key.creatorUserId, key.networkName, false, false)
-	if !key.tagged && !key.ephemeral {
-		signIn := ResolveNetworkSignIn(ctx, key.creatorUserId, key.networkId, server.NowUtc())
-		if signIn == nil {
-			return nil, newNetworkEnrollRefusal(http.StatusUnauthorized, NetworkEnrollCodeAuthKeyInvalid, networkEnrollAuthKeyInvalidMessage)
-		}
-		creator = NewNetworkSignInByJwt(signIn, false)
+	// the creator's sign-in, for every key, tagged and ephemeral ones included:
+	// the mint's state check takes no other credential in a team, whose
+	// admin_user_id is an owner of record that never signs in (see the header)
+	signIn := ResolveNetworkSignIn(ctx, key.creatorUserId, key.networkId, server.NowUtc())
+	if signIn == nil {
+		return nil, newNetworkEnrollRefusal(http.StatusUnauthorized, NetworkEnrollCodeAuthKeyInvalid, networkEnrollAuthKeyInvalidMessage)
+	}
+	creator := NewNetworkSignInByJwt(signIn, false)
+	if hook := Testing_EnrollAfterSignIn; hook != nil {
+		hook()
 	}
 	approvalState := NetworkEnrollApprovalStatePending
 	if admission != nil {
