@@ -748,7 +748,7 @@ func (self *controlPlaneCase) awaitReadRefused(ctx context.Context, device *side
 		var sink strings.Builder
 		if _, err := client.Repo(repoId).ReadHead(ctx, &sidecar.EvsReadArgs{Path: path, Fresh: true}, &sink); err != nil {
 			// evs's gate refusing the read for want of the right, never another failure that only looks like one
-			if code := sidecar.EvsRefusalCodeOf(err); code != protocol.EvsRefusalCode_EVS_REFUSAL_SCOPE {
+			if !sidecar.IsEvsRefusal(err, protocol.EvsRefusalCode_EVS_REFUSAL_SCOPE) {
 				return fmt.Errorf("the read failed other than by evs's scope refusal: %w", err)
 			}
 			self.t.Logf("%s's read of %s in %s is refused: %v", device.Name, path, repoId, err)
