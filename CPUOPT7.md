@@ -337,7 +337,7 @@ From §2's shares, at about 22.5 proxy cores per host:
    - **Why it's the owner's call:** both libraries ship in every app and in the provider,
      not only the proxy, so landing them is the owner's call even though the answers are
      unchanged.
-   - **Recommendation:** merge both, and build the next proxy with them.
+   - **Recommendation:** merge both, and build the next proxy with them. (Done 11-22: §9.1.)
 2. **Memory headroom** (P90SPEED fix #1, held on 11-18 until the two new hosts and 192 GB
    per host arrive).
    - **The cost:** GC is still 41–53% of a process.
@@ -436,3 +436,154 @@ follows the 11-21 hotfix roll.
   - the full root package (9,074 tests) is the branch's merge gate, run on the merged tree
     before it merges.
 - **sdk:** the new tests pass.
+
+## 9. Merge, build and roll (owner, about 07:05Z 11-22: "Merge + canary proxy roll")
+
+### 9.1 Merges
+
+- **connect main `0709a55a`:** the `--no-ff` merge of `perf/cpuopt7-proxy-1122` (8a41fb8f) on `33c032e1`, pushed at
+  about 07:33Z.
+  - The merged tree's full `./...` run passed, apart from failures that main has without the change:
+    - the root package fails only the known `TestAuthCancellationIsNotBackendFailure`;
+    - `extender` fails 13 phone-memory profile tests (`TestExtenderIosMemoryLive*`,
+      `TestExtenderMobileMemoryLiveCompositionMatrix`), which fail the same way on `33c032e1`.
+- **sdk main `bced97ce`:** the `--no-ff` merge of bc6a4429 on `a945474c`, pushed at about 07:21Z. Its merged tree passed
+  all seven packages, with connect main plus the change as the sibling.
+
+### 9.2 The image (§7, option A)
+
+- **Version:** `main-proxy:2026.11.22-outerwerld-1105311750`.
+- **Digest:** `sha256:e8853c96a50c8a62aa20d5caf029c4f17e1ba8c9ad97e06bb32129984ebbcc3a`. Built 07:06–07:16Z by a copy of
+  the 11-21 build harness.
+- **Sources:** the running pins, plus one commit each, as local `hotfix/cpuopt7-proxy-1122` branches proven by
+  patch-id:
+  - server `a4225d5aa` = `485cbe0b6` + 02e54f61a;
+  - connect `91f1d695` = `e9148707` + 8a41fb8f;
+  - sdk `efbbafcc` = `35fd1127` + bc6a4429;
+  - sn, proxy, glog, goidenticons, userwireguard and gvisor at 1104820710's pins.
+- **Gates:**
+  - D64's private warpctl and a private, empty version home;
+  - the registry guard: the tag was absent before its push;
+  - govulncheck on amd64 and arm64: 0 affecting;
+  - the pushed digest equals the registry's;
+  - the stamps: `a4225d5aa`, `vcs.modified=false`, go1.27.4;
+  - the dependency audit against 1104820710: MATCH, 213 and 212 lines, the VCS lines aside;
+  - the `-trimpath` audit rebuild: MATCH on both arches;
+  - the rollback target `main-proxy:2026.11.21-outerwerld-1104820710` (`sha256:b4d255d1…`) unchanged before and
+    after.
+- **The hotfix tree's tests**, with the siblings at the image's pins:
+  - build and vet;
+  - the new connect, sdk and model tests;
+  - the 91 FindProviders2, score-read and page-cache DB tests;
+  - the proxy package (DB), 330 passed and 0 failed.
+
+### 9.3 The roll
+
+**The g3 canary passed (deploy 09:43:10Z, hold to 10:18:53Z, verdict at 10:19:22Z).** It ran under the validator
+gate (intent 26494 finalized, 3,672 s to the boundary), the health gates, the payout gate and the proxy lane lock. No
+api restart landed in its window (every api process started 03:40–03:57Z).
+
+| Per process, g3 against its 18 peers | 30 min before the deploy | Last 10 min of the hold (36 min after) |
+|---|---|---|
+| cores | 2.31 (peers 2.32) | 2.13 (peers 2.33), −8.7% |
+| GC a minute | 8.36 (peers 8.48) | 7.07 (peers 8.99), −21% |
+| heap+stacks | 7.07 GB (peers 7.10) | 6.98 GB (peers 7.14) |
+| session-check unchecked share | 0.043% (peers 0.033%) | 0.135% (peers 0.037%), under the 1% bound |
+
+- **Restart relief:** a restarted process holds fewer devices for about an hour (crisp g3 2,020 live devices at 7
+  minutes against its peers' 3,200–3,500). So part of this is relief. The perf A/B below is the direct check.
+- **The perf A/B, 10:03Z:** 30 s at 99 Hz, the new g3 against the old g5 on each host, at the same moment.
+
+  | Share of the process | crisp g3 (new) | crisp g5 (old) | fireside g3 (new) | fireside g5 (old) |
+  |---|---|---|---|---|
+  | affinity donor scan | 0.04% | 7.42% | 5.36% | 13.91% |
+  | flow reaper pass | 0.37% | 2.17% | 4.10% | 5.14% |
+  | `IsDone` within it | 0 | 1.50% | 0 (`Err` 1.18%) | 3.17% |
+  | sdk `encodeUuid` | 0.20% | 1.16% | 0.13% | 1.09% |
+  | page reads (`readWithClient`) | 0.45% | 1.37% | 0.92% | 1.29% |
+
+  fireside g3's remaining donor-scan cost is lookups of members younger than a minute: 1.76% `mapaccess2` and 3.04%
+  self. A busy group there adds many flows a minute, which is §6 item 6's follow-up (a time-ordered index).
+- **The safety rules passed:**
+  - WireGuard: median 104 → 30 packets a second, sessions 21 → 15. The rule reverts below 10% and 50%.
+  - Active devices against the other blocks: 0.973 (stop below 0.8).
+  - User bytes against the other blocks: 1.171 (stop below 0.6).
+  - edge-2's 15-min busy CPU without iowait: 0.461 → 0.471, limit 0.511. It reached 0.538 at 10:03Z with bot sweeps
+    at 330–357 a second, then fell. Before the roll it swung 0.446–0.607 with no proxy change.
+  - The D57p per-host comparison: crisp g3 had 4.0 mint refusals a second against its peers' 27.3, 0.35 failed CONNECTs
+    a second against 0.71, and 1.91 against 2.35 cores. fireside g3 had 12.6 refusals a second against 25.8.
+  - proxy-test setup p50: 8.84 → 7.94 s, success share 0.862.
+
+**The g6 WireGuard canary passed (deploy 10:55:24Z, hold to 11:20:24Z).**
+
+- WireGuard: median 52.4 → 43.0 packets a second, sessions 21 → 24.
+- Against the other blocks: active devices 0.991, user bytes 1.259. edge-2: 0.507 → 0.459.
+- Per process: 2.28 cores against 2.32, and 8.2 collections a minute against 9.1.
+- The per-host comparison: fireside g6 had 21.6 mint refusals a second against its peers' 41.1, and 0.31 failed
+  CONNECTs a second against 0.65. crisp was level (0.78 against 0.69 failed CONNECTs a second, diff-in-diff +0.03).
+
+**The other blocks.** Each passed the validator, health and payout gates and the version guard, then settled 600 s.
+The readings are per process, about 15 minutes after the deploy, so they include restart relief:
+
+| Block | Deployed | Cores (other blocks) | GC a minute (other blocks) | Heap+stacks GB (other blocks) |
+|---|---|---|---|---|
+| g1 | 11:21:02Z | 2.20 (2.31) | 4.56 (8.51) | 6.70 (7.08) |
+| g2 | 11:36:10Z | 2.00 (2.33) | 5.04 (8.46) | 6.73 (7.04) |
+| g4 | 12:06:30Z | 2.07 (2.33) | 6.78 (8.67) | 6.81 (7.06) |
+| g5 | 12:21:44Z | 2.07 (2.32) | 4.52 (8.73) | 6.67 (7.08) |
+| g7 | 12:36:52Z | 2.31 (2.31) | 7.94 (8.59) | 6.94 (7.05) |
+| g8 | 13:18:41Z | 1.88 (2.27) | 2.72 (7.66) | 6.64 (7.06) |
+
+- The half-fleet check after g4 passed: proxy-test setup p50 was 8.62 s against 7.90 s before g6, and the success
+  share 0.758 against 0.742. The rolled blocks' active devices against the old blocks': 0.977.
+
+**Two stops on the per-block edge-2 rule, both judged false.** The rule compares two single 5-minute readings about
+15 minutes apart, with a tolerance of 0.05. Before the roll began, edge-2's 5-minute reading swung by more than 0.05
+within 15 of the 20 15-minute windows from 05:00Z, by up to 0.23 (0.48–0.72 at 07:54Z), with no deploy.
+
+1. **After g7, 12:51:27Z (0.494 → 0.571).**
+   - g7's state load (12:40–12:44, 68–86 acquired connections) came at edge-2's low point, 0.49–0.51.
+   - The rise came at 12:46–12:53, after g7's connections were back to 33–48. It was user CPU (0.36 → 0.44), with
+     transaction and tuple rates flat, bot sweeps steady at 390–407 a second and 7–10 autovacuum workers.
+   - 12:02–12:11 read 0.57–0.60 before g4 started.
+   - Resumed at 12:55Z for g8, g9 and g10, with every guard unchanged. g8 deployed at the next validator window.
+2. **After g8, 13:33:16Z (0.476 → 0.594), with a Main stall from 13:30Z.**
+   - The stall: api mean latency rose to 600 ms and PgBouncer clients waiting to 132.
+   - g8's state load had ended at 13:24, with 8–9 waiting.
+   - The stall was the start of a fleet-wide deploy that wasn't part of this roll: taskworker g1 restarted at 13:30:53Z
+     and the api's beta block at 13:31:07Z. The api was already slow at 13:30:00Z, before the first restart.
+   - The 7 block restarts from 09:43 to 12:37Z caused no stall.
+
+For the next roll: give the per-block rule the canary's 15-minute average, or a tolerance of 0.09.
+
+**WireGuard on restarted blocks.** In the hour after each restart, the restarted block's WireGuard traffic fell
+against the blocks not yet restarted. The old build's 11-21 roll did the same, so this is the cost of a restart, not
+of this build:
+
+| Roll (pre: 60 min before; post: 10–70 min after) | Restarted blocks, post/pre | Blocks not yet restarted, same windows | Relative |
+|---|---|---|---|
+| 11-21, the old build 1104820710 (g3–g8) | 0.67 | 1.03 | 0.65 |
+| 11-22, this build (g3–g7) | 0.59 | 0.89 | 0.66 |
+
+- Single blocks range widely in both rolls: 0.20–1.53 relative on 11-21 and 0.12–2.20 on 11-22.
+- WireGuard sessions fell by about a quarter on most restarted blocks. The handoff exports only active peers, so this
+  is a candidate for its own change.
+
+**How the roll ended: 8 blocks, then a fleet-wide deploy.**
+
+- **This roll:** g3, g6, g1, g2, g4, g5, g7 and g8 ran 1105311750, the last from 13:22Z. g9 and g10 were held on
+  1104820710 after the second stop. The roll released the proxy lane lock at each stop. Its queued resume held no
+  lock and was waiting for 14:06Z.
+- **The fleet-wide deploy:** from 13:30Z, a deploy of the builder's `2026.11.22+1105365180` replaced every service:
+  - taskworker from 13:30:53Z;
+  - api, connect and mcp from 13:31Z to 13:48Z;
+  - all 20 proxy processes at 13:48:11–13:51:55Z, about 20 s apart, both hosts of every block.
+- **CPUOPT7 is in that build.** Its tags contain all of this round's commits: server `ff9c9f996` (02e54f61a), connect
+  `dc447487` (8a41fb8f) and sdk `2c4bb027` (bc6a4429).
+- **Main during it:** PgBouncer clients waiting 91–416 at 13:50–13:52Z. At 13:53Z, api requests other than the control
+  long-polls averaged about 0.5 s over 2 minutes.
+- **The guards would have held the roll.** Had the resumed run been active, its builder guard would have held it at
+  the next block on the new api and taskworker versions. Its version guard refuses to deploy over a newer build.
+- **For the next deploy-all:** take or check the proxy lane lock (`deploy-proxy.lock.d`), so a deploy-all can't run
+  through a stopped proxy roll.
+
