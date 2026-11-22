@@ -16,6 +16,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/urnetwork/sidecar"
+
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
@@ -176,4 +178,16 @@ func worldNetworkMemberRoles(ctx context.Context, networkId server.Id) (roles ma
 		returnErr = err
 	})
 	return
+}
+
+// Sets one of pro.yml's free: sidecar: limits, the tier the world's personal networks are on, to value, until the
+// returned pop: a limits phase's cap set just above what a network holds.
+func worldSetFreeLimit(limitKey string, value int64) func() {
+	return model.Testing_SetSidecarLimits(model.NetworkTierFree, map[string]int64{limitKey: value})
+}
+
+// The admissions §20.4's config_admissions counts in state at now, as api's sequencer counts them
+// (model.ConfigAdmissionCount): what a limits phase sets its cap above.
+func worldConfigAdmissionCount(state *sidecar.ConfigState, now time.Time) int64 {
+	return model.ConfigAdmissionCount(state, now.UnixMilli())
 }

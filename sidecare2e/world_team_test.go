@@ -81,6 +81,8 @@ type WorldTeamSettings struct {
 	// read meanwhile: the task worker polls its queue, and the effects run after it claims the task.
 	RoleMirrorTimeout      time.Duration
 	RoleMirrorPollInterval time.Duration
+	// How long a tagged admission lives, its not_after from its filing: 30 days, inside §7.8's 90.
+	TaggedAdmissionLife time.Duration
 }
 
 func DefaultWorldTeamSettings() *WorldTeamSettings {
@@ -95,6 +97,7 @@ func DefaultWorldTeamSettings() *WorldTeamSettings {
 		GrantDataByteCount:     10 * 1024 * 1024 * 1024 * 1024,
 		RoleMirrorTimeout:      60 * time.Second,
 		RoleMirrorPollInterval: 100 * time.Millisecond,
+		TaggedAdmissionLife:    30 * 24 * time.Hour,
 	}
 }
 
@@ -209,6 +212,8 @@ type WorldTeam struct {
 	// each tag's atom id, by its name without the prefix, from the team's saved ACL document
 	tagIds map[string]sidecar.Id
 	tagged []*sidecart3.T3Device
+	// the team directory (fileDirectory)
+	directoryId sidecar.Id
 }
 
 // The team's members, its first Owner first, removed ones included, in join order.
@@ -356,7 +361,47 @@ func (self *World) AddTeamNetwork(ctx context.Context, settings *WorldTeamSettin
 			return nil, fmt.Errorf("%s's first ACL document: %w", settings.Name, err)
 		}
 	}
+	if err := team.fileDirectory(ctx, clients[0]); err != nil {
+		return nil, err
+	}
 	return team, nil
+}
+
+// The bootstrapping Owner's device files the team directory's RepoCreate past base 1 and creates the repo, as ur
+// daemon's team start does (§7.5, §16.11; sidecar.FileTeamDirectory), synced at the log's tip.
+func (self *WorldTeam) fileDirectory(ctx context.Context, device *sidecart3.T3Device) error {
+	client := device.Follower().Client()
+	evs, err := device.EvsClient()
+	if err != nil {
+		return err
+	}
+	result, err := sidecar.FileTeamDirectory(ctx, &sidecar.TeamDirectoryArgs{
+		SidecarId: device.Sidecar().Identity().SidecarId,
+		State:     client.State,
+		CatchUp:   client.CatchUp,
+		FileStatement: func(ctx context.Context, signedType bridge.SignedType, body proto.Message) error {
+			_, err := self.FileStatement(ctx, device, signedType, body)
+			return err
+		},
+		CreateRepo: evs.CreateRepo,
+	})
+	if err != nil {
+		return fmt.Errorf("%s's team directory: %w", self.Name, err)
+	}
+	self.stateLock.Lock()
+	self.directoryId = result.RepoId
+	self.stateLock.Unlock()
+	if err := client.CatchUp(ctx); err != nil {
+		return err
+	}
+	return self.Sync(ctx, client.Pin().GetVersion())
+}
+
+// The team directory's repo, which the bootstrapping Owner's device filed.
+func (self *WorldTeam) DirectoryId() sidecar.Id {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.directoryId
 }
 
 // A team network's name: the label and 8 random hex characters, so worlds never share one.
@@ -533,58 +578,95 @@ func (self *WorldTeam) AdmitMember(ctx context.Context, admin *sidecart3.T3Devic
 	})
 }
 
-// The first device of a member who joined by invite, then count-1 more: each enrolled under the member's team
-// credential; the first admitted by the inviting device with SIDECAR_CAPABILITY_INVITED once its join's MAC verifies
-// under the invite's fragment (§7.5), the rest by that consented first device (§7.9's scoped row); then each follows.
+// The first device of a member who joined by invite, then count-1 more, enrolled (EnrollMemberDevices) and admitted
+// (AdmitMemberDevices).
 func (self *WorldTeam) AddMemberDevices(ctx context.Context, member *WorldTeamMember, invite *WorldTeamInvite, count int) ([]*sidecart3.T3Device, error) {
 	if count < 1 {
 		return nil, nil
 	}
-	devices, err := self.AddSidecarsWith(ctx, &sidecart3.T3EnrollArgs{Root: member.Root, MemberId: member.MemberId, Count: count})
+	devices, err := self.EnrollMemberDevices(ctx, member, count, "")
+	if err != nil {
+		return nil, err
+	}
+	if err := self.AdmitMemberDevices(ctx, member, invite, devices); err != nil {
+		return nil, err
+	}
+	return devices, nil
+}
+
+// count devices of member, each enrolled under the member's team credential, Online and not yet admitted; name, where
+// set, starts their names (T3EnrollArgs.Name), so enrollments of several members may run at once.
+func (self *WorldTeam) EnrollMemberDevices(ctx context.Context, member *WorldTeamMember, count int, name string) ([]*sidecart3.T3Device, error) {
+	devices, err := self.AddSidecarsWith(ctx, &sidecart3.T3EnrollArgs{Root: member.Root, MemberId: member.MemberId, Count: count, Name: name})
 	if err != nil {
 		return nil, fmt.Errorf("%s's devices: %w", member.Name, err)
 	}
-	first := devices[0]
-	if invite != nil {
-		identity := first.Sidecar().Identity()
-		join := &sidecar.MemberInviteJoin{
-			NetworkId:         sidecar.Id(self.NetworkId),
-			InviteId:          invite.InviteId,
-			SidecarId:         identity.SidecarId,
-			IdentityPublicKey: identity.IdentityPublicKey,
-			MemberId:          member.MemberId,
-		}
-		// the joining device MACs its request with the fragment's secret, and the inviting device checks it
-		mac, err := invite.invite.Fragment().JoinMac(join)
-		if err != nil {
-			return nil, fmt.Errorf("%s's join: %w", first.Name, err)
-		}
-		if err := sidecar.VerifyMemberInviteJoin(invite.invite.Fragment(), join, mac); err != nil {
-			return nil, fmt.Errorf("%s's join did not verify: %w", first.Name, err)
-		}
-		if err := self.admitBy(ctx, invite.Inviter, first, member.MemberId, uint32(bridge.SidecarCapability_SIDECAR_CAPABILITY_INVITED)); err != nil {
-			return nil, err
-		}
-	} else if err := self.admitBy(ctx, self.Owner.Devices()[0], first, member.MemberId, 0); err != nil {
-		return nil, err
+	return devices, nil
+}
+
+// Admits member's enrolled devices, then has each follow: the first, where invite is the member's, by the inviting
+// device with SIDECAR_CAPABILITY_INVITED once its join's MAC verifies under the invite's fragment (§7.5), else by the
+// first Owner's first device; the rest by that consented first device (§7.9's scoped row). A member who already has
+// a device admitted has each new one admitted by that device.
+func (self *WorldTeam) AdmitMemberDevices(ctx context.Context, member *WorldTeamMember, invite *WorldTeamInvite, devices []*sidecart3.T3Device) error {
+	if len(devices) == 0 {
+		return nil
 	}
-	if err := self.Follow(ctx, devices[:1]); err != nil {
-		return nil, err
+	var admitter *sidecart3.T3Device
+	if held := member.Devices(); 0 < len(held) {
+		admitter = held[0]
 	}
-	for _, device := range devices[1:] {
-		if err := self.admitBy(ctx, first, device, member.MemberId, 0); err != nil {
-			return nil, err
+	pending := devices
+	if admitter == nil {
+		first := devices[0]
+		pending = devices[1:]
+		if invite != nil {
+			identity := first.Sidecar().Identity()
+			join := &sidecar.MemberInviteJoin{
+				NetworkId:         sidecar.Id(self.NetworkId),
+				InviteId:          invite.InviteId,
+				SidecarId:         identity.SidecarId,
+				IdentityPublicKey: identity.IdentityPublicKey,
+				MemberId:          member.MemberId,
+			}
+			// the joining device MACs its request with the fragment's secret, and the inviting device checks it
+			mac, err := invite.invite.Fragment().JoinMac(join)
+			if err != nil {
+				return fmt.Errorf("%s's join: %w", first.Name, err)
+			}
+			if err := sidecar.VerifyMemberInviteJoin(invite.invite.Fragment(), join, mac); err != nil {
+				return fmt.Errorf("%s's join did not verify: %w", first.Name, err)
+			}
+			if err := self.admitBy(ctx, invite.Inviter, first, member.MemberId, uint32(bridge.SidecarCapability_SIDECAR_CAPABILITY_INVITED)); err != nil {
+				return err
+			}
+		} else if err := self.admitBy(ctx, self.Owner.Devices()[0], first, member.MemberId, 0); err != nil {
+			return err
+		}
+		if err := self.Follow(ctx, devices[:1]); err != nil {
+			return err
+		}
+		admitter = first
+		func() {
+			member.stateLock.Lock()
+			defer member.stateLock.Unlock()
+			member.devices = append(member.devices, first)
+		}()
+	}
+	for _, device := range pending {
+		if err := self.admitBy(ctx, admitter, device, member.MemberId, 0); err != nil {
+			return err
 		}
 	}
-	if 1 < len(devices) {
-		if err := self.Follow(ctx, devices[1:]); err != nil {
-			return nil, err
+	if 0 < len(pending) {
+		if err := self.Follow(ctx, pending); err != nil {
+			return err
 		}
 	}
 	member.stateLock.Lock()
 	defer member.stateLock.Unlock()
-	member.devices = append(member.devices, devices...)
-	return devices, nil
+	member.devices = append(member.devices, pending...)
+	return nil
 }
 
 // admitter admits device under memberId with capabilities: a device of the same member as `ur approve` does on its
@@ -649,13 +731,20 @@ func (self *WorldTeam) AddTagged(ctx context.Context, admin *sidecart3.T3Device,
 
 // admin signs device's SidecarAdmit carrying tagId alone, filed through api.
 func (self *WorldTeam) AdmitTagged(ctx context.Context, admin *sidecart3.T3Device, device *sidecart3.T3Device, tagId sidecar.Id) error {
+	return WorldAdmitTagged(ctx, self.T3Network, admin, device, tagId, self.settings.TaggedAdmissionLife)
+}
+
+// admin signs device's SidecarAdmit in network carrying tagId alone and a not_after life from now, which a tagged
+// admission carries (§7.9's type rules: tombstoned until its not_after), filed through api.
+func WorldAdmitTagged(ctx context.Context, network *sidecart3.T3Network, admin *sidecart3.T3Device, device *sidecart3.T3Device, tagId sidecar.Id, life time.Duration) error {
 	identity := device.Sidecar().Identity()
-	_, err := self.FileStatement(ctx, admin, bridge.SignedType_SIGNED_SIDECAR_ADMIT, &protocol.SidecarAdmit{
-		NetworkId:         sidecar.Id(self.NetworkId).Bytes(),
+	_, err := network.FileStatement(ctx, admin, bridge.SignedType_SIGNED_SIDECAR_ADMIT, &protocol.SidecarAdmit{
+		NetworkId:         sidecar.Id(network.NetworkId).Bytes(),
 		SidecarId:         identity.SidecarId.Bytes(),
 		IdentityPublicKey: identity.IdentityPublicKey,
 		IdentityAlg:       "ed25519",
 		TagIds:            [][]byte{tagId.Bytes()},
+		NotAfter:          time.Now().Add(life).UnixMilli(),
 	})
 	if err != nil {
 		return fmt.Errorf("%s's tagged admission: %w", device.Name, err)

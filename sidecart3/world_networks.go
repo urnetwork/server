@@ -918,10 +918,15 @@ type T3EnrollArgs struct {
 	Count int
 	// Called for each, adjusting its settings past the defaults; nil for none.
 	Settings func(name string, sidecarSettings *sidecar.SidecarSettings)
+	// What the devices' names start with, each then -<index> from 0 within the call, so calls naming different
+	// prefixes may run at once on one network. "": the network's name, each numbered from the network's count, one call
+	// at a time.
+	Name string
 }
 
 // AddSidecars under args: each device enrolled from an auth key args' credential makes, carrying args' tags, so a
-// team's member enrolls its own devices and a tag owner its tagged ones. One call at a time per network.
+// team's member enrolls its own devices and a tag owner its tagged ones. One call at a time per network, unless each
+// names a prefix of its own (T3EnrollArgs.Name).
 func (self *T3Network) AddSidecarsWith(ctx context.Context, args *T3EnrollArgs) ([]*T3Device, error) {
 	count, settings := args.Count, args.Settings
 	root := args.Root
@@ -935,7 +940,10 @@ func (self *T3Network) AddSidecarsWith(ctx context.Context, args *T3EnrollArgs) 
 	if 0 < len(args.Tags) {
 		memberId = sidecar.Id{}
 	}
-	start := len(self.Devices())
+	prefix, start := self.Name, len(self.Devices())
+	if args.Name != "" {
+		prefix, start = args.Name, 0
+	}
 	added := make([]*T3Device, count)
 	errs := make([]error, count)
 	concurrency := max(1, self.world.settings.EnrollConcurrency)
@@ -945,7 +953,7 @@ func (self *T3Network) AddSidecarsWith(ctx context.Context, args *T3EnrollArgs) 
 		group.Go(func() {
 			tickets <- struct{}{}
 			defer func() { <-tickets }()
-			name := fmt.Sprintf("%s-%d", self.Name, start+index)
+			name := fmt.Sprintf("%s-%d", prefix, start+index)
 			added[index], errs[index] = self.enroll(ctx, name, root, memberId, args.Tags, settings)
 		})
 	}
