@@ -9,9 +9,9 @@ package nginx
 //     BodySettings.MemoryBudgetBytes before the first read (D7, D19). With no
 //     room, the front answers a local 503 before reading anything. An h3
 //     request without a content-length reserves once its first bytes arrive
-//     instead, and a 503 comes after that read: the vendored http3 gives
-//     every such request a body of unknown length, a GET's included, and one
-//     whose stream ends first has no body, so it holds nothing
+//     instead, and a 503 comes after that read: the quic-go fork's http3
+//     gives every such request a body of unknown length, a GET's included,
+//     and one whose stream ends first has no body, so it holds nothing
 //     (bodyReadOptions.absentWhenEmpty);
 //   - the bytes past the prefix go to one spill file in BodySettings.SpillDir,
 //     taken under BodySettings.SpillMaxFiles when the first such byte
@@ -169,9 +169,9 @@ type bodyReadOptions struct {
 	// a body of unknown length that ends before its first byte is no body:
 	// its memory prefix is reserved only once a read returns bytes, and read
 	// returns a nil body for one that ends first. For an h3 request without
-	// a content-length: the vendored http3 gives each a body of unknown
-	// length, a GET's included, and reports a stream that ended with its
-	// head only to a read. A declared length ignores it.
+	// a content-length: the quic-go fork's http3 gives each a body of
+	// unknown length, a GET's included, and reports a stream that ended with
+	// its head only to a read. A declared length ignores it.
 	absentWhenEmpty bool
 }
 
@@ -248,9 +248,9 @@ func (self *bodyStore) read(ctx context.Context, body io.Reader, options bodyRea
 	}
 	if 0 <= options.declaredLength && storedBody.length() != options.declaredLength {
 		// a body that ended short of its declared length, which Go's h1 and
-		// h2 servers report as a failed read, but the vendored http3 as the
-		// stream's end: RFC 9114 §4.1.2 makes such a request malformed, and
-		// nginx answers it 400 ("client prematurely closed stream")
+		// h2 servers report as a failed read, but the quic-go fork's http3 as
+		// the stream's end: RFC 9114 §4.1.2 makes such a request malformed,
+		// and nginx answers it 400 ("client prematurely closed stream")
 		return nil, &bodyRefusal{status: http.StatusBadRequest, reason: bodyRefusalIncomplete}
 	}
 	stored = true
@@ -295,10 +295,11 @@ const bodyHttp2ClientDisconnectedText = "client disconnected"
 //   - an h2 connection that ended (bodyHttp2ClientDisconnectedText): Go's
 //     server fails the body first;
 //   - an h3 request stream the client reset, or a QUIC connection it closed
-//     or reset: the vendored http3 fails the body with a remote http3.Error,
-//     or quic's own error, and cancels the request's context only once the
-//     response's side is stopped too, so a client that resets only its
-//     request's side never ends it. A local error is the front's own doing.
+//     or reset: the quic-go fork's http3 fails the body with a remote
+//     http3.Error, or quic's own error, and cancels the request's context
+//     only once the response's side is stopped too, so a client that resets
+//     only its request's side never ends it. A local error is the front's
+//     own doing.
 func bodyReadClientGone(err error) bool {
 	if errors.Is(err, syscall.ECONNRESET) || err.Error() == bodyHttp2ClientDisconnectedText {
 		return true

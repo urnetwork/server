@@ -607,7 +607,7 @@ var parityAcceptances = []*parityAcceptance{
 	},
 	{
 		id:     "repeated-identical-content-length",
-		source: "LBALT-IMPL §4: Go's h1 and h2 servers, and the vendored http3, merge repeated identical Content-Length values into one before any handler runs (net/http fixLength, the h2 server's newWriterAndRequest, http3 parseHeaders), and the front forwards the request framed by that one length, where nginx answers a second Content-Length 400 on h1 and h2 alike (ngx_http_process_unique_header_line)",
+		source: "LBALT-IMPL §4: Go's h1 and h2 servers, and the quic-go fork's http3, merge repeated identical Content-Length values into one before any handler runs (net/http fixLength, the h2 server's newWriterAndRequest, http3 parseHeaders), and the front forwards the request framed by that one length, where nginx answers a second Content-Length 400 on h1 and h2 alike (ngx_http_process_unique_header_line)",
 		match: func(check *parityCheck, difference *parityDifference) bool {
 			if !check.hasTag("repeated-identical-content-length") || parityValue(check.nginx, "response[0].status") != "400" || parityValue(check.front, "response[0].status") != "200" {
 				return false

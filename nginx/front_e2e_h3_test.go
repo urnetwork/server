@@ -107,9 +107,10 @@ func newE2eH3ApiClient(t *testing.T, e2e *e2eFront) *http.Client {
 // An h3 body whose stream ends 90 bytes short of its declared 100 is a 400,
 // as nginx answers a stream that ends before its body ("client prematurely
 // closed stream") and as the front answers on h2: on a buffered route it
-// reaches no block, where the vendored http3's end of stream had it forwarded
-// as a complete 10-byte body, and on a streamed route, whose head went
-// upstream at once, it is a refusal, not one of the front's own 502s.
+// reaches no block, where the end of stream from the quic-go fork's http3 had
+// it forwarded as a complete 10-byte body, and on a streamed route, whose
+// head went upstream at once, it is a refusal, not one of the front's own
+// 502s.
 func TestFrontE2eH3BodyEndingShortOfItsLengthIs400(t *testing.T) {
 	// the api's /stream/ paths stream, as the api's streamable paths do
 	e2e := newE2eFront(t, nil, func(routeTable *RouteTable) {
@@ -161,12 +162,12 @@ func TestFrontE2eH3BodyEndingShortOfItsLengthIs400(t *testing.T) {
 	}
 }
 
-// An h3 GET, which the vendored http3 gives a body of unknown length ended
-// by its stream, goes to a buffered route's block with no framing, as the
-// same GET does over h1 and h2 and as nginx's h3 sends a request whose stream
-// ended with its head: no Content-Length and no Transfer-Encoding, and,
-// while the block holds it, nothing reserved in the body store. An h3 POST of
-// no declared length still goes with the length of what it sent.
+// An h3 GET, which the quic-go fork's http3 gives a body of unknown length
+// ended by its stream, goes to a buffered route's block with no framing, as
+// the same GET does over h1 and h2 and as nginx's h3 sends a request whose
+// stream ended with its head: no Content-Length and no Transfer-Encoding,
+// and, while the block holds it, nothing reserved in the body store. An h3
+// POST of no declared length still goes with the length of what it sent.
 func TestFrontE2eH3BodilessRequestHasNoFraming(t *testing.T) {
 	e2e := newE2eFront(t, nil, nil)
 	client := newE2eH3ApiClient(t, e2e)
