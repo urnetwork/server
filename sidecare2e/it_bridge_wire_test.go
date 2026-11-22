@@ -107,6 +107,8 @@ type itBridgeDevice struct {
 	// a filing device's filer, and its gate's stand-in (it_bridge_world_test.go); nil on a client
 	filer *sidecar.BridgeFiler
 	gate  *worldDeviceGate
+	// a client's grant filer, which asks its route grants (it_bridge_grants_test.go); nil on a client that asks none
+	grants *sidecar.AclGrantFiler
 }
 
 // The device's id in the network's config.

@@ -7,8 +7,8 @@
 //
 //	subnets   S subnets join and leave the network concurrently, each behind its own forwarding device: a subnet joins
 //	          by its device's BridgeRoute under the document's standing route rule (§17.7), and leaves by a reset
-//	          BridgeWithdraw of it (§17.8's revocation row); a route grant that activates and expires and a bridge share
-//	          accepted and revoked are §17's other ways in and out, which this case does not run
+//	          BridgeWithdraw of it (§17.8's revocation row); a route grant that activates and expires or is revoked is
+//	          §17's next way in and out, which TestE2eItBridgeRouteGrants runs (it_bridge_grants_test.go)
 //	forwards  P port forwards are set up and removed concurrently on H other devices: each a BridgeMap of its host's
 //	          overlay address's port to a service on the host's loopback (§17.6's rule 1), removed by a reset
 //	          BridgeWithdraw; every host claimed its overlay address first
@@ -85,6 +85,40 @@ func TestE2eItBridgeStatic(t *testing.T) {
 		}
 		for _, err := range world.Sweep(ctx, "sweep") {
 			t.Errorf("sweep: %v", err)
+		}
+		world.Check(t)
+		world.LogBridges(t)
+		world.Reconcile(ctx, t)
+		world.Summarize(t)
+	})
+}
+
+// Route grants joining a subnet to a client's reach and taking it out again (it_bridge_grants_test.go): every client
+// the document denies a subnet asks a route grant on it, which the owner's device approves and the client's gate
+// spends in a GrantActivate; while the grant is in force the client must reach the subnet by TCP and UDP, its table
+// holding the subnet's entry and the subnet's device's rows its route row, and once the grant expires or is revoked,
+// past LeaveBound, nothing reaches the subnet from it. Then a sweep, the oracle and the ledgers, as the case's.
+func TestE2eItBridgeRouteGrants(t *testing.T) {
+	e2eTestEnv().Run(t, func(t testing.TB) {
+		settings := DefaultItBridgeSettings()
+		settings.SubnetCount = 3
+		settings.ForwardCount = 1
+		settings.ForwardHostCount = 1
+		settings.ClientCount = 3
+		settings.CampusPrefix = netip.Prefix{}
+		settings.RouteGrants = true
+		world := NewItBridgeWorld(t, settings)
+		ctx, cancel := world.world.StepContext(t.Context(), world.world.HostsSettings().CaseTimeout)
+		defer cancel()
+		if err := world.JoinAll(ctx); err != nil {
+			world.FailProgress(t, "the joins", err, nil)
+		}
+		for _, err := range world.Sweep(ctx, "sweep") {
+			t.Errorf("sweep: %v", err)
+		}
+		world.RouteGrantCycle(ctx, t)
+		for _, err := range world.Sweep(ctx, "last sweep") {
+			t.Errorf("last sweep: %v", err)
 		}
 		world.Check(t)
 		world.LogBridges(t)
@@ -403,8 +437,8 @@ func (self *ItBridgeWorld) Check(t testing.TB) {
 		if attempt.Owner != attempt.Expected.name {
 			t.Errorf("%s reached %s, not %s, which owns the address for it", where, attempt.Owner, attempt.Expected.name)
 		}
-		if !attempt.Granted {
-			t.Errorf("%s was answered, and the document grants it none", where)
+		if !attempt.Granted && !self.grantedOver(attempt.Client, attempt.Expected, attempt.Protocol, attempt.Start, attempt.End) {
+			t.Errorf("%s was answered, and neither the document nor a route grant within %s of its end grants it", where, bound)
 		}
 		if attempt.Expected.timeline != nil && !attempt.Expected.timeline.Allows(attempt.Start, attempt.End, bound) {
 			t.Errorf("%s was answered outside every incarnation of %s, %s", where, attempt.Expected.name, self.describeTimeline(attempt.Expected))
@@ -418,8 +452,8 @@ func (self *ItBridgeWorld) Check(t testing.TB) {
 				t.Errorf("%s reached %s from no client of the case", where, target.name)
 				continue
 			}
-			if !self.grantedBy(client.clientIndex(), target, arrival.Network) {
-				t.Errorf("%s reached %s, which the document denies it", where, target.name)
+			if !self.grantedOver(client, target, arrival.Network, arrival.At, arrival.At) {
+				t.Errorf("%s reached %s, which the document denies it and no route grant within %s of its end gave it", where, target.name, bound)
 			}
 			if target == self.campus {
 				// a nested subnet's address the client routes reaches that subnet's device or nothing, never the
@@ -531,10 +565,15 @@ func (self *ItBridgeWorld) checkLiveness(t testing.TB) {
 	}
 }
 
-// A timeline as one line for a failure's message.
+// A target's timeline as one line for a failure's message.
 func (self *ItBridgeWorld) describeTimeline(target *itBridgeTarget) string {
+	return describeItBridgeTimeline(target.timeline)
+}
+
+// A timeline as one line.
+func describeItBridgeTimeline(timeline *itBridgeTimeline) string {
 	parts := []string{}
-	for _, incarnation := range target.timeline.Incarnations() {
+	for _, incarnation := range timeline.Incarnations() {
 		parts = append(parts, fmt.Sprintf("#%d filed %s landed %s at %d adopted %s, withdraw %s withdrawn %s at %d adopted %s",
 			incarnation.Number, itBridgeTime(incarnation.FiledAt), itBridgeTime(incarnation.LandedAt), incarnation.Pin, itBridgeTime(incarnation.AdoptedAt),
 			itBridgeTime(incarnation.WithdrawAt), itBridgeTime(incarnation.WithdrawnAt), incarnation.WithdrawPin, itBridgeTime(incarnation.WithdrawAdoptedAt)))
@@ -660,6 +699,9 @@ func (self *ItBridgeWorld) Summarize(t testing.TB) {
 	}
 	for _, target := range slices.Concat(self.routes(), self.forwards) {
 		t.Logf("%s: %d arrivals, %d incarnations %s", target.name, len(target.service.Arrivals()), len(target.timeline.Incarnations()), self.describeTimeline(target))
+	}
+	for _, grant := range self.routeGrants {
+		t.Logf("%s: grant %x, expires %t, %s", grant.name, grant.GrantId(), grant.expires, describeItBridgeTimeline(grant.timeline))
 	}
 	self.stateLock.Lock()
 	chaos := slices.Clone(self.chaos)

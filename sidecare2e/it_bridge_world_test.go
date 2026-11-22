@@ -166,6 +166,12 @@ type ItBridgeSettings struct {
 	// How long the ledgers may take to settle at the end: every relayed contract closed by both its parties.
 	LedgerTimeout      time.Duration
 	LedgerPollInterval time.Duration
+	// Route grants (it_bridge_grants_test.go): whether the case runs them, the document then carrying a requests rule
+	// through which every client the grant matrix denies a subnet that nests in no campus asks a route grant on it, and
+	// how long the first such grant asks to last before it expires, long enough to outlast its probes; the rest are
+	// revoked once probed. false, 90 s.
+	RouteGrants        bool
+	RouteGrantLifetime time.Duration
 	// The case's randomness: targets, addresses, holds and pauses. Logged.
 	Seed uint64
 }
@@ -221,6 +227,8 @@ func DefaultItBridgeSettings() *ItBridgeSettings {
 		ChaosSecondHostAfter:       32 * time.Second,
 		LedgerTimeout:              2 * time.Minute,
 		LedgerPollInterval:         250 * time.Millisecond,
+		RouteGrants:                false,
+		RouteGrantLifetime:         90 * time.Second,
 		Seed:                       uint64(time.Now().UnixNano()),
 	}
 }
@@ -439,6 +447,8 @@ type ItBridgeWorld struct {
 	devices []*itBridgeDevice
 	// each host's overlay address, by the host's index
 	hostAddresses []netip.Addr
+	// the route grants the clients ask (it_bridge_grants_test.go); none unless RouteGrants
+	routeGrants []*itBridgeRouteGrant
 	// the document the owner saved
 	policy string
 
@@ -479,6 +489,11 @@ func NewItBridgeWorld(t testing.TB, settings *ItBridgeSettings) *ItBridgeWorld {
 	if worldSettings.T3 == nil {
 		worldSettings.T3 = sidecart3.DefaultT3WorldSettings()
 	}
+	// every follower checks a GrantActivate's decisions as ur daemon's does, so a route grant's activation counts at
+	// every device (it_bridge_grants_test.go)
+	t3Settings := *worldSettings.T3
+	t3Settings.FollowerSpendCheck = true
+	worldSettings.T3 = &t3Settings
 	if worldSettings.T3.Exchange == nil {
 		worldSettings.T3.Exchange = sidecart3.DefaultExchangeSettings()
 	}
@@ -597,6 +612,12 @@ func (self *ItBridgeWorld) build(ctx context.Context) error {
 		self.clients = append(self.clients, client)
 		self.devices = append(self.devices, client)
 	}
+	if settings.RouteGrants {
+		self.routeGrants = self.newRouteGrants()
+		if len(self.routeGrants) == 0 {
+			return errors.New("the grant matrix denies no client a subnet that nests in no campus, so no client asks a route grant")
+		}
+	}
 
 	if err := self.formConfigGroup(ctx); err != nil {
 		return err
@@ -651,6 +672,9 @@ func (self *ItBridgeWorld) build(ctx context.Context) error {
 		return fmt.Errorf("the document: %w", err)
 	}
 	if err := self.awaitDocument(ctx); err != nil {
+		return err
+	}
+	if err := self.installGrantGates(ctx); err != nil {
 		return err
 	}
 	return self.AwaitAdopted(ctx, self.tip())
@@ -920,7 +944,11 @@ func (self *ItBridgeWorld) policySource() (string, error) {
 			"src": src, "dst": []string{selector(echo.device)}, "allow": []string{"dial"}, "ip": []string{"icmp:*"},
 		})
 	}
-	source, err := json.Marshal(map[string]any{"grants": grants})
+	document := map[string]any{"grants": grants}
+	if requests := self.routeGrantRequests(selector); requests != nil {
+		document["requests"] = requests
+	}
+	source, err := json.Marshal(document)
 	if err != nil {
 		return "", err
 	}
@@ -1262,7 +1290,8 @@ type ItBridgeAttempt struct {
 	Target   *itBridgeTarget
 	Protocol string
 	Address  netip.AddrPort
-	// The destination that should answer it (ItBridgeWorld.answerer), and whether the client's rules grant it.
+	// The destination that should answer it (ItBridgeWorld.answerer), and whether the client's rules grant it: the
+	// document's, or a route grant in force as it began.
 	Expected *itBridgeTarget
 	Granted  bool
 	Start    time.Time
@@ -1282,6 +1311,12 @@ type ItBridgeAttempt struct {
 // (answerer).
 func (self *ItBridgeWorld) granted(clientIndex int, target *itBridgeTarget, protocol string) bool {
 	return self.grantedBy(clientIndex, self.answerer(clientIndex, target), protocol)
+}
+
+// Whether client may have sent protocol to target itself over [start, end]: the document's rules, or a route grant
+// whose timeline allows the span (it_bridge_grants_test.go).
+func (self *ItBridgeWorld) grantedOver(client *itBridgeDevice, target *itBridgeTarget, protocol string, start time.Time, end time.Time) bool {
+	return self.grantedBy(client.clientIndex(), target, protocol) || self.routeGrantAllows(client, target, protocol, start, end)
 }
 
 // Whether clientIndex's rules for target itself let it send protocol there.
@@ -1336,15 +1371,17 @@ func (self *itBridgeDevice) clientIndex() int {
 // Sends one attempt of protocol, tcp, udp, stream or icmp, from client to target through its stack and router, and
 // keeps it. Never fails the test: what it reached is the oracle's to judge.
 func (self *ItBridgeWorld) Attempt(ctx context.Context, phase string, client *itBridgeDevice, target *itBridgeTarget, protocol string) *ItBridgeAttempt {
+	start := time.Now()
+	expected := self.answerer(client.clientIndex(), target)
 	attempt := &ItBridgeAttempt{
 		Phase:    phase,
 		Client:   client,
 		Target:   target,
 		Protocol: protocol,
 		Address:  self.addressOf(target),
-		Expected: self.answerer(client.clientIndex(), target),
-		Granted:  self.granted(client.clientIndex(), target, protocol),
-		Start:    time.Now(),
+		Expected: expected,
+		Granted:  self.granted(client.clientIndex(), target, protocol) || self.routeGrantInForce(client, expected, protocol, start),
+		Start:    start,
 	}
 	err := func() error {
 		wire := client.currentWire()
