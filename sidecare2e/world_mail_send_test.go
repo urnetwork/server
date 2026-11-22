@@ -62,18 +62,22 @@ func DefaultWorldMailSenderSettings() *WorldMailSenderSettings {
 	}
 }
 
-// A logger that keeps each line among name's newest (World.SidecarLogLines), so a stalled step's dump shows what the
-// composition said: info, warnings and errors, and the guarded levels up to Level.
+// A logger that keeps each line among each of names' newest (World.SidecarLogLines), so a stalled step's dump shows
+// what the composition said: info, warnings and errors, and the guarded levels up to Level.
 type worldTeeLogger struct {
 	world *World
-	name  string
+	// the device's name, whose lines a stall's dump shows, and the composition's own (WorldMailSender.LogLines), which
+	// the device's other lines do not crowd out
+	names []string
 	level int32
 }
 
 var _ sidecar.Logger = (*worldTeeLogger)(nil)
 
 func (self *worldTeeLogger) keep(line string) {
-	self.world.keepSidecarLogLine(self.name, strings.TrimRight(line, "\n"))
+	for _, name := range self.names {
+		self.world.keepSidecarLogLine(name, strings.TrimRight(line, "\n"))
+	}
 }
 
 func (self *worldTeeLogger) Info(args ...any) {
@@ -188,7 +192,7 @@ func (self *World) startMailSender(ctx context.Context, device *sidecart3.T3Devi
 		settings.Sender(senderSettings)
 	}
 	clock := sidecar.RealClock{}
-	log := &worldTeeLogger{world: self, name: device.Name, level: settings.LogLevel}
+	log := &worldTeeLogger{world: self, names: []string{device.Name, worldMailSenderLogName(device)}, level: settings.LogLevel}
 	anchors, err := self.dnssec.Anchors()
 	if err != nil {
 		return nil, err
@@ -278,6 +282,17 @@ func (self *WorldMailSender) Wake() {
 	case self.wake <- struct{}{}:
 	default:
 	}
+}
+
+// The name a device's prover host's compositions keep their log lines under, beside the device's.
+func worldMailSenderLogName(device *sidecart3.T3Device) string {
+	return device.Name + " smtp"
+}
+
+// The newest lines the device's prover host's compositions logged, this one's and any before it on the device, oldest
+// first.
+func (self *WorldMailSender) LogLines(world *World) []string {
+	return world.SidecarLogLines(worldMailSenderLogName(self.Device))
 }
 
 // Every mail_send event the sender raised so far.
