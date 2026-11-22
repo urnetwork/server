@@ -561,6 +561,7 @@ type dnsCertsWorkerBlock struct {
 
 // One run of the certs worker.
 type dnsCertsWorkerRun struct {
+	ctx     context.Context
 	cancel  context.CancelFunc
 	install *server.SidecarSwitchInstall
 	worker  *task.TaskWorker
@@ -589,6 +590,16 @@ func newDnsCertsWorkerBlock(stack *dnsCertsStack) (*dnsCertsWorkerBlock, error) 
 		accountFile:    []byte(accountFile),
 		credentialFile: []byte("current: " + stack.certsBearer + "\n"),
 	}, nil
+}
+
+// The current run's context, which ends once its stop has drained it; nil while the block is stopped.
+func (self *dnsCertsWorkerBlock) RunContext() context.Context {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if self.current == nil {
+		return nil
+	}
+	return self.current.ctx
 }
 
 // How many runs have started.
@@ -646,6 +657,7 @@ func (self *dnsCertsWorkerBlock) Start() error {
 	workerSettings.ClaimRegisteredTargetsOnly = true
 	workerSettings.PollTimeout = settings.WorkerPollTimeout
 	workerSettings.DrainFinishTimeout = settings.WorkerDrainTimeout
+	workerSettings.DrainCancelTimeout = settings.WorkerDrainCancelTimeout
 	worker := task.NewTaskWorker(ctx, workerSettings)
 	worker.AddTargets(
 		task.NewTaskTargetWithPost(work.TlsCertOrders, work.TlsCertOrdersPost),
@@ -654,7 +666,7 @@ func (self *dnsCertsWorkerBlock) Start() error {
 		task.NewTaskTargetWithPost(work.TlsCustomSweep, work.TlsCustomSweepPost),
 		task.NewTaskTargetWithPost(controller.TlsCustomChallengeWork, controller.TlsCustomChallengeWorkPost),
 	)
-	run := &dnsCertsWorkerRun{cancel: cancel, install: install, worker: worker}
+	run := &dnsCertsWorkerRun{ctx: ctx, cancel: cancel, install: install, worker: worker}
 	first := func() bool {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()

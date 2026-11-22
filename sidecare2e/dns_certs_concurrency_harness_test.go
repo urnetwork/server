@@ -734,3 +734,56 @@ func dnsCertsChallengeReceipts(ctx context.Context, networkId server.Id) (receip
 	})
 	return
 }
+
+// The network's spends of kind in network_tls_custom_spend: each one a custom account's budget took (model's
+// tls_account_model.go).
+func dnsCertsCustomSpends(ctx context.Context, networkId server.Id, kind string) (count int, returnErr error) {
+	server.HandleError(func() {
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(
+				ctx,
+				`SELECT count(*) FROM network_tls_custom_spend WHERE network_id = $1 AND kind = $2`,
+				networkId,
+				kind,
+			).Scan(&count))
+		})
+	}, func(err error) {
+		returnErr = fmt.Errorf("the custom spends: %w", err)
+	})
+	return
+}
+
+// The network's custom rows of network_tls_cert with their hosts (model's tls_account_model.go moves them; certs'
+// store reads no custom column, so model.NewCertsStore's rows name no host), oldest first: id, sidecar, key, state,
+// host, reason and chain.
+func dnsCertsCustomCerts(ctx context.Context, networkId server.Id) (rows []*sidecar.TlsCertRecord, returnErr error) {
+	server.HandleError(func() {
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`
+					SELECT cert_id, sidecar_id, spki_sha256, state, custom_host, COALESCE(custom_reason, ''), chain
+					FROM network_tls_cert
+					WHERE network_id = $1 AND custom_host IS NOT NULL
+					ORDER BY cert_id
+				`,
+				networkId,
+			)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var certId, sidecarId server.Id
+					row := &sidecar.TlsCertRecord{NetworkId: sidecar.Id(networkId)}
+					var state string
+					server.Raise(result.Scan(&certId, &sidecarId, &row.SpkiSha256, &state, &row.CustomHost, &row.CustomReason, &row.Chain))
+					row.CertId = sidecar.Id(certId)
+					row.SidecarId = sidecar.Id(sidecarId)
+					row.State = sidecar.TlsCertState(state)
+					rows = append(rows, row)
+				}
+			})
+		})
+	}, func(err error) {
+		returnErr = fmt.Errorf("the custom rows: %w", err)
+	})
+	return
+}
