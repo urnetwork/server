@@ -349,9 +349,10 @@ func (self *World) runTlsedge(ctx context.Context, listeners *worldBlockListener
 
 // smtpedge on the world's Postgres and Redis: its send store (model.NewSmtpEdgeStore), the abuse gate, the stock
 // gate over the log through api's internal gate on its bearer and the model's facts, its X-UR-Ref keys; its resolver
-// the world's DNSSEC for a network's names, validated from the world's own anchor through the dns edge
-// (world_mail_dns_test.go), and sidecartest's MX world for every other name, the PTR and the dialer, beside a fake
-// proof verifier (the World's header); mxedge's router at the world's lb interface reached over the LAN splice to the
+// the world's DNSSEC for a network's names and the internet sender's, validated from the world's own anchor
+// (world_mail_dns_test.go), and sidecartest's MX world for every other name, the PTR and the dialer, but for the
+// internet sender's MX, which the world serves, beside a fake proof verifier (the World's header); mxedge's router at
+// the world's lb interface reached over the LAN splice to the
 // router's LAN listener (router_interfaces, router_lan; D-SMTP-13); its platform clients in urnetwork-edge, registered
 // with sockets on their own sockets tokens, and its Quota over api's internal quota surface on its bearer.
 func (self *World) runSmtpedge(ctx context.Context, listeners *worldBlockListeners) error {
@@ -427,7 +428,7 @@ func (self *World) runSmtpedge(ctx context.Context, listeners *worldBlockListene
 		Facts:      smtpedgehost.NewModelGateSource(config.Settings.Root, quota),
 		Resolver:   mxResolver,
 		Ptr:        resolver,
-		Dialer:     world,
+		Dialer:     self.smtpMxDialer(world),
 		Verifier:   sidecartest.NewFakeSmtpProofVerifier(nil),
 		NewClients: func(ctx context.Context) (smtpedgehost.HostClients, error) {
 			return smtpedgehost.NewEdgeClients(ctx, sidecar.EdgeClientPoolArgs{

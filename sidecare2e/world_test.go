@@ -52,9 +52,15 @@
 //     run; sidecartest's FakeClockCheck answers an offset of zero;
 //   - the DNS above the world's root: the world's DNS is authoritative only under zone.e2e.example., signed under the
 //     KSK the world made, and no chain from IANA's root keys reaches it, so the world signs ".", "example." and
-//     "e2e.example." itself, each holding its child's DS, the last its root KSK's (world_mail_dns_test.go). smtpedge's
-//     resolver validates a network's MX, its mail host's address and its TLSA from that parent chain's anchor, every
-//     answer under the root the dns edge's own, and a sending device's DANE validates under the same anchor;
+//     "e2e.example." itself, each holding its children's DS, the last its root KSK's (world_mail_dns_test.go).
+//     smtpedge's resolver validates a network's MX, its mail host's address and its TLSA from that parent chain's
+//     anchor, every answer under the root the dns edge's own, and a sending device's DANE validates under the same
+//     anchor;
+//   - the internet: one internet sender, sender.example., a zone the world signs under "example." with its SPF, DKIM
+//     key, DMARC record, MTA address, MX and that MX's TLSA, and its MTA's reverse zone under "arpa." and
+//     "in-addr.arpa." with the MTA's PTR (world_mail_dns_test.go), so a receiver's checks of its mail read real
+//     verdicts; its MX, a sidecartest ScriptedMx that smtpedge's dialer reaches in process, takes a network's mail to
+//     the domain, end to end under TLS held to that TLSA;
 //   - smtpedge's MX world for every other name: sidecartest's MxWorld answers the sending address's HELO name and PTR,
 //     which no zone of the world serves, and dials an MX off the router's interfaces, which a sending address's
 //     SO_MARK reaches in production. An MX on the world's lb interface is mxedge's router's, which smtpedge reaches
@@ -71,8 +77,9 @@
 //     chain ask the world's DNS above through MailReceiveSettings.ResolverFactory, under the same anchor, where
 //     production's receiver asks public resolvers over a DohCache of its own, which a receiver in a test binary refuses
 //     (ErrMailReceiverPublicResolver), so no test queries them from the test host. A name under the world's root is
-//     answered as the dns edge signs it; an internet sender's domain and its documentation address's PTR, which no zone
-//     of the world serves, get no answer, so their checks read temperror, which refuses no mail (§15.5, D-MAIL-14);
+//     answered as the dns edge signs it, and the internet sender's domain and its MTA's PTR as the world's zones for
+//     them hold them, so their checks read pass or fail; any other outside name gets no answer, which reads temperror
+//     and refuses no mail (§15.5, D-MAIL-14);
 //   - smtpedge's proof verifier: sidecartest's FakeSmtpProofVerifier. smtpproof's Groth16 keys come from a production
 //     setup that has not run (smtpproof's SPEC.md section 12), so its real verifier holds no key set and refuses every
 //     part, as its prover does;
