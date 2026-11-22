@@ -70,6 +70,7 @@ import (
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 	"github.com/urnetwork/server/sidecarhost"
+	"github.com/urnetwork/server/sidecart3"
 	"github.com/urnetwork/server/task"
 	"github.com/urnetwork/server/taskworker/work"
 )
@@ -809,20 +810,23 @@ func dnsCertsVisitVerified(ctx context.Context, world *World, serverName string,
 	return leaf, bytes.TrimSuffix(answer, []byte("\n")), nil
 }
 
-// dnsCertsVisitVerified until its answer is want, every RetryInterval within Timeout: a registration reaches sockets at
-// its verdict and tlsedge at its Find, with no hook a test reads. The leaf of the visit answered.
-func dnsCertsAwaitVerifiedVisit(ctx context.Context, world *World, serverName string, roots *x509.CertPool, request []byte, want []byte, settings *WorldTlsSettings) (*x509.Certificate, error) {
+// dnsCertsVisitVerified until its answer is want and its leaf wantLeaf, every RetryInterval within Timeout: a
+// registration reaches sockets at its verdict and tlsedge at its Find, and a device's pass installs a renewed chain,
+// with no hook a test reads. The leaf of the visit answered.
+func dnsCertsAwaitVerifiedVisit(ctx context.Context, world *World, serverName string, roots *x509.CertPool, request []byte, want []byte, wantLeaf []byte, settings *WorldTlsSettings) (*x509.Certificate, error) {
 	ctx, cancel := context.WithTimeout(ctx, settings.Timeout)
 	defer cancel()
 	tries := 0
 	for {
 		tries += 1
 		leaf, answer, err := dnsCertsVisitVerified(ctx, world, serverName, roots, request, settings)
-		if err == nil && bytes.Equal(answer, want) {
+		if err == nil && bytes.Equal(answer, want) && bytes.Equal(leaf.Raw, wantLeaf) {
 			return leaf, nil
 		}
-		if err == nil {
+		if err == nil && !bytes.Equal(answer, want) {
 			err = fmt.Errorf("answered %q, not %q", answer, want)
+		} else if err == nil {
+			err = fmt.Errorf("shown the leaf of serial %x, not the one wanted", leaf.SerialNumber)
 		}
 		select {
 		case <-ctx.Done():
@@ -830,4 +834,42 @@ func dnsCertsAwaitVerifiedVisit(ctx context.Context, world *World, serverName st
 		case <-time.After(settings.RetryInterval):
 		}
 	}
+}
+
+// Serves every connection listener accepts until it closes, as worldServeTlsEcho does, but each handshake ended on
+// what device's TlsDeviceCertificate gives serverName then, as a desktop's front presents its newest issued chain: one
+// request line read and answer(line) written back.
+func dnsCertsServeTls(device *sidecart3.T3Device, listener *sidecar.SocketListener, serverName string, answer func(line []byte) []byte, settings *WorldTlsSettings) *worldTlsEcho {
+	config := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+			return device.Sidecar().TlsDeviceCertificate([]string{serverName})
+		},
+	}
+	var handlers sync.WaitGroup
+	handle := func(conn net.Conn) {
+		defer conn.Close()
+		conn.SetDeadline(time.Now().Add(settings.VisitTimeout))
+		server := tls.Server(conn, config)
+		defer server.Close()
+		line, err := bufio.NewReaderSize(server, settings.RequestMaxByteCount).ReadSlice('\n')
+		if err != nil {
+			return
+		}
+		server.Write(answer(bytes.TrimSuffix(line, []byte("\n"))))
+	}
+	echo := &worldTlsEcho{Wait: handlers.Wait}
+	handlers.Go(func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				echo.end(err)
+				return
+			}
+			handlers.Go(func() {
+				handle(conn)
+			})
+		}
+	})
+	return echo
 }

@@ -34,10 +34,7 @@
 //     of the set's newest row at or below the later serial, and no row of the set lies between that row and the
 //     earlier serial; no reader sees the root's serial go back, across both restarts;
 //   - once the edge serves the root's serial, every set answers its newest row's values, signed as §12.6 says; and
-//     each zone's version, read through dns's api, is the serial of the zone's newest row;
-//   - §12.7's dns_changes_per_hour, the dns write budget the phase spends, reconciles exactly: each network's
-//     dns.records admin events since the phase began are its journal rows, and its owner's writes after the phase are
-//     answered until the events reach the cap, exactly, where the next write is refused 429 with used at the limit.
+//     each zone's version, read through dns's api, is the serial of the zone's newest row.
 //
 // The certificates phase: each network's first sidecar (CertDeviceCount of them) runs a tls component and asks for its
 // network's certificate, all at once, as `ur bridge public-tls` does: POST /tls/cert-order through api's certs routes,
@@ -51,9 +48,27 @@
 //     web.<label>.<root>, on the device's own key, the chain of the device's one issued row, from LE's place in the
 //     CA order, and what TlsDeviceCertificate presents for the name;
 //   - each device listens on tls/443/web, and a visitor through tlsedge, behind the lb's PROXY header, verifies the
-//     listener's chain against Pebble's root, not a self-signed leaf, and is answered by the device;
-//   - certs' budget at LE ({tcb_letsencrypt_<root>}) holds exactly the orders that spent on it, each device's first
-//     order, a new set, beside its rebuild's marker.
+//     listener's chain against Pebble's root, not a self-signed leaf, and is answered by the device.
+//
+// The renewals race: Pebble asks for each first certificate's renewal now, its ARI window set to one that began an hour
+// ago (RFC 9773's early renewal); the renewal pass, kicked, re-reads the window and queues each successor from its
+// stored CSR, and the order pass, kicked, orders it by DNS-01, while every device writes its own TXT set and
+// compare-and-swaps the shared one again (RaceTxtWriteCount, RaceSharedWriteCount) and readers read the edge. The
+// challenges move each zone's version as the record writes do, so the compare-and-swaps meet them. Once a successor's
+// order is under way the certs worker restarts, its drain cutting the pass, and the order pass is kicked again. What
+// must hold, beside the records phase's checks over every write and read so far:
+//
+//   - every successor issues from the stored CSR, on the device's key with a serial of its own, and once the device's
+//     pass installs it a visitor through tlsedge is shown it;
+//   - the restart came while a renewal was under way;
+//   - no challenge of certs' is left: each network's _acme-challenge.<label>.<root> answers no TXT, and its newest
+//     journal row deletes it.
+//
+// The ledgers at the end, exactly: §12.7's dns_changes_per_hour, the dns write budget the case spends, each network's
+// dns.records admin events since the records phase began are its journal rows of user records, and its owner's writes
+// are answered until the events reach the cap, where the next is refused 429 with used at the limit; and certs' budget
+// at LE ({tcb_letsencrypt_<root>}) holds exactly the orders that spent on it, each device's first order, a new set,
+// beside its rebuild's marker: the renewals and the resumed orders spent nothing.
 //
 // Each phase has PhaseTimeout and dumps the world's progress when it stalls. Run it through the build's wrapper:
 // -tags 'sidecar_e2e sidecar_pending sidecar_localstack'.
@@ -149,8 +164,17 @@ type dnsCertsSettings struct {
 	WorkerDrainTimeout time.Duration
 	// How often a wait on a certificate row reads the rows again: a row moves at a pass, with no hook a test reads.
 	CertPollInterval time.Duration
-	Dns              *WorldDnsSettings
-	Bursts           *WorldBurstSettings
+	// The renewals race: the window Pebble answers each first certificate's ARI with, starting this long before now
+	// and this long, so the renewal is due at once; each device's writes to its own TXT set and its compare-and-swaps
+	// on the shared one during the race; and the readers of the edge and the reads each makes.
+	RenewalWindowAge     time.Duration
+	RenewalWindowLength  time.Duration
+	RaceTxtWriteCount    int
+	RaceSharedWriteCount int
+	RaceReaderCount      int
+	RaceReadCount        int
+	Dns                  *WorldDnsSettings
+	Bursts               *WorldBurstSettings
 	// Each phase's bound, and the case's.
 	PhaseTimeout time.Duration
 	CaseTimeout  time.Duration
@@ -198,6 +222,12 @@ func defaultDnsCertsSettings() *dnsCertsSettings {
 		WorkerPollTimeout:        100 * time.Millisecond,
 		WorkerDrainTimeout:       2 * time.Second,
 		CertPollInterval:         250 * time.Millisecond,
+		RenewalWindowAge:         time.Hour,
+		RenewalWindowLength:      time.Minute,
+		RaceTxtWriteCount:        2,
+		RaceSharedWriteCount:     2,
+		RaceReaderCount:          2,
+		RaceReadCount:            60,
 		Dns:                      DefaultWorldDnsSettings(),
 		Bursts:                   bursts,
 		PhaseTimeout:             5 * time.Minute,
@@ -309,13 +339,43 @@ func TestE2eDnsCertsConcurrency(t *testing.T) {
 		world := stack.World
 		defer world.Close()
 		networks := addDnsCertsNetworks(t, world, settings)
-		dnsCertsRecordsPhase(t, world, settings, networks)
-		dnsCertsCertificatesPhase(t, stack, settings, networks)
+		records := dnsCertsRecordsPhase(t, world, settings, networks)
+		publishers := dnsCertsCertificatesPhase(t, stack, settings, networks)
+		dnsCertsRenewalsPhase(t, stack, settings, networks, records, publishers)
+		dnsCertsLedgersPhase(t, stack, settings, networks, records, publishers)
 	})
 }
 
+// What the records phase leaves the phases after it: the zone keys, the journal's start, each network's events before
+// the phase and each zone's version as it began, the sets written and every reader of the edge so far.
+type dnsCertsRecords struct {
+	Keys           *dnsCertsZoneKeys
+	Root           string
+	StartSerial    uint64
+	PhaseStart     time.Time
+	BaselineEvents map[server.Id]int
+	StartVersions  map[server.Id]uint64
+	Sets           []dnsCertsSetKey
+
+	stateLock sync.Mutex
+	readers   []*dnsCertsReader
+}
+
+func (self *dnsCertsRecords) addReaders(readers ...*dnsCertsReader) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.readers = append(self.readers, readers...)
+}
+
+// Every reader of the edge since the records phase began.
+func (self *dnsCertsRecords) Readers() []*dnsCertsReader {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return slices.Clone(self.readers)
+}
+
 // The records phase and its checks (see the file header).
-func dnsCertsRecordsPhase(t testing.TB, world *World, settings *dnsCertsSettings, networks []*dnsCertsNetwork) {
+func dnsCertsRecordsPhase(t testing.TB, world *World, settings *dnsCertsSettings, networks []*dnsCertsNetwork) *dnsCertsRecords {
 	ctx, cancel := world.StepContext(t.Context(), settings.PhaseTimeout)
 	defer cancel()
 	root := networks[0].Root
@@ -474,12 +534,29 @@ func dnsCertsRecordsPhase(t testing.TB, world *World, settings *dnsCertsSettings
 	}
 	t.Logf("the records phase: %d writes answered, %d reads kept, %d skipped while the edge restarted, restarts %v", answered.Value(), readCount, skipped, chaosRestarts)
 
-	// what committed: the journal from the phase's start to the root's serial now, which the edge must reach
-	endSerial, err := dnsCertsRootSerial(ctx, root)
+	records := &dnsCertsRecords{
+		Keys:           keys,
+		Root:           root,
+		StartSerial:    startSerial,
+		PhaseStart:     phaseStart,
+		BaselineEvents: baselineEvents,
+		StartVersions:  startVersions,
+		Sets:           sets,
+	}
+	records.addReaders(readers...)
+	dnsCertsCheckRecords(t, ctx, world, settings, networks, records)
+	return records
+}
+
+// What committed since the records phase began, the journal to the root's serial now, which the edge must reach,
+// checked against every write and read so far (see the file header): the journal rows checked, for the checks after.
+func dnsCertsCheckRecords(t testing.TB, ctx context.Context, world *World, settings *dnsCertsSettings, networks []*dnsCertsNetwork, records *dnsCertsRecords) []dnsservice.DnsJournalRow {
+	t.Helper()
+	endSerial, err := dnsCertsRootSerial(ctx, records.Root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := world.AwaitDnsAnswer(ctx, root, dns.TypeSOA, func(answer *dns.Msg) bool {
+	if _, err := world.AwaitDnsAnswer(ctx, records.Root, dns.TypeSOA, func(answer *dns.Msg) bool {
 		for _, record := range answer.Answer {
 			if soa, ok := record.(*dns.SOA); ok && endSerial <= uint64(soa.Serial) {
 				return true
@@ -489,15 +566,15 @@ func dnsCertsRecordsPhase(t testing.TB, world *World, settings *dnsCertsSettings
 	}, settings.Dns); err != nil {
 		world.FailProgress(t, "the edge's catch-up", err, nil)
 	}
-	rows, err := dnsCertsJournal(ctx, root, startSerial, settings.JournalPageCount)
+	rows, err := dnsCertsJournal(ctx, records.Root, records.StartSerial, settings.JournalPageCount)
 	if err != nil {
 		t.Fatal(err)
 	}
-	history := dnsCertsCheckJournal(t, networks, sets, rows, startVersions)
-	dnsCertsCheckReads(t, readers, history)
-	dnsCertsCheckServed(t, ctx, world, keys, settings, sets, history)
+	history := dnsCertsCheckJournal(t, networks, records.Sets, rows, records.StartVersions)
+	dnsCertsCheckReads(t, records.Readers(), history)
+	dnsCertsCheckServed(t, ctx, world, records.Keys, settings, records.Sets, history)
 	dnsCertsCheckZoneVersions(t, ctx, settings, networks, rows)
-	dnsCertsCheckChangesBudget(t, ctx, settings, networks, rows, baselineEvents, phaseStart)
+	return rows
 }
 
 // One committed state of a set: the serial of its journal row and the values it holds then, none for a delete.
@@ -775,6 +852,10 @@ type dnsCertsPublisher struct {
 	ServerName string
 	// the device's sidecar id, which its certificate rows name
 	SidecarId sidecar.Id
+	// its first order's row, once issued
+	firstCertId sidecar.Id
+	// its listener's server, once it publishes
+	echo *worldTlsEcho
 
 	stateLock   sync.Mutex
 	certificate *tls.Certificate
@@ -800,7 +881,7 @@ func (self *dnsCertsPublisher) Order() (*tls.Certificate, error) {
 // which Pebble's validation reaches through the resolver; every order ends issued with a chain to Pebble's root on the
 // device's own key, the one issued row of its device; the device presents it at its tls/ listener, and a visitor
 // through tlsedge verifies it; and the certs budget holds exactly the orders it spent on.
-func dnsCertsCertificatesPhase(t testing.TB, stack *dnsCertsStack, settings *dnsCertsSettings, networks []*dnsCertsNetwork) {
+func dnsCertsCertificatesPhase(t testing.TB, stack *dnsCertsStack, settings *dnsCertsSettings, networks []*dnsCertsNetwork) []*dnsCertsPublisher {
 	world := stack.World
 	ctx, cancel := world.StepContext(t.Context(), settings.PhaseTimeout)
 	defer cancel()
@@ -852,7 +933,6 @@ func dnsCertsCertificatesPhase(t testing.TB, stack *dnsCertsStack, settings *dns
 	}
 	orders.Wait()
 
-	firstCertIds := map[sidecar.Id]bool{}
 	for _, publisher := range publishers {
 		certificate, err := publisher.Order()
 		if err != nil {
@@ -889,7 +969,7 @@ func dnsCertsCertificatesPhase(t testing.TB, stack *dnsCertsStack, settings *dns
 		if issued[0].Ca != string(certsservice.CertsCaLetsEncrypt) {
 			t.Errorf("%s's certificate came from CA %q", publisher.Device.Name, issued[0].Ca)
 		}
-		firstCertIds[issued[0].CertId] = true
+		publisher.firstCertId = issued[0].CertId
 		presented, err := publisher.Device.Sidecar().TlsDeviceCertificate([]string{publisher.ServerName})
 		if err != nil || len(presented.Certificate) == 0 || !bytes.Equal(presented.Certificate[0], leaf.Raw) {
 			t.Errorf("%s presents something other than its issued certificate for %s: %v", publisher.Device.Name, publisher.ServerName, err)
@@ -901,29 +981,12 @@ func dnsCertsCertificatesPhase(t testing.TB, stack *dnsCertsStack, settings *dns
 
 	// each publisher listens on its network's name, and a visitor through tlsedge verifies the issued chain
 	for _, publisher := range publishers {
-		dnsCertsPublishAndVisit(t, ctx, stack, settings, publisher)
+		dnsCertsPublish(t, ctx, stack, settings, publisher)
+		certificate, _ := publisher.Order()
+		dnsCertsVisit(t, ctx, stack, settings, publisher, certificate.Certificate[0])
 	}
 
-	// the certs budget holds exactly the orders that spent on it: each publisher's first order, a new set
-	members, err := dnsCertsBudgetMembers(ctx, world, certsservice.CertsCaLetsEncrypt, strings.TrimSuffix(stack.Keys.root, "."))
-	if err != nil {
-		t.Fatal(err)
-	}
-	spent := map[sidecar.Id]bool{}
-	for _, member := range members {
-		if member == certsservice.CertsBudgetMarker {
-			continue
-		}
-		certId, err := sidecar.ParseId(member)
-		if err != nil {
-			t.Errorf("the certs budget holds %q, which is no order's id", member)
-			continue
-		}
-		spent[certId] = true
-	}
-	if !maps.Equal(spent, firstCertIds) {
-		t.Errorf("the certs budget holds %v, not the first orders' %v", slices.Collect(maps.Keys(spent)), slices.Collect(maps.Keys(firstCertIds)))
-	}
+	return publishers
 }
 
 // device's EnsureTlsCertificate, asked again every CertPollInterval while api answers 503: api's subject waits on its
@@ -945,9 +1008,9 @@ func dnsCertsEnsureCertificate(ctx context.Context, device *sidecart3.T3Device, 
 }
 
 // publisher's listener on its network's tls/ name, as a desktop's publish runs one (World.StartSockets, the stock
-// approval gate, a raw listen), serving TLS on what TlsDeviceCertificate gives its server name; and a visitor through
-// tlsedge, behind the lb's PROXY header, who verifies the chain against Pebble's roots and is answered by the device.
-func dnsCertsPublishAndVisit(t testing.TB, ctx context.Context, stack *dnsCertsStack, settings *dnsCertsSettings, publisher *dnsCertsPublisher) {
+// approval gate, a raw listen), serving TLS on what TlsDeviceCertificate gives its server name at each handshake, for
+// the world's life.
+func dnsCertsPublish(t testing.TB, ctx context.Context, stack *dnsCertsStack, settings *dnsCertsSettings, publisher *dnsCertsPublisher) {
 	world := stack.World
 	device := publisher.Device
 	if err := world.StartSockets(ctx, device); err != nil {
@@ -960,25 +1023,266 @@ func dnsCertsPublishAndVisit(t testing.TB, ctx context.Context, stack *dnsCertsS
 	if err != nil {
 		world.FailProgress(t, device.Name+"'s tls/ listen", err, nil)
 	}
-	answer := func(line []byte) []byte {
-		return fmt.Appendf(nil, "%s: %s\n", device.Name, line)
-	}
-	echo, err := worldServeTlsEcho(device, listener, publisher.ServerName, answer, settings.Tls)
-	if err != nil {
+	publisher.echo = dnsCertsServeTls(device, listener, publisher.ServerName, publisher.answer, settings.Tls)
+	world.T3().OnClose(func() {
 		listener.Close()
+		publisher.echo.Wait()
+	})
+}
+
+// What publisher's listener answers a request line.
+func (self *dnsCertsPublisher) answer(line []byte) []byte {
+	return fmt.Appendf(nil, "%s: %s\n", self.Device.Name, line)
+}
+
+// A visitor through tlsedge, behind the lb's PROXY header, who verifies publisher's chain against Pebble's roots and
+// is answered by the device, until the leaf it is shown is want's.
+func dnsCertsVisit(t testing.TB, ctx context.Context, stack *dnsCertsStack, settings *dnsCertsSettings, publisher *dnsCertsPublisher, want []byte) {
+	world := stack.World
+	request := []byte(settings.TlsRequest)
+	leaf, err := dnsCertsAwaitVerifiedVisit(ctx, world, publisher.ServerName, stack.Pebble.Roots, request, bytes.TrimSuffix(publisher.answer(request), []byte("\n")), want, settings.Tls)
+	if err != nil {
+		world.FailProgress(t, publisher.Device.Name+"'s visit through tlsedge", fmt.Errorf("%w; the listener's accepts ended: %v; %s", err, publisher.echo.Ended(), worldTlsServerState(t.Context(), publisher.Device.Network.NetworkId, publisher.Network.Root)), nil)
+	}
+	if !bytes.Equal(leaf.Raw, want) {
+		t.Errorf("a visitor to %s was shown a leaf that is not %s's certificate", publisher.ServerName, publisher.Device.Name)
+	}
+}
+
+// The row certId of publisher's, nil when it has none.
+func dnsCertsRow(rows []*sidecar.TlsCertRecord, certId sidecar.Id) *sidecar.TlsCertRecord {
+	for _, row := range rows {
+		if row.CertId == certId {
+			return row
+		}
+	}
+	return nil
+}
+
+// The renewals race (see the file header): Pebble asks for each first certificate's renewal now; while devices write
+// records, readers read the edge and the certs worker restarts mid-order, certs' renewal pass queues each successor
+// from its stored CSR and the order pass orders it by DNS-01, the challenges and the record writes taking turns on each
+// zone's version. Both must hold whole: every successor issued, presented and seen by a visitor, and every write and
+// read reconciled against the journal.
+func dnsCertsRenewalsPhase(t testing.TB, stack *dnsCertsStack, settings *dnsCertsSettings, networks []*dnsCertsNetwork, records *dnsCertsRecords, publishers []*dnsCertsPublisher) {
+	world := stack.World
+	ctx, cancel := world.StepContext(t.Context(), settings.PhaseTimeout)
+	defer cancel()
+	for _, publisher := range publishers {
+		rows, err := dnsCertsSidecarCerts(ctx, publisher)
+		if err != nil {
+			t.Fatal(err)
+		}
+		first := dnsCertsRow(rows, publisher.firstCertId)
+		if first == nil || len(first.Chain) == 0 {
+			t.Fatalf("%s's first certificate is gone: %s", publisher.Device.Name, dnsCertsDescribeRows(rows))
+		}
+		start := time.Now().Add(-settings.RenewalWindowAge)
+		if err := stack.Pebble.SetRenewalWindow(first.Chain[0], start, start.Add(settings.RenewalWindowLength)); err != nil {
+			t.Fatalf("%s's renewal window: %v", publisher.Device.Name, err)
+		}
+	}
+	// each publisher's successor: its first row's successor, once queued
+	successor := func(publisher *dnsCertsPublisher, rows []*sidecar.TlsCertRecord) *sidecar.TlsCertRecord {
+		first := dnsCertsRow(rows, publisher.firstCertId)
+		if first == nil || first.SuccessorCertId == (sidecar.Id{}) {
+			return nil
+		}
+		return dnsCertsRow(rows, first.SuccessorCertId)
+	}
+
+	writers := []*dnsCertsWriter{}
+	for _, network := range networks {
+		writers = append(writers, network.Writers...)
+	}
+	bursts := []*WorldBurst{}
+	for _, writer := range writers {
+		network := writer.Network
+		stepCount := settings.RaceTxtWriteCount + settings.RaceSharedWriteCount
+		burst := &WorldBurst{Name: "racing writer " + writer.Device.Name, StepCount: stepCount}
+		burst.Step = func(ctx context.Context, index int, random *rand.Rand) error {
+			// a compare-and-swap every other step, the shared set's writes spread through the race
+			if index%2 == 1 && index/2 < settings.RaceSharedWriteCount {
+				set := dnsCertsSetKey{Owner: network.OwnerName(settings.SharedHost), Type: dns.TypeTXT}
+				_, err := writer.Write(ctx, set, fmt.Sprintf("w%d-race-shared-%d", writer.Index, index), true, settings.CasTryCount, settings.Dns)
+				return err
+			}
+			set := dnsCertsSetKey{Owner: network.OwnerName(fmt.Sprintf(settings.OwnTxtHostFormat, writer.Index)), Type: dns.TypeTXT}
+			_, err := writer.Write(ctx, set, fmt.Sprintf("w%d-race-txt-%d", writer.Index, index), false, settings.CasTryCount, settings.Dns)
+			return err
+		}
+		bursts = append(bursts, burst)
+	}
+	readers := []*dnsCertsReader{}
+	for index := range settings.RaceReaderCount {
+		reader := &dnsCertsReader{Name: fmt.Sprintf("racing-reader-%d", index)}
+		readers = append(readers, reader)
+		bursts = append(bursts, &WorldBurst{
+			Name:      reader.Name,
+			StepCount: settings.RaceReadCount,
+			Step: func(ctx context.Context, index int, random *rand.Rand) error {
+				return reader.Read(ctx, world, records.Keys, records.Sets, random, settings.Dns)
+			},
+		})
+	}
+	records.addReaders(readers...)
+	// the certs driver: the renewal pass kicked until every successor is queued; the order pass kicked, the worker
+	// restarted once a successor's order is under way, and kicked again; then every successor issued
+	restartedUnderWay := ""
+	bursts = append(bursts, &WorldBurst{
+		Name:      "renewals",
+		StepCount: 3,
+		Step: func(ctx context.Context, index int, random *rand.Rand) error {
+			switch index {
+			case 0:
+				if _, err := dnsCertsKick(ctx, "tls_cert_renewals"); err != nil {
+					return err
+				}
+				return dnsCertsAwaitRows(ctx, publishers, settings, func(publisher *dnsCertsPublisher, rows []*sidecar.TlsCertRecord) bool {
+					return successor(publisher, rows) != nil
+				})
+			case 1:
+				if _, err := dnsCertsKick(ctx, "tls_cert_orders"); err != nil {
+					return err
+				}
+				if err := dnsCertsAwaitRows(ctx, publishers, settings, func(publisher *dnsCertsPublisher, rows []*sidecar.TlsCertRecord) bool {
+					renewal := successor(publisher, rows)
+					if renewal != nil && (renewal.State == sidecar.TlsCertStateOrdering || renewal.State == sidecar.TlsCertStateWaitingDns) && restartedUnderWay == "" {
+						restartedUnderWay = fmt.Sprintf("%s's renewal %s %s", publisher.Device.Name, renewal.CertId, renewal.State)
+					}
+					return restartedUnderWay != "" || (renewal != nil && renewal.State == sidecar.TlsCertStateIssued)
+				}); err != nil {
+					return err
+				}
+				if err := stack.Worker.Restart(); err != nil {
+					return fmt.Errorf("the certs worker's restart: %w", err)
+				}
+				_, err := dnsCertsKick(ctx, "tls_cert_orders")
+				return err
+			default:
+				return dnsCertsAwaitRows(ctx, publishers, settings, func(publisher *dnsCertsPublisher, rows []*sidecar.TlsCertRecord) bool {
+					renewal := successor(publisher, rows)
+					return renewal != nil && (renewal.State == sidecar.TlsCertStateIssued || renewal.State == sidecar.TlsCertStateFailed)
+				})
+			}
+		},
+	})
+	if err := RunBursts(ctx, t, "the renewals race", bursts, settings.Bursts); err != nil {
+		world.FailProgress(t, "the renewals race", err, bursts)
+	}
+	FailBurstErrors(t, bursts)
+	t.Logf("the renewals race: the certs worker restarted at run %d, %s", stack.Worker.RunCount(), restartedUnderWay)
+	if restartedUnderWay == "" {
+		t.Errorf("the certs worker restarted with no renewal under way: every renewal issued first")
+	}
+
+	// every successor issued on its device's key, installed by the device's pass, presented and seen by a visitor
+	for _, publisher := range publishers {
+		rows, err := dnsCertsSidecarCerts(ctx, publisher)
+		if err != nil {
+			t.Fatal(err)
+		}
+		renewal := successor(publisher, rows)
+		if renewal == nil || renewal.State != sidecar.TlsCertStateIssued || len(renewal.Chain) == 0 {
+			t.Errorf("%s's renewal did not issue: %s", publisher.Device.Name, dnsCertsDescribeRows(rows))
+			continue
+		}
+		leaf, err := dnsCertsVerifyChain(renewal.Chain, stack.Pebble.Roots, []string{strings.TrimSuffix(publisher.Network.Apex, "."), publisher.ServerName}, time.Now())
+		if err != nil {
+			t.Errorf("%s's renewal: %v", publisher.Device.Name, err)
+			continue
+		}
+		first := dnsCertsRow(rows, publisher.firstCertId)
+		if first.Serial == renewal.Serial {
+			t.Errorf("%s's renewal holds its first certificate's serial", publisher.Device.Name)
+		}
+		spkiSha256, err := worldTlsKeySpkiSha256(publisher.Device)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(dnsCertsSpkiSha256(leaf), spkiSha256) {
+			t.Errorf("%s's renewal is on a key not its own", publisher.Device.Name)
+		}
+		if err := publisher.Component.CertManager().Sync(ctx); err != nil {
+			t.Errorf("%s's certificate pass: %v", publisher.Device.Name, err)
+		}
+		dnsCertsVisit(t, ctx, stack, settings, publisher, leaf.Raw)
+	}
+	dnsCertsCheckChallengesGone(t, ctx, world, settings, networks, records)
+	dnsCertsCheckRecords(t, ctx, world, settings, networks, records)
+}
+
+// Once every order has ended, no challenge of certs' is left: each network's _acme-challenge.<label>.<root> answers no
+// TXT at the edge, and its newest journal row deletes it (certsservice's solver cleans each order's values up).
+func dnsCertsCheckChallengesGone(t testing.TB, ctx context.Context, world *World, settings *dnsCertsSettings, networks []*dnsCertsNetwork, records *dnsCertsRecords) {
+	t.Helper()
+	rows, err := dnsCertsJournal(ctx, records.Root, records.StartSerial, settings.JournalPageCount)
+	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() {
-		listener.Close()
-		echo.Wait()
-	}()
-	certificate, _ := publisher.Order()
-	request := []byte(settings.TlsRequest)
-	leaf, err := dnsCertsAwaitVerifiedVisit(ctx, world, publisher.ServerName, stack.Pebble.Roots, request, bytes.TrimSuffix(answer(request), []byte("\n")), settings.Tls)
-	if err != nil {
-		world.FailProgress(t, device.Name+"'s visit through tlsedge", fmt.Errorf("%w; the listener's accepts ended: %v; %s", err, echo.Ended(), worldTlsServerState(t.Context(), device.Network.NetworkId, publisher.Network.Root)), nil)
+	for _, network := range networks {
+		owner := dns.CanonicalName("_acme-challenge." + network.Apex)
+		last := ""
+		for _, row := range rows {
+			for _, upsert := range row.Upserts {
+				if dns.CanonicalName(upsert.Owner) == owner {
+					last = fmt.Sprintf("an upsert at %d", row.Serial)
+				}
+			}
+			for _, deleted := range row.Deletes {
+				if dns.CanonicalName(deleted.Owner) == owner {
+					last = "a delete"
+				}
+			}
+		}
+		if last != "a delete" {
+			t.Errorf("%s's newest challenge row is %q, not its delete", owner, last)
+		}
+		set := dnsCertsSetKey{Owner: owner, Type: dns.TypeTXT}
+		if answer, err := world.AwaitDnsAnswer(ctx, owner, dns.TypeTXT, func(answer *dns.Msg) bool {
+			return answer.Rcode == dns.RcodeSuccess && len(dnsCertsAnswerValues(answer, set)) == 0
+		}, settings.Dns); err != nil {
+			t.Errorf("the edge still answers %s's challenge: %v: %v", network.Name, err, answer)
+		}
 	}
-	if certificate == nil || !bytes.Equal(leaf.Raw, certificate.Certificate[0]) {
-		t.Errorf("a visitor to %s was shown a leaf that is not %s's issued certificate", publisher.ServerName, device.Name)
+}
+
+// The ledgers at the case's end, exactly (see the file header): §12.7's dns_changes_per_hour, each network's events
+// its user rows and its owner's writes answered until the cap, where the next is refused at the limit; and certs'
+// budget at LE holding each publisher's first order and nothing else, renewals and resumed orders spending none.
+func dnsCertsLedgersPhase(t testing.TB, stack *dnsCertsStack, settings *dnsCertsSettings, networks []*dnsCertsNetwork, records *dnsCertsRecords, publishers []*dnsCertsPublisher) {
+	world := stack.World
+	ctx, cancel := world.StepContext(t.Context(), settings.PhaseTimeout)
+	defer cancel()
+	rows, err := dnsCertsJournal(ctx, records.Root, records.StartSerial, settings.JournalPageCount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dnsCertsCheckChangesBudget(t, ctx, settings, networks, rows, records.BaselineEvents, records.PhaseStart)
+
+	firstCertIds := map[sidecar.Id]bool{}
+	for _, publisher := range publishers {
+		if publisher.firstCertId != (sidecar.Id{}) {
+			firstCertIds[publisher.firstCertId] = true
+		}
+	}
+	members, err := dnsCertsBudgetMembers(ctx, world, certsservice.CertsCaLetsEncrypt, strings.TrimSuffix(stack.Keys.root, "."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	spent := map[sidecar.Id]bool{}
+	for _, member := range members {
+		if member == certsservice.CertsBudgetMarker {
+			continue
+		}
+		certId, err := sidecar.ParseId(member)
+		if err != nil {
+			t.Errorf("the certs budget holds %q, which is no order's id", member)
+			continue
+		}
+		spent[certId] = true
+	}
+	if !maps.Equal(spent, firstCertIds) {
+		t.Errorf("the certs budget holds %v, not the first orders' %v", slices.Collect(maps.Keys(spent)), slices.Collect(maps.Keys(firstCertIds)))
 	}
 }

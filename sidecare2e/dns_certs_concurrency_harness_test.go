@@ -17,9 +17,12 @@ package sidecare2e
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base32"
+	"encoding/base64"
 	"errors"
 	"fmt"
-	"math/rand/v2"
+	mathrand "math/rand/v2"
 	"net"
 	"net/http"
 	"slices"
@@ -422,7 +425,7 @@ func (self *dnsCertsReader) Skipped() int {
 // One read of a set random picks from sets: the SOA, the set, the SOA again, every answer's signature verified. A read
 // that finds the edge stopped, or that loses an exchange, is skipped and counted; one that sees the serial go back,
 // or an answer that does not verify, is the error.
-func (self *dnsCertsReader) Read(ctx context.Context, world *World, keys *dnsCertsZoneKeys, sets []dnsCertsSetKey, random *rand.Rand, settings *WorldDnsSettings) error {
+func (self *dnsCertsReader) Read(ctx context.Context, world *World, keys *dnsCertsZoneKeys, sets []dnsCertsSetKey, random *mathrand.Rand, settings *WorldDnsSettings) error {
 	set := sets[random.IntN(len(sets))]
 	skip := func() error {
 		self.stateLock.Lock()
@@ -637,4 +640,97 @@ func dnsCertsBudgetMembers(ctx context.Context, world *World, ca certsservice.Ce
 		members = append(members, string(member.Bulk))
 	}
 	return members, nil
+}
+
+// A verified custom domain of networkId's with host mapped to owner (§7.6, §12.8 steps 1 and 2), written as POST
+// /network/domain-verify's first verification and POST /network/dns/custom-host-add leave the rows: the domain
+// verified with its acme_token, 16 random bytes in lowercase base32 with no padding as verification mints it, and the
+// host active in weak mode, which needs no CAA walk. Both routes are a Team's (model.RequireTeamTierInTx) and the case's
+// networks are Pro, so the case writes the rows those routes would, a stand-in its header names. root and owner are
+// canonical, with their final dots. The token.
+func dnsCertsAddCustomDomain(ctx context.Context, networkId server.Id, domain string, host string, root string, owner string) (acmeToken string, returnErr error) {
+	tokenBytes := make([]byte, 16)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		return "", err
+	}
+	acmeToken = strings.ToLower(base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(tokenBytes))
+	challengeBytes := make([]byte, 32)
+	if _, err := rand.Read(challengeBytes); err != nil {
+		return "", err
+	}
+	server.HandleError(func() {
+		server.Tx(ctx, func(tx server.PgTx) {
+			now := server.NowUtc()
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`INSERT INTO network_domain (network_id, domain, challenge, verify_time, acme_token) VALUES ($1, $2, $3, $4, $5)`,
+				networkId,
+				domain,
+				base64.RawURLEncoding.EncodeToString(challengeBytes),
+				now,
+				acmeToken,
+			))
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+					INSERT INTO network_dns_custom_host (host, root, network_id, owner, state, caa_mode, create_time)
+					VALUES ($1, $2, $3, $4, $5, $6, $7)
+				`,
+				host,
+				root,
+				networkId,
+				owner,
+				sidecar.DnsCustomHostStateActive,
+				sidecar.DnsCustomHostModeWeak,
+				now,
+			))
+		})
+	}, func(err error) {
+		returnErr = fmt.Errorf("the custom domain's rows: %w", err)
+	})
+	return
+}
+
+// One delegated challenge's receipt as network_tls_custom_challenge holds it (model's tls_custom_challenge_model.go).
+type dnsCertsChallengeReceipt struct {
+	ChallengeId server.Id
+	Domain      string
+	ClaimSeq    int64
+	// the challenge's owner, <acme_token>.acme.<root>, and the digest it holds
+	Name          string
+	Value         string
+	State         string
+	Serial        uint64
+	DispatchCount int
+	Refusal       string
+}
+
+// The network's delegated challenge receipts, by capture order.
+func dnsCertsChallengeReceipts(ctx context.Context, networkId server.Id) (receipts []*dnsCertsChallengeReceipt, returnErr error) {
+	server.HandleError(func() {
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`
+					SELECT challenge_id, domain, claim_seq, name, value, state, COALESCE(serial, 0), dispatch_count, COALESCE(refusal, '')
+					FROM network_tls_custom_challenge
+					WHERE network_id = $1
+					ORDER BY challenge_id
+				`,
+				networkId,
+			)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					receipt := &dnsCertsChallengeReceipt{}
+					var serial int64
+					server.Raise(result.Scan(&receipt.ChallengeId, &receipt.Domain, &receipt.ClaimSeq, &receipt.Name, &receipt.Value, &receipt.State, &serial, &receipt.DispatchCount, &receipt.Refusal))
+					receipt.Serial = uint64(serial)
+					receipts = append(receipts, receipt)
+				}
+			})
+		})
+	}, func(err error) {
+		returnErr = fmt.Errorf("the challenge receipts: %w", err)
+	})
+	return
 }
