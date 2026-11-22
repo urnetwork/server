@@ -856,58 +856,29 @@ func (self *churnLoadCase) aclSave(ctx context.Context, round int, network *chur
 	}
 }
 
-// An enrollment: the team's Owner inviting a new person, who accepts and whom an Owner's device admits as a member, or
-// enrolling a new device of its own, admitted by its first device and following, StepCount times, each kept.
+// An enrollment: the team's Owner inviting a new person, who accepts and whom an Owner's device admits as a member;
+// enrolling a new device of its own, admitted by its first device and following; or enrolling a tagged sidecar of the
+// team's first tag, admitted with it by an Owner's device (World.AddTagged); StepCount times, each kept.
 func (self *churnLoadCase) enrollmentBurst(round int, random *rand.Rand, picked map[any]bool) *WorldBurst {
 	network := self.team
-	team := network.team
 	admin := network.owner()
 	steps := []func(ctx context.Context, random *rand.Rand) error{}
 	for range self.settings.Mix.Enrollments.StepCount {
 		steps = append(steps, func(ctx context.Context, random *rand.Rand) error {
 			token := self.nextToken()
-			if random.IntN(2) == 0 {
-				_, err := admin.use(func() error {
-					person, err := self.world.NewPerson(ctx, fmt.Sprintf("churn-member-%d", token))
-					if err != nil {
-						return err
-					}
-					invite, err := team.Invite(ctx, team.Owner, admin.device, person.Email, bridge.MemberRole_MEMBER_ROLE_MEMBER)
-					if err != nil {
-						return fmt.Errorf("%s's invite: %w", person.Name, err)
-					}
-					member, err := team.Accept(ctx, person, invite)
-					if err != nil {
-						return fmt.Errorf("%s's accept: %w", person.Name, err)
-					}
-					if _, err := team.AdmitMember(ctx, admin.device, member); err != nil {
-						return fmt.Errorf("%s's MemberAdmit: %w", person.Name, err)
-					}
-					network.stateLock.Lock()
-					network.joined = append(network.joined, member)
-					network.membershipTime = time.Now()
-					network.stateLock.Unlock()
-					return nil
-				})
-				return err
+			choice := random.IntN(3)
+			if choice == 2 && len(self.settings.Team.Tags) == 0 {
+				choice = random.IntN(2)
 			}
 			_, err := admin.use(func() error {
-				devices, err := team.AddSidecarsWith(ctx, &sidecart3.T3EnrollArgs{Root: team.Owner.Root, MemberId: team.Owner.MemberId, Count: 1, Name: fmt.Sprintf("%s-churn-%d", team.Name, token)})
-				if err != nil {
-					return fmt.Errorf("the Owner's new device: %w", err)
+				switch choice {
+				case 0:
+					return self.enrollMember(ctx, network, admin, token)
+				case 1:
+					return self.enrollOwnerDevice(ctx, network, token)
+				default:
+					return self.enrollTagged(ctx, network, admin)
 				}
-				if err := team.AdmitMemberDevices(ctx, team.Owner, nil, devices); err != nil {
-					return fmt.Errorf("%s's admission: %w", devices[0].Name, err)
-				}
-				device := &churnLoadDevice{device: devices[0], network: network, restartable: true}
-				device.watch()
-				network.stateLock.Lock()
-				network.devices = append(network.devices, device)
-				network.enrolled = append(network.enrolled, device)
-				network.savers = append(network.savers, device)
-				network.membershipTime = time.Now()
-				network.stateLock.Unlock()
-				return nil
 			})
 			return err
 		})
@@ -915,8 +886,73 @@ func (self *churnLoadCase) enrollmentBurst(round int, random *rand.Rand, picked 
 	return gkmConcurrencyBurst(fmt.Sprintf("the team's enrollments in %s", churnLoadPhase(round)), steps)
 }
 
+// A new person invited by the team's Owner from admin, accepted with their own sign-in and admitted as a member.
+func (self *churnLoadCase) enrollMember(ctx context.Context, network *churnLoadNetwork, admin *churnLoadDevice, token int) error {
+	team := network.team
+	person, err := self.world.NewPerson(ctx, fmt.Sprintf("churn-member-%d", token))
+	if err != nil {
+		return err
+	}
+	invite, err := team.Invite(ctx, team.Owner, admin.device, person.Email, bridge.MemberRole_MEMBER_ROLE_MEMBER)
+	if err != nil {
+		return fmt.Errorf("%s's invite: %w", person.Name, err)
+	}
+	member, err := team.Accept(ctx, person, invite)
+	if err != nil {
+		return fmt.Errorf("%s's accept: %w", person.Name, err)
+	}
+	if _, err := team.AdmitMember(ctx, admin.device, member); err != nil {
+		return fmt.Errorf("%s's MemberAdmit: %w", person.Name, err)
+	}
+	network.stateLock.Lock()
+	defer network.stateLock.Unlock()
+	network.joined = append(network.joined, member)
+	network.membershipTime = time.Now()
+	return nil
+}
+
+// A new device of the team's Owner, enrolled under its credential and admitted by its first device.
+func (self *churnLoadCase) enrollOwnerDevice(ctx context.Context, network *churnLoadNetwork, token int) error {
+	team := network.team
+	devices, err := team.AddSidecarsWith(ctx, &sidecart3.T3EnrollArgs{Root: team.Owner.Root, MemberId: team.Owner.MemberId, Count: 1, Name: fmt.Sprintf("%s-churn-%d", team.Name, token)})
+	if err != nil {
+		return fmt.Errorf("the Owner's new device: %w", err)
+	}
+	if err := team.AdmitMemberDevices(ctx, team.Owner, nil, devices); err != nil {
+		return fmt.Errorf("%s's admission: %w", devices[0].Name, err)
+	}
+	device := &churnLoadDevice{device: devices[0], network: network, restartable: true}
+	device.watch()
+	network.stateLock.Lock()
+	defer network.stateLock.Unlock()
+	network.devices = append(network.devices, device)
+	network.enrolled = append(network.enrolled, device)
+	if len(network.savers) < self.settings.TeamAclSaverCount {
+		network.savers = append(network.savers, device)
+	}
+	network.membershipTime = time.Now()
+	return nil
+}
+
+// A tagged sidecar of the team's first tag, enrolled from an auth key carrying it and admitted with it by admin.
+func (self *churnLoadCase) enrollTagged(ctx context.Context, network *churnLoadNetwork, admin *churnLoadDevice) error {
+	team := network.team
+	devices, err := team.AddTagged(ctx, admin.device, self.settings.Team.Tags[0], 1)
+	if err != nil {
+		return fmt.Errorf("the tagged sidecar: %w", err)
+	}
+	device := &churnLoadDevice{device: devices[0], network: network}
+	device.watch()
+	network.stateLock.Lock()
+	defer network.stateLock.Unlock()
+	network.tagged = append(network.tagged, device)
+	network.membershipTime = time.Now()
+	return nil
+}
+
 // A departure: the team's Owner removing a member the churn added (member-remove, then MemberRevoke), or revoking a
-// device of its own the churn added, StepCount times, each kept; a step with neither to take away does nothing.
+// device of its own or a tagged sidecar the churn added, StepCount times, each kept; a step with nothing to take away
+// does nothing.
 func (self *churnLoadCase) departureBurst(round int, random *rand.Rand, picked map[any]bool) *WorldBurst {
 	network := self.team
 	team := network.team
@@ -926,7 +962,7 @@ func (self *churnLoadCase) departureBurst(round int, random *rand.Rand, picked m
 		steps = append(steps, func(ctx context.Context, random *rand.Rand) error {
 			network.stateLock.Lock()
 			members := slices.DeleteFunc(slices.Clone(network.joined), func(member *WorldTeamMember) bool { return member.Removed() })
-			devices := slices.DeleteFunc(slices.Clone(network.enrolled), func(device *churnLoadDevice) bool { return device.gone() })
+			devices := slices.DeleteFunc(slices.Concat(network.enrolled, network.tagged), func(device *churnLoadDevice) bool { return device.gone() })
 			network.stateLock.Unlock()
 			if 0 < len(members) && (len(devices) == 0 || random.IntN(2) == 0) {
 				member, _ := churnLoadPick(random, members)

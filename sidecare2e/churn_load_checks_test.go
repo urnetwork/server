@@ -39,7 +39,7 @@ func (self *churnLoadCase) checkRound(round int, roundStartedAt time.Time) {
 	self.checkAclSaves(ctx, phase)
 	self.checkEvs(ctx, phase, false)
 	self.checkDns(ctx, phase)
-	self.checkMailboxes(ctx, phase)
+	self.checkMailboxes(phase)
 	self.checkBlog(phase, roundStartedAt)
 	self.checkBridge(ctx, phase)
 	self.checkAlarms(phase)
@@ -73,7 +73,7 @@ func (self *churnLoadCase) checkConfigConvergence(ctx context.Context, phase str
 			continue
 		}
 		live := []*sidecart3.T3Device{}
-		for _, device := range network.liveDevices() {
+		for _, device := range network.everyLiveDevice() {
 			live = append(live, device.device)
 		}
 		if divergent := controlPlaneDivergent(live); 0 < len(divergent) {
@@ -127,7 +127,7 @@ func (self *churnLoadCase) checkKeyConvergence(ctx context.Context, phase string
 		for _, repo := range self.keyRepos(network) {
 			readers := state.RepoReaders(repo.repoId)
 			holders := []*churnLoadDevice{}
-			for _, device := range network.liveDevices() {
+			for _, device := range network.everyLiveDevice() {
 				if slices.Contains(readers, device.device.Sidecar().Identity().SidecarId) {
 					holders = append(holders, device)
 				}
@@ -176,6 +176,7 @@ func (self *churnLoadCase) checkMembership(ctx context.Context, phase string) {
 	joined := slices.Clone(network.joined)
 	removed := slices.Clone(network.removed)
 	enrolled := slices.Clone(network.enrolled)
+	tagged := slices.Clone(network.tagged)
 	revoked := slices.Clone(network.revoked)
 	network.stateLock.Unlock()
 	expected := map[sidecar.Id]string{team.Owner.MemberId: team.Owner.Name}
@@ -184,13 +185,27 @@ func (self *churnLoadCase) checkMembership(ctx context.Context, phase string) {
 			expected[member.MemberId] = member.Name
 		}
 	}
-	for _, device := range network.liveDevices() {
+	for _, device := range network.everyLiveDevice() {
 		follower := device.device.Follower()
 		if follower == nil || follower.Client() == nil || follower.Client().State() == nil {
 			t.Errorf("%s: %s follows no log", phase, device.device.Name)
 			continue
 		}
 		state := follower.Client().State()
+		for _, other := range tagged {
+			row := state.SidecarRow(other.device.Sidecar().Identity().SidecarId)
+			wantRevoked := slices.Contains(revoked, other)
+			switch {
+			case row == nil:
+				t.Errorf("%s: %s's state never admitted the tagged %s", phase, device.device.Name, other.device.Name)
+			case len(row.GetTagIds()) != 1 || len(row.GetMemberId()) != 0:
+				t.Errorf("%s: %s's state admits the tagged %s with %d tags and member %x, not its one tag alone", phase, device.device.Name, other.device.Name, len(row.GetTagIds()), row.GetMemberId())
+			case wantRevoked && row.GetRevokedAt() == 0:
+				t.Errorf("%s: %s's state holds the tagged %s admitted after its revocation", phase, device.device.Name, other.device.Name)
+			case !wantRevoked && row.GetRevokedAt() != 0:
+				t.Errorf("%s: %s's state holds the tagged %s revoked at %d, which the churn never revoked", phase, device.device.Name, other.device.Name, row.GetRevokedAt())
+			}
+		}
 		for memberId, name := range expected {
 			if state.Member(memberId) == nil {
 				t.Errorf("%s: %s's state names no member %s (%s)", phase, device.device.Name, memberId, name)
@@ -240,7 +255,7 @@ func (self *churnLoadCase) checkMembership(ctx context.Context, phase string) {
 			t.Errorf("%s: api holds no active client of %s, which the churn enrolled and never revoked", phase, device.device.Name)
 		}
 	}
-	t.Logf("%s: the team holds %d members (%d joined, %d removed) and %d devices the churn enrolled (%d revoked)", phase, len(expected), len(joined), len(removed), len(enrolled), len(revoked))
+	t.Logf("%s: the team holds %d members (%d joined, %d removed), %d Owner devices and %d tagged sidecars the churn enrolled (%d revoked)", phase, len(expected), len(joined), len(removed), len(enrolled), len(tagged), len(revoked))
 }
 
 // Every ACL save its saver was answered for stands at a log position of its own, and the newest is the document the
@@ -356,14 +371,18 @@ func (self *churnLoadCase) checkDns(ctx context.Context, phase string) {
 }
 
 // Every message so far in each mailbox it names exactly once, its sender's sent copy beside it, and no mailbox holding
-// another's: each mail network's reader lists them all within the mail settings' MailboxTimeout.
-func (self *churnLoadCase) checkMailboxes(ctx context.Context, phase string) {
+// another's: each mail network's reader lists them within its own bound (MailboxRoundTimeout after a round), a network
+// that stalls failing alone, as the mail case bounds each network's wait. A message a check already reported missing is
+// not waited for again; the end's mailCheckMailbox counts it.
+func (self *churnLoadCase) checkMailboxes(phase string) {
 	t, settings := self.t, self.settings
 	if len(self.mailLedger.all()) == 0 {
 		return
 	}
 	for _, network := range self.mailNetworks {
-		entries, err := awaitMailMailbox(ctx, network, self.mailLedger, settings.Mail, settings.Mail.MailboxTimeout)
+		ctx, cancel := self.world.StepContext(t.Context(), settings.MailboxRoundTimeout)
+		entries, err := self.awaitMailboxes(ctx, network)
+		cancel()
 		if err != nil {
 			t.Errorf("%s: %v", phase, err)
 		}
@@ -373,13 +392,13 @@ func (self *churnLoadCase) checkMailboxes(ctx context.Context, phase string) {
 		}
 		for _, expected := range self.mailLedger.all() {
 			for _, mailbox := range network.Mailboxes {
+				held := len(counts.received[expected.Token][mailbox.Name])
 				if !slices.Contains(expected.Mailboxes, mailbox.Name) {
-					if held := counts.received[expected.Token][mailbox.Name]; 0 < len(held) {
-						t.Errorf("%s: %s holds %s %d times, which names it nowhere", phase, mailbox.Name, expected.Token, len(held))
+					if 0 < held {
+						t.Errorf("%s: %s holds %s %d times, which names it nowhere", phase, mailbox.Name, expected.Token, held)
 					}
 					continue
 				}
-				held := len(counts.received[expected.Token][mailbox.Name])
 				if held <= 1 {
 					continue
 				}
@@ -392,6 +411,63 @@ func (self *churnLoadCase) checkMailboxes(ctx context.Context, phase string) {
 		}
 	}
 	t.Logf("%s: %d messages of the case so far", phase, len(self.mailLedger.all()))
+}
+
+// Lists network's mailboxes until every message the ledger names one of them for is received there and every send of
+// its own has its sent copy, past the ones a check already reported missing (awaitMailMailbox's wait, which waits on
+// every message): its reader's ingest runs at each deposit's hint, with no hook a test reads, so the list is read
+// every RetryInterval until ctx ends, the network's prover host woken each time. Its last complete listing's entries;
+// past ctx, an error naming what it lacked, each kept as reported.
+func (self *churnLoadCase) awaitMailboxes(ctx context.Context, network *mailNetwork) ([]*sidecar.MailViewEntry, error) {
+	settings := self.settings.Mail
+	var listed []*sidecar.MailViewEntry
+	var missing []string
+	listCount, failCount := 0, 0
+	var lastErr error
+	for {
+		entries, err := mailListAll(ctx, network.ReaderMail, settings.ListPageCount)
+		listCount += 1
+		if err != nil {
+			failCount += 1
+			lastErr = err
+		} else {
+			listed = entries
+			missing = []string{}
+			counts := mailCountMailbox(network, entries, self.mailLedger)
+			self.stateLock.Lock()
+			reported := maps.Clone(self.mailMissing)
+			self.stateLock.Unlock()
+			for _, expected := range self.mailLedger.all() {
+				for _, mailbox := range network.Mailboxes {
+					what := expected.Token + " in " + mailbox.Name
+					if slices.Contains(expected.Mailboxes, mailbox.Name) && len(counts.received[expected.Token][mailbox.Name]) == 0 && !reported[what] {
+						missing = append(missing, what)
+					}
+				}
+				what := expected.Token + " (its sent copy)"
+				if expected.Network == network && len(counts.sent[expected.Token]) == 0 && !reported[what] {
+					missing = append(missing, what)
+				}
+			}
+			if len(missing) == 0 {
+				return entries, nil
+			}
+		}
+		network.WakeProver()
+		select {
+		case <-ctx.Done():
+			self.stateLock.Lock()
+			for _, what := range missing {
+				self.mailMissing[what] = true
+			}
+			self.stateLock.Unlock()
+			if listed == nil {
+				return nil, fmt.Errorf("%s's reader never completed a listing of its mailboxes: %d of %d listings failed, the last with %v (%w)", network.Name, failCount, listCount, lastErr, ctx.Err())
+			}
+			return listed, fmt.Errorf("%s's reader never listed %d messages %v, at its last complete listing; %d of %d listings failed, the last failure %v (%w)", network.Name, len(missing), missing, failCount, listCount, lastErr, ctx.Err())
+		case <-time.After(settings.Mail.RetryInterval):
+		}
+	}
 }
 
 // The blog's round: its commits settled within its settle bound (bloggerSettle), its visits failing only inside a chaos
@@ -430,7 +506,7 @@ func (self *churnLoadCase) checkBridge(ctx context.Context, phase string) {
 func (self *churnLoadCase) checkAlarms(phase string) {
 	t := self.t
 	for _, network := range self.networks {
-		for _, device := range network.deviceList() {
+		for _, device := range network.everyDevice() {
 			device.stateLock.Lock()
 			alarms := slices.Clone(device.alarms[min(device.alarmsChecked, len(device.alarms)):])
 			device.alarmsChecked = len(device.alarms)
@@ -467,28 +543,35 @@ func (self *churnLoadCase) finish() {
 	ctx, cancel := self.world.StepContext(t.Context(), settings.FinalTimeout)
 	defer cancel()
 
-	// mail: every send's internet mail ended sent, the internet MX took what names it, every mailbox's copies
+	// mail: every send's internet mail ended sent, the internet MX took what names it, every mailbox's copies, each
+	// network's wait bounded on its own
 	mxByteCounts, smtpByteCounts := map[string]int64{}, map[string]int64{}
 	if 0 < len(self.mailLedger.all()) {
-		outcomes, err := awaitMailOutcomes(ctx, self.world, self.mailLedger, settings.Mail)
+		outcomesCtx, cancelOutcomes := self.world.StepContext(t.Context(), settings.Mail.MailboxTimeout)
+		outcomes, err := awaitMailOutcomes(outcomesCtx, self.world, self.mailLedger, settings.Mail)
 		if err != nil {
 			t.Errorf("%s: the sends' outcomes: %v", phase, err)
 		}
-		mxMessages, err := awaitMailInternetMx(ctx, self.world, self.mailLedger, self.mailNetworks, settings.Mail, settings.Mail.MailboxTimeout)
+		mxMessages, err := awaitMailInternetMx(outcomesCtx, self.world, self.mailLedger, self.mailNetworks, settings.Mail, settings.Mail.MailboxTimeout)
+		cancelOutcomes()
 		if err != nil {
 			t.Errorf("%s: the internet MX: %v", phase, err)
 		}
 		for _, network := range self.mailNetworks {
-			entries, err := awaitMailMailbox(ctx, network, self.mailLedger, settings.Mail, settings.Mail.MailboxTimeout)
+			mailboxCtx, cancelMailbox := self.world.StepContext(t.Context(), settings.Mail.MailboxTimeout)
+			entries, err := self.awaitMailboxes(mailboxCtx, network)
 			if err != nil {
 				t.Errorf("%s: %s's mailboxes: %v", phase, network.Name, err)
 			}
-			mailCheckMailbox(ctx, t, self.world, network, self.mailLedger, entries, mxByteCounts, smtpByteCounts)
+			mailCheckMailbox(mailboxCtx, t, self.world, network, self.mailLedger, entries, mxByteCounts, smtpByteCounts)
+			cancelMailbox()
 		}
-		mailCheckInternetMx(ctx, t, self.world, self.mailLedger, self.world.dnssec.sender.Address(settings.Mail.InternetTo), mxMessages, smtpByteCounts)
+		checkCtx, cancelCheck := self.world.StepContext(t.Context(), settings.Mail.MailboxTimeout)
+		mailCheckInternetMx(checkCtx, t, self.world, self.mailLedger, self.world.dnssec.sender.Address(settings.Mail.InternetTo), mxMessages, smtpByteCounts)
 		for _, network := range self.mailNetworks {
-			mailCheckOutbox(ctx, t, network, self.mailLedger, outcomes)
+			mailCheckOutbox(checkCtx, t, network, self.mailLedger, outcomes)
 		}
+		cancelCheck()
 	}
 
 	// evs on every live device, the dns records, and no certificate row left in flight
@@ -506,20 +589,21 @@ func (self *churnLoadCase) finish() {
 			self.world.FailProgress(t, name+"'s restart for its drain", err, nil)
 		}
 	}
-	self.checkLedgers(ctx, phase, mxByteCounts, smtpByteCounts)
-	self.checkWriteBudgets(ctx, phase)
-	controlPlaneCheckApiBudget(t, ctx, self.world, settings.Ledger)
-	dnsCertsCheckCertsBudget(t, ctx, self.stack, self.publishers)
-	dnsCertsCheckChallengeCounts(t, ctx, self.stack, settings.Dns, &dnsCertsRecords{Root: self.dnsRecords.Root})
-	self.logRefusals(phase)
-	// last, since its reconciliation closes every network of the world: the bridge's oracle over every attempt, its
-	// sidecar clients, and its ledger
+	// the bridge's oracle over every attempt, its sidecar clients and its ledger, which reads the debit journal's
+	// relay rows of its contracts before any ledger read's flush applies them, and which closes every network
 	if self.bridge != nil {
 		self.bridge.CheckSidecarClients(ctx, t)
 		self.bridge.Check(t)
 		self.bridge.Reconcile(ctx, t)
 		self.bridge.Summarize(t)
 	}
+	// then every ledger of the case's own networks, which reads no device
+	self.checkLedgers(ctx, phase, mxByteCounts, smtpByteCounts)
+	self.checkWriteBudgets(ctx, phase)
+	controlPlaneCheckApiBudget(t, ctx, self.world, settings.Ledger)
+	dnsCertsCheckCertsBudget(t, ctx, self.stack, self.publishers)
+	dnsCertsCheckChallengeCounts(t, ctx, self.stack, settings.Dns, &dnsCertsRecords{Root: self.dnsRecords.Root})
+	self.logRefusals(phase)
 }
 
 // No certificate row of a publisher's is left queued, ordering or waiting on dns: every order the case began ended.
