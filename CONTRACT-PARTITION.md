@@ -1275,6 +1275,14 @@ block-points ones were archived, deleted and dropped with their week.
   attached partition or invisible to a snapshot.
 - **Reaper off or behind:** the day waits ("the reaper has not emptied
   it"), reported each run. With the mode off it waits from 91 days.
+- **The zero-byte pass** (owner, 2026-11-21; `model/contract_horizon_zero_byte.go`)
+  deletes zero-byte contracts 8 days and 2 hours after creation, by the
+  same statements. On the plain tables the space it frees is reused by new
+  rows. From C it frees nothing on disk: a day's leaves take no new rows
+  after the day and keep their files (`vacuum_truncate` off), so the space
+  returns only when S1 compacts the day at the horizon. Turn it off at the
+  cutover (control `zeroByteMode` off). Expiry is unchanged: it reads the
+  horizon, never the zero-byte horizon.
 
 ### The legacy partition
 

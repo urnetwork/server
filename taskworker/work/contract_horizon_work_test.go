@@ -133,7 +133,7 @@ func TestRemoveContractsPastHorizonCheckpointsAndRearms(t *testing.T) {
 
 // Pure: a run that reached the horizon, found the reaper off or its control
 // unreadable, or only dry ran comes back after the idle interval; a run with
-// work left comes back at once.
+// work left comes back at once, also when only the zero-byte pass has it.
 func TestContractHorizonRunIdle(t *testing.T) {
 	for _, sample := range []struct {
 		report *model.ContractHorizonReport
@@ -145,6 +145,12 @@ func TestContractHorizonRunIdle(t *testing.T) {
 		{report: &model.ContractHorizonReport{Mode: model.ContractHorizonModeOff, Stop: "off"}, idle: true},
 		{report: &model.ContractHorizonReport{Mode: model.ContractHorizonModeOff, Stop: "control_unavailable"}, idle: true},
 		{report: &model.ContractHorizonReport{Mode: model.ContractHorizonModeDryRun, Stop: "budget"}, idle: true},
+		// the zero-byte pass
+		{report: &model.ContractHorizonReport{Mode: model.ContractHorizonModeOn, Stop: "horizon", CaughtUp: true, ZeroByteCaughtUp: true}, idle: true},
+		{report: &model.ContractHorizonReport{Mode: model.ContractHorizonModeOn, Stop: "budget", CaughtUp: true, ZeroByteBehind: true}, idle: false},
+		{report: &model.ContractHorizonReport{Mode: model.ContractHorizonModeOn, Stop: "canceled", CaughtUp: true, ZeroByteBehind: true}, idle: false},
+		{report: &model.ContractHorizonReport{Mode: model.ContractHorizonModeOn, Stop: "budget", CaughtUp: true, ZeroByteMode: model.ContractHorizonModeDryRun}, idle: true},
+		{report: &model.ContractHorizonReport{Mode: model.ContractHorizonModeOn, Stop: "off", CaughtUp: true, ZeroByteBehind: true}, idle: true},
 	} {
 		if contractHorizonRunIdle(sample.report) != sample.idle {
 			t.Errorf("%+v: idle %t, want %t", sample.report, !sample.idle, sample.idle)

@@ -18,7 +18,9 @@ import (
 //   - The week itself ends no later than the floor.
 //   - The floor is DefaultCloseTimeFloor until the export control sets
 //     another date, or rolling, which sets none; it is never later than
-//     MinCloseAge before now, whatever the control sets.
+//     MinCloseAge before now, whatever the control sets. Zero-byte contracts
+//     are archived from 8 days (the reaper's zero-byte horizon); the floor
+//     keeps them in PostgreSQL as long as any other row of their week.
 //   - The server's drop never lets the floor pass a week before the window of
 //     the earliest SN epoch not yet recorded either
 //     (server/db_provider_usage_archive_export.go), so a rolling floor moves
@@ -89,7 +91,12 @@ func EffectiveCloseTimeFloor(floor time.Time, now time.Time) time.Time {
 // archived later; dropping the week first would send them all to the DEFAULT
 // partition, which is never dropped. So a week leaves only once at most a
 // quarter of its newest ReaperCheckContracts contracts, live or archived, are
-// still live.
+// still live. The reaper's zero-byte pass archives a week's zero-byte
+// contracts, about half of them, before its horizon reaches the week, so the
+// share stands for the horizon's progress only while the horizon and its
+// rescan reach the week within MinCloseAge: at a longer horizon, a week whose
+// newest contracts were three quarters zero-byte could leave before the
+// horizon reached it, and its other contracts would be archived to DEFAULT.
 const (
 	ReaperCheckContracts = 1000
 	// live * ReaperLiveShareDenominator > total keeps the week

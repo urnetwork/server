@@ -34,6 +34,9 @@ const (
 	contractHorizonRunsPanel      = 63
 	contractHorizonRetentionPanel = 65
 	contractHorizonSkippedPanel   = 105
+	// the zero-byte pass (model/contract_horizon_zero_byte.go)
+	contractHorizonZeroBytePanel         = 149
+	contractHorizonZeroBytePositionPanel = 150
 )
 
 // The label matchers every reaper and retention selector starts with.
@@ -53,7 +56,7 @@ func TestContractHorizonReaperDashboardPanels(t *testing.T) {
 	}
 	selectors := regexp.MustCompile(`\{[^}]*\}`)
 	counters := regexp.MustCompile(`(\w*\()?(urnetwork_(?:contract_horizon|retention|transfer_audit_rollup)_\w*(?:_total|_bucket|_count))\{`)
-	ids := []int{contractHorizonSkippedPanel}
+	ids := []int{contractHorizonSkippedPanel, contractHorizonZeroBytePanel, contractHorizonZeroBytePositionPanel}
 	for id := contractHorizonModePanel; id <= contractHorizonRetentionPanel; id++ {
 		ids = append(ids, id)
 	}
@@ -116,6 +119,38 @@ func TestContractHorizonReaperDashboardPanels(t *testing.T) {
 	}
 	if !strings.Contains(runs.Description, "TransferAuditRollupFirstDay") {
 		t.Error("runs panel does not explain the transfer audit rollup clamp")
+	}
+
+	// the zero-byte pass: its deletes, reads and kept contracts beside the
+	// horizon's, and its lag and horizon beside the batch panels
+	zeroByte := dashboardPanelById(dashboard, contractHorizonZeroBytePanel)
+	zeroByteTargets := []string{
+		"sum(rate(urnetwork_contract_horizon_zero_byte_deleted_contracts_total{" + contractHorizonTaskworkerFilter + "}[$__rate_interval]))",
+		"sum by (mode) (rate(urnetwork_contract_horizon_zero_byte_scanned_contracts_total{" + contractHorizonTaskworkerFilter + "}[$__rate_interval]))",
+		"sum by (reason) (rate(urnetwork_contract_horizon_zero_byte_kept_contracts_total{" + contractHorizonTaskworkerFilter + "}[$__rate_interval]))",
+	}
+	if zeroByte.Type != "timeseries" || zeroByte.Title != "zero-byte pass: contracts deleted, read and kept / s" || len(zeroByte.Targets) != len(zeroByteTargets) {
+		t.Fatalf("zero-byte pass panel = %q %+v", zeroByte.Title, zeroByte.Targets)
+	}
+	for i, expr := range zeroByteTargets {
+		if zeroByte.Targets[i].Expr != expr {
+			t.Errorf("zero-byte pass panel target %d = %s, want %s", i, zeroByte.Targets[i].Expr, expr)
+		}
+	}
+	for _, reason := range []string{"open", "unresolved", "recent_close", "disputed", "bytes", "one_sided", "extender", "unsettled", "busy", "attribution review", "8 days"} {
+		if !strings.Contains(zeroByte.Description, reason) {
+			t.Errorf("zero-byte pass panel does not explain %s", reason)
+		}
+	}
+	zeroBytePosition := dashboardPanelById(dashboard, contractHorizonZeroBytePositionPanel)
+	if zeroBytePosition.Type != "timeseries" || zeroBytePosition.FieldConfig.Defaults.Unit != "s" || len(zeroBytePosition.Targets) != 2 ||
+		!strings.Contains(zeroBytePosition.Targets[0].Expr, "urnetwork_contract_horizon_zero_byte_lag_seconds") ||
+		!strings.Contains(zeroBytePosition.Targets[1].Expr, "urnetwork_contract_horizon_zero_byte_horizon_seconds") {
+		t.Fatalf("zero-byte position panel must chart the zero-byte lag and horizon in seconds: %+v", zeroBytePosition.Targets)
+	}
+	runsPanel := dashboardPanelById(dashboard, contractHorizonRunsPanel)
+	if zeroByte.GridPos.Y != dashboardPanelById(dashboard, contractHorizonPositionPanel).GridPos.Y || zeroBytePosition.GridPos.Y != runsPanel.GridPos.Y {
+		t.Error("the zero-byte panels do not sit beside the pass position and the runs")
 	}
 
 	position := dashboardPanelById(dashboard, contractHorizonPositionPanel)
@@ -196,6 +231,9 @@ func TestContractHorizonReaperPromqlReadsTheNewestRun(t *testing.T) {
 		cursor      float64
 		passStart   float64
 		batchSize   float64
+		// the zero-byte pass's lag and horizon
+		zeroByteLag     float64
+		zeroByteHorizon float64
 		// the pass's skipped contracts by reason
 		reasonSkippeds map[string]float64
 	}
@@ -217,6 +255,8 @@ func TestContractHorizonReaperPromqlReadsTheNewestRun(t *testing.T) {
 				gauge("cursor_timestamp_seconds", run.cursor),
 				gauge("pass_start_timestamp_seconds", run.passStart),
 				gauge("batch_size", run.batchSize),
+				gauge("zero_byte_lag_seconds", run.zeroByteLag),
+				gauge("zero_byte_horizon_seconds", run.zeroByteHorizon),
 			)
 			for _, reason := range slices.Sorted(maps.Keys(run.reasonSkippeds)) {
 				series = append(series, map[string]string{
@@ -229,9 +269,9 @@ func TestContractHorizonReaperPromqlReadsTheNewestRun(t *testing.T) {
 	}
 	// evaluated at 3000 s: a run is current when it started after 1200 s
 	older := reaperRun{service: "taskworker", instance: "older", start: 1500, horizonDays: 35, mode: 2, lag: 86400, cursor: 5000, passStart: 100, batchSize: 2000,
-		reasonSkippeds: map[string]float64{"recent_close": 900, "payment_hold": 5}}
+		zeroByteLag: 2 * day, zeroByteHorizon: 8 * day, reasonSkippeds: map[string]float64{"recent_close": 900, "payment_hold": 5}}
 	newest := reaperRun{service: "taskworker", instance: "newest", start: 2400, horizonDays: 91, mode: 1, lag: 3600, cursor: 7000, passStart: 200, batchSize: 500,
-		reasonSkippeds: map[string]float64{"recent_close": 3, "payment_hold": 7}}
+		zeroByteLag: 7200, zeroByteHorizon: 10 * day, reasonSkippeds: map[string]float64{"recent_close": 3, "payment_hold": 7}}
 	idle := reaperRun{service: "taskworker", instance: "idle"}
 	api := reaperRun{service: "api", instance: "api", start: 2900, horizonDays: 50, mode: 2, lag: 1, cursor: 9999, passStart: 9999, batchSize: 9999,
 		reasonSkippeds: map[string]float64{"recent_close": 9999}}
@@ -280,6 +320,8 @@ func TestContractHorizonReaperPromqlReadsTheNewestRun(t *testing.T) {
 			{contractHorizonPositionPanel, "C", value((2400 - 91*day) * 1000)},
 			{contractHorizonBatchPanel, "C", value(500)},
 			{contractHorizonSkippedPanel, "A", byReason(map[string]float64{"recent_close": 3, "payment_hold": 7})},
+			{contractHorizonZeroBytePositionPanel, "A", value(7200)},
+			{contractHorizonZeroBytePositionPanel, "B", value(10 * day)},
 		}},
 		{name: "an off mode still reads", runs: []reaperRun{older, newestOff}, evaluations: []evaluation{
 			{contractHorizonModePanel, "A", value(0)},
@@ -292,6 +334,8 @@ func TestContractHorizonReaperPromqlReadsTheNewestRun(t *testing.T) {
 			{contractHorizonPositionPanel, "B", none},
 			{contractHorizonNewestRunPanel, "A", value(1100 * 1000)},
 			{contractHorizonSkippedPanel, "A", none},
+			{contractHorizonZeroBytePositionPanel, "A", none},
+			{contractHorizonZeroBytePositionPanel, "B", none},
 		}},
 		{name: "an uncommitted pass never borrows an older cursor", runs: []reaperRun{older, uncommitted}, evaluations: []evaluation{
 			{contractHorizonModePanel, "A", value(2)},

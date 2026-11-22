@@ -174,6 +174,11 @@ type ContractHorizonSettings struct {
 	// control sets no horizon, and the longest horizon the control can set.
 	// Values below ContractHorizonFloor count as ContractHorizonFloor.
 	Horizon time.Duration
+	// How long past its creation and its close a zero-byte contract is kept
+	// while the control sets no zero-byte horizon (contract_horizon_zero_byte.go).
+	// Values below ContractHorizonZeroByteFloor count as the floor, and values
+	// at or past the horizon as the horizon, where the zero-byte pass is off.
+	ZeroByteHorizon time.Duration
 	// How far past the horizon a contract's mint time must be before a pass
 	// reads it. The cursor moves past every contract a batch reads, so a pass
 	// that read up to the horizon itself would, once caught up, read only
@@ -237,9 +242,11 @@ type ContractHorizonSettings struct {
 
 func DefaultContractHorizonSettings() *ContractHorizonSettings {
 	return &ContractHorizonSettings{
-		Enable:          true,
-		DefaultMode:     ContractHorizonModeOff,
-		Horizon:         server.ContractRetention,
+		Enable:      true,
+		DefaultMode: ContractHorizonModeOff,
+		Horizon:     server.ContractRetention,
+		// owner, 2026-11-21: "Reap zero-byte contracts at 8 days"
+		ZeroByteHorizon: ContractHorizonZeroByteFloor,
 		CloseSettleTime: 2 * DefaultContractExpiration,
 		BatchSize:       2000,
 		// a 2000-row batch halved four times
@@ -290,10 +297,13 @@ const contractHorizonControlKey = "{contract_horizon}control"
 //     remove about a billion rows, the evidence accepted from 2026-10-06 on,
 //     whatever the reaper's keep rules; their own brake
 //     (server.RemoveExpiredCloseEvidence) stops the row deletes, and this mode
-//     alone the weekly drops once the evidence is partitioned.
+//     alone the weekly drops once the evidence is partitioned;
+//   - the zero-byte pass's `zeroByteMode`, `zeroByteMaxRowsPerSecond` and
+//     `zeroByteHorizonDays` (contract_horizon_zero_byte.go).
 //
 // A field that does not parse narrows as far as it can: mode off, rate zero
-// (which is off), the minimum batch size, the code's horizon.
+// (which is off), the minimum batch size, the code's horizon, the zero-byte
+// pass off.
 const (
 	ContractHorizonControlFieldMode             = "mode"
 	ContractHorizonControlFieldMaxRowsPerSecond = "maxRowsPerSecond"
@@ -310,6 +320,14 @@ type ContractHorizonControl struct {
 	BatchSize        int
 	// How long past its creation and its close a contract is kept.
 	Horizon time.Duration
+	// The zero-byte pass's mode, at most Mode, and off while its rate is not
+	// positive or its horizon is Horizon.
+	ZeroByteMode ContractHorizonMode
+	// Contracts the zero-byte pass reads per second.
+	ZeroByteMaxRowsPerSecond float64
+	// How long past its creation and its close a zero-byte contract is kept:
+	// from ContractHorizonZeroByteFloor to Horizon.
+	ZeroByteHorizon time.Duration
 }
 
 // The control the fields narrow the settings to. Pure: fields is the control
@@ -350,6 +368,7 @@ func NarrowContractHorizonControl(fields map[string]string, settings *ContractHo
 	if !settings.Enable || !(0 < control.MaxRowsPerSecond) {
 		control.Mode = ContractHorizonModeOff
 	}
+	narrowContractHorizonZeroByteControl(fields, settings, control)
 	return control
 }
 
@@ -431,6 +450,14 @@ type ContractHorizonCursor struct {
 	// the next pass. Empty when it kept none, and in a cursor a build from
 	// before 2026-11-15 handed on.
 	SkippedReasonCounts map[string]int64 `json:"skipped_reason_counts,omitempty"`
+	// The last contract id the zero-byte pass committed past
+	// (contract_horizon_zero_byte.go). It never starts over. The zero id, and
+	// an id the horizon's window has passed, start it at that window. Zero in a
+	// cursor a build from before 2026-11-21 handed on.
+	ZeroByteContractId server.Id `json:"zero_byte_contract_id,omitzero"`
+	// The zero-byte pass's adaptive batch size. Zero starts at the control's
+	// batch size.
+	ZeroByteBatchSize int `json:"zero_byte_batch_size,omitempty"`
 }
 
 // The cursor of a new pass at the oldest contract, carrying the adaptive
@@ -440,6 +467,16 @@ func newContractHorizonPass(now time.Time, batchSize int) ContractHorizonCursor 
 		PassStartTime: now.UTC(),
 		BatchSize:     batchSize,
 	}
+}
+
+// The cursor of a new pass of the horizon at the oldest contract, keeping the
+// adaptive batch size and the zero-byte pass's position, which never starts
+// over.
+func (self ContractHorizonCursor) startPass(now time.Time) ContractHorizonCursor {
+	next := newContractHorizonPass(now, self.BatchSize)
+	next.ZeroByteContractId = self.ZeroByteContractId
+	next.ZeroByteBatchSize = self.ZeroByteBatchSize
+	return next
 }
 
 // Adds the contracts one committed batch kept, by reason.
@@ -541,11 +578,42 @@ type ContractHorizonReport struct {
 	CaughtUp bool
 	// Why the run ended.
 	Stop string
+
+	// The zero-byte pass (contract_horizon_zero_byte.go): its mode and horizon
+	// at the last control read; its batches; the contracts it read, those that
+	// passed every check (in on mode, deleted) and those it kept, by reason;
+	// the rows it deleted, by table, and the contracts it archived.
+	ZeroByteMode        ContractHorizonMode
+	ZeroByteHorizonTime time.Time
+	ZeroByteBatches     int
+	ZeroByteScanned     int64
+	ZeroByteEligible    int64
+	ZeroByteKept        map[string]int64
+	ZeroByteDeleted     map[string]int64
+	ZeroByteArchived    int64
+	// The zero-byte pass reached its horizon.
+	ZeroByteCaughtUp bool
+	// The zero-byte pass is on and stopped short of its horizon, so the next
+	// run has its work.
+	ZeroByteBehind bool
 }
 
 // The run found nothing to do: the reaper is off or its control unreadable.
 func (self *ContractHorizonReport) Idle() bool {
 	return self.Stop == contractHorizonStopOff || self.Stop == contractHorizonStopControl
+}
+
+func (self *ContractHorizonReport) addZeroByte(batch *contractHorizonZeroByteBatch) {
+	self.ZeroByteBatches += 1
+	self.ZeroByteScanned += batch.scanned
+	self.ZeroByteEligible += int64(len(batch.eligibleIds))
+	self.ZeroByteArchived += batch.archived
+	for table, count := range batch.deleted {
+		self.ZeroByteDeleted[table] += count
+	}
+	for reason, count := range batch.kept {
+		self.ZeroByteKept[reason] += count
+	}
 }
 
 func (self *ContractHorizonReport) add(batch *contractHorizonBatch) {
@@ -675,10 +743,13 @@ var contractHorizonBatchCommitted func(batch int, last server.Id)
 // the batch's settings through it.
 var contractHorizonBatchObserved func(ctx context.Context, tx server.PgTx)
 
-// One run: batches from cursor toward the horizon of now, until the horizon,
-// the budget, the mode or ctx stops it. next is where the following run
-// resumes, also when err is set: every batch before the failed one committed.
-// A canceled run is not an error; its batch in flight rolled back.
+// One run: batches of the horizon's pass from cursor toward the horizon of
+// now, and of the zero-byte pass from its own cursor toward the zero-byte
+// horizon (contract_horizon_zero_byte.go), each paced to its own rate, until
+// both reach their horizons, or the budget, the mode or ctx stops it. When
+// both passes are due, the horizon's reads first. next is where the following
+// run resumes, also when err is set: every batch before the failed one
+// committed. A canceled run is not an error; its batch in flight rolled back.
 func RemoveContractsPastHorizon(
 	ctx context.Context,
 	now time.Time,
@@ -691,12 +762,16 @@ func RemoveContractsPastHorizon(
 		paymentDischargeTime: now.UTC().Add(-CompletedContractExpiration),
 		runEnd:               time.Now().Add(settings.RunBudget),
 	}
-	// the code's horizon until the control is read
+	// the code's horizons until the control is read
 	reaper.setHorizon(settings.horizon())
+	reaper.setZeroByteHorizon(contractHorizonZeroByte(settings.ZeroByteHorizon, settings.horizon()))
 	report = &ContractHorizonReport{
-		HorizonTime: reaper.horizonTime,
-		Deleted:     map[string]int64{},
-		Protected:   map[string]int64{},
+		HorizonTime:         reaper.horizonTime,
+		Deleted:             map[string]int64{},
+		Protected:           map[string]int64{},
+		ZeroByteHorizonTime: reaper.zeroByteHorizonTime,
+		ZeroByteKept:        map[string]int64{},
+		ZeroByteDeleted:     map[string]int64{},
 		// every return sets its stop; a panic counts as an error
 		Stop: contractHorizonStopError,
 	}
@@ -707,11 +782,14 @@ func RemoveContractsPastHorizon(
 		next.PassStartTime = now.UTC()
 	}
 	reaper.observePass(next)
+	// the zero-byte pass is on and has contracts left to read
+	zeroBytePending := false
 	defer func() {
+		report.ZeroByteBehind = zeroBytePending
 		contractHorizonRunCounter.WithLabelValues(report.Stop).Inc()
 		if glog.V(1) {
 			glog.Infof(
-				"[contract_horizon]run mode=%s stop=%s batches=%d scanned=%d eligible=%d deleted=%v archived=%d protected=%v caught_up=%t horizon_days=%g horizon=%s pass_start=%s pass_skipped=%v\n",
+				"[contract_horizon]run mode=%s stop=%s batches=%d scanned=%d eligible=%d deleted=%v archived=%d protected=%v caught_up=%t horizon_days=%g horizon=%s pass_start=%s pass_skipped=%v zero_byte_mode=%s zero_byte_horizon_days=%g zero_byte_batches=%d zero_byte_scanned=%d zero_byte_eligible=%d zero_byte_deleted=%v zero_byte_archived=%d zero_byte_kept=%v zero_byte_caught_up=%t\n",
 				report.Mode,
 				report.Stop,
 				report.Batches,
@@ -725,6 +803,15 @@ func RemoveContractsPastHorizon(
 				report.HorizonTime.Format(time.RFC3339),
 				next.PassStartTime.Format(time.RFC3339),
 				next.SkippedReasonCounts,
+				report.ZeroByteMode,
+				reaper.zeroByteHorizon.Hours()/24,
+				report.ZeroByteBatches,
+				report.ZeroByteScanned,
+				report.ZeroByteEligible,
+				report.ZeroByteDeleted,
+				report.ZeroByteArchived,
+				report.ZeroByteKept,
+				report.ZeroByteCaughtUp,
 			)
 		}
 	}()
@@ -750,8 +837,14 @@ func RemoveContractsPastHorizon(
 
 	// A dry run reads ahead of the stored cursor without advancing it; an on
 	// batch always starts at the stored cursor, so switching modes mid-run
-	// skips nothing.
+	// skips nothing. The same holds for the zero-byte pass.
 	dryRunPosition := next.ContractId
+	zeroByteDryRunPosition := next.ZeroByteContractId
+	// When each pass may read its next batch, at its own rate, and whether it
+	// reached its horizon in this run: a pass that has stops reading until the
+	// next run.
+	var horizonDue, zeroByteDue time.Time
+	horizonDone, zeroByteDone := false, false
 	for {
 		select {
 		case <-ctx.Done():
@@ -774,6 +867,10 @@ func RemoveContractsPastHorizon(
 		reaper.setHorizon(control.Horizon)
 		report.HorizonTime = reaper.horizonTime
 		reaper.observeHorizon(next.ContractId)
+		reaper.setZeroByteHorizon(control.ZeroByteHorizon)
+		report.ZeroByteMode = control.ZeroByteMode
+		report.ZeroByteHorizonTime = reaper.zeroByteHorizonTime
+		reaper.observeZeroByteHorizon(control.ZeroByteMode, next.ZeroByteContractId)
 		if control.Mode == ContractHorizonModeOff {
 			report.Stop = contractHorizonStopOff
 			return
@@ -789,9 +886,81 @@ func RemoveContractsPastHorizon(
 				next.PassStartTime.Format(time.RFC3339),
 				server.ContractIdTime(next.ContractId).Format(time.RFC3339),
 			)
-			next = newContractHorizonPass(now, next.BatchSize)
+			next = next.startPass(now)
 			dryRunPosition = next.ContractId
 			reaper.observePass(next)
+		}
+
+		zeroByte := !zeroByteDone && control.ZeroByteMode != ContractHorizonModeOff && reaper.zeroByteWindowOpen()
+		zeroBytePending = zeroByte && control.ZeroByteMode == ContractHorizonModeOn
+		if horizonDone && !zeroByte {
+			report.Stop = contractHorizonStopHorizon
+			return
+		}
+		// the pass due first; the horizon's on a tie
+		serveZeroByte := zeroByte && (horizonDone || zeroByteDue.Before(horizonDue))
+		due := horizonDue
+		if serveZeroByte {
+			due = zeroByteDue
+		}
+		if wait := time.Until(due); 0 < wait {
+			if !reaper.pace(ctx, wait) {
+				report.Stop = contractHorizonStopCanceled
+				return
+			}
+			// read the control again before the batch
+			continue
+		}
+
+		if serveZeroByte {
+			batchSize := next.ZeroByteBatchSize
+			if batchSize <= 0 || control.BatchSize < batchSize {
+				batchSize = control.BatchSize
+			}
+			start := next.ZeroByteContractId
+			if control.ZeroByteMode == ContractHorizonModeDryRun {
+				start = zeroByteDryRunPosition
+			}
+			batchStart := time.Now()
+			batch, err := reaper.removeZeroByteBatch(ctx, start, batchSize, control.ZeroByteMode)
+			batchDuration := time.Since(batchStart)
+			if err != nil {
+				contractHorizonBatchDuration.WithLabelValues(control.ZeroByteMode.String(), "error").Observe(batchDuration.Seconds())
+				if ctx.Err() != nil {
+					report.Stop = contractHorizonStopCanceled
+					return
+				}
+				report.Stop = contractHorizonStopError
+				returnErr = err
+				return
+			}
+			contractHorizonBatchDuration.WithLabelValues(control.ZeroByteMode.String(), "ok").Observe(batchDuration.Seconds())
+			report.addZeroByte(batch)
+			reaper.observeZeroByte(batch, control.ZeroByteMode)
+
+			if batch.scanned == 0 {
+				zeroByteDone = true
+				zeroBytePending = false
+				report.ZeroByteCaughtUp = true
+				if horizonDone {
+					report.Stop = contractHorizonStopHorizon
+					return
+				}
+				continue
+			}
+			if control.ZeroByteMode == ContractHorizonModeOn {
+				next.ZeroByteContractId = batch.lastId
+				zeroByteDryRunPosition = batch.lastId
+				reaper.observeZeroByteCursor(next.ZeroByteContractId)
+				if contractHorizonZeroByteBatchCommitted != nil {
+					contractHorizonZeroByteBatchCommitted(report.ZeroByteBatches, batch.lastId)
+				}
+			} else {
+				zeroByteDryRunPosition = batch.lastId
+			}
+			next.ZeroByteBatchSize = nextContractHorizonBatchSize(batchSize, batchDuration, control.BatchSize, settings)
+			zeroByteDue = time.Now().Add(contractHorizonPaceDelay(batch.scanned, control.ZeroByteMaxRowsPerSecond, batchDuration))
+			continue
 		}
 
 		batchSize := next.BatchSize
@@ -821,13 +990,17 @@ func RemoveContractsPastHorizon(
 
 		if batch.scanned == 0 {
 			report.CaughtUp = true
-			report.Stop = contractHorizonStopHorizon
+			horizonDone = true
 			if control.Mode == ContractHorizonModeOn && settings.RescanInterval <= now.Sub(next.PassStartTime) {
-				// revisit what this pass kept
-				next = newContractHorizonPass(now, next.BatchSize)
+				// revisit what this pass kept, from the next run
+				next = next.startPass(now)
 				reaper.observePass(next)
 			}
-			return
+			if !zeroByte {
+				report.Stop = contractHorizonStopHorizon
+				return
+			}
+			continue
 		}
 		if control.Mode == ContractHorizonModeOn {
 			next.ContractId = batch.lastId
@@ -843,11 +1016,7 @@ func RemoveContractsPastHorizon(
 		}
 		next.BatchSize = nextContractHorizonBatchSize(batchSize, batchDuration, control.BatchSize, settings)
 		contractHorizonBatchSizeGauge.Set(float64(next.BatchSize))
-
-		if !reaper.pace(ctx, contractHorizonPaceDelay(batch.scanned, control.MaxRowsPerSecond, batchDuration)) {
-			report.Stop = contractHorizonStopCanceled
-			return
-		}
+		horizonDue = time.Now().Add(contractHorizonPaceDelay(batch.scanned, control.MaxRowsPerSecond, batchDuration))
 	}
 }
 
@@ -885,6 +1054,12 @@ type contractHorizonReaper struct {
 	// A batch reads only ids below this: the floor of the horizon less
 	// CloseSettleTime.
 	windowId server.Id
+	// How long past its creation and its close a zero-byte contract is kept,
+	// and the zero-byte pass's window: it reads ids from windowId up to this,
+	// the floor of the zero-byte horizon less CloseSettleTime.
+	zeroByteHorizon     time.Duration
+	zeroByteHorizonTime time.Time
+	zeroByteWindowId    server.Id
 	// The windows, [start, end), of the operator blocks whose points can still
 	// be awarded (OperatorBlockPointsPendingWindows); none without an earning
 	// cutoff, when no block is awarded.
