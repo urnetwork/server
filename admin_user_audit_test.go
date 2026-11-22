@@ -18,6 +18,13 @@ package server
 //	          member's credential reads network_member) or fails closed for a
 //	          team, since the owner of record never matches a member's user
 //
+// One credential names a team's owner of record and passes the state check:
+// a client credential of the team's tagged lineage, whose client is the
+// network's and not a member's (QD-1194; session/by_jwt.go's
+// ownerOfRecordTaggedEligible). It is strict_exp and admin_refused, so it
+// reaches only a sidecar's routes; a member read there must never take the
+// owner of record for a member or for a personal network's owner.
+//
 // TestAdminUserIdReadsClassified scans the source, so a new read, or one more
 // in a function already listed, fails until it is classified here.
 
@@ -69,7 +76,7 @@ var adminUserIdReads = map[string]map[string]adminUserIdRead{
 		"NetworkRefreshToken": {count: 1, class: adminUserIdMember, why: "a member's token is checked against its membership, an owner's against admin_user_id"},
 	},
 	"controller/config_log_controller.go": {
-		"configGenesisOwner": {count: 2, class: adminUserIdMember, why: "base 1's owner: a team's live Owner membership, else the personal network's owner"},
+		"configGenesisOwner": {count: 2, class: adminUserIdMember, why: "base 1's owner: a team's live Owner membership, never its owner of record, else the personal network's owner"},
 	},
 	"controller/network_controller.go": {
 		"NetworkRemove": {count: 1, class: adminUserIdMember, why: "deletion is the owner's: refused to every team member until TEAM-M6-03's Owner permission"},
@@ -128,6 +135,9 @@ var adminUserIdReads = map[string]map[string]adminUserIdRead{
 	"model/lag_guest_model.go": {
 		"CreateLagGuestNetwork": {count: 1, class: adminUserIdOwner, why: "a guest network's creation"},
 		"removeExpiredLagGuest": {count: 1, class: adminUserIdOwner, why: "a guest network's removal"},
+	},
+	"model/network_client_owner_model.go": {
+		"readNetworkEnrollKey": {count: 1, class: adminUserIdOwner, why: "a team's tagged client is minted on the team's own account, its owner of record (QD-1194), while the mint runs on its sponsor's live membership; the state check takes that credential only as a tagged lineage's client credential"},
 	},
 	"model/network_member_auth_model.go": {
 		"GetNetworkSignInsOfUser": {count: 1, class: adminUserIdNetwork, why: "the user's own network beside its memberships"},
@@ -211,11 +221,11 @@ var adminUserIdReads = map[string]map[string]adminUserIdRead{
 	"session/by_jwt.go": {
 		"LoadByJwtFromClientId":   {count: 1, class: adminUserIdMember, why: "a client's owner credential: refused for a team's client"},
 		"getNetworkIdForUser":     {count: 1, class: adminUserIdNetwork, why: "a legacy credential's repair; never a member credential"},
-		"validateByJwtStateQuery": {count: 2, class: adminUserIdMember, why: "an owner's credential; a member credential takes validateMemberByJwtStateQuery"},
+		"validateByJwtStateQuery": {count: 2, class: adminUserIdMember, why: "an owner's credential, which in a team the owner of record's change time refuses but for a client credential of a tagged lineage (QD-1194); a member credential takes validateMemberByJwtStateQuery"},
 	},
 	"session/revocation_record.go": {
 		"RotateCredentialRecordsInTx": {count: 1, class: adminUserIdOwner, why: "the owner's records; member credentials stay on the query"},
-		"readRevocationRecordFacts":   {count: 1, class: adminUserIdMember, why: "an owner's record; a member credential never uses a record"},
+		"readRevocationRecordFacts":   {count: 1, class: adminUserIdMember, why: "an owner's record, in a team only a tagged lineage's client the state query took (QD-1194); a member credential never uses a record"},
 	},
 	"session/session_operation.go": {
 		"EnforceSessionOperation": {count: 1, class: adminUserIdMember, why: "an owner's operation: a member actor is cancelled, failing closed"},

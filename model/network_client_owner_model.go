@@ -391,13 +391,22 @@ func getEnrolledClientPublicKeyInTx(ctx context.Context, tx server.PgTx, clientI
 //	creator   every key mints on its creator's sign-in in the key's network,
 //	          tagged and ephemeral ones too: a personal network's owner, whose
 //	          credential names no member, or a team's live membership, whose
-//	          member_id the credential carries (§7.5), since a team's
-//	          admin_user_id is a synthetic owner of record the state check
-//	          refuses; a credential naming the creator without it would fail
-//	          the mint's own state check. A creator with no sign-in there,
+//	          member_id the credential carries (§7.5). The mint's transaction
+//	          checks that sign-in, orders the spend with the membership's
+//	          removal, and requires the key's creator to be the sign-in's user,
+//	          a tagged client's sponsor. A creator with no sign-in there,
 //	          removed, JIT pending or past its reauth_deadline, holds no key
 //	          any longer (§7.10), so its key answers auth_key_invalid, and so
 //	          does one whose sign-in ends before the mint's transaction
+//	token     names the creator's sign-in, but a team's tagged client's names
+//	          the team's own identity, its owner of record (admin_user_id),
+//	          with no member_id (QD-1194): the client is the network's, not
+//	          the member's (owner decision 83), so its credential outlives its
+//	          sponsor's membership. The state check takes a credential naming
+//	          the owner of record only as a client credential of such a tagged
+//	          lineage, and refuses every other (session.ValidateByJwtState). A
+//	          team's untagged client, ephemeral or not, is its creator's member
+//	          device, and its token names the membership
 //	owner     untagged, ephemeral or not: the key's creator owns it, its
 //	          member the creator's membership in a team, its user in a personal
 //	          network; tagged: no owner, the creator its sponsor (§7.7), the
@@ -533,17 +542,24 @@ type networkClientEnrollment struct {
 	bearer      string
 	authKeyId   server.Id
 	declaresKey []byte
-	// the key creator's live membership at enrollment in a team, which the
-	// credential carries whatever the key is; nil in a personal network
+	// the key creator's live membership at enrollment in a team, whose
+	// credential the mint runs on whatever the key is; nil in a personal
+	// network
 	memberId *server.Id
+	// what the client's token names when it is not the creator's sign-in the
+	// mint runs on: a team's tagged client is minted on the team's owner of
+	// record, with no member_id (QD-1194). nil for every other enrollment
+	credential *session.ByJwt
 	// set in the mint's transaction: the key it spent, or why it spent none
 	authKey *NetworkAuthKey
 	refusal error
 }
 
 // Spends the key, first ordering a team mint with a removal or
-// reauthentication of the exact membership its credential carries: one that
-// ended refuses the key, as the removal ended the creator's keys (§7.10).
+// reauthentication of the exact membership the creator's credential carries:
+// one that ended refuses the key, as the removal ended the creator's keys
+// (§7.10). creator is the creator's sign-in, never the owner of record a
+// tagged client's token names.
 func (self *networkClientEnrollment) consume(ctx context.Context, tx server.PgTx, creator *session.ByJwt) (*NetworkAuthKey, error) {
 	if self.memberId != nil {
 		rows, err := tx.Query(ctx, `SELECT member_id FROM network_member
@@ -600,12 +616,15 @@ var Testing_EnrollAfterSignIn func()
 // secret check: the mint's ConsumeAuthKeyInTx is the authority, and a key that
 // moved on meanwhile refuses there.
 type networkEnrollKey struct {
-	networkId     server.Id
-	networkName   string
-	creatorUserId server.Id
-	tagged        bool
-	ephemeral     bool
-	preApproved   bool
+	networkId   server.Id
+	networkName string
+	// the network's admin_user_id: in a team its owner of record, which a
+	// tagged key's client is minted on (QD-1194). It never changes (D-TEAM-2)
+	ownerOfRecordUserId server.Id
+	creatorUserId       server.Id
+	tagged              bool
+	ephemeral           bool
+	preApproved         bool
 }
 
 func readNetworkEnrollKey(ctx context.Context, authKeyId server.Id) (key *networkEnrollKey) {
@@ -616,6 +635,7 @@ func readNetworkEnrollKey(ctx context.Context, authKeyId server.Id) (key *networ
 				SELECT
 					network_auth_key.network_id,
 					network.network_name,
+					network.admin_user_id,
 					network_auth_key.creator_user_id,
 					0 < cardinality(network_auth_key.tag_ids),
 					network_auth_key.ephemeral,
@@ -629,7 +649,7 @@ func readNetworkEnrollKey(ctx context.Context, authKeyId server.Id) (key *networ
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
 				key = &networkEnrollKey{}
-				server.Raise(result.Scan(&key.networkId, &key.networkName, &key.creatorUserId, &key.tagged, &key.ephemeral, &key.preApproved))
+				server.Raise(result.Scan(&key.networkId, &key.networkName, &key.ownerOfRecordUserId, &key.creatorUserId, &key.tagged, &key.ephemeral, &key.preApproved))
 			}
 		})
 	})
@@ -692,13 +712,21 @@ func EnrollNetworkClient(ctx context.Context, enroll *NetworkEnrollArgs, clientA
 		return nil, NewQuotaRefusalError(refusal)
 	}
 	// the creator's sign-in, for every key, tagged and ephemeral ones included:
-	// the mint's state check takes no other credential in a team, whose
-	// admin_user_id is an owner of record that never signs in (see the header)
+	// the mint runs on it, and in a team it is the creator's live membership
+	// (see the header)
 	signIn := ResolveNetworkSignIn(ctx, key.creatorUserId, key.networkId, server.NowUtc())
 	if signIn == nil {
 		return nil, newNetworkEnrollRefusal(http.StatusUnauthorized, NetworkEnrollCodeAuthKeyInvalid, networkEnrollAuthKeyInvalidMessage)
 	}
 	creator := NewNetworkSignInByJwt(signIn, false)
+	// a team's tagged client is the network's: its token names the team's
+	// owner of record with no member_id, which only a client credential of a
+	// tagged lineage passes the state check with (QD-1194). A personal
+	// network's names its owner, the creator, as before
+	var credential *session.ByJwt
+	if key.tagged && signIn.MemberId != nil {
+		credential = session.NewByJwt(key.networkId, key.ownerOfRecordUserId, signIn.NetworkName, false, false)
+	}
 	if hook := Testing_EnrollAfterSignIn; hook != nil {
 		hook()
 	}
@@ -721,6 +749,7 @@ func EnrollNetworkClient(ctx context.Context, enroll *NetworkEnrollArgs, clientA
 		authKeyId:   authKeyId,
 		declaresKey: bytes.Clone(enroll.ClientPublicKey),
 		memberId:    creator.MemberId,
+		credential:  credential,
 	}
 	result, err := authNetworkClientWithParentState(&AuthNetworkClientArgs{
 		DeviceSpec:       enroll.DeviceSpec,

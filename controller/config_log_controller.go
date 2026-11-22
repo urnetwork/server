@@ -124,6 +124,8 @@ func configClientAdmitted(sequencer *model.ConfigLogSequencer, clientSession *se
 // Whether the bearer is the network's owner as base 1's genesis names it
 // (§7.9's who): a personal network's admin_user_id, whose member_id is its user
 // id, or in a team a live Owner membership, the genesis's member its member_id.
+// A team's credential with no member_id names its owner of record, a tagged
+// lineage's since QD-1194, which is never the genesis's owner.
 func configGenesisOwner(clientSession *session.ClientSession, genesis *bridge.Genesis) bool {
 	byJwt := clientSession.ByJwt
 	if byJwt.MemberId != nil {
@@ -131,6 +133,9 @@ func configGenesisOwner(clientSession *session.ClientSession, genesis *bridge.Ge
 		return signIn != nil && signIn.MemberId != nil && *signIn.MemberId == *byJwt.MemberId &&
 			signIn.Role == model.NetworkMemberRoleOwner &&
 			bytes.Equal(genesis.GetOwnerMemberId(), sidecar.Id(*byJwt.MemberId).Bytes())
+	}
+	if model.NetworkIsTeam(clientSession.Ctx, byJwt.NetworkId) {
+		return false
 	}
 	network := model.GetNetwork(clientSession)
 	return network != nil && network.AdminUserId != nil && *network.AdminUserId == byJwt.UserId &&
