@@ -4,7 +4,6 @@ import (
 	"github.com/urnetwork/server/api/handlers"
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
-	"github.com/urnetwork/server/oauth"
 	"github.com/urnetwork/server/router"
 	"time"
 )
@@ -491,5 +490,5 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 	}
 
 	// every route is classified by credential (route_authz.go, AUTHZ1.md)
-	return applyRouteAccess(append(routes, oauth.Routes()...))
+	return applyRouteAccess(append(routes, oauthRoutes()...))
 }

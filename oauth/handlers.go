@@ -9,6 +9,10 @@ package oauth
 // The authorization endpoint itself is NOT here -- it is the consent page on
 // the ur.io origin, because that is where the logged in session lives (IDP.md
 // §1). ur.io calls `AuthorizeHandler` to mint the code once the user approves.
+//
+// The api serves these handlers, and its route table for them is
+// api/oauth_routes.go. oauth must not import router: model imports oauth, and
+// router's tests import model.
 
 import (
 	"encoding/json"
@@ -22,25 +26,8 @@ import (
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/router"
 	"github.com/urnetwork/server/session"
 )
-
-// The authorization server routes. Served on the issuer host.
-func Routes() []*router.Route {
-	return []*router.Route{
-		router.NewRoute("GET", "/\\.well-known/oauth-authorization-server", ServerMetadataHandler),
-		router.NewRoute("GET", "/\\.well-known/openid-configuration", ServerMetadataHandler),
-		router.NewRoute("GET", "/\\.well-known/jwks\\.json", JwksHandler),
-		router.NewRoute("POST", "/oauth/token", TokenHandler),
-		router.NewRoute("POST", "/oauth/register", RegisterHandler),
-		router.NewRoute("POST", "/oauth/revoke", RevokeHandler),
-		router.NewRoute("GET", "/oauth/userinfo", UserinfoHandler),
-		// called by the consent page on the ur.io origin
-		router.NewRoute("POST", "/oauth/authorize", AuthorizeHandler),
-		router.NewRoute("POST", "/oauth/consent", ConsentHandler),
-	}
-}
 
 // rfc 6749 section 5.2 error envelope.
 type oauthError struct {
