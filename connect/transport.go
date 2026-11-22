@@ -356,7 +356,7 @@ func writeConnectH1UserReadyBatch(
 	ctx context.Context,
 	writer connectH1WebSocketWriter,
 	writeBatch connectH1WriteBatch,
-	receive <-chan []byte,
+	receive *messageQueue,
 	firstMessage []byte,
 	firstOpen bool,
 	writeTimeout time.Duration,
@@ -373,23 +373,20 @@ func writeConnectH1UserReadyBatch(
 	open = true
 	framedWriter, framed := writer.(interface{ WriteMessages([][]byte) error })
 	if writeBatch != nil || framed {
-	drainReady:
-		for connectH1WriteBatchCanDrain(messageCount, messageByteCount) {
-			select {
-			case <-ctx.Done():
-				open = false
-				break drainReady
-			case message, nextOpen := <-receive:
-				if !nextOpen {
-					open = false
-					break drainReady
-				}
-				messageStorage[messageCount] = message
-				messageCount += 1
-				messageByteCount += len(message)
-			default:
-				break drainReady
-			}
+		// the drain takes ready messages under one lock of the queue, and a
+		// done context ends it. The queue is concrete so that the storage
+		// stays on the stack.
+		batch, batchByteCount, drained := receive.tryReceiveBatch(
+			messageStorage[:messageCount],
+			ByteCount(messageByteCount),
+			connectH1WriteBatchMaxMessageCount,
+			connectH1WriteBatchDrainByteCount,
+			ctx.Done(),
+		)
+		messageCount = len(batch)
+		messageByteCount = int(batchByteCount)
+		if drained || ctx.Err() != nil {
+			open = false
 		}
 	}
 	defer func() {
@@ -408,12 +405,12 @@ func writeConnectH1UserReadyBatch(
 		var spans [connectH1WriteBatchMaxMessageCount]h1RelayLineageSpan
 		for index, message := range messageStorage[:messageCount] {
 			if len(message) > 16 {
-				spans[index] = beginH1RelayLineage("edge_h1_write_begin", server.Id{}, server.Id{}, message, len(receive), cap(receive))
+				spans[index] = beginH1RelayLineage("edge_h1_write_begin", server.Id{}, server.Id{}, message, receive.len(), receive.capacity())
 			}
 		}
 		defer func() {
 			for _, span := range spans[:messageCount] {
-				span.end("edge_h1_write_end", err == nil, len(receive), cap(receive))
+				span.end("edge_h1_write_end", err == nil, receive.len(), receive.capacity())
 			}
 		}()
 	}
@@ -2017,7 +2014,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 				messageType, message, err := readConnectH1PooledWithDeadline(ws, self.settings.ReadTimeout, int64(self.settings.FramerSettings.MaxMessageLen+4))
 				var trace h1RelayLineageSpan
 				if h1RelayLineageTraceEnabled {
-					trace = beginH1RelayLineage("edge_h1_read", clientId, connectionId, message, len(residentTransport.send), cap(residentTransport.send))
+					trace = beginH1RelayLineage("edge_h1_read", clientId, connectionId, message, residentTransport.send.len(), residentTransport.send.capacity())
 				}
 				if err != nil {
 					h1Observation.readError(err)
@@ -2089,7 +2086,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 						connect.NoteTransportDelayHandoff(ws, time.Since(handoffStartTime))
 					}
 					if h1RelayLineageTraceEnabled {
-						trace.end("edge_h1_admit", sendResult == pooledMessageSendDelivered, len(residentTransport.send), cap(residentTransport.send))
+						trace.end("edge_h1_admit", sendResult == pooledMessageSendDelivered, residentTransport.send.len(), residentTransport.send.capacity())
 					}
 					if sendResult == pooledMessageSendDone {
 						return
@@ -2223,27 +2220,29 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 						return
 					case <-residentTransport.Done():
 						return
-					case message, ok := <-residentTransport.receive:
-						if !writeUser(message, ok) {
+					default:
+					}
+					if message, result := residentTransport.receive.tryReceive(); result != messageQueueEmpty {
+						if !writeUser(message, result == messageQueueReceived) {
 							return
 						}
-					default:
 					}
 					continue
 				}
 
 				// fast path without arming the ping timer. A pending kick is
-				// selected here too, so continuous traffic cannot starve it.
+				// checked first, so continuous traffic cannot starve it.
 				select {
-				case message, ok := <-residentTransport.receive:
-					if !writeUser(message, ok) {
-						return
-					}
-					continue
 				case cause := <-kickRequest:
 					writeKick(cause)
 					return
 				default:
+				}
+				if message, result := residentTransport.receive.tryReceive(); result != messageQueueEmpty {
+					if !writeUser(message, result == messageQueueReceived) {
+						return
+					}
+					continue
 				}
 
 				pingTimer.Reset(self.settings.heartbeatInterval(pingTracker))
@@ -2255,7 +2254,8 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 				case cause := <-kickRequest:
 					writeKick(cause)
 					return
-				case message, ok := <-residentTransport.receive:
+				case message, ok := <-residentTransport.receive.head():
+					residentTransport.receive.received()
 					if !writeUser(message, ok) {
 						return
 					}
@@ -3189,7 +3189,7 @@ func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier Resi
 		// batching path.
 		var streamSend chan []byte
 		var streamSendBudget *connect.H3HybridStreamSendBudget
-		streamInput := (<-chan []byte)(residentTransport.receive)
+		var streamInput pooledMessageSource = residentTransport.receive
 		if useH3Datagrams {
 			datagramSettings := self.settings.H3DatagramSettings
 			streamSend = make(chan []byte, datagramSettings.HybridStreamQueueMessageCount)
@@ -3198,7 +3198,7 @@ func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier Resi
 				datagramSettings.HybridStreamQueueByteCount(),
 				self.settings.H3DatagramStats,
 			)
-			streamInput = streamSend
+			streamInput = pooledMessageChannel(streamSend)
 		}
 		releaseStreamMessage := func(message []byte) {
 			if streamSendBudget != nil {
@@ -3254,21 +3254,23 @@ func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier Resi
 					case <-handleCtx.Done():
 						receiveOpen = false
 						break drainReady
-					case message, ok := <-streamInput:
-						if !ok {
-							receiveOpen = false
-							break drainReady
-						}
-						framedByteCount := len(message) + 4 + delayHeaderByteCount
-						if connectH3WriteBatchMaxByteCount < batchByteCount+framedByteCount {
-							pendingMessage = message
-							break drainReady
-						}
-						messages = append(messages, message)
-						batchByteCount += framedByteCount
 					default:
+					}
+					message, result := streamInput.tryReceive()
+					switch result {
+					case messageQueueEmpty:
+						break drainReady
+					case messageQueueDrained:
+						receiveOpen = false
 						break drainReady
 					}
+					framedByteCount := len(message) + 4 + delayHeaderByteCount
+					if connectH3WriteBatchMaxByteCount < batchByteCount+framedByteCount {
+						pendingMessage = message
+						break drainReady
+					}
+					messages = append(messages, message)
+					batchByteCount += framedByteCount
 				}
 
 				if writeBatchStorage == nil {
@@ -3319,7 +3321,8 @@ func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier Resi
 					select {
 					case <-handleCtx.Done():
 						return
-					case nextMessage, ok := <-streamInput:
+					case nextMessage, ok := <-streamInput.head():
+						streamInput.received()
 						if !ok {
 							return
 						}
@@ -3375,37 +3378,33 @@ func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier Resi
 					}
 				}
 				for {
-					select {
-					case <-handleCtx.Done():
+					message, result := residentTransport.receive.receiveWait(handleCtx.Done())
+					if result != messageQueueReceived {
 						return
-					case message, ok := <-residentTransport.receive:
-						if !ok {
+					}
+					// the delay header rides inside the envelope
+					useDatagram := self.settings.H3DatagramSettings.UseDatagramForPathWithHeader(
+						len(message),
+						maxDatagramByteCount,
+						delayHeaderByteCount,
+					)
+					if useDatagram {
+						useStream, sendErr := sendDatagramMessage(message)
+						if sendErr != nil {
+							connect.MessagePoolReturn(message)
+							if glog.V(2) {
+								glog.Infof("[ts]H3 DATAGRAM error = %s\n", sendErr)
+							}
 							return
 						}
-						// the delay header rides inside the envelope
-						useDatagram := self.settings.H3DatagramSettings.UseDatagramForPathWithHeader(
-							len(message),
-							maxDatagramByteCount,
-							delayHeaderByteCount,
-						)
-						if useDatagram {
-							useStream, sendErr := sendDatagramMessage(message)
-							if sendErr != nil {
-								connect.MessagePoolReturn(message)
-								if glog.V(2) {
-									glog.Infof("[ts]H3 DATAGRAM error = %s\n", sendErr)
-								}
-								return
-							}
-							if !useStream {
-								announce.SendMessage(ByteCount(len(message)))
-								connect.MessagePoolReturn(message)
-								continue
-							}
+						if !useStream {
+							announce.SendMessage(ByteCount(len(message)))
+							connect.MessagePoolReturn(message)
+							continue
 						}
-						if !offerStream(message) {
-							return
-						}
+					}
+					if !offerStream(message) {
+						return
 					}
 				}
 			})

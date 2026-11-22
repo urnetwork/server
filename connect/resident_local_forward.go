@@ -115,7 +115,7 @@ func (self *ResidentForward) runLocal(link *localTransportLink, pending *[]byte,
 		link:         link,
 		direction:    localTransportDirectionForward,
 		source:       self.send,
-		destination:  link.routeReceive,
+		destination:  pooledMessageChannel(link.routeReceive),
 		dropBoundary: receiveQueueBoundaryLocalForwardSend,
 		sourceClosed: func() {
 			// a closed send queue ends the forward, as it ends its socket's

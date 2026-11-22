@@ -92,7 +92,7 @@ func TestResidentForwardDemandDisconnectedStopsAndNewWorkRetries(t *testing.T) {
 		}
 		first := clientconnect.MessagePoolCopy([]byte("first packet"))
 		firstWitness := retainResidentPoolWitness(first)
-		forward.send <- first
+		forward.send.sendForTest(first)
 		done := startForwardDemand(forward, func(context.Context, server.Id, time.Duration) *model.NetworkClientResident {
 			if calls.Add(1) == 1 {
 				return &model.NetworkClientResident{ResidentId: server.NewId(), ResidentHost: "fixture.invalid", ResidentInternalPorts: []int{1}}
@@ -114,7 +114,7 @@ func TestResidentForwardDemandDisconnectedStopsAndNewWorkRetries(t *testing.T) {
 		idleCalls := calls.Load() - before
 		second := clientconnect.MessagePoolCopy([]byte("new work for temporarily missing peer"))
 		secondWitness := retainResidentPoolWitness(second)
-		forward.send <- second
+		forward.send.sendForTest(second)
 		time.Sleep(3 * time.Second)
 		newCalls := calls.Load() - before - idleCalls
 		forward.Cancel()
@@ -180,7 +180,7 @@ func TestResidentForwardDemandRecoveryPreservesFifo(t *testing.T) {
 		for _, value := range []string{"one", "two", "three"} {
 			message := clientconnect.MessagePoolCopy([]byte(value))
 			witnesses = append(witnesses, retainResidentPoolWitness(message))
-			forward.send <- message
+			forward.send.sendForTest(message)
 		}
 		done := startForwardDemand(forward, func(context.Context, server.Id, time.Duration) *model.NetworkClientResident {
 			calls.Add(1)
@@ -231,7 +231,7 @@ func TestResidentForwardDemandLatePacketWakesLookup(t *testing.T) {
 		idleCalls := calls.Load()
 		message := clientconnect.MessagePoolCopy([]byte("late first packet"))
 		witness := retainResidentPoolWitness(message)
-		forward.send <- message
+		forward.send.sendForTest(message)
 		select {
 		case <-entered:
 		case <-time.After(time.Second):
@@ -259,7 +259,7 @@ func TestResidentForwardDemandLookupPanicReleasesPending(t *testing.T) {
 		for range 2 {
 			message := clientconnect.MessagePoolCopy([]byte("lookup unwind"))
 			witnesses = append(witnesses, retainResidentPoolWitness(message))
-			forward.send <- message
+			forward.send.sendForTest(message)
 		}
 		recovered := make(chan any, 1)
 		go func() {
@@ -289,7 +289,7 @@ func TestResidentForwardDemandCanceledQueueDoesNotLookup(t *testing.T) {
 		for range 4 {
 			message := clientconnect.MessagePoolCopy([]byte("canceled"))
 			witnesses = append(witnesses, retainResidentPoolWitness(message))
-			forward.send <- message
+			forward.send.sendForTest(message)
 		}
 		forward.Cancel()
 		<-startForwardDemand(forward, func(context.Context, server.Id, time.Duration) *model.NetworkClientResident { calls.Add(1); return nil })
@@ -306,7 +306,7 @@ func TestResidentForwardDemandCloseJoinsLookup(t *testing.T) {
 		forward, _ := newForwardDemandFixture()
 		message := clientconnect.MessagePoolCopy([]byte("lookup blocked on cancellation"))
 		witness := retainResidentPoolWitness(message)
-		forward.send <- message
+		forward.send.sendForTest(message)
 		entered := make(chan struct{})
 		done := startForwardDemand(forward, func(ctx context.Context, _ server.Id, _ time.Duration) *model.NetworkClientResident {
 			close(entered)

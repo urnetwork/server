@@ -129,7 +129,7 @@ func testResidentPacketRedisOnlyConstruction(t testing.TB, value string, active,
 	if active {
 		wantAccepted = packets
 	}
-	if got := len(forward.send); got != wantAccepted || redisReads.Load() != 1 {
+	if got := forward.send.len(); got != wantAccepted || redisReads.Load() != 1 {
 		t.Fatalf("constructed cohort accepted=%d Redis reads=%d, want accepted=%d reads=1", got, redisReads.Load(), wantAccepted)
 	}
 	releaseOnce.Do(func() { close(release) })

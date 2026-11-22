@@ -71,8 +71,8 @@ func TestH1RelayLineageFlushBoundary(t *testing.T) {
 			if fail {
 				boundary.flushErr = errors.New("synthetic flush failure")
 			}
-			ready := make(chan []byte, 1)
-			ready <- newConnectH1BatchTestMessage(73)
+			ready := newMessageQueue(1)
+			ready.sendForTest(newConnectH1BatchTestMessage(73))
 			finished := make(chan error, 1)
 			go func() {
 				_, err := writeConnectH1UserReadyBatch(context.Background(), &connectH1BatchTestWriter{}, boundary,

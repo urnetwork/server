@@ -96,7 +96,7 @@ func (f *idleForwardFixture) deliver(t *testing.T, marker string) {
 	if !f.forward.UpdateActivity() {
 		t.Fatal("live forward refused payload activity")
 	}
-	f.forward.send <- message
+	f.forward.send.sendForTest(message)
 	select {
 	case got := <-f.send:
 		if !bytes.Equal(got, body) {
@@ -209,7 +209,7 @@ func TestResidentForwardIdleQueuedTrafficCrossesOldDeadline(t *testing.T) {
 			if !f.forward.UpdateActivity() {
 				t.Fatal("near-deadline work refused")
 			}
-			f.forward.send <- message
+			f.forward.send.sendForTest(message)
 		}
 		time.Sleep(2 * time.Second)
 		if f.forward.IsDone() {

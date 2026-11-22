@@ -48,7 +48,7 @@ func TestExchangeLiveWriterReleasesPreviousBatchBacking(t *testing.T) {
 			connection := &ExchangeConnection{
 				ctx: ctx, cancel: cancel, done: make(chan struct{}), conn: conn,
 				sendBuffer: NewDefaultExchangeBuffer(settings), receiveBuffer: NewReceiveOnlyExchangeBuffer(settings),
-				send: make(chan []byte, 8), receive: make(chan []byte, 8),
+				send: newMessageQueue(8), receive: newMessageQueue(8),
 				settings: settings, header: ExchangeHeader{Op: op},
 			}
 			secondBatch := make(chan struct{})
@@ -70,7 +70,7 @@ func TestExchangeLiveWriterReleasesPreviousBatchBacking(t *testing.T) {
 			go connection.Run()
 			// This send follows the prefilled burst. The production writer's
 			// second-dequeue barrier proves the first WriteMessages has returned.
-			connection.send <- []byte{1}
+			connection.send.sendForTest([]byte{1})
 			waitExchangeOutboundBarrier(t, secondBatch, "smaller second batch")
 			runtime.GC()
 			runtime.GC()
@@ -89,13 +89,13 @@ func TestExchangeLiveWriterReleasesPreviousBatchBacking(t *testing.T) {
 }
 
 // Keep the enqueue-time strong references out of the collecting test frame.
-func enqueueExchangeRetentionBurst(queue chan<- []byte) []weak.Pointer[byte] {
+func enqueueExchangeRetentionBurst(queue *messageQueue) []weak.Pointer[byte] {
 	witnesses := make([]weak.Pointer[byte], 8)
 	for i := range witnesses {
 		payload := make([]byte, 16*1024)
 		payload[0] = byte(i + 1)
 		witnesses[i] = weak.Make(&payload[0])
-		queue <- payload
+		queue.sendForTest(payload)
 	}
 	return witnesses
 }

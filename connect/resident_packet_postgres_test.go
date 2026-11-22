@@ -425,7 +425,7 @@ func TestResidentPacketLiveForwardRechecksAndRevokes(t *testing.T) {
 		resident.residentContractManager.readContract = residentContractReadForTest(func(context.Context, server.Id, server.Id) bool { calls.Add(1); return active.Load() })
 		first := offerResidentPacket(t, resident, resident.clientId, destination)
 		synctest.Wait()
-		if len(forward.send) != 1 || calls.Load() != 1 {
+		if forward.send.len() != 1 || calls.Load() != 1 {
 			t.Fatal("live forward bypassed its initial authorization")
 		}
 		// A model checkpoint still has an open/resumable hole; expire the old
@@ -433,7 +433,7 @@ func TestResidentPacketLiveForwardRechecksAndRevokes(t *testing.T) {
 		time.Sleep(settings.ContractManagerCheckTimeout)
 		resumed := offerResidentPacket(t, resident, resident.clientId, destination)
 		synctest.Wait()
-		if len(forward.send) != 2 || calls.Load() != 2 {
+		if forward.send.len() != 2 || calls.Load() != 2 {
 			t.Fatal("checkpoint-resumable allowance did not pass a fresh check")
 		}
 		acceptedAt := forward.lastActivityNanos.Load()
@@ -441,7 +441,7 @@ func TestResidentPacketLiveForwardRechecksAndRevokes(t *testing.T) {
 		time.Sleep(settings.ContractManagerCheckTimeout)
 		refused := offerResidentPacket(t, resident, resident.clientId, destination)
 		synctest.Wait()
-		if len(forward.send) != 2 || calls.Load() != 3 || forward.lastActivityNanos.Load() != acceptedAt {
+		if forward.send.len() != 2 || calls.Load() != 3 || forward.lastActivityNanos.Load() != acceptedAt {
 			t.Fatal("final-close refusal accepted or renewed live forward work")
 		}
 		requireResidentPoolOwnerReturned(t, refused, "revoked live-forward offer")
@@ -483,7 +483,7 @@ func TestResidentPacketForwardLimitDoesNotReadNewPair(t *testing.T) {
 		requireResidentPoolOwnerReturned(t, refused, "forward-count limit")
 		accepted := offerResidentPacket(t, resident, resident.clientId, destination)
 		synctest.Wait()
-		if calls.Load() != 1 || len(forward.send) != 1 {
+		if calls.Load() != 1 || forward.send.len() != 1 {
 			t.Fatal("destination limit blocked the existing authorized forward")
 		}
 		if err := resident.CloseAndWait(context.Background()); err != nil {
@@ -530,7 +530,7 @@ func TestResidentPacketDeniedPairHistoryHasOwnerBound(t *testing.T) {
 		}
 		witnesses = append(witnesses, offerResidentPacket(t, resident, resident.clientId, healthy))
 		synctest.Wait()
-		if len(forward.send) != 2 || calls.Load() != 4 {
+		if forward.send.len() != 2 || calls.Load() != 4 {
 			t.Fatal("denied history blocked or reread an existing healthy pair")
 		}
 		other := newResidentCallbackLifecycleFixture(t, ctx, settings)
@@ -620,7 +620,7 @@ func TestResidentPacketCloseJoinsPositiveRefresh(t *testing.T) {
 		second := offerResidentPacket(t, resident, resident.clientId, destination)
 		<-started
 		synctest.Wait()
-		if len(forward.send) != 2 {
+		if forward.send.len() != 2 {
 			t.Fatal("fresh positive packet waited for the independent Redis refresh")
 		}
 		closed := make(chan error, 1)

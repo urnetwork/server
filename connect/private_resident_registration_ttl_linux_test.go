@@ -134,7 +134,7 @@ func TestPrivateResidentRegistrationForwardCancellationAtLookupJoins(t *testing.
 			for _, body := range []string{"pending-at-cancel", "queued-at-cancel"} {
 				message := clientconnect.MessagePoolCopy([]byte(body))
 				witnesses = append(witnesses, retainResidentPoolWitness(message))
-				f.send <- message
+				f.send.sendForTest(message)
 			}
 			var releaseOnce sync.Once
 			release := func() { releaseOnce.Do(func() { close(barrier.release) }) }
@@ -291,7 +291,7 @@ func TestPrivateResidentRegistrationForwardReadsMustNotRenewOrphan(t *testing.T)
 	f := NewResidentForward(context.Background(), &Exchange{settings: s}, n.ClientId)
 	message := clientconnect.MessagePoolCopy([]byte("one pending payload after owner retirement"))
 	witness := retainResidentPoolWitness(message)
-	f.send <- message
+	f.send.sendForTest(message)
 	started := time.Now()
 	runDone, idleDone := make(chan struct{}), make(chan struct{})
 	go func() { defer close(runDone); privateRunResidentForward(t, f) }()
@@ -434,7 +434,7 @@ func TestPrivateResidentRegistrationForwardReplacementDeliversPendingFIFO(t *tes
 		message := clientconnect.MessagePoolCopy(body)
 		bodies = append(bodies, body)
 		witnesses = append(witnesses, retainResidentPoolWitness(message))
-		f.send <- message
+		f.send.sendForTest(message)
 	}
 	privateWait(t, time.Second, func() bool { return refused.Load() >= 2 }, "handoff did not start at refused old owner")
 	replacement := *n

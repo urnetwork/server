@@ -196,7 +196,7 @@ func (self *exchangePingTimerFixture) deliver(t *testing.T, marker string) {
 	if !self.forward.UpdateActivity() {
 		t.Fatal("live forward refused payload activity")
 	}
-	self.forward.send <- clientconnect.MessagePoolCopy(body)
+	self.forward.send.sendForTest(clientconnect.MessagePoolCopy(body))
 	select {
 	case got := <-self.delivered:
 		if !bytes.Equal(got, body) {

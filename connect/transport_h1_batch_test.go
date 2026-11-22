@@ -135,7 +135,7 @@ func TestConnectH1ReadyDrainBalancesAcksAndPayloadBytes(t *testing.T) {
 // One maximum ready batch shares one deadline and flush while the next message
 // retains its place in the source queue for the next writer iteration.
 func TestConnectH1UserReadyBatchBoundsDrainAndPreservesFifo(t *testing.T) {
-	receive := make(chan []byte, connectH1WriteBatchMaxMessageCount)
+	receive := newMessageQueue(connectH1WriteBatchMaxMessageCount)
 	messages := make([][]byte, connectH1WriteBatchMaxMessageCount+1)
 	witnesses := make([][]byte, connectH1WriteBatchMaxMessageCount)
 	for messageIndex := range messages {
@@ -147,7 +147,7 @@ func TestConnectH1UserReadyBatchBoundsDrainAndPreservesFifo(t *testing.T) {
 		}
 	}
 	for _, message := range messages[1:] {
-		receive <- message
+		receive.sendForTest(message)
 	}
 
 	writer := &connectH1BatchTestWriter{}
@@ -206,26 +206,25 @@ func TestConnectH1UserReadyBatchBoundsDrainAndPreservesFifo(t *testing.T) {
 		}
 	}
 
-	select {
-	case pendingMessage := <-receive:
-		pendingIdentity := pendingMessage[0]
-		if pendingIdentity != byte(len(messages)) {
-			clientconnect.MessagePoolReturn(pendingMessage)
-			t.Fatalf("pending message identity = %d, want %d", pendingIdentity, len(messages))
-		}
-		clientconnect.MessagePoolReturn(pendingMessage)
-	default:
+	pendingMessage, result := receive.tryReceive()
+	if result != messageQueueReceived {
 		t.Fatal("bounded batch consumed the next ready message")
 	}
+	pendingIdentity := pendingMessage[0]
+	if pendingIdentity != byte(len(messages)) {
+		clientconnect.MessagePoolReturn(pendingMessage)
+		t.Fatalf("pending message identity = %d, want %d", pendingIdentity, len(messages))
+	}
+	clientconnect.MessagePoolReturn(pendingMessage)
 }
 
 // An unwrapped connection retains the historical singleton fallback and does
 // not dequeue a second ready message.
 func TestConnectH1UserReadyBatchUnwrappedFallbackStaysSingleton(t *testing.T) {
-	receive := make(chan []byte, 1)
+	receive := newMessageQueue(1)
 	firstMessage := newConnectH1BatchTestMessage(1)
 	secondMessage := newConnectH1BatchTestMessage(2)
-	receive <- secondMessage
+	receive.sendForTest(secondMessage)
 	writer := &connectH1BatchTestWriter{}
 
 	open, err := writeConnectH1UserReadyBatch(
@@ -244,17 +243,16 @@ func TestConnectH1UserReadyBatchUnwrappedFallbackStaysSingleton(t *testing.T) {
 	if !open || len(writer.messages) != 1 {
 		t.Fatalf("fallback result open=%t messages=%d, want true/1", open, len(writer.messages))
 	}
-	select {
-	case pendingMessage := <-receive:
-		pendingIdentity := pendingMessage[0]
-		if pendingIdentity != 2 {
-			clientconnect.MessagePoolReturn(pendingMessage)
-			t.Fatalf("pending message identity = %d, want 2", pendingIdentity)
-		}
-		clientconnect.MessagePoolReturn(pendingMessage)
-	default:
+	pendingMessage, result := receive.tryReceive()
+	if result != messageQueueReceived {
 		t.Fatal("singleton fallback drained another message")
 	}
+	pendingIdentity := pendingMessage[0]
+	if pendingIdentity != 2 {
+		clientconnect.MessagePoolReturn(pendingMessage)
+		t.Fatalf("pending message identity = %d, want 2", pendingIdentity)
+	}
+	clientconnect.MessagePoolReturn(pendingMessage)
 }
 
 // A failed production type assertion must remain a nil batch interface; a
@@ -273,7 +271,7 @@ func TestConnectH1WriteBatchForConnRejectsTypedNil(t *testing.T) {
 // message the batch dequeued.
 func TestConnectH1UserReadyBatchFlushErrorReturnsOwnership(t *testing.T) {
 	flushErr := errors.New("injected terminal flush error")
-	receive := make(chan []byte, connectH1WriteBatchMaxMessageCount-1)
+	receive := newMessageQueue(connectH1WriteBatchMaxMessageCount - 1)
 	messages := make([][]byte, connectH1WriteBatchMaxMessageCount)
 	witnesses := make([][]byte, len(messages))
 	for messageIndex := range messages {
@@ -282,7 +280,7 @@ func TestConnectH1UserReadyBatchFlushErrorReturnsOwnership(t *testing.T) {
 			messages[messageIndex],
 		)
 		if 0 < messageIndex {
-			receive <- messages[messageIndex]
+			receive.sendForTest(messages[messageIndex])
 		}
 	}
 	writer := &connectH1BatchTestWriter{}
@@ -322,7 +320,7 @@ func TestConnectH1UserReadyBatchFlushErrorReturnsOwnership(t *testing.T) {
 // resident route.
 func TestConnectH1UserReadyBatchFrameErrorReturnsOwnership(t *testing.T) {
 	writeErr := errors.New("injected logical frame error")
-	receive := make(chan []byte, connectH1WriteBatchMaxMessageCount-1)
+	receive := newMessageQueue(connectH1WriteBatchMaxMessageCount - 1)
 	messages := make([][]byte, connectH1WriteBatchMaxMessageCount)
 	witnesses := make([][]byte, len(messages))
 	for messageIndex := range messages {
@@ -331,7 +329,7 @@ func TestConnectH1UserReadyBatchFrameErrorReturnsOwnership(t *testing.T) {
 			messages[messageIndex],
 		)
 		if 0 < messageIndex {
-			receive <- messages[messageIndex]
+			receive.sendForTest(messages[messageIndex])
 		}
 	}
 	writer := &connectH1BatchTestWriter{
@@ -402,7 +400,7 @@ func TestConnectH1WorkersJoinHeldReadyBatchOwnership(t *testing.T) {
 			writerCtx,
 			writer,
 			boundary,
-			nil,
+			newMessageQueue(0),
 			message,
 			true,
 			5*time.Second,

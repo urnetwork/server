@@ -202,14 +202,14 @@ func TestResidentPacketLeaseDeadlineRevokesAndResumesLiveForward(t *testing.T) {
 		}
 		first := offerResidentPacket(t, resident, resident.clientId, destination)
 		synctest.Wait()
-		if len(forward.send) != 1 {
+		if forward.send.len() != 1 {
 			t.Fatal("healthy lease did not deliver through the callback")
 		}
 		acceptedAt := forward.lastActivityNanos.Load()
 		time.Sleep(1500 * time.Millisecond)
 		refused := offerResidentPacket(t, resident, resident.clientId, destination)
 		synctest.Wait()
-		if len(forward.send) != 1 || forward.lastActivityNanos.Load() != acceptedAt {
+		if forward.send.len() != 1 || forward.lastActivityNanos.Load() != acceptedAt {
 			t.Fatal("expired cached lease accepted or renewed live-forward work")
 		}
 		requireResidentPoolOwnerReturned(t, refused, "expired lease offer")
@@ -217,7 +217,7 @@ func TestResidentPacketLeaseDeadlineRevokesAndResumesLiveForward(t *testing.T) {
 		time.Sleep(time.Second)
 		resumed := offerResidentPacket(t, resident, resident.clientId, destination)
 		synctest.Wait()
-		if len(forward.send) != 2 {
+		if forward.send.len() != 2 {
 			t.Fatal("replacement lease did not resume the existing forward")
 		}
 		if err := resident.CloseAndWait(context.Background()); err != nil {

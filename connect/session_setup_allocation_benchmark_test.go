@@ -2,8 +2,9 @@
 // §3.5, R23): its resident transport, one resident forward, and the outbound
 // exchange connection of each, dialed over loopback through the real header
 // handshake. Sessions last a median 4.4 s in production, so this is paid at
-// the session rate. The queues are sized for their peak, ExchangeBufferSize
-// and ForwardBufferSize messages each, allocated in full at construction.
+// the session rate. The session's six queues are messageQueues, which allocate
+// as they fill; they were channels made at their bound, ExchangeBufferSize and
+// ForwardBufferSize messages each, 590 KB of the setup's 698 KB.
 package connect
 
 import (
@@ -54,8 +55,7 @@ func startExchangeHeaderEchoForTest(t testing.TB) (host string, port int) {
 
 // One session's setup: a resident transport, one resident forward, and two
 // outbound exchange connections, a transport's and a forward's, each through
-// its handshake. Reports the bytes the setup allocates, and the share of the
-// peak-sized queues.
+// its handshake. Reports the bytes the setup allocates.
 func BenchmarkConnectSessionSetupAllocation(b *testing.B) {
 	host, port := startExchangeHeaderEchoForTest(b)
 	settings := DefaultExchangeSettings()
@@ -77,9 +77,43 @@ func BenchmarkConnectSessionSetupAllocation(b *testing.B) {
 		transport.Cancel()
 		forward.Cancel()
 	}
-	// the peak-sized queues: the transport's two, the forward's one, and the
-	// transport connection's two and the forward connection's send queue,
-	// each a slice header a slot
-	queueByteCount := (5*settings.ExchangeBufferSize + settings.ForwardBufferSize) * 24
-	b.ReportMetric(float64(queueByteCount), "queue-B/session")
+}
+
+// The bounds of a session's queues: the transport's send and receive, the
+// forward's send, the transport connection's send and receive, and the forward
+// connection's send and its receive, which holds nothing.
+func connectSessionQueueBoundsForTest(settings *ExchangeSettings) []int {
+	return []int{
+		settings.ExchangeBufferSize,
+		settings.ExchangeBufferSize,
+		settings.ForwardBufferSize,
+		settings.ExchangeBufferSize,
+		settings.ExchangeBufferSize,
+		settings.ExchangeBufferSize,
+		0,
+	}
+}
+
+// A session's queues as the channels they were, made at their bounds.
+func BenchmarkConnectSessionQueuesAsChannels(b *testing.B) {
+	bounds := connectSessionQueueBoundsForTest(DefaultExchangeSettings())
+	queues := make([]chan []byte, len(bounds))
+	b.ReportAllocs()
+	for b.Loop() {
+		for i, bound := range bounds {
+			queues[i] = make(chan []byte, bound)
+		}
+	}
+}
+
+// A session's queues as messageQueues, which allocate as they fill.
+func BenchmarkConnectSessionQueuesAsMessageQueues(b *testing.B) {
+	bounds := connectSessionQueueBoundsForTest(DefaultExchangeSettings())
+	queues := make([]*messageQueue, len(bounds))
+	b.ReportAllocs()
+	for b.Loop() {
+		for i, bound := range bounds {
+			queues[i] = newMessageQueue(bound)
+		}
+	}
 }
