@@ -7,8 +7,8 @@
 //
 //	subnets   S subnets join and leave the network concurrently, each behind its own forwarding device: a subnet joins
 //	          by its device's BridgeRoute under the document's standing route rule (§17.7), and leaves by a reset
-//	          BridgeWithdraw of it (§17.8's revocation row); a route grant that activates and expires and a bridge share
-//	          accepted and revoked are §17's other ways in and out, which this case does not run
+//	          BridgeWithdraw of it (§17.8's revocation row); a route grant that activates and expires or is revoked is
+//	          §17's next way in and out, which TestE2eItBridgeRouteGrants runs (it_bridge_grants_test.go)
 //	forwards  P port forwards are set up and removed concurrently on H other devices: each a BridgeMap of its host's
 //	          overlay address's port to a service on the host's loopback (§17.6's rule 1), removed by a reset
 //	          BridgeWithdraw; every host claimed its overlay address first
@@ -87,6 +87,41 @@ func TestE2eItBridgeStatic(t *testing.T) {
 			t.Errorf("sweep: %v", err)
 		}
 		world.Check(t)
+		world.LogBridges(t)
+		world.Reconcile(ctx, t)
+		world.Summarize(t)
+	})
+}
+
+// Route grants joining a subnet to a client's reach and taking it out again (it_bridge_grants_test.go): every client
+// the document denies a subnet asks a route grant on it, which the owner's device approves and the client's gate
+// spends in a GrantActivate; while the grant is in force the client must reach the subnet by TCP and UDP, its table
+// holding the subnet's entry and the subnet's device's rows its route row, and once the grant expires or is revoked,
+// past LeaveBound, nothing reaches the subnet from it. Then a sweep, the oracle and the ledgers, as the case's.
+func TestE2eItBridgeRouteGrants(t *testing.T) {
+	e2eTestEnv().Run(t, func(t testing.TB) {
+		settings := DefaultItBridgeSettings()
+		settings.SubnetCount = 3
+		settings.ForwardCount = 1
+		settings.ForwardHostCount = 1
+		settings.ClientCount = 3
+		settings.CampusPrefix = netip.Prefix{}
+		settings.RouteGrants = true
+		world := NewItBridgeWorld(t, settings)
+		ctx, cancel := world.world.StepContext(t.Context(), world.world.HostsSettings().CaseTimeout)
+		defer cancel()
+		if err := world.JoinAll(ctx); err != nil {
+			world.FailProgress(t, "the joins", err, nil)
+		}
+		for _, err := range world.Sweep(ctx, "sweep") {
+			t.Errorf("sweep: %v", err)
+		}
+		world.RouteGrantCycle(ctx, t)
+		for _, err := range world.Sweep(ctx, "last sweep") {
+			t.Errorf("last sweep: %v", err)
+		}
+		world.Check(t)
+		world.LogBridges(t)
 		world.Reconcile(ctx, t)
 		world.Summarize(t)
 	})
@@ -141,6 +176,7 @@ func TestE2eItBridgeLinksPastSidecarClients(t *testing.T) {
 				"a sidecar's window clients count against sidecar_clients (limit %d), which §20.8 exempts", connected, sidecarCount, windowClientCount, sidecarCount+1)
 		}
 		world.Check(t)
+		world.LogBridges(t)
 		world.Summarize(t)
 	})
 }
@@ -164,8 +200,16 @@ func runItBridge(t testing.TB, settings *ItBridgeSettings) {
 		t.Errorf("last sweep: %v", err)
 	}
 	world.Check(t)
+	world.LogBridges(t)
 	world.Reconcile(ctx, t)
 	world.Summarize(t)
+}
+
+// Logs each device's bridge line while the bridges still run, before the ledgers end them.
+func (self *ItBridgeWorld) LogBridges(t testing.TB) {
+	for _, device := range self.devices {
+		t.Logf("bridge %s", self.deviceProgress(device))
+	}
 }
 
 // Joins every subnet and forward that is out, concurrently.
@@ -267,7 +311,11 @@ func (self *ItBridgeWorld) Churn(ctx context.Context) {
 				if err := hold(settings.LeftHoldMin, settings.LeftHoldMax); err != nil {
 					return err
 				}
-				return self.Join(ctx, target)
+				if err := self.Join(ctx, target); err != nil {
+					return err
+				}
+				self.probeComeback(ctx, target, random)
+				return nil
 			},
 		})
 	}
@@ -301,6 +349,40 @@ func (self *ItBridgeWorld) Churn(ctx context.Context) {
 		self.FailProgress(t, "the churn", err, bursts)
 	}
 	FailBurstErrors(t, bursts)
+}
+
+// Probes a subnet or forward the churn joined again from one client and protocol its rules grant, picked at random,
+// until an attempt reaches it or ComebackTryCount tries: the oracle's liveness row then judges each incarnation the
+// churn joins by attempts made for it, where the random traffic may pick another destination for the whole window.
+func (self *ItBridgeWorld) probeComeback(ctx context.Context, target *itBridgeTarget, random *rand.Rand) {
+	type pair struct {
+		client   *itBridgeDevice
+		protocol string
+	}
+	pairs := []pair{}
+	for _, client := range self.clients {
+		for _, protocol := range target.protocols() {
+			if self.granted(client.clientIndex(), target, protocol) {
+				pairs = append(pairs, pair{client: client, protocol: protocol})
+			}
+		}
+	}
+	if len(pairs) == 0 {
+		return
+	}
+	chosen := pairs[random.IntN(len(pairs))]
+	for try := range self.settings.ComebackTryCount {
+		if 0 < try {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(self.settings.SweepPause):
+			}
+		}
+		if self.Attempt(ctx, "comeback", chosen.client, target, chosen.protocol).Reached {
+			return
+		}
+	}
 }
 
 // One client's traffic until stop: bursts of up to BurstAttemptCount concurrent attempts, each to a random destination
@@ -355,8 +437,8 @@ func (self *ItBridgeWorld) Check(t testing.TB) {
 		if attempt.Owner != attempt.Expected.name {
 			t.Errorf("%s reached %s, not %s, which owns the address for it", where, attempt.Owner, attempt.Expected.name)
 		}
-		if !attempt.Granted {
-			t.Errorf("%s was answered, and the document grants it none", where)
+		if !attempt.Granted && !self.grantedOver(attempt.Client, attempt.Expected, attempt.Protocol, attempt.Start, attempt.End) {
+			t.Errorf("%s was answered, and neither the document nor a route grant within %s of its end grants it", where, bound)
 		}
 		if attempt.Expected.timeline != nil && !attempt.Expected.timeline.Allows(attempt.Start, attempt.End, bound) {
 			t.Errorf("%s was answered outside every incarnation of %s, %s", where, attempt.Expected.name, self.describeTimeline(attempt.Expected))
@@ -370,8 +452,8 @@ func (self *ItBridgeWorld) Check(t testing.TB) {
 				t.Errorf("%s reached %s from no client of the case", where, target.name)
 				continue
 			}
-			if !self.grantedBy(client.clientIndex(), target, arrival.Network) {
-				t.Errorf("%s reached %s, which the document denies it", where, target.name)
+			if !self.grantedOver(client, target, arrival.Network, arrival.At, arrival.At) {
+				t.Errorf("%s reached %s, which the document denies it and no route grant within %s of its end gave it", where, target.name, bound)
 			}
 			if target == self.campus {
 				// a nested subnet's address the client routes reaches that subnet's device or nothing, never the
@@ -469,6 +551,13 @@ func (self *ItBridgeWorld) checkLiveness(t testing.TB) {
 						attempts += 1
 					}
 				}
+				// a window no granted attempt fell in has nothing to judge: the churn's probe gives every incarnation it
+				// joins its attempts, and the sweeps judge the ones joined before them
+				if attempts == 0 {
+					t.Logf("%s's incarnation %d had no granted attempt in its stable window %s to %s",
+						target.name, incarnation.Number, incarnation.AdoptedAt.Format(time.RFC3339Nano), end.Format(time.RFC3339Nano))
+					continue
+				}
 				t.Errorf("%s's incarnation %d was reached by nothing in its stable window %s to %s, %d granted attempts there",
 					target.name, incarnation.Number, incarnation.AdoptedAt.Format(time.RFC3339Nano), end.Format(time.RFC3339Nano), attempts)
 			}
@@ -476,10 +565,15 @@ func (self *ItBridgeWorld) checkLiveness(t testing.TB) {
 	}
 }
 
-// A timeline as one line for a failure's message.
+// A target's timeline as one line for a failure's message.
 func (self *ItBridgeWorld) describeTimeline(target *itBridgeTarget) string {
+	return describeItBridgeTimeline(target.timeline)
+}
+
+// A timeline as one line.
+func describeItBridgeTimeline(timeline *itBridgeTimeline) string {
 	parts := []string{}
-	for _, incarnation := range target.timeline.Incarnations() {
+	for _, incarnation := range timeline.Incarnations() {
 		parts = append(parts, fmt.Sprintf("#%d filed %s landed %s at %d adopted %s, withdraw %s withdrawn %s at %d adopted %s",
 			incarnation.Number, itBridgeTime(incarnation.FiledAt), itBridgeTime(incarnation.LandedAt), incarnation.Pin, itBridgeTime(incarnation.AdoptedAt),
 			itBridgeTime(incarnation.WithdrawAt), itBridgeTime(incarnation.WithdrawnAt), incarnation.WithdrawPin, itBridgeTime(incarnation.WithdrawAdoptedAt)))
@@ -505,7 +599,10 @@ func (self *ItBridgeWorld) Reconcile(ctx context.Context, t testing.TB) {
 	self.world.T3().CloseNetworks()
 	ledgerCtx, cancel := context.WithTimeout(ctx, self.settings.LedgerTimeout)
 	defer cancel()
+	// every relayed contract closed, or past the bound the ones that stayed open reported and left out: the ledgers
+	// still reconcile the closed ones, since an open contract's reservation debits nothing until it settles
 	var contracts []*ItBridgeRelayedContract
+	stayedOpenCount := 0
 	for {
 		var err error
 		contracts, err = itBridgeRelayedContracts(ledgerCtx, networkId)
@@ -525,13 +622,20 @@ func (self *ItBridgeWorld) Reconcile(ctx context.Context, t testing.TB) {
 		case <-ledgerCtx.Done():
 			for _, contract := range contracts {
 				if contract.Open {
-					t.Errorf("relayed contract %s from %s is still open, close reports %v", contract.ContractId, contract.SourceId, contract.CloseReports)
+					t.Errorf("relayed contract %s from %s is still open, close reports %v, checkpoints %v", contract.ContractId, contract.SourceId, contract.CloseReports, contract.CheckpointReports)
 				}
 			}
-			t.Fatalf("%d of %d relayed contracts stayed open past the ledgers' bound: %v", open, len(contracts), ledgerCtx.Err())
+			t.Errorf("%d of %d relayed contracts stayed open past the ledgers' bound of %s: %v", open, len(contracts), self.settings.LedgerTimeout, ledgerCtx.Err())
+			stayedOpenCount = open
 		case <-time.After(self.settings.LedgerPollInterval):
 		}
+		if 0 < stayedOpenCount {
+			break
+		}
 	}
+	contracts = slices.DeleteFunc(contracts, func(contract *ItBridgeRelayedContract) bool {
+		return contract.Open
+	})
 	ledgers, err := self.world.ReadLedgers(ctx, time.Time{})
 	if err != nil {
 		t.Fatalf("the ledgers: %v", err)
@@ -562,7 +666,9 @@ func (self *ItBridgeWorld) Reconcile(ctx context.Context, t testing.TB) {
 			payload += attempt.PayloadByteCount
 		}
 	}
-	if settled < int64(payload) {
+	if 0 < stayedOpenCount {
+		t.Logf("the relayed contracts' cover of the clients' bytes goes unchecked, since %d contracts stayed open", stayedOpenCount)
+	} else if settled < int64(payload) {
 		t.Errorf("the relayed contracts settle %d B, under the %d B of requests and answers the clients moved", settled, payload)
 	}
 	t.Logf("ledgers: %d relayed contracts settle %d B, the relay meter %d B, every meter %d B, the balances lost %d B; the clients' reached attempts moved %d B",
@@ -594,6 +700,9 @@ func (self *ItBridgeWorld) Summarize(t testing.TB) {
 	for _, target := range slices.Concat(self.routes(), self.forwards) {
 		t.Logf("%s: %d arrivals, %d incarnations %s", target.name, len(target.service.Arrivals()), len(target.timeline.Incarnations()), self.describeTimeline(target))
 	}
+	for _, grant := range self.routeGrants {
+		t.Logf("%s: grant %x, expires %t, %s", grant.name, grant.GrantId(), grant.expires, describeItBridgeTimeline(grant.timeline))
+	}
 	self.stateLock.Lock()
 	chaos := slices.Clone(self.chaos)
 	self.stateLock.Unlock()
@@ -613,9 +722,9 @@ func (self *ItBridgeWorld) Summarize(t testing.TB) {
 		}
 		passed := int64(0)
 		if device.gate != nil {
-			passed = device.gate.PassedCount()
+			passed = device.gate.ApprovedCount()
 		}
-		t.Logf("%s: %d wires, %d dials, %d refused, %d exposures the stock gate held for a person; %s", device.name, device.WireCount(),
-			len(device.dialer.Dials()), refused, passed, self.deviceProgress(device))
+		t.Logf("%s: %d wires, %d dials, %d refused, %d exposures the stock gate held for a person", device.name, device.WireCount(),
+			len(device.dialer.Dials()), refused, passed)
 	}
 }

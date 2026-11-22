@@ -36,6 +36,7 @@ import (
 	"net/netip"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/urnetwork/connect"
@@ -105,7 +106,9 @@ type itBridgeDevice struct {
 	wireCount int
 	// a filing device's filer, and its gate's stand-in (it_bridge_world_test.go); nil on a client
 	filer *sidecar.BridgeFiler
-	gate  *itBridgeStandingGate
+	gate  *worldDeviceGate
+	// a client's grant filer, which asks its route grants (it_bridge_grants_test.go); nil on a client that asks none
+	grants *sidecar.AclGrantFiler
 }
 
 // The device's id in the network's config.
@@ -634,7 +637,15 @@ func (self *itBridgeLinkHost) NewBridgeLink(ctx context.Context, target connect.
 			return nil, errors.New("a link dials nothing locally")
 		},
 	}
-	generator := &itBridgeLinkGenerator{host: self, generation: generation, target: target, clients: map[*connect.Client]*itBridgeWindowClient{}}
+	transportSettings := *self.wire.device.world.transportSettings
+	transportSettings.PlatformTransportBudget = connect.DefaultPlatformTransportBudget()
+	generator := &itBridgeLinkGenerator{
+		host:              self,
+		generation:        generation,
+		target:            target,
+		transportSettings: &transportSettings,
+		clients:           map[*connect.Client]*itBridgeWindowClient{},
+	}
 	return connect.NewRemoteUserNatMultiClient(ctx, device.NewBridgeLinkGenerator(ctx, generator, sign), self.wire.receive,
 		protocol.ProvideMode_Network, multiClientSettings), nil
 }
@@ -646,11 +657,27 @@ func (self *itBridgeLinkHost) LocalDials() []string {
 	return slices.Clone(self.localDials)
 }
 
-// How many window clients the links opened.
+// How many window clients the links opened, how many of their transports ever connected to the exchange, and how many
+// opens answered a client to their window.
 func (self *itBridgeLinkHost) WindowClientCount() int {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	return len(self.windowClients)
+}
+
+func (self *itBridgeLinkHost) WindowClientCounts() (count int, connectedCount int, openedCount int) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	for _, windowClient := range self.windowClients {
+		count += 1
+		if windowClient.connected.Load() {
+			connectedCount += 1
+		}
+		if windowClient.opened.Load() {
+			openedCount += 1
+		}
+	}
+	return count, connectedCount, openedCount
 }
 
 // Ends every window client the links opened and waits for them. Idempotent.
@@ -673,6 +700,9 @@ type itBridgeWindowClient struct {
 	settings  *ItBridgeWireSettings
 	client    *connect.Client
 	transport *connect.PlatformTransport
+	// whether its transport ever connected to the exchange, and whether its open answered a client
+	connected atomic.Bool
+	opened    atomic.Bool
 	closeOnce sync.Once
 }
 
@@ -693,6 +723,10 @@ type itBridgeLinkGenerator struct {
 	host       *itBridgeLinkHost
 	generation *itBridgeGeneration
 	target     connect.Id
+	// the world's transport settings with a carrier budget of the link's own, as connect.ApiMultiClientGenerator
+	// gives each of its windows (one per link in the ur daemon and the sdk): a budget the world's settings shared
+	// would admit DefaultPlatformTransportBudget's carriers across every link of every device, and hold the rest
+	transportSettings *connect.PlatformTransportSettings
 
 	stateLock sync.Mutex
 	clients   map[*connect.Client]*itBridgeWindowClient
@@ -788,7 +822,7 @@ func (self *itBridgeLinkGenerator) NewClient(ctx context.Context, args *connect.
 		settings: settings,
 		client:   client,
 		transport: connect.NewPlatformTransportWithTargetMode(ctx, world.clientStrategy, client.RouteManager(),
-			world.world.T3().Exchange().PlatformUrl(), args.ClientAuth, connect.TransportModeH1, world.transportSettings),
+			world.world.T3().Exchange().PlatformUrl(), args.ClientAuth, connect.TransportModeH1, self.transportSettings),
 	}
 	kept := func() bool {
 		host.stateLock.Lock()
@@ -803,6 +837,21 @@ func (self *itBridgeLinkGenerator) NewClient(ctx context.Context, args *connect.
 		windowClient.close()
 		return nil, errors.New("the wire has closed")
 	}
+	// notes when the transport first connects, for the progress line
+	host.closing.Go(func() {
+		for {
+			connected := windowClient.transport.ConnectedNotify()
+			if windowClient.transport.IsConnected() {
+				windowClient.connected.Store(true)
+				return
+			}
+			select {
+			case <-connected:
+			case <-ctx.Done():
+				return
+			}
+		}
+	})
 	fail := func(err error) (*connect.Client, error) {
 		host.closing.Go(windowClient.close)
 		return nil, err
@@ -840,6 +889,7 @@ func (self *itBridgeLinkGenerator) NewClient(ctx context.Context, args *connect.
 		defer self.stateLock.Unlock()
 		self.clients[client] = windowClient
 	}()
+	windowClient.opened.Store(true)
 	return client, nil
 }
 

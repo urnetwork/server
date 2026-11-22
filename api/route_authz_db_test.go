@@ -314,10 +314,22 @@ func routeAccessAdminRequests(self *routeAccessDbFixture, victimClientId server.
 		"POST /oauth/authorize":                   {path: "/oauth/authorize", body: oauthRequest},
 		"POST /oauth/consent":                     {path: "/oauth/consent", body: oauthRequest},
 		"POST /auth/network-refresh":              {path: "/auth/network-refresh"},
+		// the consent page's read and answer of a device authorization (§7.8), as POST /oauth/consent and /oauth/authorize
+		"POST /oauth/device_consent": {path: "/oauth/device_consent", body: map[string]any{"user_code": "ATTACKER"}},
+		"POST /oauth/device_approve": {path: "/oauth/device_approve", body: map[string]any{"user_code": "ATTACKER", "approve": true}},
+		// a team's CI credentials (§7.8): a new one would mint keys
+		"GET /network/oauth-clients":        {path: "/network/oauth-clients"},
+		"POST /network/oauth-clients":       {path: "/network/oauth-clients", body: map[string]any{"scopes": []string{model.ApiKeyScopeAll}}},
+		"POST /network/oauth-client-revoke": {path: "/network/oauth-client-revoke", body: map[string]any{"oauth_client_id": server.NewId()}},
 		// the team routes (§7.5, §7.6)
-		"POST /network/team-create":   {path: "/network/team-create", body: map[string]any{"network_name": "attacker" + self.networkName}},
-		"GET /network/members":        {path: "/network/members"},
-		"POST /network/team-checkout": {path: "/network/team-checkout", body: map[string]any{}},
+		"POST /network/member-remove":        {path: "/network/member-remove", body: map[string]any{"member_id": server.NewId()}},
+		"GET /network/scim-changes":          {path: "/network/scim-changes"},
+		"POST /network/member-invite":        {path: "/network/member-invite", body: map[string]any{"email": "attacker@example.com", "role": model.NetworkMemberRoleOwner, "expire_days": 7}},
+		"POST /network/member-invite-accept": {path: "/network/member-invite-accept", body: map[string]any{"invite_bearer": "attacker"}},
+		"POST /auth/network-switch":          {path: "/auth/network-switch", body: map[string]any{"network_id": self.networkId}},
+		"POST /network/team-create":          {path: "/network/team-create", body: map[string]any{"network_name": "attacker" + self.networkName}},
+		"GET /network/members":               {path: "/network/members"},
+		"POST /network/team-checkout":        {path: "/network/team-checkout", body: map[string]any{}},
 		// an issue, which would retire the team's SCIM bearer (QD-828)
 		"POST /network/scim-token":    {path: "/network/scim-token", body: map[string]any{}},
 		"POST /network/idp":           {path: "/network/idp", body: map[string]any{"issuer": "https://attacker.example", "client_id": "attacker", "client_auth": "client_secret", "client_secret": "attacker"}},
@@ -330,6 +342,18 @@ func routeAccessAdminRequests(self *routeAccessDbFixture, victimClientId server.
 		// §21.16's routes for the network's own credential (ABUSE-M5-11): an appeal, which would file one
 		"GET /abuse/cases":   {path: "/abuse/cases"},
 		"POST /abuse/appeal": {path: "/abuse/appeal", body: map[string]any{"case_id": server.NewId(), "reason": "attacker"}},
+		// the network's zone routes (§12.8): each write would change what the network's names answer
+		"GET /network/dns":                     {path: "/network/dns"},
+		"POST /network/dns/records":            {path: "/network/dns/records", body: map[string]any{"upserts": []any{map[string]any{"name": "attacker", "type": "TXT", "values": []string{"attacker"}}}}},
+		"POST /network/dns/label-reclaim":      {path: "/network/dns/label-reclaim", body: map[string]any{"name": "attacker", "network_id": self.networkId, "incident_id": server.NewId()}},
+		"POST /network/dns/alias-claim":        {path: "/network/dns/alias-claim", body: map[string]any{"name": self.networkName}},
+		"POST /network/dns/alias-release":      {path: "/network/dns/alias-release", body: map[string]any{"name": self.networkName}},
+		"POST /network/dns/custom-host-add":    {path: "/network/dns/custom-host-add", body: map[string]any{"host": "www.attacker.example", "owner": "www"}},
+		"POST /network/dns/custom-host-remove": {path: "/network/dns/custom-host-remove", body: map[string]any{"host": "www.attacker.example"}},
+		// the network's direct MX (§15.15) and a recheck of its send halts (§14.8)
+		"POST /mail/direct-mx":   {path: "/mail/direct-mx", body: map[string]any{"receivers": []any{map[string]any{"receiver_sidecar_id": server.NewId(), "address": "192.0.2.1"}}}},
+		"DELETE /mail/direct-mx": {path: "/mail/direct-mx"},
+		"POST /smtp/appeal":      {path: "/smtp/appeal", body: map[string]any{"halt_id": server.NewId()}},
 		// app admin
 		"POST /auth/network-delete":               {path: "/auth/network-delete"},
 		"POST /auth/code-create":                  {path: "/auth/code-create", body: map[string]any{"uses": 1, "duration_minutes": 60}},

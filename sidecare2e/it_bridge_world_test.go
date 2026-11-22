@@ -30,9 +30,13 @@
 // port its rule leaves out still enters the link and is the forwarding role's to refuse (§17.6's rule 6).
 //
 // The filings go through each device's BridgeFiler, the path `ur bridge` and MCP's bridge tools take, through §16.6's
-// stock approval gate over the device's follower, whose standing grants are the document's, and a stand-in in front of
-// it that passes an exposure the stock gate holds for a person although the document's standing rule covers it
-// (itBridgeStandingGate, a product finding). A filing seals its body
+// stock approval gate over the device's follower, whose standing grants are the document's, behind the World's
+// worldDeviceGate approving exposures as a person would: the stock gate holds every exposure, route or map, for a
+// person's decision, even one the document's standing route or dial rule covers, since its standing check is
+// AclEngine.ActiveGrant, which covers only an action with grant fields, and an exposure's CanonicalAction carries none
+// (a product finding the case reports). The filer then files the rule with no approval, which every reader holds in
+// force only while the document covers it (§17.7; AclLocalPolicy.StandingCovers), so the stand-in opens nothing the
+// document does not. A filing seals its body
 // under the config repo's key, which each Sidecar holds through the follower's keys the case installs
 // (itBridgeConfigKeys): a follower installs them itself only over a key client of forwarding setup's, which the World's
 // FakeGkm client is not; and the config repo's group, which a real-keys bootstrap forms at gkm, is formed at the World's
@@ -54,7 +58,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -146,6 +149,9 @@ type ItBridgeSettings struct {
 	// A stable window shorter than this, an incarnation's from its adoption to its withdrawal, is not held to being
 	// reached at least once: 3 s.
 	LivenessMinWindow time.Duration
+	// How many tries the churn's probe of a subnet or forward joined again gives the one granted client and protocol
+	// it picks, SweepPause apart, so every incarnation the churn joins has attempts its liveness is judged by: 6.
+	ComebackTryCount int
 	// How many tries a sweep gives each granted pair before it fails it, and each denied pair to be answered, and how
 	// long it pauses between: 6, 2 and 1 s.
 	SweepTryCount       int
@@ -160,6 +166,12 @@ type ItBridgeSettings struct {
 	// How long the ledgers may take to settle at the end: every relayed contract closed by both its parties.
 	LedgerTimeout      time.Duration
 	LedgerPollInterval time.Duration
+	// Route grants (it_bridge_grants_test.go): whether the case runs them, the document then carrying a requests rule
+	// through which every client the grant matrix denies a subnet that nests in no campus asks a route grant on it, and
+	// how long the first such grant asks to last before it expires, long enough to outlast its probes; the rest are
+	// revoked once probed. false, 90 s.
+	RouteGrants        bool
+	RouteGrantLifetime time.Duration
 	// The case's randomness: targets, addresses, holds and pauses. Logged.
 	Seed uint64
 }
@@ -205,6 +217,7 @@ func DefaultItBridgeSettings() *ItBridgeSettings {
 		EchoTimeout:                3 * time.Second,
 		ReadByteCount:              4 * 1024,
 		LivenessMinWindow:          3 * time.Second,
+		ComebackTryCount:           6,
 		SweepTryCount:              6,
 		SweepDeniedTryCount:        2,
 		SweepPause:                 time.Second,
@@ -214,6 +227,8 @@ func DefaultItBridgeSettings() *ItBridgeSettings {
 		ChaosSecondHostAfter:       32 * time.Second,
 		LedgerTimeout:              2 * time.Minute,
 		LedgerPollInterval:         250 * time.Millisecond,
+		RouteGrants:                false,
+		RouteGrantLifetime:         90 * time.Second,
 		Seed:                       uint64(time.Now().UnixNano()),
 	}
 }
@@ -432,6 +447,8 @@ type ItBridgeWorld struct {
 	devices []*itBridgeDevice
 	// each host's overlay address, by the host's index
 	hostAddresses []netip.Addr
+	// the route grants the clients ask (it_bridge_grants_test.go); none unless RouteGrants
+	routeGrants []*itBridgeRouteGrant
 	// the document the owner saved
 	policy string
 
@@ -472,6 +489,11 @@ func NewItBridgeWorld(t testing.TB, settings *ItBridgeSettings) *ItBridgeWorld {
 	if worldSettings.T3 == nil {
 		worldSettings.T3 = sidecart3.DefaultT3WorldSettings()
 	}
+	// every follower checks a GrantActivate's decisions as ur daemon's does, so a route grant's activation counts at
+	// every device (it_bridge_grants_test.go)
+	t3Settings := *worldSettings.T3
+	t3Settings.FollowerSpendCheck = true
+	worldSettings.T3 = &t3Settings
 	if worldSettings.T3.Exchange == nil {
 		worldSettings.T3.Exchange = sidecart3.DefaultExchangeSettings()
 	}
@@ -590,6 +612,12 @@ func (self *ItBridgeWorld) build(ctx context.Context) error {
 		self.clients = append(self.clients, client)
 		self.devices = append(self.devices, client)
 	}
+	if settings.RouteGrants {
+		self.routeGrants = self.newRouteGrants()
+		if len(self.routeGrants) == 0 {
+			return errors.New("the grant matrix denies no client a subnet that nests in no campus, so no client asks a route grant")
+		}
+	}
 
 	if err := self.formConfigGroup(ctx); err != nil {
 		return err
@@ -602,14 +630,12 @@ func (self *ItBridgeWorld) build(ctx context.Context) error {
 		self.world.T3().OnClose(remove)
 	}
 	// filings go through §16.6's stock gate over each filer's follower, its standing grants the document's, behind the
-	// stand-in that passes an exposure the stock gate holds for a person (itBridgeStandingGate)
+	// World's stand-in approving the exposures it holds for a person (the file's header)
 	for _, filer := range slices.Concat([]*itBridgeDevice{self.owner}, self.routerDevices(), self.hosts) {
-		stock, err := self.world.InstallApprovalGate(ctx, filer.t3)
-		if err != nil {
+		var err error
+		if filer.gate, err = self.world.InstallDeviceGate(ctx, filer.t3, sidecar.SidecarActionExpose); err != nil {
 			return err
 		}
-		filer.gate = &itBridgeStandingGate{next: stock}
-		self.world.T3().OnClose(filer.t3.Sidecar().InstallGate(filer.gate))
 		if filer.filer, err = self.newFiler(filer, nil); err != nil {
 			return err
 		}
@@ -648,45 +674,10 @@ func (self *ItBridgeWorld) build(ctx context.Context) error {
 	if err := self.awaitDocument(ctx); err != nil {
 		return err
 	}
-	return self.AwaitAdopted(ctx, self.tip())
-}
-
-// A stand-in in front of §16.6's stock gate behind one device's Authorize (the file's header): the stock gate holds
-// every exposure, route or map, for a person's decision, even one the document's standing route or dial rule covers,
-// since its standing check is AclEngine.ActiveGrant, which covers only an action with grant fields, and an exposure's
-// CanonicalAction carries none (a product finding the case reports); so where it answers pending for an exposure, this
-// runs the exposure's effect under an empty key, as the gate's step 2 runs one a standing grant covers. The filer then
-// files the rule with no approval, which every reader holds in force only while the document covers it (§17.7;
-// AclLocalPolicy.StandingCovers), so the stand-in opens nothing the document does not. Every other answer is the stock
-// gate's.
-type itBridgeStandingGate struct {
-	next sidecar.SidecarGate
-	// the exposures the stock gate held for a person and this passed
-	passedCount atomic.Int64
-}
-
-func (self *itBridgeStandingGate) Authorize(ctx context.Context, action *sidecar.SidecarAction, decision *bridge.Signed) error {
-	err := self.next.Authorize(ctx, action, decision)
-	var pending *sidecar.ApprovalPendingError
-	if err == nil || action == nil || action.Kind != sidecar.SidecarActionExpose || action.Effect == nil || !errors.As(err, &pending) {
+	if err := self.installGrantGates(ctx); err != nil {
 		return err
 	}
-	effectRef, runErr := action.Effect.Run(ctx, nil)
-	switch {
-	case runErr == nil:
-		action.Outcome = &sidecar.SidecarOutcome{State: sidecar.ApprovalOutcomeDone, EffectRef: effectRef}
-	case errors.Is(runErr, sidecar.ErrSidecarEffectNotDone):
-		action.Outcome = &sidecar.SidecarOutcome{State: sidecar.ApprovalOutcomeNotDone, Err: runErr}
-	default:
-		action.Outcome = &sidecar.SidecarOutcome{State: sidecar.ApprovalOutcomeUncertain, Err: runErr}
-	}
-	self.passedCount.Add(1)
-	return nil
-}
-
-// How many exposures the stock gate held for a person and this passed.
-func (self *itBridgeStandingGate) PassedCount() int64 {
-	return self.passedCount.Load()
+	return self.AwaitAdopted(ctx, self.tip())
 }
 
 // A follower's config repo keys as its Sidecar holds them (sidecar.SidecarConfigKeys), as the follower installs its own
@@ -953,7 +944,11 @@ func (self *ItBridgeWorld) policySource() (string, error) {
 			"src": src, "dst": []string{selector(echo.device)}, "allow": []string{"dial"}, "ip": []string{"icmp:*"},
 		})
 	}
-	source, err := json.Marshal(map[string]any{"grants": grants})
+	document := map[string]any{"grants": grants}
+	if requests := self.routeGrantRequests(selector); requests != nil {
+		document["requests"] = requests
+	}
+	source, err := json.Marshal(document)
 	if err != nil {
 		return "", err
 	}
@@ -1047,13 +1042,14 @@ func (self *ItBridgeWorld) deviceProgress(device *itBridgeDevice) string {
 	decision := wire.bridge.Decision()
 	role := wire.bridge.Status()
 	defaultRouteCount, refusedSendCount := wire.Counts()
+	windowClientCount, windowConnectedCount, windowOpenedCount := wire.links.WindowClientCounts()
 	line += fmt.Sprintf(", posture %v at %d (state %d), compiled %d (%d compiles, %d refused), serving %t, waits %d, alarms %d, routes %d, "+
-		"%d window clients, %d default-route packets, %d refused sends, %d local dials, wire %d; role: document %t, %d entries, %d maps, "+
+		"%d window clients (%d connected, %d opened), %d default-route packets, %d refused sends, %d local dials, wire %d; role: document %t, %d entries, %d maps, "+
 		"%d served, %d subjects, %d links open, %d building, %d principals verified, %d rejects sent, %d held rejects, %d route conflicts, "+
 		"%d waits, %d posture alarms, %d alarms",
 		decision.State, decision.Pin.GetVersion(), decision.BridgeState.GetAuth().GetVersion(), status.CompiledPin.GetVersion(),
 		status.CompileCount, status.CompileErrorCount, status.Serving, len(status.Waits), len(status.Alarms), len(wire.bridge.Routes()),
-		wire.links.WindowClientCount(), defaultRouteCount, refusedSendCount, len(wire.links.LocalDials()), device.WireCount(),
+		windowClientCount, windowConnectedCount, windowOpenedCount, defaultRouteCount, refusedSendCount, len(wire.links.LocalDials()), device.WireCount(),
 		role.HasDocument, role.EntryCount, role.MapCount, role.ServedCount, role.SubjectCount, role.LinkOpenCount, role.LinkBuildingCount,
 		role.PrincipalVerifiedCount, role.RejectSentCount, role.HeldRejectCount, role.RouteConflictCount, len(role.Waits),
 		len(role.PostureAlarms), len(role.Alarms))
@@ -1294,7 +1290,8 @@ type ItBridgeAttempt struct {
 	Target   *itBridgeTarget
 	Protocol string
 	Address  netip.AddrPort
-	// The destination that should answer it (ItBridgeWorld.answerer), and whether the client's rules grant it.
+	// The destination that should answer it (ItBridgeWorld.answerer), and whether the client's rules grant it: the
+	// document's, or a route grant in force as it began.
 	Expected *itBridgeTarget
 	Granted  bool
 	Start    time.Time
@@ -1314,6 +1311,12 @@ type ItBridgeAttempt struct {
 // (answerer).
 func (self *ItBridgeWorld) granted(clientIndex int, target *itBridgeTarget, protocol string) bool {
 	return self.grantedBy(clientIndex, self.answerer(clientIndex, target), protocol)
+}
+
+// Whether client may have sent protocol to target itself over [start, end]: the document's rules, or a route grant
+// whose timeline allows the span (it_bridge_grants_test.go).
+func (self *ItBridgeWorld) grantedOver(client *itBridgeDevice, target *itBridgeTarget, protocol string, start time.Time, end time.Time) bool {
+	return self.grantedBy(client.clientIndex(), target, protocol) || self.routeGrantAllows(client, target, protocol, start, end)
 }
 
 // Whether clientIndex's rules for target itself let it send protocol there.
@@ -1368,15 +1371,17 @@ func (self *itBridgeDevice) clientIndex() int {
 // Sends one attempt of protocol, tcp, udp, stream or icmp, from client to target through its stack and router, and
 // keeps it. Never fails the test: what it reached is the oracle's to judge.
 func (self *ItBridgeWorld) Attempt(ctx context.Context, phase string, client *itBridgeDevice, target *itBridgeTarget, protocol string) *ItBridgeAttempt {
+	start := time.Now()
+	expected := self.answerer(client.clientIndex(), target)
 	attempt := &ItBridgeAttempt{
 		Phase:    phase,
 		Client:   client,
 		Target:   target,
 		Protocol: protocol,
 		Address:  self.addressOf(target),
-		Expected: self.answerer(client.clientIndex(), target),
-		Granted:  self.granted(client.clientIndex(), target, protocol),
-		Start:    time.Now(),
+		Expected: expected,
+		Granted:  self.granted(client.clientIndex(), target, protocol) || self.routeGrantInForce(client, expected, protocol, start),
+		Start:    start,
 	}
 	err := func() error {
 		wire := client.currentWire()
