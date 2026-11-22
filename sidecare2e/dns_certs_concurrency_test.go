@@ -7,7 +7,9 @@
 // while readers query the dns edge, and a standing public publish of tls/443/web, so each network's first sidecar
 // orders the network's certificate. The world runs the real certificate chain in place of its stand-in
 // (World.IssueTlsCertificateRow): §13.8's certs worker, api's certs routes and Pebble, beside the stand-ins
-// dns_certs_concurrency_certs_test.go names (the canary monitor's validator, the internet's resolvers).
+// dns_certs_concurrency_certs_test.go names (the canary monitor's validator, the internet's resolvers) and those of
+// the delegated phase (dns_certs_concurrency_desktop_test.go): the custom domain's and host's rows, which a Team's
+// routes write and the case's Pro networks may not, and the secret repos' key files, a map the desktops share.
 //
 // The records phase: every device writes, with random pauses, in an order of its own,
 //
