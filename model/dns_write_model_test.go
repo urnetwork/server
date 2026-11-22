@@ -321,8 +321,9 @@ func TestDnsWriteWhileRestoringTakesNoSerial(t *testing.T) {
 	})
 }
 
-// The path keeps * answering at an empty non-terminal: a first child adds its copy row in the same
-// journal row, and removing the child removes the copy (D-DNS-11).
+// The path keeps * answering at an empty non-terminal and at an owner with no address of its own: a
+// first child adds the copy rows in the same journal row, its own among them (QD-1190), and removing
+// the child removes them (D-DNS-11).
 func TestDnsWriteAddsAndDropsCopyRows(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -337,7 +338,8 @@ func TestDnsWriteAddsAndDropsCopyRows(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// _tcp.blog and blog are both empty non-terminals now, each with its copy
+		// _tcp.blog and blog are both empty non-terminals now, and _sip._tcp.blog holds no address, each
+		// with its copy
 		rows := testDnsJournal(t, ctx, root, added.Serial-1)
 		copyOwners := []string{}
 		for _, set := range rows[0].Upserts {
@@ -346,7 +348,8 @@ func TestDnsWriteAddsAndDropsCopyRows(t *testing.T) {
 			}
 		}
 		slices.Sort(copyOwners)
-		if len(rows) != 1 || len(rows[0].Upserts) != 3 || !slices.Equal(copyOwners, []string{"_tcp.blog." + apex, "blog." + apex}) {
+		wantCopyOwners := []string{"_sip._tcp.blog." + apex, "_tcp.blog." + apex, "blog." + apex}
+		if len(rows) != 1 || len(rows[0].Upserts) != 4 || !slices.Equal(copyOwners, wantCopyOwners) {
 			t.Fatalf("the child's row %+v", rows)
 		}
 		removed, err := DnsWrite(ctx, &DnsWriteArgs{Root: root, NetworkId: networkId, Deletes: []dnsservice.DnsRecordKey{srv.Key()}})
@@ -354,7 +357,7 @@ func TestDnsWriteAddsAndDropsCopyRows(t *testing.T) {
 			t.Fatal(err)
 		}
 		rows = testDnsJournal(t, ctx, root, removed.Serial-1)
-		if len(rows) != 1 || len(rows[0].Deletes) != 3 {
+		if len(rows) != 1 || len(rows[0].Deletes) != 4 {
 			t.Fatalf("the removal's row %+v", rows)
 		}
 	})

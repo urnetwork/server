@@ -12,7 +12,8 @@ package model
 //     and AAAA, written in the same journal write as its first selector and deleted with its last: the copy
 //     row §12.6's one write path plans (dnsservice.PlanCopyRows), which dnsedge answers from *'s current
 //     records, health drops included, never copied addresses (D-DNS-11). _domainkey.<blabel>, an empty
-//     non-terminal too, takes one beside it by the same rule.
+//     non-terminal too, and each selector, which holds no address of its own (QD-1190), take one by the same
+//     rule.
 //   - These are the only writers allowed a word-number owner: the record API refuses one (§12.7), and the
 //     burner writers take nothing else.
 //

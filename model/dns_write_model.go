@@ -11,7 +11,9 @@ package model
 //  2. the zone's lock, pg_advisory_xact_lock, transaction-scoped and so safe
 //     under PgBouncer's transaction pooling;
 //  3. the zone's current rows, a suspension's refusal, the copy rows the write
-//     needs (dnsservice.PlanCopyRows) and the zone lint over the result
+//     needs (dnsservice.PlanCopyRows, over what edges serve once it commits,
+//     withheld rows left out; QD-1190 puts one at every owner left with no
+//     address or CNAME of its own under *) and the zone lint over the result
 //     (dnsservice.LintZoneWrite), so a refused write takes nothing;
 //  4. dns_root's row lock as late as it can be, since it serializes every
 //     write in the root: ErrDnsRestoring while restoring, the compare-and-swap,
@@ -295,6 +297,9 @@ func DnsWriteInTx(ctx context.Context, tx server.PgTx, args *DnsWriteArgs) (*Dns
 
 	stored := getDnsZoneRowsInTx(ctx, tx, args.Root, args.NetworkId)
 	before := make([]dnsservice.DnsRecordSet, 0, len(stored))
+	// what edges serve: a row a suspension or a downgrade withholds stays
+	// stored and is served by none
+	served := make([]dnsservice.DnsRecordSet, 0, len(stored))
 	for _, row := range stored {
 		if row.set.Kind == dnsservice.DnsRecordKindWithheld {
 			for _, key := range dnsWriteKeys(args.Upserts, args.Deletes) {
@@ -304,12 +309,19 @@ func DnsWriteInTx(ctx context.Context, tx server.PgTx, args *DnsWriteArgs) (*Dns
 			}
 		}
 		before = append(before, row.set)
+		if !row.withheld {
+			served = append(served, row.set)
+		}
 	}
-	after := dnsservice.DnsRowsAfter(before, args.Upserts, args.Deletes)
+	// copies follow what edges serve once the write commits, as the
+	// downgrade's withholding plans them (dns_withhold_model.go), so an owner
+	// whose own address is withheld keeps *'s through a copy and the two
+	// writers never undo each other; an upsert serves its row again
+	servedAfter := dnsservice.DnsRowsAfter(served, args.Upserts, args.Deletes)
 	copyUpserts := []dnsservice.DnsRecordSet{}
 	copyDeletes := []dnsservice.DnsRecordKey{}
 	for _, apex := range apexes {
-		apexUpserts, apexDeletes := dnsservice.PlanCopyRows(apex, after)
+		apexUpserts, apexDeletes := dnsservice.PlanCopyRows(apex, servedAfter)
 		copyUpserts = append(copyUpserts, apexUpserts...)
 		copyDeletes = append(copyDeletes, apexDeletes...)
 	}

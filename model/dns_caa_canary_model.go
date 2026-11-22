@@ -11,9 +11,9 @@ package model
 //     neither way. The custom host's row names the network.
 //   - The RRset is the walk's effective set plus 0 urcanary "<nonce>" (dnsservice.DnsCaaCanaryRdata), TTL
 //     ttl.canary, kind canary, so it expires an hour after the write, as a challenge does, and taskworker's
-//     chain removes it then (RemoveExpiredDnsChallenges). Where the owner holds nothing else the write path
-//     plans a copy of *'s records beside it, and drops the copy with it, so the host's addresses keep
-//     answering from * (dnsservice.PlanCopyRows).
+//     chain removes it then (RemoveExpiredDnsChallenges). Where the owner holds no address or CNAME of its own
+//     (QD-1190) the write path plans a copy of *'s records beside it, and drops the copy with it unless the
+//     owner's other records keep it, so the host's addresses keep answering from * (dnsservice.PlanCopyRows).
 //   - One probe a target at a time: a canary standing at the owner refuses a publish
 //     (dnsservice.ErrDnsCaaCanaryBusy) unless the publish replaces it by its nonce, as certs does after
 //     /dns/ready answers stale, which takes a new nonce at a new serial (§13.8).

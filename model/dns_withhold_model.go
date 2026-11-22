@@ -10,7 +10,9 @@ package model
 //     stay stored (withheld_time), as a suspension's do (§12.9), so nothing is deleted. DnsWithholdOverQuotaInTx
 //     and DnsReleaseWithheldInTx both converge the zone on one rule: the newest RRsets past the limit withheld,
 //     the rest served, so a release goes oldest first and a pass run twice writes nothing more. Copy rows follow
-//     what stays served (dnsservice.PlanCopyRows), so a withheld host's children keep the wildcard answering.
+//     what stays served (dnsservice.PlanCopyRows), as §12.6's write path plans them, so a withheld host's children
+//     keep the wildcard answering, and so does a host whose own address is withheld while its other records stay
+//     (QD-1190); a withheld host's last record takes its copy, and a release puts back the copy the host needs.
 //   - A row a suspension withholds stays the suspension's: a zone suspended is left alone, and a row under a
 //     suspended host is neither withheld nor released here. A suspension's changes keep a row withheld here, as
 //     a user row withheld while the suspension left it visible (dns_suspend_model.go); a lift that shows such a

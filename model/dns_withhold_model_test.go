@@ -151,7 +151,9 @@ func testDnsAdminResultsContain(t testing.TB, ctx context.Context, networkId ser
 }
 
 // A withheld host whose child stays served becomes an empty non-terminal, which keeps answering the wildcard by a
-// copy row written with the withholding.
+// copy row written with the withholding, and the child, no longer behind the host's own record, takes one too.
+// Served again, the host holds only its TXT and so keeps its copy (QD-1190), while the child, which the host blocks
+// the wildcard from once more, loses its own.
 func TestDnsWithholdKeepsTheWildcardAtAWithheldHost(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -159,28 +161,25 @@ func TestDnsWithholdKeepsTheWildcardAtAWithheldHost(t *testing.T) {
 		if _, err := DnsSyncEdgeRecords(ctx, world.networkId, world.root, true, false); err != nil {
 			t.Fatal(err)
 		}
+		blog := "blog." + world.apex
+		note := "_note.blog." + world.apex
 		world.writeAged(t, ctx, "_note.blog", "blog")
 		world.quota(t, ctx, 1, false)
 		if withheld, _ := world.withheldHosts(t, ctx); !slices.Equal(withheld, []string{"blog"}) {
 			t.Fatalf("withheld %v", withheld)
 		}
-		copied := false
-		server.Db(ctx, func(conn server.PgConn) {
-			for _, row := range getDnsZoneRowsInTx(ctx, conn, world.root, world.networkId) {
-				copied = copied || (row.set.Kind == dnsservice.DnsRecordKindCopy && row.set.Owner == "blog."+world.apex && !row.withheld)
+		for _, owner := range []string{blog, note} {
+			if held, withheld := world.copyAt(ctx, owner); !held || withheld {
+				t.Fatalf("withholding the host left %s's copy held %t, withheld %t", owner, held, withheld)
 			}
-		})
-		if !copied {
-			t.Fatal("no copy row at the withheld host")
 		}
 		world.quota(t, ctx, -1, true)
-		server.Db(ctx, func(conn server.PgConn) {
-			for _, row := range getDnsZoneRowsInTx(ctx, conn, world.root, world.networkId) {
-				if row.set.Kind == dnsservice.DnsRecordKindCopy && row.set.Owner == "blog."+world.apex {
-					t.Error("the copy stayed once the host was served again")
-				}
-			}
-		})
+		if held, withheld := world.copyAt(ctx, blog); !held || withheld {
+			t.Errorf("serving the host's TXT again left its copy held %t, withheld %t", held, withheld)
+		}
+		if held, _ := world.copyAt(ctx, note); held {
+			t.Error("the child's copy stayed once the host's own record was served again")
+		}
 	})
 }
 

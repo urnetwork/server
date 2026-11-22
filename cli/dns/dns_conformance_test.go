@@ -115,7 +115,8 @@ func newDnsConformance(t testing.TB, ctx context.Context) *dnsConformance {
 		{what: "the root's own record", name: "_spf." + stack.root, rrType: dns.TypeTXT},
 		{what: "a wildcard answer", name: "www." + apex, rrType: dns.TypeA},
 		{what: "compact denial of a missing name", name: "nobody." + stack.root, rrType: dns.TypeA, negative: true},
-		{what: "compact denial of a missing type", name: "_dmarc." + apex, rrType: dns.TypeA, negative: true},
+		// _dmarc answers *'s A, AAAA and MX through its copy (QD-1190), and holds no SRV
+		{what: "compact denial of a missing type", name: "_dmarc." + apex, rrType: dns.TypeSRV, negative: true},
 	}
 	return self
 }
