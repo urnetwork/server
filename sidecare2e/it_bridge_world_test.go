@@ -71,8 +71,19 @@ import (
 type ItBridgeSettings struct {
 	// The World the network runs in; nil takes DefaultWorldSettings with no networks of its own.
 	World *WorldSettings
+	// Whether the network subscribes to Pro before its bridges start (World.VerifyNetwork), so it runs under §20.4's Pro
+	// column, whose sidecar_clients its links' window clients fit: server counts every window client against
+	// sidecar_clients, where §20.8's table exempts a sidecar's window clients, so on the World's own tier (§20.4's
+	// Community column, 20) a network of the case's devices connects about two (the product finding
+	// TestE2eItBridgeLinksPastSidecarClients holds). true; false runs the network on the World's tier.
+	Pro bool
 	// Each device's bridge.
 	Wire *ItBridgeWireSettings
+	// The concurrent connections the exchange's handler takes from one address (server's
+	// ConnectionRateLimitSettings.MaxTotalConnectionCount, 200 in production, past which each connection waits 30 s and
+	// is refused): every client of the World dials from 127.0.0.1, where production's come from many hosts, and the
+	// case's sidecars, links' window clients and the edges' clients pass 200 from it. 4,000.
+	ExchangeConnectionMaxCount int
 	// S, the subnets, each behind a device of its own: 8.
 	SubnetCount int
 	// P, the port forwards, over ForwardHostCount hosts: 8 over 4.
@@ -155,53 +166,55 @@ type ItBridgeSettings struct {
 
 func DefaultItBridgeSettings() *ItBridgeSettings {
 	return &ItBridgeSettings{
-		Wire:                 DefaultItBridgeWireSettings(),
-		SubnetCount:          8,
-		ForwardCount:         8,
-		ForwardHostCount:     4,
-		ClientCount:          4,
-		SubnetPrefixes:       []netip.Prefix{netip.MustParsePrefix("203.0.113.0/25"), netip.MustParsePrefix("198.51.100.0/24")},
-		SubnetBits:           28,
-		CampusPrefix:         netip.MustParsePrefix("203.0.113.0/24"),
-		SubnetServicePort:    7000,
-		ForwardPortBase:      8000,
-		ForwardUdpEvery:      2,
-		Block:                netip.MustParsePrefix("100.88.0.0/16"),
-		SubnetGrantModulus:   4,
-		SubnetDeniedResidue:  3,
-		SubnetTcpOnlyResidue: 2,
-		ForwardGrantModulus:  4,
-		ForwardDeniedResidue: 1,
-		EchoGrantModulus:     3,
-		EchoDeniedResidue:    0,
-		AdoptTimeout:         60 * time.Second,
-		AdoptPollInterval:    25 * time.Millisecond,
-		FilingTimeout:        60 * time.Second,
-		LeaveBound:           20 * time.Second,
-		ChurnCycleCount:      3,
-		JoinedHoldMin:        4 * time.Second,
-		JoinedHoldMax:        12 * time.Second,
-		LeftHoldMin:          2 * time.Second,
-		LeftHoldMax:          6 * time.Second,
-		BurstAttemptCount:    4,
-		BurstPauseMax:        300 * time.Millisecond,
-		StreamRequestCount:   8,
-		StreamPause:          250 * time.Millisecond,
-		AttemptTimeout:       5 * time.Second,
-		UdpTryCount:          3,
-		EchoTimeout:          3 * time.Second,
-		ReadByteCount:        4 * 1024,
-		LivenessMinWindow:    3 * time.Second,
-		SweepTryCount:        6,
-		SweepDeniedTryCount:  2,
-		SweepPause:           time.Second,
-		ChaosDownPause:       2 * time.Second,
-		ChaosDeviceAfter:     8 * time.Second,
-		ChaosHandlerAfter:    20 * time.Second,
-		ChaosSecondHostAfter: 32 * time.Second,
-		LedgerTimeout:        2 * time.Minute,
-		LedgerPollInterval:   250 * time.Millisecond,
-		Seed:                 uint64(time.Now().UnixNano()),
+		Wire:                       DefaultItBridgeWireSettings(),
+		Pro:                        true,
+		ExchangeConnectionMaxCount: 4000,
+		SubnetCount:                8,
+		ForwardCount:               8,
+		ForwardHostCount:           4,
+		ClientCount:                4,
+		SubnetPrefixes:             []netip.Prefix{netip.MustParsePrefix("203.0.113.0/25"), netip.MustParsePrefix("198.51.100.0/24")},
+		SubnetBits:                 28,
+		CampusPrefix:               netip.MustParsePrefix("203.0.113.0/24"),
+		SubnetServicePort:          7000,
+		ForwardPortBase:            8000,
+		ForwardUdpEvery:            2,
+		Block:                      netip.MustParsePrefix("100.88.0.0/16"),
+		SubnetGrantModulus:         4,
+		SubnetDeniedResidue:        3,
+		SubnetTcpOnlyResidue:       2,
+		ForwardGrantModulus:        4,
+		ForwardDeniedResidue:       1,
+		EchoGrantModulus:           3,
+		EchoDeniedResidue:          0,
+		AdoptTimeout:               60 * time.Second,
+		AdoptPollInterval:          25 * time.Millisecond,
+		FilingTimeout:              60 * time.Second,
+		LeaveBound:                 20 * time.Second,
+		ChurnCycleCount:            3,
+		JoinedHoldMin:              4 * time.Second,
+		JoinedHoldMax:              12 * time.Second,
+		LeftHoldMin:                2 * time.Second,
+		LeftHoldMax:                6 * time.Second,
+		BurstAttemptCount:          4,
+		BurstPauseMax:              300 * time.Millisecond,
+		StreamRequestCount:         8,
+		StreamPause:                250 * time.Millisecond,
+		AttemptTimeout:             5 * time.Second,
+		UdpTryCount:                3,
+		EchoTimeout:                3 * time.Second,
+		ReadByteCount:              4 * 1024,
+		LivenessMinWindow:          3 * time.Second,
+		SweepTryCount:              6,
+		SweepDeniedTryCount:        2,
+		SweepPause:                 time.Second,
+		ChaosDownPause:             2 * time.Second,
+		ChaosDeviceAfter:           8 * time.Second,
+		ChaosHandlerAfter:          20 * time.Second,
+		ChaosSecondHostAfter:       32 * time.Second,
+		LedgerTimeout:              2 * time.Minute,
+		LedgerPollInterval:         250 * time.Millisecond,
+		Seed:                       uint64(time.Now().UnixNano()),
 	}
 }
 
@@ -456,8 +469,18 @@ func NewItBridgeWorld(t testing.TB, settings *ItBridgeSettings) *ItBridgeWorld {
 	if worldSettings == nil {
 		worldSettings = DefaultWorldSettings()
 	}
+	if worldSettings.T3 == nil {
+		worldSettings.T3 = sidecart3.DefaultT3WorldSettings()
+	}
+	if worldSettings.T3.Exchange == nil {
+		worldSettings.T3.Exchange = sidecart3.DefaultExchangeSettings()
+	}
+	handlerSettings := *worldSettings.T3.Exchange.Handler
+	handlerSettings.ConnectionRateLimitSettings.MaxTotalConnectionCount = settings.ExchangeConnectionMaxCount
+	exchangeSettings := *worldSettings.T3.Exchange
+	exchangeSettings.Handler = &handlerSettings
+	worldSettings.T3.Exchange = &exchangeSettings
 	world := NewWorld(t, worldSettings)
-	exchangeSettings := sidecart3.DefaultExchangeSettings()
 	self := &ItBridgeWorld{
 		t:                 t,
 		settings:          settings,
@@ -491,6 +514,11 @@ func (self *ItBridgeWorld) build(ctx context.Context) error {
 		return fmt.Errorf("the network: %w", err)
 	}
 	self.network = network
+	if settings.Pro {
+		if err := self.world.VerifyNetwork(ctx, network, true, nil); err != nil {
+			return fmt.Errorf("the network's Pro balance: %w", err)
+		}
+	}
 	postureRoot := self.t.TempDir()
 	newDevice := func(t3 *sidecart3.T3Device, role string, index int) *itBridgeDevice {
 		name := fmt.Sprintf("%s-%d", role, index)
@@ -1247,7 +1275,9 @@ func (self *ItBridgeWorld) RestartDevice(ctx context.Context, device *itBridgeDe
 	if err := device.startWire(); err != nil {
 		return err
 	}
-	return self.awaitDeviceAdopted(ctx, device, self.tip())
+	adoptCtx, cancel := context.WithTimeout(ctx, self.settings.AdoptTimeout)
+	defer cancel()
+	return self.awaitDeviceAdopted(adoptCtx, device, self.tip())
 }
 
 // Restarts the exchange's connect handler mid-run: every client's transport drops and dials again.

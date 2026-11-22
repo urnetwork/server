@@ -18,6 +18,9 @@
 //	          bursts of concurrent attempts with random pauses between
 //	chaos     mid-run, a subnet's device's bridge restarts on its posture store, the exchange's connect handler restarts,
 //	          and a forward host's bridge restarts
+//	tier      the network subscribes to Pro first (ItBridgeSettings.Pro): server counts every link's window client
+//	          against sidecar_clients, which §20.8's table exempts, so on the World's own tier the case's links all but
+//	          never connect; TestE2eItBridgeLinksPastSidecarClients holds that product finding on that tier
 //
 // and the oracle, over every attempt and over every request each destination received:
 //
@@ -44,6 +47,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"math/rand/v2"
 	"net/netip"
 	"slices"
@@ -53,6 +57,8 @@ import (
 	"time"
 
 	"github.com/urnetwork/sidecar"
+
+	"github.com/urnetwork/server/sidecart3"
 )
 
 // The case: setup, the joins, a sweep, the churn with traffic and chaos, a sweep again, the oracle and the ledgers.
@@ -82,6 +88,59 @@ func TestE2eItBridgeStatic(t *testing.T) {
 		}
 		world.Check(t)
 		world.Reconcile(ctx, t)
+		world.Summarize(t)
+	})
+}
+
+// §20.8's table on the forwarding path: a sidecar's window clients count no sidecar client of their own (its sidecar
+// counts once), and §17's links are capped by nothing but the transfer balance (R-BRIDGE-11, owner decision 66). A
+// small network on the World's own tier, its sidecar_clients one past its sidecars, so every sidecar connects and every
+// link's window client must too: each granted pair is reached in the sweep, and server counts no more connected
+// sidecar clients than the network has sidecars. Today server counts every strict_exp client, window clients included
+// (model/sidecar_client_count_model.go's mark), so all but the first link's window client are closed at the exchange
+// with 4001 client limit exceeded and held off for minutes, and this stays failing until that is fixed.
+func TestE2eItBridgeLinksPastSidecarClients(t *testing.T) {
+	e2eTestEnv().Run(t, func(t testing.TB) {
+		settings := DefaultItBridgeSettings()
+		settings.Pro = false
+		settings.SubnetCount = 1
+		settings.ForwardCount = 1
+		settings.ForwardHostCount = 1
+		settings.ClientCount = 2
+		settings.CampusPrefix = netip.Prefix{}
+		sidecarCount := 1 + settings.SubnetCount + settings.ForwardHostCount + settings.ClientCount
+		worldSettings := DefaultWorldSettings()
+		t3Settings := sidecart3.DefaultT3WorldSettings()
+		limits := *t3Settings.SidecarLimits
+		limits.LimitKeyValues = maps.Clone(limits.LimitKeyValues)
+		limits.LimitKeyValues["sidecar_clients"] = int64(sidecarCount + 1)
+		t3Settings.SidecarLimits = &limits
+		worldSettings.T3 = t3Settings
+		settings.World = worldSettings
+		world := NewItBridgeWorld(t, settings)
+		ctx, cancel := world.world.StepContext(t.Context(), world.world.HostsSettings().CaseTimeout)
+		defer cancel()
+		if err := world.JoinAll(ctx); err != nil {
+			world.FailProgress(t, "the joins", err, nil)
+		}
+		for _, err := range world.Sweep(ctx, "sweep") {
+			t.Errorf("sweep: %v", err)
+		}
+		windowClientCount := 0
+		for _, client := range world.clients {
+			if wire := client.currentWire(); wire != nil {
+				windowClientCount += wire.links.WindowClientCount()
+			}
+		}
+		connected, err := itBridgeConnectedSidecarClientCount(ctx, world.network.NetworkId)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if int64(sidecarCount) < connected {
+			t.Errorf("server counts %d connected sidecar clients for a network of %d sidecars, whose links opened %d window clients: "+
+				"a sidecar's window clients count against sidecar_clients (limit %d), which §20.8 exempts", connected, sidecarCount, windowClientCount, sidecarCount+1)
+		}
+		world.Check(t)
 		world.Summarize(t)
 	})
 }
@@ -556,6 +615,7 @@ func (self *ItBridgeWorld) Summarize(t testing.TB) {
 		if device.gate != nil {
 			passed = device.gate.PassedCount()
 		}
-		t.Logf("%s: %d wires, %d dials, %d refused, %d exposures the stock gate held for a person", device.name, device.WireCount(), len(device.dialer.Dials()), refused, passed)
+		t.Logf("%s: %d wires, %d dials, %d refused, %d exposures the stock gate held for a person; %s", device.name, device.WireCount(),
+			len(device.dialer.Dials()), refused, passed, self.deviceProgress(device))
 	}
 }

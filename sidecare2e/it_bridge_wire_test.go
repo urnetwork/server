@@ -243,6 +243,9 @@ func newItBridgeWire(owner *itBridgeDevice) (returnWire *itBridgeWire, returnErr
 		pin := self.bridge.Decision().Pin.GetVersion()
 		self.adoptedPin.Update(func(adopted uint64) uint64 { return max(adopted, pin) })
 	}))
+	// a restart's role restores its posture before any change, which publishes nothing new while the tip has not moved
+	restored := self.bridge.Decision().Pin.GetVersion()
+	self.adoptedPin.Update(func(adopted uint64) uint64 { return max(adopted, restored) })
 	self.bridge.SetReceivePacket(self.receive)
 
 	componentSettings := sidecar.DefaultBridgeComponentSettings()

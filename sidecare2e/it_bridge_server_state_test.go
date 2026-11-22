@@ -3,7 +3,8 @@
 // Every read and write of server state the it-bridge case makes outside the hosts and api's routes, in one file of its
 // own beside world_server_state_test.go (the e2e conventions; QD-1028's layout move will move sidecar's model code):
 // a link's window client's out-of-band control, which reaches server's controller in process as the world's sidecars'
-// clients do, whether server holds the key a window client published in band, and the network's relayed contracts,
+// clients do, whether server holds the key a window client published in band, how many sidecar clients server counts
+// connected against the network's sidecar_clients, and the network's relayed contracts,
 // whose close reports §20.6's relay meter debits (model/relayed_contract_settle.go), for the case's exact
 // reconciliation of its transfer balances.
 
@@ -73,6 +74,17 @@ func itBridgeClientKeyHeld(ctx context.Context, clientId server.Id, publicKey []
 		held = err == nil && bytes.Equal(heldKey, publicKey)
 	})
 	return held
+}
+
+// How many of networkId's sidecar clients server counts connected against sidecar_clients (§20.7, §20.8): the live
+// entries of its connected-sidecar set, which each marked client's resident writes and refreshes.
+func itBridgeConnectedSidecarClientCount(ctx context.Context, networkId server.Id) (count int64, returnErr error) {
+	server.HandleError(func() {
+		count = model.GetNetworkSidecarConnectedCount(ctx, networkId)
+	}, func(err error) {
+		returnErr = fmt.Errorf("the connected sidecar clients: %w", err)
+	})
+	return count, returnErr
 }
 
 // One relayed contract of a network as server holds it (§20.6): two marked clients of one network on a Network
