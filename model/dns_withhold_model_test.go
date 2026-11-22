@@ -121,7 +121,9 @@ func TestDnsWithholdOverQuotaWithholdsTheNewest(t *testing.T) {
 			}
 		}
 		wantCopies := []dnsservice.DnsRecordKey{{Owner: "h4." + world.apex, Type: dnsservice.DnsCopyType}, {Owner: "h5." + world.apex, Type: dnsservice.DnsCopyType}}
-		slices.SortFunc(withheldCopies, func(first dnsservice.DnsRecordKey, second dnsservice.DnsRecordKey) int { return strings.Compare(first.Owner, second.Owner) })
+		slices.SortFunc(withheldCopies, func(first dnsservice.DnsRecordKey, second dnsservice.DnsRecordKey) int {
+			return strings.Compare(first.Owner, second.Owner)
+		})
 		if len(journal[0].Deletes) != 4 || !slices.Equal(withheldCopies, wantCopies) {
 			t.Fatalf("journal %+v", journal)
 		}
