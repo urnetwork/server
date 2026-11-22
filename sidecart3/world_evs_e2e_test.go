@@ -1,4 +1,4 @@
-//go:build sidecar_e2e && sidecar_localstack
+//go:build sidecar_e2e && sidecar_localstack && sidecar_pending
 
 // Full sidecars pushing to and reading from evs at once (the end-to-end tests' groundwork, e2e-client-origins): a T3
 // world (world_networks.go) with evs served at its origin (world_evs.go), and in it two networks, the first with
@@ -23,16 +23,16 @@
 //     one's own token there with 403.
 //
 // Each phase has PhaseTimeout and dumps every burst's progress when it stalls; the case has CaseTimeout. Run it with
-// the private stores through the build's wrapper, -tags 'sidecar_e2e sidecar_pending sidecar_localstack'.
+// the private stores through the build's wrapper, -tags 'sidecar_e2e sidecar_pending sidecar_localstack': the file
+// builds only with all three, since the world needs the log's tables, MG1's and MG2's.
 //
-// TestT3WorldEvsBurstsShareEachClient fails today, most runs, and TestT3WorldEvsReadAnsweredBeforeItsOwnWrite every run,
-// and both stay failing until the client is fixed (the e2e conventions): one EvsClient's concurrent reads and writes
-// judge a read's reply against the pin and read records another of its calls moved after the read was asked, so a head
-// evs served at or above the read's own pin is refused as a fork (ErrEvsHeadForked, head_alarm), a path's entry as
-// below what this device read (ErrEvsEntryRefused, a tamper alarm), or a write's head as below the pin
-// (ErrEvsPinLower); and the read records it leaves fail a later listing on the same device with no call beside it.
-// Run one call at a time per client, the burst case passes. The read-answered case fixes the order with a hold at evs's
-// origin (T3EvsSettings.Handler), so it fails the same way every run.
+// TestT3WorldEvsBurstsShareEachClient failed most runs, and TestT3WorldEvsReadAnsweredBeforeItsOwnWrite every run, while
+// one EvsClient's concurrent reads and writes judged a read's reply against the pin and read records another of its
+// calls moved after the read was asked, so a head evs served at or above the read's own pin was refused as a fork
+// (ErrEvsHeadForked, head_alarm), a path's entry as below what this device read (ErrEvsEntryRefused, a tamper alarm),
+// or a write's head as below the pin (ErrEvsPinLower). The client now judges each reply against the pin its own read
+// asked at (sidecar's evs_read_overlap_test.go), and both pass. The read-answered case fixes the order with a hold at
+// evs's origin (T3EvsSettings.Handler), so a client that judges against a moved pin fails it every run.
 
 package sidecart3
 
@@ -593,10 +593,9 @@ func (self *t3EvsReadHold) wrap(handler http.Handler) http.Handler {
 // One sidecar's read, answered by evs before the same sidecar's own write commits and reaching it after: evs's answer
 // is the ref's head when the read was asked, at or past the pin the read named, and its chain is the one the sidecar
 // then pinned past, so the read stands, with no alarm. The hold makes the order: the read's answer waits at evs's
-// origin while the sidecar writes another path and reads it back, which pins the newer head, then goes on. Today the
-// client judges the answer against the pin its write moved, refusing it as a fork (ErrEvsHeadForked) and raising
-// head_alarm: TestT3WorldEvsBurstsShareEachClient's failure, in a fixed order. It stays failing until the client is
-// fixed.
+// origin while the sidecar writes another path and reads it back, which pins the newer head, then goes on. A client
+// that judges the answer against the pin its write moved refuses it as a fork (ErrEvsHeadForked) and raises
+// head_alarm: TestT3WorldEvsBurstsShareEachClient's old failure, in a fixed order.
 func TestT3WorldEvsReadAnsweredBeforeItsOwnWrite(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: true}).Run(t, func(tb testing.TB) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
