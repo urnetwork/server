@@ -146,6 +146,9 @@ type ItBridgeSettings struct {
 	// A stable window shorter than this, an incarnation's from its adoption to its withdrawal, is not held to being
 	// reached at least once: 3 s.
 	LivenessMinWindow time.Duration
+	// How many tries the churn's probe of a subnet or forward joined again gives the one granted client and protocol
+	// it picks, SweepPause apart, so every incarnation the churn joins has attempts its liveness is judged by: 6.
+	ComebackTryCount int
 	// How many tries a sweep gives each granted pair before it fails it, and each denied pair to be answered, and how
 	// long it pauses between: 6, 2 and 1 s.
 	SweepTryCount       int
@@ -205,6 +208,7 @@ func DefaultItBridgeSettings() *ItBridgeSettings {
 		EchoTimeout:                3 * time.Second,
 		ReadByteCount:              4 * 1024,
 		LivenessMinWindow:          3 * time.Second,
+		ComebackTryCount:           6,
 		SweepTryCount:              6,
 		SweepDeniedTryCount:        2,
 		SweepPause:                 time.Second,

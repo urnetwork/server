@@ -277,7 +277,11 @@ func (self *ItBridgeWorld) Churn(ctx context.Context) {
 				if err := hold(settings.LeftHoldMin, settings.LeftHoldMax); err != nil {
 					return err
 				}
-				return self.Join(ctx, target)
+				if err := self.Join(ctx, target); err != nil {
+					return err
+				}
+				self.probeComeback(ctx, target, random)
+				return nil
 			},
 		})
 	}
@@ -311,6 +315,40 @@ func (self *ItBridgeWorld) Churn(ctx context.Context) {
 		self.FailProgress(t, "the churn", err, bursts)
 	}
 	FailBurstErrors(t, bursts)
+}
+
+// Probes a subnet or forward the churn joined again from one client and protocol its rules grant, picked at random,
+// until an attempt reaches it or ComebackTryCount tries: the oracle's liveness row then judges each incarnation the
+// churn joins by attempts made for it, where the random traffic may pick another destination for the whole window.
+func (self *ItBridgeWorld) probeComeback(ctx context.Context, target *itBridgeTarget, random *rand.Rand) {
+	type pair struct {
+		client   *itBridgeDevice
+		protocol string
+	}
+	pairs := []pair{}
+	for _, client := range self.clients {
+		for _, protocol := range target.protocols() {
+			if self.granted(client.clientIndex(), target, protocol) {
+				pairs = append(pairs, pair{client: client, protocol: protocol})
+			}
+		}
+	}
+	if len(pairs) == 0 {
+		return
+	}
+	chosen := pairs[random.IntN(len(pairs))]
+	for try := range self.settings.ComebackTryCount {
+		if 0 < try {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(self.settings.SweepPause):
+			}
+		}
+		if self.Attempt(ctx, "comeback", chosen.client, target, chosen.protocol).Reached {
+			return
+		}
+	}
 }
 
 // One client's traffic until stop: bursts of up to BurstAttemptCount concurrent attempts, each to a random destination
@@ -478,6 +516,13 @@ func (self *ItBridgeWorld) checkLiveness(t testing.TB) {
 					if attempt.Expected == target && attempt.Granted && !attempt.Start.Before(incarnation.AdoptedAt) && attempt.Start.Before(end) {
 						attempts += 1
 					}
+				}
+				// a window no granted attempt fell in has nothing to judge: the churn's probe gives every incarnation it
+				// joins its attempts, and the sweeps judge the ones joined before them
+				if attempts == 0 {
+					t.Logf("%s's incarnation %d had no granted attempt in its stable window %s to %s",
+						target.name, incarnation.Number, incarnation.AdoptedAt.Format(time.RFC3339Nano), end.Format(time.RFC3339Nano))
+					continue
 				}
 				t.Errorf("%s's incarnation %d was reached by nothing in its stable window %s to %s, %d granted attempts there",
 					target.name, incarnation.Number, incarnation.AdoptedAt.Format(time.RFC3339Nano), end.Format(time.RFC3339Nano), attempts)
