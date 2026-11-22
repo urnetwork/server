@@ -5169,6 +5169,47 @@
           "legendFormat": "{{host}} {{block}}"
         }
       ]
+    },
+    {
+      "id": 224,
+      "type": "timeseries",
+      "title": "score page decodes / s by format and result",
+      "description": "Score page cache misses decoded by the hosted devices' FindProviders2, by page format, gob or typed (CPUOPT8), and result. Typed decodes appear once the export writes typed pages (typed_score_pages); a decode error is a page this process could not read and leaves its source incomplete.",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 359
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (host, format, result) (rate(urnetwork_client_score_page_decodes_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{host}} {{format}} {{result}}"
+        }
+      ]
     }
   ]
 }
