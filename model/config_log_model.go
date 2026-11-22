@@ -47,10 +47,11 @@ import (
 //	           success, another entry a loss (apply it and go on at the next
 //	           position), 404 repeats the PUT with the same bytes
 //	base       its config pushes walk to its head, then its rows (projrows/,
-//	           an equal object answering 200), then the entry; base 1 comes
-//	           with its Signed Genesis, written at position 0 after entry 1,
-//	           the race's commit point, and a retry of base 1 repeats a missing
-//	           step (plan-TEAM-genesis-custody)
+//	           an equal object answering 200, and found by a read first, so
+//	           rows an earlier base's match send no PUT), then the entry; base
+//	           1 comes with its Signed Genesis, written at position 0 after
+//	           entry 1, the race's commit point, and a retry of base 1 repeats
+//	           a missing step (plan-TEAM-genesis-custody)
 //	after      network_acl_head advances to the new pin (§8.17)
 //
 // sidecartest.FakeApi copies these steps for T2, and sidecartest's
@@ -62,10 +63,18 @@ import (
 // across its store requests, serializing this instance's appends to one
 // network, while other instances race it at the store as §7.9 says. Writes are
 // P0 and never queued (§11.13): with a write budget installed
-// (SetWriteBudget), each proj/ and projrows/ PUT is issued to it as P0 of kind
-// log before it is sent, which never waits or refuses, and carries P0 in its
-// ctx, as a cluster evsservice.BudgetedBlobs wraps requires; without one, the
-// bytes are counted in a metric alone.
+// (SetWriteBudget), each proj/ and projrows/ PUT carries P0 in its ctx, as a
+// cluster evsservice.BudgetedBlobs wraps requires, the budget passing it
+// without spending, and each object this sequencer creates is spent once as P0
+// of kind log, which never waits or refuses, at its create's price, once the
+// store shows the PUT took effect. §11.13 prices a write in drive bytes, a
+// create's and not a read's, so a PUT that writes nothing spends nothing: a
+// 412, a PUT a read shows never landed, and an immutable object found already
+// standing, which then gets no PUT. A PUT whose outcome stays unknown, the read
+// after it failing too, is spent as issued, and the create of its key that
+// settles it spends nothing more, so a retry spends once (UnsettledWriteCount).
+// What the process reports is then what the objects it created price at as
+// created. Without a budget, the bytes sent are counted in a metric alone.
 // Holds no Postgres connection across store I/O: network_acl_head advances
 // after the append, in its own transaction. Safe for concurrent use.
 //
@@ -108,6 +117,14 @@ type ConfigLogSettings struct {
 	// recently used dropped past it and loaded again from the store on its next
 	// append.
 	NetworkCount int
+	// How many writes whose outcome stayed unknown, the read after them failing
+	// too, the sequencer remembers by key: each is spent as issued, once, and the
+	// create of its key that settles it spends nothing more, since by the settle
+	// rule at most one of the two took effect (spendUnsettled). Past it such a
+	// write is spent and not remembered, so the create that settles it spends
+	// again, one object over. 1,024: each needs the store to fail both a write
+	// and the read after it. Non-positive remembers none.
+	UnsettledWriteCount int
 	// The clock entries' time_ms comes from. nil is real time.
 	Clock sidecar.Clock
 	// Whether a network is on the team tier, which a directory RepoCreate needs at api alone (§8.8). nil is
@@ -152,9 +169,10 @@ type ConfigLogSettings struct {
 
 func DefaultConfigLogSettings() *ConfigLogSettings {
 	return &ConfigLogSettings{
-		AppendAttemptCount: 64,
-		ReadPageCount:      1024,
-		NetworkCount:       10000,
+		AppendAttemptCount:  64,
+		ReadPageCount:       1024,
+		NetworkCount:        10000,
+		UnsettledWriteCount: 1024,
 	}
 }
 
@@ -298,6 +316,9 @@ type ConfigLogSequencer struct {
 	// create (§11.13's cost rows)
 	budget sidecar.WriteBudget
 	price  func(objectByteCount int64) int64
+	// the keys of writes spent with their outcome unknown, until a later
+	// write of the key settles it, at most UnsettledWriteCount
+	unsettledKeys map[string]bool
 }
 
 // A sequencer on cluster, which advances network_acl_head with advanceHead
@@ -312,41 +333,151 @@ func NewConfigLogSequencer(
 		settings = DefaultConfigLogSettings()
 	}
 	return &ConfigLogSequencer{
-		cluster:     cluster,
-		settings:    settings,
-		advanceHead: advanceHead,
-		networks:    map[server.Id]*configLogNetwork{},
+		cluster:       cluster,
+		settings:      settings,
+		advanceHead:   advanceHead,
+		networks:      map[server.Id]*configLogNetwork{},
+		unsettledKeys: map[string]bool{},
 	}
 }
 
-// Issues every proj/ and projrows/ write to budget before it is sent, as P0 of
-// kind log on the cluster, priced by price, the bytes of each object it
-// creates (§11.13's reports row; evsservice.PriceTable's create row). OPS
-// installs api's process budget with its first metadata cluster. nil removes
-// it.
+// Spends every proj/ and projrows/ object this sequencer creates from budget,
+// as P0 of kind log on the cluster, priced by price, the bytes of each object
+// it creates (§11.13's reports row; evsservice.PriceTable's create row), and
+// passes every PUT through it as P0 (see the file header). OPS installs api's
+// process budget with its first metadata cluster. nil removes it.
 func (self *ConfigLogSequencer) SetWriteBudget(budget sidecar.WriteBudget, price func(objectByteCount int64) int64) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	self.budget, self.price = budget, price
 }
 
-// ctx for one PUT of an object of byteCount bytes: counted, issued to the
-// budget as P0 when one is installed, and carrying P0.
-func (self *ConfigLogSequencer) issueP0(ctx context.Context, byteCount int) context.Context {
+// The process's write budget and its price, nil for none.
+func (self *ConfigLogSequencer) writeBudget() (sidecar.WriteBudget, func(int64) int64) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.budget, self.price
+}
+
+// ctx for one PUT of an object of byteCount bytes: counted in the bytes sent
+// and, with a budget installed, carrying P0, which the budget passes spending
+// nothing yet, since a PUT may write nothing: the object's price is spent once
+// the store shows what the PUT did (spendWritten, spendUnsettled).
+func (self *ConfigLogSequencer) p0Context(ctx context.Context, byteCount int) context.Context {
 	configLogAppendByteCounter.Add(float64(byteCount))
-	budget, price := func() (sidecar.WriteBudget, func(int64) int64) {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		return self.budget, self.price
-	}()
+	budget, _ := self.writeBudget()
 	if budget == nil {
 		return ctx
+	}
+	return budget.IssueP0(ctx, self.cluster.ClusterId(), sidecar.WriteP0KindLog, 0)
+}
+
+// Spends one create of an object of byteCount bytes, priced, as P0 of kind log.
+func (self *ConfigLogSequencer) spendP0(ctx context.Context, byteCount int) {
+	budget, price := self.writeBudget()
+	if budget == nil {
+		return
 	}
 	pricedByteCount := int64(byteCount)
 	if price != nil {
 		pricedByteCount = price(int64(byteCount))
 	}
-	return budget.IssueP0(ctx, self.cluster.ClusterId(), sidecar.WriteP0KindLog, pricedByteCount)
+	budget.IssueP0(ctx, self.cluster.ClusterId(), sidecar.WriteP0KindLog, pricedByteCount)
+}
+
+// The store showed this sequencer's PUT of key take effect, by its answer or
+// by a read after an unknown outcome finding its bytes: the create is spent,
+// unless an earlier write of key whose outcome stayed unknown was spent
+// already, which by the settle rule never landed if this one did.
+func (self *ConfigLogSequencer) spendWritten(ctx context.Context, key string, byteCount int) {
+	spent := func() bool {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		if !self.unsettledKeys[key] {
+			return false
+		}
+		delete(self.unsettledKeys, key)
+		return true
+	}()
+	if !spent {
+		self.spendP0(ctx, byteCount)
+	}
+}
+
+// This sequencer's PUT of key may have taken effect and no read could tell:
+// spent as issued, once, its key remembered so the create that settles it
+// spends nothing more (UnsettledWriteCount).
+func (self *ConfigLogSequencer) spendUnsettled(ctx context.Context, key string, byteCount int) {
+	spent := func() bool {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		if self.unsettledKeys[key] {
+			return true
+		}
+		if len(self.unsettledKeys) < self.settings.UnsettledWriteCount {
+			self.unsettledKeys[key] = true
+		}
+		return false
+	}()
+	if !spent {
+		self.spendP0(ctx, byteCount)
+	}
+}
+
+// The store showed key holding what another write put there, another
+// instance's or one of this sequencer's spent already: nothing more is spent
+// for it.
+func (self *ConfigLogSequencer) settle(key string) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	delete(self.unsettledKeys, key)
+}
+
+// Creates one of the log's immutable keys, a base's rows or base 1's genesis
+// (§11.8's write row, an equal object answering 200), unless it holds body
+// already: a base whose rows an earlier base's match, such as a config head
+// change that leaves the rows as they were, and a retry of base 1 find them
+// standing and send no PUT, which would write nothing (§11.13's cost row
+// prices a create, and a read nothing). Otherwise PutImmutable creates it, spent
+// once the store shows the create took effect.
+func (self *ConfigLogSequencer) putImmutable(ctx context.Context, key string, body []byte) error {
+	held, found, err := func() ([]byte, bool, error) {
+		object, err := self.cluster.Get(ctx, key)
+		if errors.Is(err, sidecar.ErrBlobNotFound) {
+			return nil, false, nil
+		}
+		if err != nil {
+			return nil, false, err
+		}
+		defer object.Body.Close()
+		// one byte past body is enough to tell a longer object
+		held, err := io.ReadAll(io.LimitReader(object.Body, int64(len(body))+1))
+		return held, true, err
+	}()
+	if err != nil {
+		return err
+	}
+	if found {
+		self.settle(key)
+		if !bytes.Equal(held, body) {
+			return fmt.Errorf("%w: %s", sidecar.ErrBlobImmutableMismatch, key)
+		}
+		return nil
+	}
+	_, err = sidecar.PutImmutable(self.p0Context(ctx, len(body)), self.cluster, key, body, nil)
+	var unknown *sidecar.BlobUnknownError
+	switch {
+	case err == nil:
+		// nothing stood at the read, so the create took effect; a rival's
+		// create of the same bytes in between, which PutImmutable answers
+		// alike, is spent here too
+		self.spendWritten(ctx, key, len(body))
+	case errors.As(err, &unknown):
+		self.spendUnsettled(ctx, key, len(body))
+	case errors.Is(err, sidecar.ErrBlobImmutableMismatch):
+		self.settle(key)
+	}
+	return err
 }
 
 func (self *ConfigLogSequencer) now() time.Time {
@@ -799,13 +930,16 @@ func (self *ConfigLogSequencer) published(ctx context.Context, networkId server.
 
 // One entry's PUT at its position until its outcome is known: the new pin when
 // it landed, nil when another entry took the position (applied, so the caller
-// verifies again at the next), or an error.
+// verifies again at the next), or an error. The entry is spent once the store
+// shows this PUT took effect; a 412 and a PUT a read shows never landed spend
+// nothing, and one whose outcome stays unknown is spent as issued.
 func (self *ConfigLogSequencer) put(ctx context.Context, network *configLogNetwork, key string, entryBytes []byte, tip *bridge.AuthPin) (*bridge.AuthPin, error) {
 	for range self.settings.AppendAttemptCount {
-		_, putErr := self.cluster.PutIfNoneMatch(self.issueP0(ctx, len(entryBytes)), key, entryBytes, nil)
+		_, putErr := self.cluster.PutIfNoneMatch(self.p0Context(ctx, len(entryBytes)), key, entryBytes, nil)
 		var unknown *sidecar.BlobUnknownError
 		switch {
 		case putErr == nil:
+			self.spendWritten(ctx, key, len(entryBytes))
 			if err := network.applyWithLock(ctx, self, entryBytes); err != nil {
 				return nil, &ConfigLogError{Status: http.StatusServiceUnavailable, Code: "unavailable", Tip: tip, Err: err}
 			}
@@ -814,19 +948,33 @@ func (self *ConfigLogSequencer) put(ctx context.Context, network *configLogNetwo
 			held, found, err := configLogGet(ctx, self.cluster, key)
 			switch {
 			case err != nil:
+				if unknown != nil {
+					// it may have landed, which a retry of the append finds out
+					self.spendUnsettled(ctx, key, len(entryBytes))
+				}
 				return nil, &ConfigLogError{Status: http.StatusServiceUnavailable, Code: "unavailable", Tip: tip, Err: fmt.Errorf("the outcome is unknown: %w", err)}
 			case !found:
 				// it never landed and never will, and a 412 over nothing held
 				// nothing: the same bytes again
 				continue
 			case bytes.Equal(held, entryBytes):
+				if unknown != nil {
+					// this PUT landed and its answer was lost
+					self.spendWritten(ctx, key, len(entryBytes))
+				} else {
+					// an earlier PUT of the same bytes landed, spent when its
+					// outcome stayed unknown
+					self.settle(key)
+				}
 				if err := network.applyWithLock(ctx, self, held); err != nil {
 					return nil, &ConfigLogError{Status: http.StatusServiceUnavailable, Code: "unavailable", Tip: tip, Err: err}
 				}
 				return network.log.Pin(), nil
 			}
-			// another instance's entry: a loss here, applied, and verified
-			// again at the next position
+			// another instance's entry, or an earlier one of this append's
+			// whose outcome stayed unknown, spent then: a loss here, applied,
+			// and verified again at the next position
+			self.settle(key)
 			if err := network.applyWithLock(ctx, self, held); err != nil {
 				return nil, &ConfigLogError{Status: http.StatusServiceUnavailable, Code: "unavailable", Tip: tip, Err: err}
 			}
@@ -957,14 +1105,12 @@ func (self *ConfigLogSequencer) AppendBase(ctx context.Context, networkId server
 		},
 		before: func(ctx context.Context) error {
 			rowsSha256 := sha256.Sum256(base.Rows)
-			_, err := sidecar.PutImmutable(self.issueP0(ctx, len(base.Rows)), self.cluster, sidecar.ConfigRowsKey(sidecar.Id(networkId), rowsSha256[:]), base.Rows, nil)
-			return err
+			return self.putImmutable(ctx, sidecar.ConfigRowsKey(sidecar.Id(networkId), rowsSha256[:]), base.Rows)
 		},
 	}
 	if base.Genesis != nil {
 		request.after = func(ctx context.Context) error {
-			_, err := sidecar.PutImmutable(self.issueP0(ctx, len(base.Genesis)), self.cluster, sidecar.ConfigEntryKey(sidecar.Id(networkId), 0), base.Genesis, nil)
-			return err
+			return self.putImmutable(ctx, sidecar.ConfigEntryKey(sidecar.Id(networkId), 0), base.Genesis)
 		}
 	}
 	return self.append(ctx, networkId, request)
