@@ -59,10 +59,11 @@
 //	               across the case; the device installs it and a visitor through tlsedge is shown it
 //	acl saver      a config writer saves its network's document: every grant the network's services need and one
 //	               rule of its own, previewed and saved EXACT_HEAD, previewed again while another save moved the head
-//	enrollment     the team's Owner invites a new person, who accepts and is admitted as a member, or enrolls and
-//	               admits a new device of its own
+//	enrollment     the team's Owner invites a new person, who accepts and is admitted as a member, enrolls and
+//	               admits a new device of its own, or enrolls a tagged sidecar of tag:ci from an auth key carrying the
+//	               tag and admits it with that tag (World.AddTagged)
 //	departure      the team's Owner removes a member the churn added (member-remove, then MemberRevoke), or revokes a
-//	               device of its own the churn added
+//	               device of its own or a tagged sidecar the churn added
 //
 // Chaos (ChaosTargets) restarts a random host or device, keeping its stores: between rounds, ChaosBetweenRoundCount
 // restarts, and during each round past ChaosFreeRoundCount, ChaosDuringRoundCount restarts at random points. The
@@ -98,16 +99,17 @@
 // the metadata cluster's write budget holding a report, and nothing in flight or queued there; the certs budget at LE
 // against the case's first orders (dnsCertsCheckCertsBudget); the challenge names' journal rows against the certs
 // worker's writes (dnsCertsCheckChallengeCounts); and the mail sends' outcomes, the internet MX's transactions and
-// every mailbox's copies (mailCheckMailbox, mailCheckInternetMx, mailCheckOutbox); and last, since it closes every
-// network, the bridge's oracle over every attempt the case made, its sidecar clients and its ledger (ItBridgeWorld's
-// Check, CheckSidecarClients and Reconcile). Nothing is left in flight: no send unended, no certificate row unissued,
+// every mailbox's copies (mailCheckMailbox, mailCheckInternetMx, mailCheckOutbox); and once every check that reads a
+// device has run and the blocks drained, the bridge's oracle over every attempt the case made, its sidecar clients and
+// its ledger (ItBridgeWorld's Check, CheckSidecarClients and Reconcile, which closes every network and must read its
+// contracts' relay rows in the debit journal before a ledger read's flush applies them), then the case's own ledgers. Nothing is left in flight: no send unended, no certificate row unissued,
 // no budget in flight. Each phase has its bound and a progress dump on a stall (World.FailProgress), and the whole
 // case is bounded by CaseTimeout, 10 minutes by default.
 //
 // Not here, each for its reason: a restart of a mail, dns, blog or bridge device (above; the bridge's own device and
-// handler restarts are its case's); a tagged enrollment in the team, which answers 500 (finding team-tagged-enroll),
-// and a team member's own device, whose auth key a Member cannot make (team-member-own-auth-key), so the churn's
-// members join without devices and the Owner's devices are the ones that come and go; and an exact count of the
+// handler restarts are its case's); a team member's own device, whose auth key a Member cannot make
+// (team-member-own-auth-key), so the churn's members join without devices and the Owner's devices and tagged sidecars
+// are the ones that come and go; and an exact count of the
 // blocks' own write budget spend against the objects they wrote, which no harness attributes yet, so the blocks are
 // held to a report a run and nothing in flight.
 //
@@ -119,13 +121,15 @@
 // (config-replay-base-signer), which the case keeps out of the way by having each network's first device save its
 // documents (PersonalAclSaverCount, TeamAclSaverCount).
 //
-// A failure from a product bug stays failing. As the case landed (2026-11-22, runs of about six minutes each), it
-// failed on these, each with its evidence, every other check passing:
+// A failure from a product bug stays failing. As the case landed (2026-11-22, runs of four to six minutes, on the
+// sidecar branches as they stood after team-tagged-enroll and write-budget-close-report landed), it failed on these,
+// each with its evidence, every other check passing:
 //
-//   - a group mailbox's message lost: a message to a's group "team", the internet sender's in one run (round 0, before
-//     any chaos) and a same-network send in another (after an api restart), answered delivered and never listed in the
-//     group's mailbox, while evs answered the mailbox repo's racing ingest pushes 429 RESOURCE_EXHAUSTED and 409
-//     PATH_CONFLICT; ACL saves on a ran in the same rounds;
+//   - a group mailbox's message lost, in three runs of five: a message to a personal network's group "team" (the
+//     internet sender's to a's in round 0, before any chaos; a same-network send to b's in round 0, and to a's after an
+//     api restart), answered delivered and never listed in the group's mailbox through the end, while evs answered the
+//     mailbox repo's racing ingest pushes 429 RESOURCE_EXHAUSTED and 409 PATH_CONFLICT and once a listing's read "reply
+//     invalid: a read reply that ends before its last frame"; ACL saves ran in the same rounds;
 //   - api's write budget one log object's price (9216 B) past the objects api wrote, in every run with the it bridge
 //     network and in none without it: model's ConfigLogSequencer issues P0 before each PUT, so a base whose rows equal
 //     an earlier base's (the bridge's block base after its first) spends on a projrows/ PutImmutable that makes
@@ -133,8 +137,6 @@
 //   - an evs writer's second write of a path refused 409 PATH_CONFLICT 48 ms after its first was answered, no other
 //     push to the repo between: a write plans its first attempt on evs's cache (EvsPlanArgs.Fresh false), which its own
 //     push had not reached, and a file-mode 409 on an update goes back to the caller (the blog writer's own article);
-//   - the bridge's relayed contracts that closed across an api restart journaled no relay debit, their settled bytes
-//     on no meter (ItBridgeWorld.Reconcile), where a run with no api restart reconciled the bridge's ledger exactly.
 //
 // Run it through the build's wrapper: -tags 'sidecar_e2e sidecar_pending sidecar_localstack' -run TestE2eChurnLoad.
 
@@ -302,7 +304,7 @@ func defaultChurnLoadSettings() *churnLoadSettings {
 	dnsSettings.CertDeviceCount = 1
 	team := DefaultWorldTeamSettings()
 	team.OwnerDeviceCount = 2
-	team.Tags = []string{}
+	team.Tags = []string{"ci"}
 	configBasesPerMinute := int64(6000)
 	team.SidecarLimits["config_bases_per_min"] = configBasesPerMinute
 	bridge := DefaultItBridgeSettings()
@@ -543,7 +545,9 @@ type churnLoadNetwork struct {
 	savers []*churnLoadDevice
 	saves  []*churnLoadAclSave
 	// the members the churn added, the ones it removed, and the devices it added and revoked
-	joined         []*WorldTeamMember
+	joined []*WorldTeamMember
+	// the tagged sidecars the churn admitted, which read the config repo alone, so no evs or gkm worker takes them
+	tagged         []*churnLoadDevice
 	removed        []*WorldTeamMember
 	enrolled       []*churnLoadDevice
 	revoked        []*churnLoadDevice
@@ -560,6 +564,18 @@ func (self *churnLoadNetwork) deviceList() []*churnLoadDevice {
 // The devices that have not left.
 func (self *churnLoadNetwork) liveDevices() []*churnLoadDevice {
 	return slices.DeleteFunc(self.deviceList(), func(device *churnLoadDevice) bool { return device.gone() })
+}
+
+// Every device the case runs on the network, its tagged sidecars last.
+func (self *churnLoadNetwork) everyDevice() []*churnLoadDevice {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return slices.Concat(self.devices, self.tagged)
+}
+
+// Every device that has not left, its tagged sidecars last: what a convergence check holds.
+func (self *churnLoadNetwork) everyLiveDevice() []*churnLoadDevice {
+	return slices.DeleteFunc(self.everyDevice(), func(device *churnLoadDevice) bool { return device.gone() })
 }
 
 // The case's device of t3, nil for none.
@@ -751,7 +767,7 @@ func (self *churnLoadCase) release() {
 		}
 	}
 	for _, network := range self.networks {
-		for _, device := range network.deviceList() {
+		for _, device := range network.everyDevice() {
 			device.stateLock.Lock()
 			remove := device.removeAlarm
 			device.removeAlarm = nil
