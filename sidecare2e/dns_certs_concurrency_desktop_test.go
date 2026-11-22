@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -287,14 +288,16 @@ func (self *dnsCertsKeyFiles) WriteKeyFile(ctx context.Context, repoId sidecar.I
 	return nil
 }
 
-// One custom domain of the delegated phase: its network and the publisher whose device serves its host, the host and
-// its acme name, and the desktops that order it, each with its orderer and its passes' reports.
+// One custom domain of the delegated phase: its network and the publishers whose devices serve its host, each with a
+// custom row of its own for it, the host, the owner it maps to and its acme name, and the desktops that order it,
+// each with its orderer and its passes' reports.
 type dnsCertsCustomDomain struct {
-	Network   *dnsCertsNetwork
-	Publisher *dnsCertsPublisher
-	Domain    string
-	Host      string
-	// <acme_token>.acme.<root>, canonical
+	Network    *dnsCertsNetwork
+	Publishers []*dnsCertsPublisher
+	Domain     string
+	Host       string
+	// <TlsHost>.<label>.<root>, and <acme_token>.acme.<root>, canonical
+	Owner    string
 	AcmeName string
 	Desktops []*sidecart3.T3Device
 	Orderers []*sidecar.TlsCustomDomainOrderer
@@ -313,14 +316,39 @@ func (self *dnsCertsCustomDomain) passed(desktop int, report *sidecar.TlsCustomP
 	self.newOrders[desktop] += report.NewOrders
 }
 
-// The custom row of the domain's host its publisher's device queued, nil before.
-func (self *dnsCertsCustomDomain) row(rows []*sidecar.TlsCertRecord) *sidecar.TlsCertRecord {
+// The custom rows of the domain's host, its publishers' devices' and any other's, oldest first.
+func (self *dnsCertsCustomDomain) rows(rows []*sidecar.TlsCertRecord) []*sidecar.TlsCertRecord {
+	hostRows := []*sidecar.TlsCertRecord{}
 	for _, row := range rows {
 		if row.CustomHost == self.Host {
-			return row
+			hostRows = append(hostRows, row)
+		}
+	}
+	return hostRows
+}
+
+// The publisher whose device a row is, nil for none.
+func (self *dnsCertsCustomDomain) publisher(row *sidecar.TlsCertRecord) *dnsCertsPublisher {
+	for _, publisher := range self.Publishers {
+		if publisher.SidecarId == row.SidecarId {
+			return publisher
 		}
 	}
 	return nil
+}
+
+// Whether every publisher's row of the host issued, and no other row stands for it.
+func (self *dnsCertsCustomDomain) issuedAll(rows []*sidecar.TlsCertRecord) bool {
+	hostRows := self.rows(rows)
+	if len(hostRows) != len(self.Publishers) {
+		return false
+	}
+	for _, row := range hostRows {
+		if row.State != sidecar.TlsCertStateCustomIssued {
+			return false
+		}
+	}
+	return true
 }
 
 // The delegated phase (see the case's header): custom domains' certificates ordered by desktops under each domain's
@@ -334,35 +362,37 @@ func dnsCertsDelegatedPhase(t testing.TB, stack *dnsCertsStack, settings *dnsCer
 	customSettings.DirectoryUrl = stack.Pebble.DirectoryUrl
 	customSettings.Profile = sidecartest.PebbleProfileTlsServer
 	customSettings.OrderPollInterval = settings.CustomOrderPollInterval
-	acme := newDnsCertsAcmeClient(stack.Pebble.DirectoryUrl, stack.Pebble.HttpClient, customSettings)
+	acme := newDnsCertsAcmeClient(stack.Pebble.DirectoryUrl, stack.desktopAcmeHttp, customSettings)
 	files := newDnsCertsKeyFiles()
 	domains := []*dnsCertsCustomDomain{}
 	for index, network := range networks[:min(settings.CustomDomainCount, len(networks))] {
-		var publisher *dnsCertsPublisher
+		networkPublishers := []*dnsCertsPublisher{}
 		for _, candidate := range publishers {
 			if candidate.Network == network {
-				publisher = candidate
-				break
+				networkPublishers = append(networkPublishers, candidate)
 			}
 		}
-		if publisher == nil {
+		if len(networkPublishers) == 0 {
 			t.Fatalf("%s has no publisher to serve its custom host", network.Name)
 		}
 		domain := fmt.Sprintf(settings.CustomDomainFormat, network.Name)
 		custom := &dnsCertsCustomDomain{
-			Network:   network,
-			Publisher: publisher,
-			Domain:    domain,
-			Host:      settings.CustomHostLabel + "." + domain,
-			issued:    map[int][]sidecar.Id{},
-			newOrders: map[int]int{},
+			Network:    network,
+			Publishers: networkPublishers,
+			Domain:     domain,
+			Host:       settings.CustomHostLabel + "." + domain,
+			Owner:      network.OwnerName(settings.TlsHost),
+			issued:     map[int][]sidecar.Id{},
+			newOrders:  map[int]int{},
 		}
-		acmeToken, err := dnsCertsAddCustomDomain(ctx, network.NetworkId, domain, custom.Host, network.Root, network.OwnerName(settings.TlsHost))
+		acmeToken, err := dnsCertsAddCustomDomain(ctx, network.NetworkId, domain, custom.Host, network.Root, custom.Owner)
 		if err != nil {
 			t.Fatal(err)
 		}
 		custom.AcmeName = dns.CanonicalName(acmeToken + ".acme." + network.Root)
-		// the customer's one-time CNAME of the host's _acme-challenge to the domain's acme name (§12.8 step 3)
+		// the customer's CNAMEs: the host's to its owner, a weak-mode host (§12.8 step 2), and its _acme-challenge's,
+		// one time, to the domain's acme name (step 3)
+		stack.Resolver.MapHost(custom.Host, custom.Owner)
 		stack.Resolver.Delegate(custom.Host, custom.AcmeName)
 		desktopCount := 1
 		if index == 0 {
@@ -388,14 +418,17 @@ func dnsCertsDelegatedPhase(t testing.TB, stack *dnsCertsStack, settings *dnsCer
 		domains = append(domains, custom)
 	}
 
-	// each publisher's pass queues one CSR for its custom host, which its zone now maps (17.2.5)
+	// each publisher's pass queues one CSR of its own for its custom host, which its zone now maps (17.2.5): every
+	// device listening on the host's owner, so each domain orders as many certificates of its one host's set
 	for _, custom := range domains {
-		if err := custom.Publisher.Component.CertManager().Sync(ctx); err != nil {
-			t.Errorf("%s's certificate pass: %v", custom.Publisher.Device.Name, err)
+		for _, publisher := range custom.Publishers {
+			if err := publisher.Component.CertManager().Sync(ctx); err != nil {
+				t.Errorf("%s's certificate pass: %v", publisher.Device.Name, err)
+			}
 		}
 	}
-	if err := dnsCertsAwaitCustomRows(ctx, domains, settings, func(custom *dnsCertsCustomDomain, row *sidecar.TlsCertRecord) bool {
-		return row != nil
+	if err := dnsCertsAwaitCustomRows(ctx, domains, settings, func(custom *dnsCertsCustomDomain, rows []*sidecar.TlsCertRecord) bool {
+		return len(rows) == len(custom.Publishers)
 	}); err != nil {
 		world.FailProgress(t, "the custom hosts' CSRs", err, nil)
 	}
@@ -409,8 +442,17 @@ func dnsCertsDelegatedPhase(t testing.TB, stack *dnsCertsStack, settings *dnsCer
 	defer func() {
 		controller.Testing_TlsCustomChallengeBarrier = previousBarrier
 	}()
+	// and the dns edge restarts under the first command to read ready: that read is held until the edge is back, so
+	// the desktop's GET waits on an edge that restarted under it
+	edgeHold := stack.Dns.HoldNextReady("the dns edge's restart under a delegated challenge's ready read", func() error {
+		return world.Restart(WorldBlockDnsedge)
+	})
+	defer func() {
+		stack.Dns.Disarm(edgeHold)
+		edgeHold.Wait(settings.EdgeRestartTimeout)
+	}()
 
-	// every desktop's passes at once, until its domain's row is issued
+	// every desktop's passes at once, until every row of its domain's host is issued
 	bursts := []*WorldBurst{}
 	for _, custom := range domains {
 		for desktopIndex, orderer := range custom.Orderers {
@@ -420,7 +462,7 @@ func dnsCertsDelegatedPhase(t testing.TB, stack *dnsCertsStack, settings *dnsCer
 				if err != nil {
 					return err
 				}
-				if row := custom.row(rows); row != nil && row.State == sidecar.TlsCertStateCustomIssued {
+				if custom.issuedAll(rows) {
 					return dnsCertsStop
 				}
 				report, err := orderer.RunOnce(ctx)
@@ -441,7 +483,7 @@ func dnsCertsDelegatedPhase(t testing.TB, stack *dnsCertsStack, settings *dnsCer
 		}
 	}
 	if err := RunBursts(ctx, t, "the delegated orders", bursts, settings.Bursts); err != nil {
-		world.FailProgress(t, "the delegated orders", err, bursts)
+		world.FailProgress(t, "the delegated orders", fmt.Errorf("%w\n%s", err, stack.DescribeCerts()), bursts)
 	}
 	for _, burst := range bursts {
 		for _, err := range burst.Errors() {
@@ -456,7 +498,15 @@ func dnsCertsDelegatedPhase(t testing.TB, stack *dnsCertsStack, settings *dnsCer
 	if !restart.Done() {
 		t.Errorf("no challenge command reached its write, so the certs worker never restarted mid-command")
 	}
-	t.Logf("the delegated orders: the certs worker restarted at run %d while receipt %s held its write", stack.Worker.RunCount(), restart.ChallengeId())
+	stack.Dns.Disarm(edgeHold)
+	edgeStarted, edgeSerial := edgeHold.Started()
+	if err := edgeHold.Wait(settings.EdgeRestartTimeout); err != nil {
+		t.Errorf("%v", err)
+	}
+	if !edgeStarted {
+		t.Errorf("no challenge command read ready, so the dns edge never restarted under one")
+	}
+	t.Logf("the delegated orders: the certs worker restarted at run %d while receipt %s held its write; the dns edge restarted under a ready read of serial %q", stack.Worker.RunCount(), restart.ChallengeId(), edgeSerial)
 
 	rows, err := dnsCertsJournal(ctx, networks[0].Root, 0, settings.JournalPageCount)
 	if err != nil {
@@ -464,6 +514,7 @@ func dnsCertsDelegatedPhase(t testing.TB, stack *dnsCertsStack, settings *dnsCer
 	}
 	for _, custom := range domains {
 		dnsCertsCheckCustomDomain(t, ctx, stack, custom, rows)
+		dnsCertsCheckCustomHostRecords(t, ctx, stack, custom, rows)
 	}
 }
 
@@ -474,38 +525,53 @@ func dnsCertsCheckCustomDomain(t testing.TB, ctx context.Context, stack *dnsCert
 	if err != nil {
 		t.Fatal(err)
 	}
-	row := custom.row(certs)
-	if row == nil || row.State != sidecar.TlsCertStateCustomIssued || len(row.Chain) == 0 {
-		t.Errorf("%s's custom row did not issue: %s", custom.Host, dnsCertsDescribeRows(certs))
-		return
+	hostRows := custom.rows(certs)
+	if !custom.issuedAll(certs) {
+		t.Errorf("%s's custom rows did not all issue, one each for %d publishers: %s", custom.Host, len(custom.Publishers), dnsCertsDescribeRows(hostRows))
 	}
-	leaf, err := dnsCertsVerifyChain(row.Chain, stack.Pebble.Roots, []string{custom.Host}, time.Now())
-	if err != nil {
-		t.Errorf("%s's custom certificate: %v", custom.Host, err)
-	} else {
-		spkiSha256, err := worldTlsKeySpkiSha256(custom.Publisher.Device)
+	for _, row := range hostRows {
+		publisher := custom.publisher(row)
+		if publisher == nil {
+			t.Errorf("%s's custom row %s is of a device that publishes no name of the case's", custom.Host, row.CertId)
+			continue
+		}
+		if row.State != sidecar.TlsCertStateCustomIssued || len(row.Chain) == 0 {
+			continue
+		}
+		leaf, err := dnsCertsVerifyChain(row.Chain, stack.Pebble.Roots, []string{custom.Host}, time.Now())
+		if err != nil {
+			t.Errorf("%s's custom certificate for %s: %v", custom.Host, publisher.Device.Name, err)
+			continue
+		}
+		spkiSha256, err := worldTlsKeySpkiSha256(publisher.Device)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if !bytes.Equal(dnsCertsSpkiSha256(leaf), spkiSha256) {
-			t.Errorf("%s's custom certificate is on a key not %s's", custom.Host, custom.Publisher.Device.Name)
+			t.Errorf("%s's custom certificate %s is on a key not %s's", custom.Host, row.CertId, publisher.Device.Name)
 		}
 	}
-	// one desktop registered the chain, once, whatever the others did meanwhile
+	// one desktop registered each row's chain, once, whatever the others did meanwhile
 	custom.stateLock.Lock()
-	issuedBy := []string{}
+	registeredBy := map[sidecar.Id][]string{}
 	newOrders := 0
 	for desktopIndex, certIds := range custom.issued {
-		for range certIds {
-			issuedBy = append(issuedBy, custom.Desktops[desktopIndex].Name)
+		for _, certId := range certIds {
+			registeredBy[certId] = append(registeredBy[certId], custom.Desktops[desktopIndex].Name)
 		}
 	}
 	for _, count := range custom.newOrders {
 		newOrders += count
 	}
 	custom.stateLock.Unlock()
-	if len(issuedBy) != 1 {
-		t.Errorf("%s's chain was registered by %v, where one claim wins it once", custom.Host, issuedBy)
+	for _, row := range hostRows {
+		if desktops := registeredBy[row.CertId]; len(desktops) != 1 {
+			t.Errorf("%s's row %s was registered by %v, where one claim wins it once", custom.Host, row.CertId, desktops)
+		}
+		delete(registeredBy, row.CertId)
+	}
+	for certId, desktops := range registeredBy {
+		t.Errorf("%v registered %s, which is no row of %s's", desktops, certId, custom.Host)
 	}
 	// each receipt one domain and claim, written at the serial of the journal's one commit of its digest at the acme
 	// name, every commit of the name a receipt's
@@ -570,8 +636,79 @@ func dnsCertsCheckCustomDomain(t testing.TB, ctx context.Context, stack *dnsCert
 	}
 }
 
-// Ends a desktop's burst once its domain's row issued: a step's error, which the phase reads as done.
-var dnsCertsStop = errors.New("the domain's row issued")
+// The custom host answers through its customer's CNAME what its owner answers at the edge (§12.8 step 2's weak mode):
+// the resolver's answer to the host's TXT holds the CNAME to the owner and the owner's newest TXT commit in rows,
+// signed under the root's zone keys, asked until it does within the dns settings' Timeout, since the edge restarted
+// in the phase; and what the host's addresses answer, its owner holding a TXT set of its own, is logged.
+func dnsCertsCheckCustomHostRecords(t testing.TB, ctx context.Context, stack *dnsCertsStack, custom *dnsCertsCustomDomain, rows []dnsservice.DnsJournalRow) {
+	t.Helper()
+	settings := stack.settings.Dns
+	want := []string{}
+	for _, row := range rows {
+		for _, upsert := range row.Upserts {
+			if dns.CanonicalName(upsert.Owner) == custom.Owner && upsert.Type == dns.TypeTXT {
+				values, err := dnsCertsRdataValues(upsert)
+				if err != nil {
+					t.Errorf("serial %d: %v", row.Serial, err)
+					continue
+				}
+				want = values
+			}
+		}
+		for _, deleted := range row.Deletes {
+			if dns.CanonicalName(deleted.Owner) == custom.Owner && deleted.Type == dns.TypeTXT {
+				want = []string{}
+			}
+		}
+	}
+	if len(want) == 0 {
+		t.Errorf("%s's owner %s holds no TXT, which the records phase wrote", custom.Host, custom.Owner)
+		return
+	}
+	set := dnsCertsSetKey{Owner: custom.Owner, Type: dns.TypeTXT}
+	waitCtx, cancel := context.WithTimeout(ctx, settings.Timeout)
+	defer cancel()
+	for {
+		answer, err := stack.Resolver.exchange(waitCtx, custom.Host, dns.TypeTXT)
+		cnamed := false
+		if err == nil {
+			for _, record := range answer.Answer {
+				if cname, ok := record.(*dns.CNAME); ok && dns.CanonicalName(cname.Hdr.Name) == dns.CanonicalName(custom.Host) && dns.CanonicalName(cname.Target) == custom.Owner {
+					cnamed = true
+				}
+			}
+		}
+		if err == nil && cnamed && slices.Equal(dnsCertsAnswerValues(answer, set), want) {
+			if err := stack.Keys.Verify(answer, custom.Owner, dns.TypeTXT, time.Now()); err != nil {
+				t.Errorf("%s's TXT through its customer's CNAME: %v", custom.Host, err)
+			}
+			break
+		}
+		select {
+		case <-waitCtx.Done():
+			t.Errorf("%s's TXT through its customer's CNAME never answered %s's newest %v: %v, %v", custom.Host, custom.Owner, want, answer, err)
+			return
+		case <-time.After(settings.RetryInterval):
+		}
+	}
+	addresses, err := stack.Resolver.exchange(ctx, custom.Host, dns.TypeA)
+	t.Logf("%s's A through its customer's CNAME, its owner %s holding a TXT set of its own: %s, %v", custom.Host, custom.Owner, dnsCertsDescribeAnswer(addresses), err)
+}
+
+// answer's rcode and records, one line, for a log.
+func dnsCertsDescribeAnswer(answer *dns.Msg) string {
+	if answer == nil {
+		return "no answer"
+	}
+	records := []string{}
+	for _, record := range answer.Answer {
+		records = append(records, strings.Join(strings.Fields(record.String()), " "))
+	}
+	return fmt.Sprintf("%s %v", dns.RcodeToString[answer.Rcode], records)
+}
+
+// Ends a desktop's burst once every row of its domain's host issued: a step's error, which the phase reads as done.
+var dnsCertsStop = errors.New("the domain's rows issued")
 
 // The barrier that restarts the certs worker once, while the first challenge command it sees holds its write: the
 // restart runs on a goroutine of its own, and the command waits until the run it belongs to has ended, so the drain
@@ -633,8 +770,8 @@ func (self *dnsCertsBarrierRestart) ChallengeId() server.Id {
 	return self.challengeId
 }
 
-// Waits until want holds for each domain's custom row, read every CertPollInterval.
-func dnsCertsAwaitCustomRows(ctx context.Context, domains []*dnsCertsCustomDomain, settings *dnsCertsSettings, want func(custom *dnsCertsCustomDomain, row *sidecar.TlsCertRecord) bool) error {
+// Waits until want holds for each domain's custom rows of its host, read every CertPollInterval.
+func dnsCertsAwaitCustomRows(ctx context.Context, domains []*dnsCertsCustomDomain, settings *dnsCertsSettings, want func(custom *dnsCertsCustomDomain, rows []*sidecar.TlsCertRecord) bool) error {
 	for {
 		waiting := []string{}
 		for _, custom := range domains {
@@ -642,7 +779,7 @@ func dnsCertsAwaitCustomRows(ctx context.Context, domains []*dnsCertsCustomDomai
 			if err != nil {
 				return err
 			}
-			if !want(custom, custom.row(rows)) {
+			if !want(custom, custom.rows(rows)) {
 				waiting = append(waiting, fmt.Sprintf("%s (%s)", custom.Host, dnsCertsDescribeRows(rows)))
 			}
 		}

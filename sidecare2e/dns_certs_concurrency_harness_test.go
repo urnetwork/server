@@ -3,8 +3,10 @@
 // The harness of the dns and certificates case (dns_certs_concurrency_test.go): each device's writes through dns's
 // api and what it learned of each, the readers at the dns edge, the DNSSEC checks of what the edge answers against the
 // world's KSK, and every read of server state the case makes outside the hosts and api's routes, in one place (the e2e
-// conventions): the root's journal, which says what each write committed and at which serial, and the network's
-// dns.records admin events, which §12.7's dns_changes_per_hour counts.
+// conventions): the root's journal, which says what each write committed and at which serial, and each challenge
+// name's writes in dns_challenges_per_name_hour's window; the network's dns.records admin events, which §12.7's
+// dns_changes_per_hour counts; the certificate rows, the custom domains' receipts and spends; certs' budget in Redis;
+// and the objects api's process wrote on the first metadata cluster, which its write budget reports.
 //
 // A write's outcome is what its answer said. An unavailable answer, the dns API's own or the lb's while the block is
 // down, wrote nothing. A 5xx past the API, or no answer at all, leaves the outcome unknown, as a client that lost its
@@ -26,6 +28,7 @@ import (
 	"net"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -622,24 +625,101 @@ func dnsCertsAwaitRows(ctx context.Context, publishers []*dnsCertsPublisher, set
 	}
 }
 
-// Reads a sorted set's members in full.
+// Reads a sorted set's members in full, each followed by its score.
 var dnsCertsBudgetMembersScript = &sidecar.RedisScript{
 	Name:   "e2e_certs_budget_members",
-	Source: `return redis.call('ZRANGE', KEYS[1], 0, -1)`,
+	Source: `return redis.call('ZRANGE', KEYS[1], 0, -1, 'WITHSCORES')`,
 }
 
-// The members of root's budget at ca, {tcb_<ca>_<root>} (certsservice's budget.go): each order that spent a unit, by
-// its cert_id, and the marker of the key's rebuild.
-func dnsCertsBudgetMembers(ctx context.Context, world *World, ca certsservice.CertsCa, root string) ([]string, error) {
+// The members of root's budget at ca, {tcb_<ca>_<root>} (certsservice's budget.go), each scored by its admission in
+// Unix ms: each order that spent a unit, by its cert_id, and the marker of the key's rebuild, scored 0.
+func dnsCertsBudgetMembers(ctx context.Context, world *World, ca certsservice.CertsCa, root string) (map[string]int64, error) {
 	reply, err := world.T3().Host().Redis.RunScript(ctx, dnsCertsBudgetMembersScript, []string{fmt.Sprintf("{tcb_%s_%s}", ca, root)}, nil)
 	if err != nil {
 		return nil, err
 	}
-	members := []string{}
-	for _, member := range reply.Replies {
-		members = append(members, string(member.Bulk))
+	if len(reply.Replies)%2 != 0 {
+		return nil, fmt.Errorf("the certs budget answered %d members and scores", len(reply.Replies))
+	}
+	members := map[string]int64{}
+	for index := 0; index < len(reply.Replies); index += 2 {
+		score, err := strconv.ParseFloat(string(reply.Replies[index+1].Bulk), 64)
+		if err != nil {
+			return nil, fmt.Errorf("the certs budget scores %q with %q: %w", reply.Replies[index].Bulk, reply.Replies[index+1].Bulk, err)
+		}
+		members[string(reply.Replies[index].Bulk)] = int64(score)
 	}
 	return members, nil
+}
+
+// How many journal rows of root committed at or after since upsert the TXT at owner, canonical: what the dns API counts
+// against dns_challenges_per_name_hour for a challenge name (model's countDnsChallengeWritesInTx, over the network's
+// rows or root's own alike), read from dns_zone_journal as it does, by containment.
+func dnsCertsChallengeWindowCount(ctx context.Context, root string, owner string, since time.Time) (count int, returnErr error) {
+	match := fmt.Sprintf(`{"upserts":[{"owner":%q,"type":%d}]}`, dns.CanonicalName(owner), dns.TypeTXT)
+	server.HandleError(func() {
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(
+				ctx,
+				`SELECT count(*) FROM dns_zone_journal WHERE root = $1 AND $2 <= commit_time AND diff @> $3::jsonb`,
+				dns.CanonicalName(root),
+				since.UTC(),
+				match,
+			).Scan(&count))
+		})
+	}, func(err error) {
+		returnErr = fmt.Errorf("the challenge window of %s: %w", owner, err)
+	})
+	return
+}
+
+// A custom domain's challenge target's writes in the cap's window ending at now, as certs reads them before it
+// charges a write (model.GetDnsAcmeChallengeWindowInTx; QD-1165).
+func dnsCertsAcmeChallengeWindow(ctx context.Context, root string, name string, now time.Time) (count int, returnErr error) {
+	server.HandleError(func() {
+		server.Db(ctx, func(conn server.PgConn) {
+			count, _ = model.GetDnsAcmeChallengeWindowInTx(ctx, conn, root, name, now)
+		})
+	}, func(err error) {
+		returnErr = fmt.Errorf("the acme window of %s: %w", name, err)
+	})
+	return
+}
+
+// The key prefixes of the objects api's process writes on the first metadata cluster, and the P0 kind it issues each
+// one's PUT to its write budget as: §7.9's log entries and a base's rows (model.ConfigLogSequencer), and §7.10's
+// revocation records (model.SidecarRevStore).
+var dnsCertsApiObjectKinds = map[string]sidecar.WriteP0Kind{
+	"proj/":     sidecar.WriteP0KindLog,
+	"projrows/": sidecar.WriteP0KindLog,
+	"rev/":      sidecar.WriteP0KindRevocation,
+}
+
+// Every object under dnsCertsApiObjectKinds' prefixes on the world's first metadata cluster, its byte count by key,
+// read a page of pageCount at a time.
+func dnsCertsApiObjects(ctx context.Context, world *World, pageCount int) (map[string]int64, error) {
+	cluster, err := world.T3().Host().Blobs.FirstCluster()
+	if err != nil {
+		return nil, err
+	}
+	objects := map[string]int64{}
+	for prefix := range dnsCertsApiObjectKinds {
+		startAfter := ""
+		for {
+			page, more, err := cluster.List(ctx, prefix, startAfter, pageCount)
+			if err != nil {
+				return nil, fmt.Errorf("the objects under %s: %w", prefix, err)
+			}
+			for _, object := range page {
+				objects[object.Key] = object.ByteCount
+				startAfter = object.Key
+			}
+			if !more || len(page) == 0 {
+				break
+			}
+		}
+	}
+	return objects, nil
 }
 
 // A verified custom domain of networkId's with host mapped to owner (§7.6, §12.8 steps 1 and 2), written as POST
