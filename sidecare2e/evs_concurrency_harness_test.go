@@ -22,6 +22,9 @@
 //     pusher 502 with no evs body, as an lb whose upstream went away before the answer reached it: the pusher sends the
 //     same push id and bytes again (QD-758), and the restarted block must answer the push as committed (§11.8's 5a),
 //     so a restart lands exactly between a commit and its answer
+//   - a recorder at gkm's origin, in front of the world's lb for the gkm block: every 401 or 403 gkm answers, with the
+//     bearer's claims read unverified (its log position, scopes and sidecar, never the token) and what the case says of
+//     the caller's device at that moment, so a refusal reads as what it refused
 //
 // Safe for concurrent use.
 
@@ -30,6 +33,8 @@ package sidecare2e
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -457,6 +462,170 @@ func (self *evsConcurrencyOrigin) take(r *http.Request) *evsConcurrencyPushChaos
 	self.armed = nil
 	armed.pushId = pushId
 	return armed
+}
+
+// gkm's origin with the recorder in front of the world's lb (the file's header). Safe for concurrent use.
+type evsConcurrencyGkmOrigin struct {
+	lb http.Handler
+
+	stateLock sync.Mutex
+	// what the case says of the device a sidecar id names, given the scopes its token holds; nil until set
+	describe func(sidecarId sidecar.Id, scopes []string) string
+	refusals []*evsConcurrencyGkmRefusal
+	// how many refusals the case has logged
+	logged int
+}
+
+// One refusal gkm answered.
+type evsConcurrencyGkmRefusal struct {
+	time   time.Time
+	status int
+	// the method and path, its ids and numbers as {id} and {n}, with no query
+	route string
+	// the bearer's claims, read unverified; claimed is false where the bearer held none that parse
+	claimed           bool
+	projectionVersion uint64
+	scopes            []string
+	sidecarId         sidecar.Id
+	// what describe said of the device at the answer, "" with no describe or no sidecar
+	device string
+}
+
+// What a service token claims that the recorder reads (server/oauth's ServiceTokenClaims).
+type evsConcurrencyServiceTokenClaims struct {
+	Scope       string `json:"scope"`
+	ProjVersion uint64 `json:"proj_v"`
+	SidecarId   string `json:"ur_sidecar_id"`
+}
+
+// Serves the gkm block's origin through the recorder from now on, in place of the lb the world's first run of the block
+// put there.
+func installEvsConcurrencyGkmOrigin(world *World) (*evsConcurrencyGkmOrigin, error) {
+	block := world.Block(WorldBlockGkm)
+	if block == nil || block.service == "" {
+		return nil, errors.New("the world serves no gkm origin")
+	}
+	origin := &evsConcurrencyGkmOrigin{lb: &worldLb{block: block}}
+	api := world.T3().Api()
+	if err := api.ServeService(block.service, nil); err != nil {
+		return nil, err
+	}
+	if err := api.ServeService(block.service, origin); err != nil {
+		return nil, err
+	}
+	return origin, nil
+}
+
+// Sets what the recorder asks of a refused caller's device from now on.
+func (self *evsConcurrencyGkmOrigin) setDescribe(describe func(sidecarId sidecar.Id, scopes []string) string) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.describe = describe
+}
+
+func (self *evsConcurrencyGkmOrigin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	status := &evsConcurrencyStatusWriter{ResponseWriter: w}
+	self.lb.ServeHTTP(status, r)
+	if status.status != http.StatusUnauthorized && status.status != http.StatusForbidden {
+		return
+	}
+	refusal := &evsConcurrencyGkmRefusal{time: time.Now(), status: status.status, route: r.Method + " " + evsConcurrencyRoute(r.URL.Path)}
+	if claims := evsConcurrencyBearerClaims(r); claims != nil {
+		refusal.claimed = true
+		refusal.projectionVersion = claims.ProjVersion
+		refusal.scopes = strings.Fields(claims.Scope)
+		refusal.sidecarId, _ = sidecar.ParseId(claims.SidecarId)
+	}
+	self.stateLock.Lock()
+	describe := self.describe
+	self.stateLock.Unlock()
+	if describe != nil && refusal.sidecarId != (sidecar.Id{}) {
+		refusal.device = describe(refusal.sidecarId, refusal.scopes)
+	}
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.refusals = append(self.refusals, refusal)
+}
+
+// The refusals recorded since the last call, oldest first.
+func (self *evsConcurrencyGkmOrigin) takeRefusals() []*evsConcurrencyGkmRefusal {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	refusals := slices.Clone(self.refusals[self.logged:])
+	self.logged = len(self.refusals)
+	return refusals
+}
+
+// A path as a route: each 32-character hex segment {id}, each number {n}.
+func evsConcurrencyRoute(path string) string {
+	segments := strings.Split(path, "/")
+	for i, segment := range segments {
+		if segment == "" {
+			continue
+		}
+		hex, digits := len(segment) == 32, true
+		for _, c := range segment {
+			if c < '0' || '9' < c {
+				digits = false
+				if c < 'a' || 'f' < c {
+					hex = false
+				}
+			}
+		}
+		switch {
+		case hex:
+			segments[i] = "{id}"
+		case digits:
+			segments[i] = "{n}"
+		}
+	}
+	return strings.Join(segments, "/")
+}
+
+// The claims of r's bearer, read without verifying it, nil where it holds none that parse.
+func evsConcurrencyBearerClaims(r *http.Request) *evsConcurrencyServiceTokenClaims {
+	token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if !ok {
+		return nil
+	}
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return nil
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil
+	}
+	claims := &evsConcurrencyServiceTokenClaims{}
+	if err := json.Unmarshal(payload, claims); err != nil {
+		return nil
+	}
+	return claims
+}
+
+// A response writer that keeps the status it was answered with.
+type evsConcurrencyStatusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (self *evsConcurrencyStatusWriter) WriteHeader(status int) {
+	if self.status == 0 {
+		self.status = status
+	}
+	self.ResponseWriter.WriteHeader(status)
+}
+
+func (self *evsConcurrencyStatusWriter) Write(b []byte) (int, error) {
+	if self.status == 0 {
+		self.status = http.StatusOK
+	}
+	return self.ResponseWriter.Write(b)
+}
+
+// What http.ResponseController reaches through, the lb's flushes among it.
+func (self *evsConcurrencyStatusWriter) Unwrap() http.ResponseWriter {
+	return self.ResponseWriter
 }
 
 // Waits wait, or until ctx ends, whose error it answers.

@@ -80,8 +80,17 @@
 //   - the stored bytes, in some runs: the commit the hook lets the block answer just before its drain can lose its step
 //     8, its stored-byte delta (the ledger short of evs.nightly's count by that record's bytes) and its hints, since
 //     EvsEngine.Drain waits for requests in flight and not for step 8, which runs off the reply path;
-//
-// and a gkm 403 to one writer's GET /gkm/groups/{group_id}/gen while the races' bases land, which is not traced yet.
+//   - the writes beside the races, in most runs: two or three writers are refused 403 by gkm on GET
+//     /gkm/groups/{group_id}/gen, their writes failing "gkm refused: 403". The first round's save is the network's first
+//     ACL document, which drops §8.5's implicit document's admin on general repos, so member devices hold rw there by
+//     the repo's RepoGrant. gkm's state takes the save within milliseconds, before the writers' states do and often
+//     before the saver hears its own save. A writer's gkm client still presents the token it minted for the strongest
+//     roles its own state gave, admin (GkmApi.scopesFor's batches), and gkm's guard asks the state for that right
+//     together with its weaker ones, admin, rw and r, which it refuses whole (QD-975). The client retries only a 429 or
+//     a 503 (GkmApi.do), so the write fails though its writer holds rw and the read needs r. Its state catches up tens
+//     of milliseconds later, and its next token carries rw (question e2e-evs-concurrency-gkm-stale-strongest-scope).
+//     The recorder at gkm's origin (evs_concurrency_harness_test.go) logs each refusal with the token's log position and
+//     scopes, and the roles the caller's state and the newest state any device follows give it.
 //
 // Each phase has PhaseTimeout and dumps the world's progress when it stalls; the case has the conventions' 10 minutes.
 // Run it through the build's wrapper: -tags 'sidecar_e2e sidecar_pending sidecar_localstack'.
@@ -452,6 +461,8 @@ type evsConcurrencyRaceRound struct {
 	refusals map[string]error
 	// the config version the winner's base named
 	wonVersion uint64
+	// when the winner's save was answered
+	savedAt time.Time
 }
 
 // The case: the world, its devices and repos, and what each phase found.
@@ -468,6 +479,9 @@ type evsConcurrencyCase struct {
 
 	// the chaos hook at evs's origin, and the pushes whose answers its restarts lost, nil where none was taken
 	origin *evsConcurrencyOrigin
+	// the recorder at gkm's origin, and each repo's name for its lines: the case's two and the network's config
+	gkmOrigin *evsConcurrencyGkmOrigin
+	repoNames map[sidecar.Id]string
 	// each evs run past the first, by its run's number: the window its start fell in, a restart's call and return
 	runStarts map[int][2]time.Time
 	midPush   *evsConcurrencyPushChaos
@@ -517,6 +531,10 @@ func runEvsConcurrency(t testing.TB, settings *evsConcurrencySettings) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	gkmOrigin, err := installEvsConcurrencyGkmOrigin(world)
+	if err != nil {
+		t.Fatal(err)
+	}
 	sampler := startEvsConcurrencyBudgetSampler(world, settings.BudgetSampleInterval)
 	defer sampler.stop()
 	worker, err := newEvsConcurrencyWorker(world)
@@ -524,7 +542,7 @@ func runEvsConcurrency(t testing.TB, settings *evsConcurrencySettings) {
 		t.Fatal(err)
 	}
 	defer worker.close()
-	self := &evsConcurrencyCase{t: t, settings: settings, world: world, worker: worker, origin: origin, runStarts: map[int][2]time.Time{}}
+	self := &evsConcurrencyCase{t: t, settings: settings, world: world, worker: worker, origin: origin, gkmOrigin: gkmOrigin, runStarts: map[int][2]time.Time{}}
 
 	ctx, cancel := world.StepContext(t.Context(), settings.PhaseTimeout)
 	if err := self.setUp(ctx); err != nil {
@@ -539,10 +557,14 @@ func runEvsConcurrency(t testing.TB, settings *evsConcurrencySettings) {
 			}
 		}
 	}()
+	self.logGkmRefusals("the setup")
+	gkmOrigin.setDescribe(self.describeGkmCaller)
 
 	self.freshCreations()
 	self.writePhase()
+	self.logGkmRefusals("the first phase")
 	self.dropPhase()
+	self.logGkmRefusals("the second phase")
 	if t.Failed() {
 		self.logState()
 	}
@@ -551,6 +573,7 @@ func runEvsConcurrency(t testing.TB, settings *evsConcurrencySettings) {
 	self.checkChaos()
 	self.checkAlarms()
 	self.racePhase()
+	self.logGkmRefusals("the third phase")
 	self.checkAlarms()
 	self.checkLedgers(sampler)
 }
@@ -585,6 +608,12 @@ func (self *evsConcurrencyCase) setUp(ctx context.Context) error {
 	self.general = newEvsConcurrencyRepo("general", generalId)
 	self.inbox = newEvsConcurrencyRepo("inbox", inboxRepo.RepoId())
 	self.repos = []*evsConcurrencyRepo{self.general, self.inbox}
+	self.repoNames = map[sidecar.Id]string{self.general.repoId: self.general.name, self.inbox.repoId: self.inbox.name}
+	if follower := owner.Follower(); follower != nil && follower.Client() != nil && follower.Client().State() != nil {
+		if configRepoId, err := sidecar.IdFromBytes(follower.Client().State().Genesis().GetConfigRepoId()); err == nil {
+			self.repoNames[configRepoId] = "config"
+		}
+	}
 
 	// each repo's seeds, its main's first commits, so main stands before anything subscribes to it and the bursts'
 	// parents stand before they write under them
@@ -926,12 +955,13 @@ func (self *evsConcurrencyCase) race(ctx context.Context) error {
 		type racerSave struct {
 			pin *bridge.AuthPin
 			err error
+			at  time.Time
 		}
 		saves := make([]racerSave, len(plans))
 		for index, plan := range plans {
 			group.Go(func() {
 				pin, err := plan.racer.Sidecar().SaveAclPolicy(ctx, plan.source, plan.plan.Digest, sidecar.SidecarActConfirmed)
-				saves[index] = racerSave{pin: pin, err: err}
+				saves[index] = racerSave{pin: pin, err: err, at: time.Now()}
 			})
 		}
 		group.Wait()
@@ -942,6 +972,7 @@ func (self *evsConcurrencyCase) race(ctx context.Context) error {
 			if save.err == nil {
 				record.winners = append(record.winners, plan.racer.Name)
 				winner, winnerPin = plan.racer, save.pin.GetVersion()
+				record.savedAt = save.at
 				delete(remaining, plan.racer)
 				continue
 			}
@@ -1831,6 +1862,130 @@ func (self *evsConcurrencyCase) checkLedgers(sampler *evsConcurrencyBudgetSample
 	if len(clusterReports) == 0 {
 		t.Errorf("the budget sampler read no metadata cluster's reports")
 	}
+}
+
+// What the case says of the device whose sidecar is sidecarId when gkm refuses it (the recorder at gkm's origin): the
+// role its config follower's state gives it on each repo the refused token scopes, and the role the newest state any
+// device follows gives it there, each state at its log position. Called on gkm's request goroutines once setUp is done.
+func (self *evsConcurrencyCase) describeGkmCaller(sidecarId sidecar.Id, scopes []string) string {
+	name := fmt.Sprintf("sidecar %s, no device of the case", sidecarId)
+	var own *sidecar.ConfigState
+	var newest *sidecar.ConfigState
+	newestName := ""
+	for _, device := range self.devices {
+		follower := device.device.Follower()
+		if follower == nil || follower.Client() == nil {
+			continue
+		}
+		state := follower.Client().State()
+		if state == nil {
+			continue
+		}
+		if device.device.Sidecar().Identity().SidecarId == sidecarId {
+			name, own = device.device.Name, state
+		}
+		if newest == nil || newest.Pin().GetVersion() < state.Pin().GetVersion() {
+			newest, newestName = state, device.device.Name
+		}
+	}
+	now := time.Now()
+	roles := func(state *sidecar.ConfigState) string {
+		acl, err := state.Acl()
+		if err != nil {
+			return fmt.Sprintf("no rights (%v)", err)
+		}
+		parts := []string{}
+		for _, scope := range scopes {
+			repoId, ok := evsConcurrencyScopeRepoId(scope)
+			if !ok {
+				continue
+			}
+			rights := acl.EvsAccess(sidecar.AclSidecarSubject(sidecarId), repoId, sidecar.AclTokenAudienceGkm, now).Rights
+			parts = append(parts, self.repoName(repoId)+":"+evsConcurrencyRole(rights))
+		}
+		return strings.Join(parts, " ")
+	}
+	if own == nil {
+		return name
+	}
+	described := fmt.Sprintf("%s, whose follower's state at log position %d gives it %s", name, own.Pin().GetVersion(), roles(own))
+	if newest != own {
+		described += fmt.Sprintf(", where %s's, the newest at %d, gives it %s", newestName, newest.Pin().GetVersion(), roles(newest))
+	}
+	return described
+}
+
+// Logs each refusal gkm answered since the last call, with where it fell among the race rounds' saves, what the
+// refused token held and what the case said of its caller then.
+func (self *evsConcurrencyCase) logGkmRefusals(phase string) {
+	refusals := self.gkmOrigin.takeRefusals()
+	self.stateLock.Lock()
+	rounds := slices.Clone(self.rounds)
+	self.stateLock.Unlock()
+	for _, refusal := range refusals {
+		after := ""
+		for index, round := range rounds {
+			if !round.savedAt.IsZero() && round.savedAt.Before(refusal.time) {
+				after = fmt.Sprintf(", %s after round %d's save took the config repo to version %d", refusal.time.Sub(round.savedAt).Round(time.Millisecond), index, round.wonVersion)
+			}
+		}
+		token := "a bearer with no claims that parse"
+		if refusal.claimed {
+			names := []string{}
+			for _, scope := range refusal.scopes {
+				if repoId, ok := evsConcurrencyScopeRepoId(scope); ok {
+					scope = self.repoName(repoId) + ":" + scope[strings.LastIndex(scope, ":")+1:]
+				}
+				names = append(names, scope)
+			}
+			token = fmt.Sprintf("a token from log position %d holding %s", refusal.projectionVersion, strings.Join(names, " "))
+		}
+		caller := refusal.device
+		if caller == "" {
+			caller = fmt.Sprintf("sidecar %s", refusal.sidecarId)
+		}
+		self.t.Logf("%s: gkm answered %s %d at %s%s: %s, presented by %s", phase, refusal.route, refusal.status, refusal.time.Format("15:04:05.000"), after, token, caller)
+	}
+}
+
+// A repo's name in the case's lines: general, inbox or config, else its id.
+func (self *evsConcurrencyCase) repoName(repoId sidecar.Id) string {
+	if name, ok := self.repoNames[repoId]; ok {
+		return name
+	}
+	return repoId.String()
+}
+
+// The repo a repo:<id>:<role> scope names.
+func evsConcurrencyScopeRepoId(scope string) (sidecar.Id, bool) {
+	rest, ok := strings.CutPrefix(scope, "repo:")
+	if !ok {
+		return sidecar.Id{}, false
+	}
+	idText, _, ok := strings.Cut(rest, ":")
+	if !ok {
+		return sidecar.Id{}, false
+	}
+	repoId, err := sidecar.ParseId(idText)
+	if err != nil {
+		return sidecar.Id{}, false
+	}
+	return repoId, true
+}
+
+// The strongest role rights carry, as a scope names it.
+func evsConcurrencyRole(rights sidecar.AclEvsRights) string {
+	switch {
+	case rights.Has(sidecar.AclEvsAdmin):
+		return "admin"
+	case rights.Has(sidecar.AclEvsWrite):
+		return "rw"
+	case rights.Has(sidecar.AclEvsRead):
+		return "r"
+	case rights.Has(sidecar.AclEvsDeposit):
+		return "deposit"
+	}
+	return "none"
 }
 
 // What the case did, for a failure's message.
