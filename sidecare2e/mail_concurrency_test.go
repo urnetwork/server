@@ -49,7 +49,10 @@
 //     meters hold, never overdrawn, and its mx and smtp meters hold at least the bytes of the mail it took through
 //     mxedge and sent through smtpedge
 //
-// A failure from a product bug stays failing (the e2e conventions). Run it through the build's wrapper:
+// A failure from a product bug stays failing (the e2e conventions). One stands today: the groups' mailboxes list none of
+// their mail, since ingest takes the deposits of a device that reads a group without writing it, as each of the member's
+// devices but the group's creator does, for read receipts and leaves them standing (question
+// personal-group-deposit-group-deposits-classed-receipts). Run it through the build's wrapper:
 // -tags 'sidecar_e2e sidecar_pending sidecar_localstack'.
 
 package sidecare2e
