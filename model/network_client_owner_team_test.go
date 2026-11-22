@@ -272,9 +272,11 @@ func TestTeamTaggedEnrollmentMintsOnTheOwnerOfRecord(t *testing.T) {
 // its owner row marks it ephemeral, which the exchange reads to give it no
 // member's recovery scope, its evs access being §8.6's ceiling that its
 // admission sets. The member's removal ends it with the member's devices. A
-// tagged ephemeral key's client is tagged and ephemeral, sponsored by the
-// creator, and the network's: its token names the team's owner of record, and
-// it and its credential outlive the member's removal (QD-1194).
+// tagged ephemeral key, which a Member cannot make (§7.5's own devices), an
+// Admin of the team makes: its client is tagged and ephemeral, sponsored by the
+// Admin, and the network's: its token names the team's owner of record, and it
+// and its credential outlive the member's removal and its sponsor's
+// (QD-1194).
 func TestTeamEphemeralEnrollmentIsItsCreatorsMemberDevice(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		self := newTeamEnrollFixture(t, NetworkMemberRoleMember)
@@ -309,8 +311,20 @@ func TestTeamEphemeralEnrollmentIsItsCreatorsMemberDevice(t *testing.T) {
 		sum := sha256.Sum256(capabilityBytes)
 		connect.AssertEqual(t, bytes.Equal(stored, sum[:]), true)
 
-		// a tagged ephemeral key
-		taggedBearer, _ := newTeamEnrollAuthKey(t, self.creatorSession, &CreateAuthKeyArgs{Tags: []string{teamEnrollTagHex}, Ephemeral: true})
+		// a tagged ephemeral key, which the Member is refused and an Admin makes
+		if refused, err := CreateAuthKey(&CreateAuthKeyArgs{DurationSeconds: 3600, MaxUses: 1, Tags: []string{teamEnrollTagHex}, Ephemeral: true}, self.creatorSession); err == nil || refused != nil {
+			t.Fatalf("the Member's tagged ephemeral key: %v %+v", err, refused)
+		}
+		sponsorUserId := server.NewId()
+		Testing_CreateNetwork(self.ctx, server.NewId(), "sponsor-"+sponsorUserId.String(), sponsorUserId)
+		sponsor := addTestSignInMember(t, self.ctx, self.networkId, sponsorUserId, NetworkMemberRoleAdmin, false)
+		sponsorSignIn := ResolveNetworkSignIn(self.ctx, sponsorUserId, self.networkId, server.NowUtc())
+		if sponsorSignIn == nil || sponsorSignIn.MemberId == nil || *sponsorSignIn.MemberId != sponsor.MemberId {
+			t.Fatalf("the sponsor's sign-in: %+v", sponsorSignIn)
+		}
+		sponsorSession := session.NewLocalClientSession(self.ctx, "192.0.2.1:1", NewNetworkSignInByJwt(sponsorSignIn, false))
+		defer sponsorSession.Cancel()
+		taggedBearer, _ := newTeamEnrollAuthKey(t, sponsorSession, &CreateAuthKeyArgs{Tags: []string{teamEnrollTagHex}, Ephemeral: true})
 		tagged, err := EnrollNetworkClient(self.ctx, teamEnrollArgs(t, taggedBearer), "192.0.2.9:1")
 		if err != nil {
 			t.Fatalf("the team's tagged ephemeral enrollment: %v", err)
@@ -321,19 +335,21 @@ func TestTeamEphemeralEnrollmentIsItsCreatorsMemberDevice(t *testing.T) {
 		taggedRow := readTeamEnrollOwnerRow(t, self.ctx, tagged.ClientId)
 		connect.AssertEqual(t, taggedRow.tagged && taggedRow.ephemeral, true)
 		connect.AssertEqual(t, taggedRow.ownerUserId == nil && taggedRow.memberId == nil, true)
-		connect.AssertEqual(t, taggedRow.sponsorUserId != nil && *taggedRow.sponsorUserId == self.creatorUserId, true)
+		connect.AssertEqual(t, taggedRow.sponsorUserId != nil && *taggedRow.sponsorUserId == sponsorUserId, true)
 		connect.AssertEqual(t, tagged.Close != "", true)
 
 		// the member's removal deactivates its untagged ephemeral device, and its
-		// credential with it; the tagged agent's client stays (owner decision 83),
-		// and so does its credential
+		// credential with it
 		denied := denyTeamEnrollMember(t, self.ctx, self.networkId, self.creator.MemberId)
 		connect.AssertEqual(t, denied.DeactivatedClientCount, int64(1))
 		connect.AssertEqual(t, readTeamEnrollClientActive(t, self.ctx, result.ClientId), false)
-		connect.AssertEqual(t, readTeamEnrollClientActive(t, self.ctx, tagged.ClientId), true)
 		if err := session.ValidateByJwtState(self.ctx, byJwt, true); err == nil {
 			t.Fatal("the removed member's ephemeral device's credential still validates")
 		}
+		// the tagged agent's client stays past its sponsor's removal too (owner
+		// decision 83), and so does its credential
+		denyTeamEnrollMember(t, self.ctx, self.networkId, sponsor.MemberId)
+		connect.AssertEqual(t, readTeamEnrollClientActive(t, self.ctx, tagged.ClientId), true)
 		if err := session.ValidateByJwtState(self.ctx, taggedJwt, true); err != nil {
 			t.Fatalf("the tagged ephemeral agent's credential past its sponsor's removal: %v", err)
 		}
