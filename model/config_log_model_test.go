@@ -148,9 +148,10 @@ func TestConfigLogAppendsAdvanceTheAclHead(t *testing.T) {
 	}
 }
 
-// With the process's write budget installed, every proj/ and projrows/ PUT is issued to it as P0 of kind
-// log, priced, before it is sent, so a first cluster that refuses unbudgeted writes takes the appends;
-// without it, that cluster refuses them before anything is sent.
+// With the process's write budget installed, every proj/ and projrows/ PUT carries P0, so a first cluster
+// that refuses unbudgeted writes takes the appends, and each object they create is spent once as P0 of kind
+// log, priced (config_log_budget_test.go holds the spend to the objects); without it, that cluster refuses
+// them before anything is sent.
 func TestConfigLogWritesSpendTheBudgetAsP0(t *testing.T) {
 	blobs := sidecartest.NewFakeBlobs(sidecartest.NewFakeClock(sidecartest.DefaultClockStart()), sidecartest.NewFaultQueue(), nil, sidecartest.DefaultFakeBlobsSettings())
 	cluster, err := evsservice.NewBudgetedBlobs(blobs).FirstCluster()
