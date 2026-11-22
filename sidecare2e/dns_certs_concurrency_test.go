@@ -47,14 +47,12 @@
 //
 // The certificates phase: each network's first CertDeviceCount sidecars, two by default, run a tls component and ask
 // for their network's certificate, all at once, as `ur bridge public-tls` does: POST /tls/cert-order through api's certs
-// routes, which queue the rows; the certs worker's order pass, kicked once every row is queued, admits each under the
-// policy and orders it from Pebble by DNS-01, so one pass holds two orders of each set, {<label>.<root>,
-// *.<label>.<root>}, whose four authorizations validate at the one name _acme-challenge.<label>.<root>, which holds at
-// most two values (§12.7): as certsservice is built, its solver keeps a name's values together and refuses a third,
-// and the order it refuses, which has already opened its order at Pebble and spent a unit of the budget as a new set,
-// queues again for the next pass, 30 s later, which admits it as a repeated set (QD-1189 has the admission hold a
-// set's second order back until the first has issued instead; the checks hold either way). The challenges are
-// written through POST /dns/internal/acme-challenge on the certs bearer and served by the edge, GET
+// routes, which queue the rows; the certs worker's order pass, kicked once every row is queued, admits one order of
+// each set, {<label>.<root>, *.<label>.<root>}, under the policy and orders it from Pebble by DNS-01, its two
+// authorizations' values written in one write at the one name _acme-challenge.<label>.<root>, which holds at most two
+// values (§12.7), and holds the set's other orders back until that order has ended, a later pass admitting each in turn
+// as a repeated set once the first has issued (QD-1189). The challenges are written through POST
+// /dns/internal/acme-challenge on the certs bearer and served by the edge, GET
 // /dns/internal/ready answering ready once the edge serves the serial and the canary is clean, Pebble refusing 5% of
 // nonces and validating through the resolver, which reaches the edge. What must hold:
 //
@@ -64,15 +62,14 @@
 //   - each device listens on tls/443/web, and a visitor through tlsedge, behind the lb's PROXY header, verifies the
 //     listener's chain against Pebble's root, not a self-signed leaf, and is answered by the device.
 //
-// The renewals race: Pebble asks for the renewal now of each network's first publisher's certificate, its ARI window
-// set to one that began an hour ago (RFC 9773's early renewal); the renewal pass, kicked, re-reads the window and queues
-// each successor from its stored CSR, and the order pass, kicked, orders it by DNS-01, while every device writes its own
+// The renewals race: Pebble asks for the renewal now of each renewing publisher's certificate, its ARI window set to
+// one that began an hour ago (RFC 9773's early renewal); the renewal pass, kicked, re-reads the window and queues each
+// successor from its stored CSR, and the order pass, kicked, orders it by DNS-01, while every device writes its own
 // TXT set and compare-and-swaps the shared one again (RaceTxtWriteCount, RaceSharedWriteCount) and readers read the
-// edge. The challenges move each zone's version as the record writes do, so the compare-and-swaps meet them. One device
-// a network renews (RenewDeviceCount): each order writes its name's challenge twice, the apex's value and then the
-// wildcard's beside it, and a name's ten writes an hour (dns_challenges_per_name_hour) hold the set's two first orders,
-// one renewal and the chaos below, but not a second renewal as well, after which every order of the set fails until
-// the hour frees a slot (QD-1189's question). Chaos comes under the orders' own requests
+// edge. The challenges move each zone's version as the record writes do, so the compare-and-swaps meet them. Every
+// publisher of a network renews (RenewDeviceCount): each order writes its name's challenge once and a set's orders go
+// one at a time (QD-1189), so a name's ten writes an hour (dns_challenges_per_name_hour) hold the set's first orders,
+// all its renewals and the chaos's re-dos. Chaos comes under the orders' own requests
 // (dns_certs_concurrency_recorders_test.go's holds and gate): the certs worker restarts under the first renewal's
 // challenge write, every write that comes until the restart has ended waiting and cut by the drain before it is sent,
 // and the order pass is kicked again; the dns API block stops under the first write after that restart, which meets
@@ -255,10 +252,10 @@ type dnsCertsSettings struct {
 	DelegatedPhaseTimeout time.Duration
 	// How often a wait on a certificate row reads the rows again: a row moves at a pass, with no hook a test reads.
 	CertPollInterval time.Duration
-	// The renewals race: the publishers of each network, from its first, whose first certificates renew, one since an
-	// order writes its name's challenge twice (the apex's value, then the wildcard's beside it) and §12.7's
-	// dns_challenges_per_name_hour gives the name ten writes an hour, which the set's two first orders, a renewal and the
-	// chaos's re-dos come near; the window Pebble answers each such certificate's ARI with, starting this long before
+	// The renewals race: the publishers of each network, from its first, whose first certificates renew, every one
+	// (CertDeviceCount) since an order writes its name's challenge once and a set's orders go one at a time (QD-1189),
+	// so the set's first orders, its renewals and the chaos's re-dos stay within §12.7's dns_challenges_per_name_hour,
+	// ten writes a name an hour; the window Pebble answers each such certificate's ARI with, starting this long before
 	// now and this long, so the renewal is due at once; each device's writes to its own TXT set and its
 	// compare-and-swaps on the shared one during the race; and the readers of the edge and the reads each makes.
 	RenewDeviceCount     int
@@ -336,7 +333,7 @@ func defaultDnsCertsSettings() *dnsCertsSettings {
 		EdgeRestartTimeout:       2 * time.Minute,
 		ResolverRetryTimeout:     10 * time.Second,
 		DiagnosticKeepCount:      40,
-		RenewDeviceCount:         1,
+		RenewDeviceCount:         2,
 		RenewalWindowAge:         time.Hour,
 		RenewalWindowLength:      time.Minute,
 		RaceTxtWriteCount:        2,
