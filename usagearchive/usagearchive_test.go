@@ -118,19 +118,72 @@ func TestWeekLeafNames(t *testing.T) {
 	}
 }
 
-// The floor is never later than 70 days before now.
+// The floor is never later than 42 days before now (owner, 2026-11-21; 70
+// before).
 func TestEffectiveCloseTimeFloor(t *testing.T) {
+	if MinCloseAge != 42*24*time.Hour {
+		t.Fatalf("the close age floor is %s, not 42 days", MinCloseAge)
+	}
 	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
 	if got := EffectiveCloseTimeFloor(DefaultCloseTimeFloor, now); !got.Equal(DefaultCloseTimeFloor) {
 		t.Fatalf("the default floor is %s", got)
 	}
-	if got := EffectiveCloseTimeFloor(now, now); !got.Equal(now.Add(-70 * 24 * time.Hour)) {
-		t.Fatalf("a floor of now is %s", got)
+	if got := EffectiveCloseTimeFloor(now, now); !got.Equal(time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)) {
+		t.Fatalf("a floor of now is %s, not 42 days before it", got)
 	}
-	// before 2026-11-10 the 70 days bind the default floor
-	early := time.Date(2026, 11, 3, 0, 0, 0, 0, time.UTC)
-	if got := EffectiveCloseTimeFloor(DefaultCloseTimeFloor, early); !got.Equal(time.Date(2026, 8, 25, 0, 0, 0, 0, time.UTC)) {
-		t.Fatalf("on 11-03 the default floor is %s", got)
+	// Main's control floor of 2026-11-05: on 11-21 the floor in force is
+	// 10-10, where 70 days held it at 09-12
+	if got := EffectiveCloseTimeFloor(time.Date(2026, 11, 5, 0, 0, 0, 0, time.UTC), time.Date(2026, 11, 21, 0, 0, 0, 0, time.UTC)); !got.Equal(time.Date(2026, 10, 10, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("on 11-21 the floor of 11-05 is in force at %s", got)
+	}
+	// before 2026-10-13 the 42 days bind the default floor
+	early := time.Date(2026, 10, 10, 0, 0, 0, 0, time.UTC)
+	if got := EffectiveCloseTimeFloor(DefaultCloseTimeFloor, early); !got.Equal(time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("on 10-10 the default floor is %s", got)
+	}
+}
+
+// rolling names no date: the floor in force is always 42 days before now. It
+// reads back as written, as dates and times do; anything else is refused.
+func TestRollingCloseTimeFloor(t *testing.T) {
+	rolling, err := ParseCloseTimeFloor(" rolling ")
+	if err != nil || !rolling.Equal(RollingCloseTimeFloor) {
+		t.Fatalf("rolling parsed to %s, %v", rolling, err)
+	}
+	for _, now := range []time.Time{
+		time.Date(2026, 11, 21, 22, 30, 0, 0, time.UTC),
+		time.Date(2027, 6, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2099, 12, 31, 23, 59, 59, 0, time.UTC),
+	} {
+		if got := EffectiveCloseTimeFloor(rolling, now); !got.Equal(now.Add(-42 * 24 * time.Hour)) {
+			t.Fatalf("at %s the rolling floor is %s", now, got)
+		}
+	}
+	for value, want := range map[string]time.Time{
+		"2026-11-05":           time.Date(2026, 11, 5, 0, 0, 0, 0, time.UTC),
+		"2026-11-05T12:30:00Z": time.Date(2026, 11, 5, 12, 30, 0, 0, time.UTC),
+	} {
+		got, err := ParseCloseTimeFloor(value)
+		if err != nil || !got.Equal(want) {
+			t.Fatalf("%q parsed to %s, %v", value, got, err)
+		}
+	}
+	for floor, want := range map[time.Time]string{
+		RollingCloseTimeFloor:                          "rolling",
+		time.Date(2026, 11, 5, 0, 0, 0, 0, time.UTC):   "2026-11-05",
+		time.Date(2026, 11, 5, 12, 30, 0, 0, time.UTC): "2026-11-05T12:30:00Z",
+	} {
+		if got := FormatCloseTimeFloor(floor); got != want {
+			t.Fatalf("%s formats as %q, not %q", floor, got, want)
+		}
+		if back, err := ParseCloseTimeFloor(want); err != nil || !back.Equal(floor) {
+			t.Fatalf("%q reads back as %s, %v", want, back, err)
+		}
+	}
+	for _, value := range []string{"", "Rolling", "roll", "next week", "11/05/2026"} {
+		if _, err := ParseCloseTimeFloor(value); err == nil {
+			t.Fatalf("%q was accepted", value)
+		}
 	}
 }
 

@@ -261,10 +261,12 @@ Options:
                    usage-archive-export, delete the export control, so no
                    week of the usage archive drops before its 52 weeks.
     --close-time-floor=<date>  With db usage-archive-export, the close time
-                   floor (YYYY-MM-DD, UTC): a week leaves early only when it
-                   ends by the floor and every row closed before it. It is
-                   never later than 70 days ago, whatever is set. Move it only
-                   past SN epochs that are recorded with no recovery pending.
+                   floor (YYYY-MM-DD, UTC), or rolling for none: a week leaves
+                   early only when it ends by the floor and every row closed
+                   before it. Whatever is set, the floor in force is never
+                   later than 42 days ago, nor than a week before the window
+                   of an SN epoch not yet recorded; with rolling it is the
+                   earlier of the two.
     --max-weeks-per-pass=<n>  With db usage-archive-export, the early drops
                    (or dry-run verifications) of one retention pass, 1 to 4.
     --lock-timeout=<duration>  With db reindex-index, how long the rebuild
@@ -874,8 +876,8 @@ func dbUsageArchiveExport(opts docopt.Opts) {
 	server.Raise(err)
 	control := server.NarrowProviderUsageArchiveExportControl(stored, settings)
 	fmt.Printf("Usage archive export control: %v\n", stored)
-	fmt.Printf("Next retention pass: mode %s, close time floor %s (in force now: %s), up to %d weeks a pass",
-		control.Mode, control.CloseTimeFloor.Format(time.DateOnly), control.EffectiveFloor(server.NowUtc()).Format(time.RFC3339), control.MaxWeeksPerPass)
+	fmt.Printf("Next retention pass: mode %s, close time floor %s (in force now: %s, or earlier while an SN epoch is not yet recorded), up to %d weeks a pass",
+		control.Mode, control.CloseTimeFloorText(), control.EffectiveFloor(server.NowUtc()).Format(time.RFC3339), control.MaxWeeksPerPass)
 	if control.Invalid != "" {
 		fmt.Printf("; off because %s", control.Invalid)
 	}
@@ -885,8 +887,8 @@ func dbUsageArchiveExport(opts docopt.Opts) {
 // The export control fields and removal the options ask for. Every value is
 // checked as the retention pass narrows it (server.NarrowProviderUsageArchiveExportControl),
 // so the command refuses what the pass would read as off: a mode other than on,
-// dry_run or off, a floor that is not YYYY-MM-DD, and a weekly brake outside 1
-// to the settings' most. --remove with fields is refused.
+// dry_run or off, a floor that is neither YYYY-MM-DD nor rolling, and a weekly
+// brake outside 1 to the settings' most. --remove with fields is refused.
 func usageArchiveExportControlChange(opts docopt.Opts, settings *server.ProviderUsageArchiveExportSettings) (fields map[string]string, remove bool, err error) {
 	fields = map[string]string{}
 	remove, _ = opts.Bool("--remove")
@@ -897,8 +899,8 @@ func usageArchiveExportControlChange(opts docopt.Opts, settings *server.Provider
 		fields[server.ProviderUsageArchiveExportControlFieldMode] = mode
 	}
 	if floor, _ := opts.String("--close-time-floor"); floor != "" {
-		if _, parseErr := time.Parse(time.DateOnly, floor); parseErr != nil {
-			return nil, false, fmt.Errorf("--close-time-floor must be YYYY-MM-DD, not %q", floor)
+		if _, parseErr := time.Parse(time.DateOnly, floor); parseErr != nil && floor != server.ProviderUsageArchiveExportRollingFloor {
+			return nil, false, fmt.Errorf("--close-time-floor must be YYYY-MM-DD or %s, not %q", server.ProviderUsageArchiveExportRollingFloor, floor)
 		}
 		fields[server.ProviderUsageArchiveExportControlFieldCloseTimeFloor] = floor
 	}
