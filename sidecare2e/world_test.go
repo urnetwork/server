@@ -230,6 +230,9 @@ type WorldSettings struct {
 	SmtpGateRetryTimeout time.Duration
 	// How the world signs the DNS path above its root (world_mail_dns_test.go).
 	Dnssec *worldDnssecSettings
+	// Lines sidecar.yml carries under sidecar: past the world's own, each one key of §19.11's file indented as the
+	// world's are, such as a scenario's format2 gate: none.
+	SidecarYamlLines []string
 }
 
 // §20.4's Pro column, pro.yml's pro: sidecar: keys: what a network a scenario makes Pro runs under.
@@ -310,9 +313,9 @@ const (
 )
 
 // sidecar.yml as a world puts it: preview_networks, every service's gate open to every network, evs's with the env's
-// one block, urnetwork_edge the edges' clients' network, the push switch when push is on, and the contract gate's when
-// the world turns it on.
-func worldSidecarYaml(urnetworkEdge server.Id, push bool, aclContractGate bool) func(previewNetworkIds []string) string {
+// one block, urnetwork_edge the edges' clients' network, the push switch when push is on, the contract gate's when
+// the world turns it on, and the scenario's extra lines.
+func worldSidecarYaml(urnetworkEdge server.Id, push bool, aclContractGate bool, extraLines []string) func(previewNetworkIds []string) string {
 	return func(previewNetworkIds []string) string {
 		lines := []string{
 			"sidecar:",
@@ -332,6 +335,7 @@ func worldSidecarYaml(urnetworkEdge server.Id, push bool, aclContractGate bool) 
 		if aclContractGate {
 			lines = append(lines, "  "+server.SidecarSwitchAclContractGate+": {enabled: true}")
 		}
+		lines = append(lines, extraLines...)
 		return strings.Join(lines, "\n") + "\n"
 	}
 }
@@ -403,7 +407,7 @@ func NewWorld(t testing.TB, settings *WorldSettings) *World {
 		copied := *t3Settings
 		t3Settings = &copied
 	}
-	t3Settings.SidecarYaml = worldSidecarYaml(self.urnetworkEdge, settings.Push, settings.AclContractGate)
+	t3Settings.SidecarYaml = worldSidecarYaml(self.urnetworkEdge, settings.Push, settings.AclContractGate, settings.SidecarYamlLines)
 	t3Settings.RealKeys = !settings.FakeGkm
 	t3Settings.KeyResyncInterval = settings.KeyResyncInterval
 	// api spends on a budget of its own over the world's Redis, as its process does, never the Net's fake
