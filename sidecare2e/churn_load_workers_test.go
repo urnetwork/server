@@ -287,9 +287,7 @@ func (self *churnLoadCase) resolveEvsWrite(ctx context.Context, client *sidecar.
 	}
 }
 
-// An evs reader: a device reading other devices' paths of its network's shared repo StepCount times, each read one of
-// that path's writes, never older than the burst read before (evsConcurrencyCase.read), a read refused for now tried
-// again.
+// An evs reader: a device reading other devices' paths of its network's shared repo StepCount times (evsRead).
 func (self *churnLoadCase) evsReaderBurst(round int, random *rand.Rand, picked map[any]bool) *WorldBurst {
 	network, _ := churnLoadPick(random, self.evsNetworks())
 	reader, ok := churnLoadPick(random, network.liveDevices())
@@ -305,23 +303,59 @@ func (self *churnLoadCase) evsReaderBurst(round int, random *rand.Rand, picked m
 			if !ok {
 				return nil
 			}
-			target.stateLock.Lock()
-			sequenceCount := target.evsSequence
-			target.stateLock.Unlock()
 			fresh := random.IntN(2) == 0
 			_, err := reader.use(func() error {
-				return self.retry(ctx, "evs read", func() error {
-					client, err := reader.device.EvsClient()
-					if err != nil {
-						return err
-					}
-					return network.evsCase.read(ctx, &evsConcurrencyDevice{device: reader.device, client: client}, network.evs, self.evsPath(target), sequenceCount, fresh, seen)
-				})
+				return self.evsRead(ctx, network, reader, target, fresh, seen)
 			})
 			return err
 		})
 	}
 	return gkmConcurrencyBurst(fmt.Sprintf("%s's evs reads in %s", reader.device.Name, churnLoadPhase(round)), steps)
+}
+
+// reader reads target's path's head on network's shared repo, as evsConcurrencyCase.read reads one, held to it the
+// same way: its content one of target's writes begun by the time the read was answered, which a write begun during a
+// read retried for now may be, at a path version never below the one the burst read before (seen); an absent path
+// reads as nothing until the burst has seen it. A read refused for now is tried again.
+func (self *churnLoadCase) evsRead(ctx context.Context, network *churnLoadNetwork, reader *churnLoadDevice, target *churnLoadDevice, fresh bool, seen map[string]uint64) error {
+	repo := network.evs
+	path := self.evsPath(target)
+	name := reader.device.Name
+	return self.retry(ctx, "evs read", func() error {
+		client, err := reader.device.EvsClient()
+		if err != nil {
+			return err
+		}
+		var content bytes.Buffer
+		info, err := client.Repo(repo.repoId).ReadHead(ctx, &sidecar.EvsReadArgs{Path: path, Fresh: fresh}, &content)
+		switch {
+		case errors.Is(err, sidecar.ErrEvsPathAbsent):
+			if version, ok := seen[path]; ok {
+				return fmt.Errorf("%s read %s on %s as absent after reading it at version %d", name, path, repo.name, version)
+			}
+			return nil
+		case err != nil:
+			return fmt.Errorf("%s's read of %s on %s: %w", name, path, repo.name, err)
+		}
+		target.stateLock.Lock()
+		begun := target.evsSequence
+		target.stateLock.Unlock()
+		matched := -1
+		for sequence := range begun {
+			if bytes.Equal(content.Bytes(), evsConcurrencyContent(repo.name, path, sequence)) {
+				matched = sequence
+				break
+			}
+		}
+		if matched < 0 {
+			return fmt.Errorf("%s read %s on %s as %q, none of the %d writes begun by then", name, path, repo.name, content.String(), begun)
+		}
+		if version, ok := seen[path]; ok && info.Version < version {
+			return fmt.Errorf("%s read %s on %s back at version %d after version %d", name, path, repo.name, info.Version, version)
+		}
+		seen[path] = info.Version
+		return nil
+	})
 }
 
 // The live devices of network as the syncs of a statement wait on them.

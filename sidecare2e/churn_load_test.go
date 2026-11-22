@@ -37,7 +37,8 @@
 //	               write refused for now (gkm's wait, an unavailable block) is tried again, and one whose outcome is
 //	               unknown is resolved from the path's history before it is tried again, so nothing is acknowledged
 //	               twice
-//	evs reader     a device reads another's path, one of its writes, never older than the burst read before
+//	evs reader     a device reads another's path, one of its writes begun by the read's answer, never older than the
+//	               burst read before (evsRead)
 //	gkm membership the owner grants its partial repo to a device that does not read it, or revokes the grant of one
 //	               that does, as its own verified state says; a shrink makes the repo's writers rotate with cause
 //	               REMOVE (§10.5, §10.6)
@@ -319,7 +320,7 @@ func defaultChurnLoadSettings() *churnLoadSettings {
 			WorldBlockSmtpedge, WorldBlockMxedge, WorldBlockSockets, churnLoadChaosCerts, churnLoadChaosDevice,
 		},
 		ChaosBetweenRoundCount:  1,
-		ChaosDuringRoundCount:   1,
+		ChaosDuringRoundCount:   2,
 		ChaosFreeRoundCount:     1,
 		ChaosMaxDelay:           15 * time.Second,
 		RetryTimeout:            2 * time.Minute,
