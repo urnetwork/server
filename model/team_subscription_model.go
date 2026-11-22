@@ -379,7 +379,7 @@ func teamCreditLineIdsInTx(ctx context.Context, tx server.PgTx, networkId server
 			FROM transfer_balance
 			WHERE
 				network_id = $1 AND
-				grant_kind = $2 AND
+				grant_kind IS NOT DISTINCT FROM $2 AND
 				$3 < end_time
 			ORDER BY balance_id
 		`,
@@ -431,7 +431,7 @@ func RestoreTeamCreditLinesInTx(ctx context.Context, tx server.PgTx, networkId s
 				team_grant.start_time = line.start_time
 			WHERE
 				line.network_id = $1 AND
-				line.grant_kind = $2 AND
+				line.grant_kind IS NOT DISTINCT FROM $2 AND
 				line.end_time < team_grant.end_time AND
 				$3 < team_grant.end_time
 			ORDER BY line.balance_id
@@ -500,7 +500,7 @@ func unpaidTeamPeriodBalanceIdsInTx(ctx context.Context, tx server.PgTx, network
 			FROM transfer_balance
 			WHERE
 				network_id = $1 AND
-				(grant_kind = $2 OR grant_kind = $3) AND
+				(grant_kind IS NOT DISTINCT FROM $2 OR grant_kind IS NOT DISTINCT FROM $3) AND
 				$4 <= start_time AND
 				$5 < end_time
 			ORDER BY balance_id

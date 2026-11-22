@@ -163,7 +163,7 @@ func teamCreditUsedInTx(ctx context.Context, tx server.PgTx, networkId server.Id
 			FROM transfer_balance
 			WHERE
 				network_id = $1 AND
-				grant_kind = $2 AND
+				grant_kind IS NOT DISTINCT FROM $2 AND
 				start_time < $3 AND
 				$4 < end_time
 		`,
