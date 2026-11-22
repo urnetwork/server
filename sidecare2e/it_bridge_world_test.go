@@ -1047,13 +1047,14 @@ func (self *ItBridgeWorld) deviceProgress(device *itBridgeDevice) string {
 	decision := wire.bridge.Decision()
 	role := wire.bridge.Status()
 	defaultRouteCount, refusedSendCount := wire.Counts()
+	windowClientCount, windowConnectedCount, windowOpenedCount := wire.links.WindowClientCounts()
 	line += fmt.Sprintf(", posture %v at %d (state %d), compiled %d (%d compiles, %d refused), serving %t, waits %d, alarms %d, routes %d, "+
-		"%d window clients, %d default-route packets, %d refused sends, %d local dials, wire %d; role: document %t, %d entries, %d maps, "+
+		"%d window clients (%d connected, %d opened), %d default-route packets, %d refused sends, %d local dials, wire %d; role: document %t, %d entries, %d maps, "+
 		"%d served, %d subjects, %d links open, %d building, %d principals verified, %d rejects sent, %d held rejects, %d route conflicts, "+
 		"%d waits, %d posture alarms, %d alarms",
 		decision.State, decision.Pin.GetVersion(), decision.BridgeState.GetAuth().GetVersion(), status.CompiledPin.GetVersion(),
 		status.CompileCount, status.CompileErrorCount, status.Serving, len(status.Waits), len(status.Alarms), len(wire.bridge.Routes()),
-		wire.links.WindowClientCount(), defaultRouteCount, refusedSendCount, len(wire.links.LocalDials()), device.WireCount(),
+		windowClientCount, windowConnectedCount, windowOpenedCount, defaultRouteCount, refusedSendCount, len(wire.links.LocalDials()), device.WireCount(),
 		role.HasDocument, role.EntryCount, role.MapCount, role.ServedCount, role.SubjectCount, role.LinkOpenCount, role.LinkBuildingCount,
 		role.PrincipalVerifiedCount, role.RejectSentCount, role.HeldRejectCount, role.RouteConflictCount, len(role.Waits),
 		len(role.PostureAlarms), len(role.Alarms))

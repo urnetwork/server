@@ -87,6 +87,7 @@ func TestE2eItBridgeStatic(t *testing.T) {
 			t.Errorf("sweep: %v", err)
 		}
 		world.Check(t)
+		world.LogBridges(t)
 		world.Reconcile(ctx, t)
 		world.Summarize(t)
 	})
@@ -141,6 +142,7 @@ func TestE2eItBridgeLinksPastSidecarClients(t *testing.T) {
 				"a sidecar's window clients count against sidecar_clients (limit %d), which §20.8 exempts", connected, sidecarCount, windowClientCount, sidecarCount+1)
 		}
 		world.Check(t)
+		world.LogBridges(t)
 		world.Summarize(t)
 	})
 }
@@ -164,8 +166,16 @@ func runItBridge(t testing.TB, settings *ItBridgeSettings) {
 		t.Errorf("last sweep: %v", err)
 	}
 	world.Check(t)
+	world.LogBridges(t)
 	world.Reconcile(ctx, t)
 	world.Summarize(t)
+}
+
+// Logs each device's bridge line while the bridges still run, before the ledgers end them.
+func (self *ItBridgeWorld) LogBridges(t testing.TB) {
+	for _, device := range self.devices {
+		t.Logf("bridge %s", self.deviceProgress(device))
+	}
 }
 
 // Joins every subnet and forward that is out, concurrently.
@@ -615,7 +625,7 @@ func (self *ItBridgeWorld) Summarize(t testing.TB) {
 		if device.gate != nil {
 			passed = device.gate.PassedCount()
 		}
-		t.Logf("%s: %d wires, %d dials, %d refused, %d exposures the stock gate held for a person; %s", device.name, device.WireCount(),
-			len(device.dialer.Dials()), refused, passed, self.deviceProgress(device))
+		t.Logf("%s: %d wires, %d dials, %d refused, %d exposures the stock gate held for a person", device.name, device.WireCount(),
+			len(device.dialer.Dials()), refused, passed)
 	}
 }

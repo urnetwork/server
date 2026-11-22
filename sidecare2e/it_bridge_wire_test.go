@@ -36,6 +36,7 @@ import (
 	"net/netip"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/urnetwork/connect"
@@ -646,11 +647,27 @@ func (self *itBridgeLinkHost) LocalDials() []string {
 	return slices.Clone(self.localDials)
 }
 
-// How many window clients the links opened.
+// How many window clients the links opened, how many of their transports ever connected to the exchange, and how many
+// opens answered a client to their window.
 func (self *itBridgeLinkHost) WindowClientCount() int {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	return len(self.windowClients)
+}
+
+func (self *itBridgeLinkHost) WindowClientCounts() (count int, connectedCount int, openedCount int) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	for _, windowClient := range self.windowClients {
+		count += 1
+		if windowClient.connected.Load() {
+			connectedCount += 1
+		}
+		if windowClient.opened.Load() {
+			openedCount += 1
+		}
+	}
+	return count, connectedCount, openedCount
 }
 
 // Ends every window client the links opened and waits for them. Idempotent.
@@ -673,6 +690,9 @@ type itBridgeWindowClient struct {
 	settings  *ItBridgeWireSettings
 	client    *connect.Client
 	transport *connect.PlatformTransport
+	// whether its transport ever connected to the exchange, and whether its open answered a client
+	connected atomic.Bool
+	opened    atomic.Bool
 	closeOnce sync.Once
 }
 
@@ -803,6 +823,21 @@ func (self *itBridgeLinkGenerator) NewClient(ctx context.Context, args *connect.
 		windowClient.close()
 		return nil, errors.New("the wire has closed")
 	}
+	// notes when the transport first connects, for the progress line
+	host.closing.Go(func() {
+		for {
+			connected := windowClient.transport.ConnectedNotify()
+			if windowClient.transport.IsConnected() {
+				windowClient.connected.Store(true)
+				return
+			}
+			select {
+			case <-connected:
+			case <-ctx.Done():
+				return
+			}
+		}
+	})
 	fail := func(err error) (*connect.Client, error) {
 		host.closing.Go(windowClient.close)
 		return nil, err
@@ -840,6 +875,7 @@ func (self *itBridgeLinkGenerator) NewClient(ctx context.Context, args *connect.
 		defer self.stateLock.Unlock()
 		self.clients[client] = windowClient
 	}()
+	windowClient.opened.Store(true)
 	return client, nil
 }
 
