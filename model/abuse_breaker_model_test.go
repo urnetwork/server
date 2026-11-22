@@ -430,10 +430,11 @@ sidecar_abuse:
 // api, connect's server or any other block reads it. connect cannot import
 // server at all.
 func TestMailBreakerStateReachesOnlyTheSendGate(t *testing.T) {
+	// smtpedge's send gate has lived in smtpedgehost since its host left package main (8f37c2b6b)
 	readers := map[string]bool{
 		"model":           true,
 		"taskworker/work": true,
-		"cli/smtpedge":    true,
+		"smtpedgehost":    true,
 	}
 	root, err := filepath.Abs("..")
 	if err != nil {
@@ -475,7 +476,7 @@ func TestMailBreakerStateReachesOnlyTheSendGate(t *testing.T) {
 		t.Fatal(err)
 	}
 	// the check reads the tree it means to: the gate and the job are among the readers
-	if !found["cli/smtpedge"] || !found["taskworker/work"] {
+	if !found["smtpedgehost"] || !found["taskworker/work"] {
 		t.Fatalf("the walk found the readers %v", found)
 	}
 }

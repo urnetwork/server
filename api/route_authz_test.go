@@ -220,42 +220,46 @@ func TestAdminRoutesRefuseAClientTokenThroughTheRouter(t *testing.T) {
 
 // Every gated route serves the network credential, a root token or an API
 // key, and a request with no credential, exactly as before: the gate passes
-// them to the handler, whose authentication decides.
+// them to the handler, whose authentication decides. The role gate looks an
+// API key up in Postgres (TEAM-M6-03), so the schema is up: a key it does not
+// hold has no role there, and goes on to the handler.
 func TestAdminRoutesServeTheNetworkCredential(t *testing.T) {
 	tokens := newRouteAccessTokens()
 	setNetworkRefusesClientAdmin(t, func(ctx context.Context, networkId server.Id) bool {
 		return true
 	})
 
-	for _, route := range Routes() {
-		access := routeAccessFor(route)
-		if !routeAccessGated(access) {
-			continue
-		}
-		reached := false
-		stubbed := router.Testing_WithHandler(route, func(w http.ResponseWriter, r *http.Request) {
-			reached = true
-			w.WriteHeader(http.StatusOK)
-		})
-		ctx, cancel := context.WithCancel(context.Background())
-		routeRouter := router.NewRouter(ctx, []*router.Route{stubbed})
-		for name, authorization := range map[string]string{
-			"root token":    "Bearer " + tokens.networkToken,
-			"api key":       "Bearer " + tokens.apiKey,
-			"no credential": "",
-		} {
-			reached = false
-			w := serveRouteAccess(routeRouter, route.Method(), routeAccessTestPath(route.Pattern()), authorization)
-			if !reached || w.Code != http.StatusOK {
-				t.Fatalf("%s: %s status = %d, handler ran = %t; want the handler", routeAccessKey(route), name, w.Code, reached)
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		for _, route := range Routes() {
+			access := routeAccessFor(route)
+			if !routeAccessGated(access) {
+				continue
 			}
+			reached := false
+			stubbed := router.Testing_WithHandler(route, func(w http.ResponseWriter, r *http.Request) {
+				reached = true
+				w.WriteHeader(http.StatusOK)
+			})
+			ctx, cancel := context.WithCancel(context.Background())
+			routeRouter := router.NewRouter(ctx, []*router.Route{stubbed})
+			for name, authorization := range map[string]string{
+				"root token":    "Bearer " + tokens.networkToken,
+				"api key":       "Bearer " + tokens.apiKey,
+				"no credential": "",
+			} {
+				reached = false
+				w := serveRouteAccess(routeRouter, route.Method(), routeAccessTestPath(route.Pattern()), authorization)
+				if !reached || w.Code != http.StatusOK {
+					t.Fatalf("%s: %s status = %d, handler ran = %t; want the handler", routeAccessKey(route), name, w.Code, reached)
+				}
+			}
+			reached = false
+			if w := serveRouteAccess(routeRouter, route.Method(), routeAccessTestPath(route.Pattern()), "Bearer "+tokens.clientToken); reached || w.Code != http.StatusForbidden {
+				t.Fatalf("%s: client token status = %d, handler ran = %t; want 403", routeAccessKey(route), w.Code, reached)
+			}
+			cancel()
 		}
-		reached = false
-		if w := serveRouteAccess(routeRouter, route.Method(), routeAccessTestPath(route.Pattern()), "Bearer "+tokens.clientToken); reached || w.Code != http.StatusForbidden {
-			t.Fatalf("%s: client token status = %d, handler ran = %t; want 403", routeAccessKey(route), w.Code, reached)
-		}
-		cancel()
-	}
+	})
 }
 
 // The app admin routes keep serving the URnetwork apps' client tokens on a
