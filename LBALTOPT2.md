@@ -517,6 +517,85 @@ Server branch `feat/connect-timer-sweep-1120`, not merged or deployed. It shrink
 - **The existing tests,** with the timer counts of the announce round and passive sample tests now asserting no runtime timers.
 - **Suites, on the local stack:** `internal/timersweep` with `-race`; the whole `session` package (25 minutes); and 522 of server connect's tests, every announce, resident, forward, client-close, exchange, move, peer, session, stream, transport-auth and timer test (29 minutes). The connect run first found a test fixture's resident without an exchange, whose stream grant ticker now gets a sweep of its own, and two announce tests that compress a 30 s round to 50–100 ms, which a timer's own sweep now scales its tick for.
 
+## 9. Results and decisions, 2026-11-21 to 2026-11-22
+
+This section records what shipped from §5 and what it measured. §1–§8 are left as written on 2026-11-20.
+
+### 9.1 Status of each recommendation
+
+| R | Status | Where |
+|---|---|---|
+| R13 | Live since 11-20 | connect hotfix 1104116030 |
+| R14 | Live. The first half since 11-20; the sweep (§8.1) since 11-21, and its authorization lease timers since 11-22 | hotfix 1104287110, then main builds |
+| R15 | Live. (a)–(c) since 11-20. (d), the identity limit, since 11-22 07:33–07:40Z, at 120 requests a minute, a burst of 60 and an address factor of 20 | §9.3 |
+| R16 | Measured and fixed (§9.2) | warp bca1f62, vault bb92ce9 |
+| R17 | Dropped (owner, 11-22) once R16 had balanced the blocks | – |
+| R18 | Announce batching on main (d6d0d9ac7). A session's six exchange queues grow as they fill (4e4ac9e34): its setup allocates 108 KB, not 698 KB | live from 11-22 |
+| R19 | Live since 11-21 | hotfix 1104287110 |
+| R20 | (a) and (b): a phone's h3 carriers claim 923,532 bytes each, not 2 MiB, and an h3 transport the budget can't admit is carried on h1 (connect f4d102a8, sdk 6ad9a88a). quic-go became its own module, `github.com/urnetwork/quic-go` at `../quic-go`; server removed its copy (db272dde3). (c) is not done. (d) became the whodis diagnosis (§9.4) | apps with the next sdk release |
+| R21, R23 | On main with R18 (d6d0d9ac7) | live from 11-22 |
+| R22 | (a), session ticket keys shared by every front: live since 11-22 06:27Z (vault 9bf6107). (b), the offer counters: live since 11-21 | §9.3 |
+| R24 | On main since 11-20 (32c46f14e) | – |
+
+### 9.2 R16: the block imbalance was our own proxy fleet
+
+- **Finding (11-21):** one IPv4 /29 held about 110k of connect's 258k connections (43%), every one on g2 or g4.
+  - Every client behind it was a server/proxy "resident proxy" DeviceLocal, one connection each, spread across 24k networks.
+  - They dial connect's public URL and reach the front through our own routers' NAT, from our public /27. Hashing that /29 with the client IP pepper matched it to the /27's addresses, with no address printed.
+  - The split hashed new flows by source address alone (§3.9), so the whole fleet landed on two blocks.
+- **Fix:** `lb.lb_alt_port_hash_sources` in services.yml (warp bca1f62).
+  - New TCP flows from the listed prefixes hash by source address and source port.
+  - UDP stays address-hashed: the proxy pins its DeviceLocals to h1, and QUIC must keep its block across NAT rebinding, since `ConnGroup` moves a connection only within one block.
+  - The /27 is listed (vault bb92ce9).
+- **Rollout (11-22, 02:54–03:15Z):** warpctl was installed with `WARP_SKIP_SERVICES=1 run-edges.sh`, then `run-lb-unit.sh` ran on each of the 10 interfaces, one at a time.
+- **Result:** after the next connect roll, the blocks carry 66–73k connections each, against 35k/87k/36k/97k on 11-21. The proxy fleet is spread at 31–36k a block.
+
+### 9.3 The connect rolls of 11-22, tickets and identity limits
+
+- **Roll 1:** 2026.11.21-outerwerld+1104998540 (server a65bf5cd1) went out at 06:27–06:37Z, in two waves. It carried R18/R21/R23, R20's quic-go switch and the lease timers on the sweep. Shared ticket keys took effect as each block restarted.
+- **Roll 2:** 2026.11.22-outerwerld+1105316750 (server 45a8de9c6) went out at 07:33–07:40Z. It added the growable queues and the whodis server fixes.
+  - The identity limit needs the connect block's runner to render it into the route file. The runners had run warpctl from 11-20 06:06Z, which predates that rendering.
+  - So each wave's runners were stopped, the new target was set, and the runners were started on warpctl bca1f62. Each block cycled once.
+- **Superseded:** the release 2026.11.22+1105365180 replaced both builds from 13:30Z.
+
+**Measured,** with all drains done:
+
+| | Before | After |
+|---|---|---|
+| PSK offers resumed (R22 (a)) | about 36% (§3.8) | 98–99.9% |
+| Front refusals | about 1.8k/s, of which about 1.5k/s were address requests | 0.5–0.9k/s; address requests near 0 |
+| Identity refusals | – | 420–880/s, mostly api class |
+| api 2xx | 6.8k/s | 6.6–7.4k/s |
+| connect JWT rejections | about 3.6/s | about 3.6/s |
+| connect CPU per Gbps, edges 0/1/3/4 (08:44Z vs a day earlier) | 8.45 cores | 8.39 cores |
+| connect allocation | 2.5 GB/s | 1.7 GB/s (−33%) |
+| GC pause time | – | −31% |
+
+The growable queues' per-message cost and the identity checks roughly offset the GC savings: CPU per Gbps is flat.
+
+### 9.4 whodis: clients abandoned their own handshakes
+
+- **The failure:** about 98% of whodis handshakes failed, 97% of them at the front's 30 s idle timeout. Connect-class QUIC on 443 completed about 98% on the same sockets, so the network path wasn't the cause.
+- **Causes:**
+  - a phone's memory-budget race cancelled the attempt in flight at every 250 ms stagger, where a whodis handshake needs 0.4–1 s;
+  - desktop parallel blocks and hedges cancelled the slower whodis dialer;
+  - the h3 gate cancelled in-flight h3dns attempts;
+  - the quic-go fork dropped a cancelled dial without a CONNECTION_CLOSE, so the server waited out its idle timeout.
+- **Fixes:**
+  - **Clients** (connect b67da3eb and quic-go 83a1e6f8): an attempt that hears alt is kept; desktops start whodis beside the others after 3 s if nothing has connected; the h3 gate keeps an in-flight h3dns dial; a cancelled dial sends a CONNECTION_CLOSE.
+  - **Extender DNS-carrier port race** (connect 1ee839f8): the same rule, with a 1 s stagger and a 2 s stall.
+  - **Server** (f7643f4fb): unpaced whodis replies, a 10 s whodis handshake idle timeout, an `interface` label and a failure `class` (hello_only, reply_unacked, abandoned) on the front's QUIC counts, Retries, and an unvalidated-handshake gauge.
+  - The client fixes reach the apps with the next sdk release.
+- **Deferred:** the router items (UDP 4053 on edge-0/1, IPv6 53/4053), until the routers move to the new router push.
+
+### 9.5 Open
+
+- R20 (c): split the `signature` rejection into a bounded label.
+- The TCP camouflage race keeps its 250 ms stagger (connect `net_extender_camouflage.go`).
+- An extender dial's request phase doesn't observe cancellation.
+- The OSV scan of the fork reports 14 unknown findings from its minimum golang.org/x versions; the owner chose not to raise them now.
+- The whodis counters, after the client fixes ship, will show what's left.
+
 ## Appendix A. Queries and profile commands
 
 **Queries.** Instant queries over the window, at its end, against Mimir. LBALTOPT1 Appendix A has the CPU, traffic and runtime queries. New here:
