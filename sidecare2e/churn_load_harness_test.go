@@ -10,6 +10,11 @@
 //     world itself on DefaultWorldSettings, which keeps each sidecar's gkm resync at the sidecar's own hour; the case
 //     sets the T3World's KeyResyncInterval before its first enrollment, as WorldSettings.KeyResyncInterval would have,
 //     so a hint a chaos lost costs a device at most that interval (§6.8);
+//   - the exchange's connection limit from one address (server's ConnectionRateLimitSettings.MaxTotalConnectionCount,
+//     200 in production): every client of the World dials from 127.0.0.1, and the case's sidecars, the edges' clients
+//     and the bridges' window clients pass 200 from it, as the it bridge case found (ItBridgeSettings'
+//     ExchangeConnectionMaxCount, which NewItBridgeWorld sets before its World starts); the case's stack builds the
+//     World itself, so the case raises the handler's settings and restarts the handler before its first network;
 //   - api's rows of a team's members and of a network's active clients, which the case holds against each member's and
 //     device's churn (world_team_state_test.go's reads, wrapped so a panicking model call reads as an error).
 //
@@ -50,6 +55,16 @@ func churnLoadInstallLimits(tierLimits map[model.NetworkTier]map[string]int64) f
 // world's first enrollment, while nothing reads the setting.
 func churnLoadSetKeyResyncInterval(world *World, interval time.Duration) {
 	world.T3().Settings().KeyResyncInterval = interval
+}
+
+// Raises the exchange handler's connection limit from one address to count and restarts the handler on it, every
+// client's transport dialing again (the file's header). Called before the world's first network.
+func churnLoadRaiseExchangeConnections(ctx context.Context, world *World, count int) error {
+	world.T3().Settings().Exchange.Handler.ConnectionRateLimitSettings.MaxTotalConnectionCount = count
+	if err := world.T3().Exchange().RestartHandler(ctx); err != nil {
+		return fmt.Errorf("the exchange's handler on a limit of %d connections: %w", count, err)
+	}
+	return nil
 }
 
 // The team's members as api's rows hold them, each member_id and its role; a panicking model call reads as an error.

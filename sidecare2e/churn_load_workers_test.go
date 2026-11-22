@@ -43,6 +43,8 @@ const (
 	churnLoadKindDnsWriter     = "dns writer"
 	churnLoadKindDnsReader     = "dns reader"
 	churnLoadKindCertsRenewal  = "certs renewal"
+	churnLoadKindBridgeClient  = "bridge client"
+	churnLoadKindBridgeForward = "bridge forward"
 	churnLoadKindAclSaver      = "acl saver"
 	churnLoadKindEnrollment    = "enrollment"
 	churnLoadKindDeparture     = "departure"
@@ -70,6 +72,8 @@ func (self *churnLoadCase) kinds() []*churnLoadKind {
 		{name: churnLoadKindDnsWriter, settings: mix.DnsWriters, burst: self.dnsWriterBurst},
 		{name: churnLoadKindDnsReader, settings: mix.DnsReaders, burst: self.dnsReaderBurst},
 		{name: churnLoadKindCertsRenewal, settings: mix.CertRenewals, burst: self.certsRenewalBurst},
+		{name: churnLoadKindBridgeClient, settings: mix.BridgeClients, burst: self.bridgeClientBurst},
+		{name: churnLoadKindBridgeForward, settings: mix.BridgeForward, burst: self.bridgeForwardBurst},
 		{name: churnLoadKindAclSaver, settings: mix.AclSavers, burst: self.aclSaverBurst},
 		{name: churnLoadKindEnrollment, settings: mix.Enrollments, burst: self.enrollmentBurst},
 		{name: churnLoadKindDeparture, settings: mix.Departures, burst: self.departureBurst},
@@ -686,6 +690,64 @@ func (self *churnLoadCase) renew(ctx context.Context, publisher *dnsCertsPublish
 	return nil
 }
 
+// A bridge client: an it bridge client's StepCount attempts, each to a random subnet address or forwarded port over
+// one of its protocols, a TCP one a stream at times, through its gVisor stack (ItBridgeWorld.Attempt): what each
+// reached is kept for the bridge's oracle, which judges every attempt at the end.
+func (self *churnLoadCase) bridgeClientBurst(round int, random *rand.Rand, picked map[any]bool) *WorldBurst {
+	if self.bridge == nil {
+		return nil
+	}
+	client, ok := churnLoadPick(random, self.bridge.clients)
+	if !ok {
+		return nil
+	}
+	phase := churnLoadPhase(round)
+	return &WorldBurst{
+		Name:      fmt.Sprintf("%s's bridge traffic in %s", client.name, phase),
+		StepCount: self.settings.Mix.BridgeClients.StepCount,
+		Step: func(ctx context.Context, index int, random *rand.Rand) error {
+			target, ok := churnLoadPick(random, self.bridge.targets())
+			if !ok {
+				return nil
+			}
+			protocol, _ := churnLoadPick(random, target.protocols())
+			if protocol == "tcp" && random.IntN(4) == 0 {
+				protocol = "stream"
+			}
+			self.bridge.Attempt(ctx, phase, client, target, protocol)
+			return ctx.Err()
+		},
+	}
+}
+
+// A bridge forward: a port forward none other of the round took removed (a reset BridgeWithdraw) and set up again (a
+// BridgeMap), each adopted by every bridge, then probed from a client its rules grant, StepCount times.
+func (self *churnLoadCase) bridgeForwardBurst(round int, random *rand.Rand, picked map[any]bool) *WorldBurst {
+	if self.bridge == nil {
+		return nil
+	}
+	free := slices.DeleteFunc(slices.Clone(self.bridge.forwards), func(target *itBridgeTarget) bool { return picked[target] })
+	target, ok := churnLoadPick(random, free)
+	if !ok {
+		return nil
+	}
+	picked[target] = true
+	steps := []func(ctx context.Context, random *rand.Rand) error{}
+	for range self.settings.Mix.BridgeForward.StepCount {
+		steps = append(steps, func(ctx context.Context, random *rand.Rand) error {
+			if err := self.bridge.Leave(ctx, target); err != nil {
+				return err
+			}
+			if err := self.bridge.Join(ctx, target); err != nil {
+				return err
+			}
+			self.bridge.probeComeback(ctx, target, random)
+			return nil
+		})
+	}
+	return gkmConcurrencyBurst(fmt.Sprintf("%s's removal and setup in %s", target.name, churnLoadPhase(round)), steps)
+}
+
 // An ACL saver: a config writer of a personal network or of the team saving its network's document StepCount times,
 // each every grant the network's services need and a rule of its own, previewed and saved EXACT_HEAD, previewed again
 // while another save moved the head, kept with its base's position once answered.
@@ -907,6 +969,11 @@ func (self *churnLoadCase) chaosBetween(round int) {
 // window of the blog's visit checks.
 func (self *churnLoadCase) restart(ctx context.Context, round int, target string, during bool, random *rand.Rand) error {
 	chaos := &churnLoadChaos{round: round, target: target, during: during, startedAt: time.Now()}
+	if self.bridge != nil {
+		// a window the bridge's oracle forgives every device in, as its own chaos's
+		end := self.bridge.beginChaos(nil, "the churn's "+target+" restart")
+		defer end()
+	}
 	var err error
 	switch target {
 	case churnLoadChaosApi:

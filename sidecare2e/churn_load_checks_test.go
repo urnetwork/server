@@ -41,6 +41,7 @@ func (self *churnLoadCase) checkRound(round int, roundStartedAt time.Time) {
 	self.checkDns(ctx, phase)
 	self.checkMailboxes(ctx, phase)
 	self.checkBlog(phase, roundStartedAt)
+	self.checkBridge(ctx, phase)
 	self.checkAlarms(phase)
 	self.logRefusals(phase)
 	t.Logf("%s's checks took %s", phase, time.Since(startedAt).Round(time.Millisecond))
@@ -411,6 +412,20 @@ func (self *churnLoadCase) checkBlog(phase string, roundStartedAt time.Time) {
 	checkBloggerNotifications(t, self.blog, roundStartedAt)
 }
 
+// Every client of the bridge reaches every subnet and forward its rules grant over every protocol, and none it denies
+// answers (ItBridgeWorld.Sweep, whose attempts the oracle judges at the end).
+func (self *churnLoadCase) checkBridge(ctx context.Context, phase string) {
+	if self.bridge == nil {
+		return
+	}
+	if err := self.bridge.JoinAll(ctx); err != nil {
+		self.t.Errorf("%s: the bridge's joins: %v", phase, err)
+	}
+	for _, err := range self.bridge.Sweep(ctx, phase+" sweep") {
+		self.t.Errorf("%s: the bridge's sweep: %v", phase, err)
+	}
+}
+
 // No device raised an alarm since the last check; one that left logs what it raised after.
 func (self *churnLoadCase) checkAlarms(phase string) {
 	t := self.t
@@ -497,6 +512,14 @@ func (self *churnLoadCase) finish() {
 	dnsCertsCheckCertsBudget(t, ctx, self.stack, self.publishers)
 	dnsCertsCheckChallengeCounts(t, ctx, self.stack, settings.Dns, &dnsCertsRecords{Root: self.dnsRecords.Root})
 	self.logRefusals(phase)
+	// last, since its reconciliation closes every network of the world: the bridge's oracle over every attempt, its
+	// sidecar clients, and its ledger
+	if self.bridge != nil {
+		self.bridge.CheckSidecarClients(ctx, t)
+		self.bridge.Check(t)
+		self.bridge.Reconcile(ctx, t)
+		self.bridge.Summarize(t)
+	}
 }
 
 // No certificate row of a publisher's is left queued, ordering or waiting on dns: every order the case began ended.

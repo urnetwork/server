@@ -24,6 +24,10 @@
 //	          webserver behind tlsedge on the blog's one name through sockets' fair scheduler, BlogReaderCount readers
 //	team      a team (World.AddTeamNetwork) of its first Owner's TeamOwnerDeviceCount devices, a shared evs repo the
 //	          Owner's devices write, and the members and devices the churn adds and takes away
+//	itb       the it bridge case's network on this world (newItBridgeNetwork, which builds on a real-keys World as on
+//	          its own FakeGkm one: its config group stands, so the owner's CreateGroup takes generation 1 as it stands),
+//	          its subnets behind their routers, its port forwards on their hosts and its gVisor clients, every subnet and
+//	          forward joined at setup
 //
 // The rounds (RoundCount): in each, a random mix of workers runs at once, one goroutine a burst, random pauses
 // between steps (RunBursts), each kind's count drawn from 0 to its MaxBurstCount, and the last round runs every kind
@@ -43,7 +47,10 @@
 //	mail receiver  the internet sender delivers to a or b through the lb and mxedge's router (mailInternetDeliver)
 //	blog writer    a writer of c updates one of its articles, tried again while evs or gkm refuse for now
 //	blog reader    a reader of c loads an article through tlsedge (bloggerReader.read)
-//	bridge client  not run: see "Not here" below
+//	bridge client  an it bridge client sends TCP, UDP or a stream to a random subnet address or forwarded port through
+//	               its gVisor stack (ItBridgeWorld.Attempt), which the bridge's oracle judges at the end
+//	bridge forward a port forward is removed (a reset BridgeWithdraw) and set up again (a BridgeMap), then probed from
+//	               a client its rules grant (Leave, Join, probeComeback)
 //	dns writer     a device writes its own TXT set through dns's api, a value no other write puts
 //	dns reader     a reader asks the dns edge for the written sets between two reads of the root's SOA
 //	certs renewal  Pebble asks a's certificate's renewal now (its ARI window), the certs worker's renewal pass queues
@@ -60,7 +67,8 @@
 // restarts, and during each round past ChaosFreeRoundCount, ChaosDuringRoundCount restarts at random points. The
 // hosts: api (T3World.RestartApi), evs, gkm, dns, dnsedge, tlsedge, smtpedge, mxedge, sockets (World.Restart), the
 // certs worker (dnsCertsWorkerBlock.Restart); the device: one of the team's devices (T3Device.Restart), held from
-// every worker's use while it restarts. The mail, dns and blog devices are no device chaos's target, since their mail
+// every worker's use while it restarts. Each restart is a chaos window of the bridge's oracle and of the blog's visit
+// checks. The mail, dns and blog devices are no device chaos's target, since their mail
 // clients, dns writers and webservers are bound to the Sidecar a restart ends.
 //
 // After each round, strictly:
@@ -91,10 +99,8 @@
 // unended, no certificate row unissued, no budget in flight. Each phase has its bound and a progress dump on a stall
 // (World.FailProgress), and the whole case is bounded by CaseTimeout, 10 minutes by default.
 //
-// Not here, each for its reason: the bridge clients through port forwards, since the it bridge case's network
-// (NewItBridgeWorld) runs only on a World of FakeGkm, which every other part of this case's world cannot (its
-// config group is formed at FakeGkm by build's formConfigGroup), so a real-keys build of it waits on a change to
-// it_bridge_world_test.go (the report names it); a restart of a mail, dns or blog device (above); a tagged enrollment
+// Not here, each for its reason: a restart of a mail, dns, blog or bridge device (above, and the bridge's own chaos is
+// its case's); a tagged enrollment
 // in the team, which answers 500 (finding team-tagged-enroll), and a team member's own device, whose auth key a
 // Member cannot make (team-member-own-auth-key), so the churn's members join without devices and the Owner's devices
 // are the ones that come and go.
@@ -114,6 +120,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand/v2"
+	"net/netip"
 	"slices"
 	"strings"
 	"sync"
@@ -155,6 +162,8 @@ type churnLoadMixSettings struct {
 	AclSavers     *churnLoadKindSettings
 	Enrollments   *churnLoadKindSettings
 	Departures    *churnLoadKindSettings
+	BridgeClients *churnLoadKindSettings
+	BridgeForward *churnLoadKindSettings
 }
 
 // What the case runs with (QD-702): every count, rate, pause and bound it adds to the harnesses' own.
@@ -227,6 +236,10 @@ type churnLoadSettings struct {
 	EvsDirectory string
 	// The host format of each dns writer's own TXT set, %d its place among the case's writers.
 	DnsHostFormat string
+	// The it bridge case's network on the case's world (newItBridgeNetwork): its subnets, forwards over their hosts,
+	// clients and grant matrix, and the exchange's connection limit it asks, which the case raises before its first
+	// network (churn_load_harness_test.go). nil runs no bridge.
+	Bridge *ItBridgeSettings
 	// The harnesses' own settings, which the case reuses.
 	Evs    *evsConcurrencySettings
 	Gkm    *gkmservice.GkmReconcilerSettings
@@ -250,7 +263,7 @@ const (
 
 func defaultChurnLoadSettings() *churnLoadSettings {
 	bursts := DefaultWorldBurstSettings()
-	bursts.MaxPause = 200 * time.Millisecond
+	bursts.MaxPause = 2 * time.Second
 	mail := defaultMailConcurrencySettings()
 	mail.Groups = []string{"team"}
 	blog := defaultBloggerSettings()
@@ -261,6 +274,12 @@ func defaultChurnLoadSettings() *churnLoadSettings {
 	team.Tags = []string{}
 	configBasesPerMinute := int64(6000)
 	team.SidecarLimits["config_bases_per_min"] = configBasesPerMinute
+	bridge := DefaultItBridgeSettings()
+	bridge.SubnetCount = 1
+	bridge.CampusPrefix = netip.Prefix{}
+	bridge.ForwardCount = 2
+	bridge.ForwardHostCount = 1
+	bridge.ClientCount = 2
 	reconciler := gkmservice.DefaultGkmReconcilerSettings()
 	reconciler.PendingHintInterval = 10 * time.Second
 	reconciler.DroppedLeafHintInterval = 10 * time.Second
@@ -277,20 +296,22 @@ func defaultChurnLoadSettings() *churnLoadSettings {
 		RoundCount:           3,
 		Seed:                 uint64(time.Now().UnixNano()),
 		Mix: &churnLoadMixSettings{
-			EvsWriters:    &churnLoadKindSettings{MaxBurstCount: 4, StepCount: 3},
-			EvsReaders:    &churnLoadKindSettings{MaxBurstCount: 3, StepCount: 4},
-			GkmMembership: &churnLoadKindSettings{MaxBurstCount: 1, StepCount: 2},
-			GkmRotations:  &churnLoadKindSettings{MaxBurstCount: 2, StepCount: 1},
-			MailSenders:   &churnLoadKindSettings{MaxBurstCount: 3, StepCount: 1},
-			MailReceivers: &churnLoadKindSettings{MaxBurstCount: 2, StepCount: 1},
-			BlogWriters:   &churnLoadKindSettings{MaxBurstCount: 2, StepCount: 2},
-			BlogReaders:   &churnLoadKindSettings{MaxBurstCount: 2, StepCount: 4},
+			EvsWriters:    &churnLoadKindSettings{MaxBurstCount: 6, StepCount: 8},
+			EvsReaders:    &churnLoadKindSettings{MaxBurstCount: 4, StepCount: 10},
+			GkmMembership: &churnLoadKindSettings{MaxBurstCount: 1, StepCount: 3},
+			GkmRotations:  &churnLoadKindSettings{MaxBurstCount: 2, StepCount: 2},
+			MailSenders:   &churnLoadKindSettings{MaxBurstCount: 4, StepCount: 2},
+			MailReceivers: &churnLoadKindSettings{MaxBurstCount: 2, StepCount: 2},
+			BlogWriters:   &churnLoadKindSettings{MaxBurstCount: 2, StepCount: 6},
+			BlogReaders:   &churnLoadKindSettings{MaxBurstCount: 2, StepCount: 12},
 			DnsWriters:    &churnLoadKindSettings{MaxBurstCount: 4, StepCount: 2},
-			DnsReaders:    &churnLoadKindSettings{MaxBurstCount: 1, StepCount: 6},
+			DnsReaders:    &churnLoadKindSettings{MaxBurstCount: 1, StepCount: 20},
 			CertRenewals:  &churnLoadKindSettings{MaxBurstCount: 1, StepCount: 1},
-			AclSavers:     &churnLoadKindSettings{MaxBurstCount: 3, StepCount: 1},
-			Enrollments:   &churnLoadKindSettings{MaxBurstCount: 1, StepCount: 1},
-			Departures:    &churnLoadKindSettings{MaxBurstCount: 1, StepCount: 1},
+			AclSavers:     &churnLoadKindSettings{MaxBurstCount: 3, StepCount: 2},
+			Enrollments:   &churnLoadKindSettings{MaxBurstCount: 1, StepCount: 2},
+			Departures:    &churnLoadKindSettings{MaxBurstCount: 1, StepCount: 2},
+			BridgeClients: &churnLoadKindSettings{MaxBurstCount: 2, StepCount: 10},
+			BridgeForward: &churnLoadKindSettings{MaxBurstCount: 1, StepCount: 2},
 		},
 		Bursts: bursts,
 		ChaosTargets: []string{
@@ -300,7 +321,7 @@ func defaultChurnLoadSettings() *churnLoadSettings {
 		ChaosBetweenRoundCount:  1,
 		ChaosDuringRoundCount:   1,
 		ChaosFreeRoundCount:     1,
-		ChaosMaxDelay:           10 * time.Second,
+		ChaosMaxDelay:           15 * time.Second,
 		RetryTimeout:            2 * time.Minute,
 		RetryInterval:           500 * time.Millisecond,
 		KeyResyncInterval:       45 * time.Second,
@@ -320,6 +341,7 @@ func defaultChurnLoadSettings() *churnLoadSettings {
 		PersonalAclSaverCount: 1,
 		CertRenewalCount:      1,
 		CertDeviceCount:       1,
+		Bridge:                bridge,
 		EvsDirectory:          "churn",
 		DnsHostFormat:         "churn-%d",
 		Evs:                   defaultEvsConcurrencySettings(),
@@ -332,6 +354,7 @@ func defaultChurnLoadSettings() *churnLoadSettings {
 		BudgetSampleInterval:  time.Second,
 		FinalDrainBlocks:      []string{WorldBlockTlsedge, WorldBlockSmtpedge, WorldBlockMxedge, WorldBlockSockets, WorldBlockEvs},
 	}
+	settings.Bridge.Seed = settings.Seed
 	settings.TierLimits = map[model.NetworkTier]map[string]int64{
 		model.NetworkTierFree: {"config_bases_per_min": configBasesPerMinute},
 		model.NetworkTierPro:  {"config_bases_per_min": configBasesPerMinute},
@@ -549,6 +572,8 @@ type churnLoadCase struct {
 	team     *churnLoadNetwork
 	networks []*churnLoadNetwork
 	blog     *bloggerBlog
+	// the it bridge case's network, nil where Bridge is
+	bridge *ItBridgeWorld
 	// mail's ledger over every message of the case, and its networks
 	mailLedger   *mailLedger
 	mailNetworks []*mailNetwork
@@ -605,6 +630,14 @@ func runChurnLoad(t testing.TB, settings *churnLoadSettings) {
 	churnLoadSetKeyResyncInterval(world, settings.KeyResyncInterval)
 	popLimits := churnLoadInstallLimits(settings.TierLimits)
 	defer popLimits()
+	if settings.Bridge != nil {
+		ctx, cancel := world.StepContext(t.Context(), settings.SetupTimeout)
+		err := churnLoadRaiseExchangeConnections(ctx, world, settings.Bridge.ExchangeConnectionMaxCount)
+		cancel()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	// the recorder at gkm's origin before any device, so every claim passes it
 	origin, err := installGkmConcurrencyOrigin(world)
@@ -666,8 +699,12 @@ func runChurnLoad(t testing.TB, settings *churnLoadSettings) {
 	self.logSummary()
 }
 
-// Ends what the case started on its devices: the blog's webservers and subscriptions, and every alarm watch.
+// Ends what the case started on its devices: the bridges, the blog's webservers and subscriptions, and every alarm
+// watch.
 func (self *churnLoadCase) release() {
+	if self.bridge != nil {
+		self.bridge.Close()
+	}
 	if self.blog != nil {
 		for _, writer := range self.blog.writers {
 			writer.stop()
@@ -739,6 +776,14 @@ func (self *churnLoadCase) setUp(ctx context.Context) error {
 	}
 	if err := self.blog.awaitRoute(ctx); err != nil {
 		return fmt.Errorf("the blog's route through tlsedge: %w", err)
+	}
+
+	// the it bridge case's network: its block, document and every bridge adopted, then every subnet and forward joined
+	if settings.Bridge != nil {
+		self.bridge = newItBridgeNetwork(self.t, world, settings.Bridge, world.T3().Settings().Exchange)
+		if err := self.bridge.JoinAll(ctx); err != nil {
+			return fmt.Errorf("the bridge's first joins: %w", err)
+		}
 	}
 
 	// the team, its Owner's devices the device chaos's targets
