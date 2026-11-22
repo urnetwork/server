@@ -87,9 +87,10 @@
 // sequencer and rev/ store spend on api's own write budget; and gkm's hint writer resolves sidecar ids through api's
 // internal route on the block's gkm bearer, as production's block does (WorldSettings.GkmHintResolver). A device's
 // §16.6 approval gate is the stock one (World.InstallApprovalGate), which takes a tls/ or smtp/ listen under a standing
-// grant with nothing filed; a network's label takes its zone's serial when it is drawn, so tlsedge routes it from the
-// map; a member's consented device deposits in its member's mailbox, which its write there implies (QD-1173); and a
-// mailbox's reader ingests each deposit at the deposit's hint, nothing waking its ingest.
+// grant with nothing filed; a device's socket component runs for the world's life, whatever step started it
+// (StartSockets); a network's label takes its zone's serial when it is drawn, so tlsedge routes it from the map; a
+// member's consented device deposits in its member's mailbox, which its write there implies (QD-1173); and a mailbox's
+// reader ingests each deposit at the deposit's hint, nothing waking its ingest.
 //
 // Process-wide state, so one world runs at a time and its Close puts each back: the T3World's (sidecar.yml, pro.yml's
 // limits, oauth's issuer and keys, WARP_DOMAIN, api's installs, the smtp routes' §8 checks among them), pro.yml's pro:

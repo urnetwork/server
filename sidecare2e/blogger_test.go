@@ -681,9 +681,7 @@ func newBloggerBlog(ctx context.Context, world *World, settings *bloggerSettings
 		if writer.spkiSha256, err = worldTlsKeySpkiSha256(device); err != nil {
 			return nil, err
 		}
-		// the component's registrar runs until the context it is made with ends (Sidecar.NewSocketComponent), so it
-		// is made on the world's, never on a step's, or every heartbeat, unlisten and listen after the step is lost
-		if err := world.StartSockets(world.T3().Context(), device); err != nil {
+		if err := world.StartSockets(ctx, device); err != nil {
 			return nil, err
 		}
 		if _, err := world.InstallApprovalGate(ctx, device); err != nil {

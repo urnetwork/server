@@ -67,22 +67,38 @@ func DefaultWorldTlsSettings() *WorldTlsSettings {
 }
 
 // Starts device's socket component, as ur daemon does once its follower stands (cli's startUrConfigFollower):
-// Sidecar.NewSocketComponent and AddComponent, what its Listen and Dial run on. Once per device: a later call finds it
-// started. The sidecar removes it at its close.
+// Sidecar.NewSocketComponent and AddComponent, what its Listen and Dial run on. The component's registrar runs until the
+// context it is made with ends, so it is made on the world's, as the daemon's runs for the daemon's life: a step's end
+// never ends it, or every heartbeat, unlisten and listen after the step is lost. ctx, the caller's step, bounds only the
+// wait for what the component is made of. Once per device: a later call finds it started. The sidecar removes it at its
+// close.
 func (self *World) StartSockets(ctx context.Context, device *sidecart3.T3Device) error {
 	self.socketsLock.Lock()
 	defer self.socketsLock.Unlock()
 	if self.socketsStarted[device] {
 		return nil
 	}
-	component, err := device.Sidecar().NewSocketComponent(ctx)
+	componentCtx, cancelComponent := context.WithCancel(self.t3.Context())
+	// the step's end cancels the component's context only while the component is being made
+	stopStepBound := context.AfterFunc(ctx, cancelComponent)
+	component, err := device.Sidecar().NewSocketComponent(componentCtx)
+	if !stopStepBound() {
+		if err == nil {
+			component.Close()
+		}
+		cancelComponent()
+		return fmt.Errorf("%s's socket component: the step ended while it was made: %w", device.Name, ctx.Err())
+	}
 	if err != nil {
+		cancelComponent()
 		return fmt.Errorf("%s's socket component: %w", device.Name, err)
 	}
 	if _, err := device.Sidecar().AddComponent(component); err != nil {
 		component.Close()
+		cancelComponent()
 		return fmt.Errorf("%s's socket component: %w", device.Name, err)
 	}
+	self.t3.OnClose(cancelComponent)
 	if self.socketsStarted == nil {
 		self.socketsStarted = map[*sidecart3.T3Device]bool{}
 	}
