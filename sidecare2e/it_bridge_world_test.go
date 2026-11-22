@@ -166,9 +166,13 @@ type ItBridgeSettings struct {
 	ChaosDeviceAfter     time.Duration
 	ChaosHandlerAfter    time.Duration
 	ChaosSecondHostAfter time.Duration
-	// How long the ledgers may take to settle at the end: every relayed contract closed by both its parties.
+	// How long the ledgers may take to settle at the end: every relayed contract closed by both its parties, and every
+	// share contract settled and its debit flushed to its dialer's balances.
 	LedgerTimeout      time.Duration
 	LedgerPollInterval time.Duration
+	// The balances one page of the transfer debit flush visits (model.FlushTransferDebits' maxBalances, at most 64),
+	// which the ledgers run for the share contracts' settles as taskworker runs it: 64.
+	LedgerFlushBalanceCount int
 	// Route grants (it_bridge_grants_test.go): whether the case runs them, the document then carrying a requests rule
 	// through which every client the grant matrix denies a subnet that nests in no campus asks a route grant on it, and
 	// how long the first such grant asks to last before it expires, long enough to outlast its probes; the rest are
@@ -249,6 +253,7 @@ func DefaultItBridgeSettings() *ItBridgeSettings {
 		ChaosSecondHostAfter:       32 * time.Second,
 		LedgerTimeout:              2 * time.Minute,
 		LedgerPollInterval:         250 * time.Millisecond,
+		LedgerFlushBalanceCount:    64,
 		RouteGrants:                false,
 		RouteGrantLifetime:         90 * time.Second,
 		NetworkName:                "itb",
