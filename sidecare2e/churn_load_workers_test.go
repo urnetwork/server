@@ -829,6 +829,7 @@ func (self *churnLoadCase) aclSave(ctx context.Context, round int, network *chur
 			network.stateLock.Lock()
 			network.saves = append(network.saves, save)
 			network.stateLock.Unlock()
+			self.t.Logf("%s: %s saved %s's document %d, its base at %d", churnLoadPhase(round), saver.device.Name, network.Name, index, pin.GetVersion())
 			return network.Sync(ctx, pin.GetVersion())
 		}
 		var apiErr *sidecar.SidecarApiError
@@ -856,9 +857,10 @@ func (self *churnLoadCase) aclSave(ctx context.Context, round int, network *chur
 	}
 }
 
-// An enrollment: the team's Owner inviting a new person, who accepts and whom an Owner's device admits as a member;
-// enrolling a new device of its own, admitted by its first device and following; or enrolling a tagged sidecar of the
-// team's first tag, admitted with it by an Owner's device (World.AddTagged); StepCount times, each kept.
+// An enrollment: the team's Owner inviting a new person, who accepts, whom an Owner's device admits as a member, and
+// who enrolls MemberDeviceCount devices of its own from its own auth keys (§7.5's Member: own devices); enrolling a new
+// device of the Owner's, admitted by its first device and following; or enrolling a tagged sidecar of the team's first
+// tag, admitted with it by an Owner's device; StepCount times, each kept.
 func (self *churnLoadCase) enrollmentBurst(round int, random *rand.Rand, picked map[any]bool) *WorldBurst {
 	network := self.team
 	admin := network.owner()
@@ -877,7 +879,7 @@ func (self *churnLoadCase) enrollmentBurst(round int, random *rand.Rand, picked 
 				case 1:
 					return self.enrollOwnerDevice(ctx, network, token)
 				default:
-					return self.enrollTagged(ctx, network, admin)
+					return self.enrollTagged(ctx, network, admin, token)
 				}
 			})
 			return err
@@ -886,7 +888,10 @@ func (self *churnLoadCase) enrollmentBurst(round int, random *rand.Rand, picked 
 	return gkmConcurrencyBurst(fmt.Sprintf("the team's enrollments in %s", churnLoadPhase(round)), steps)
 }
 
-// A new person invited by the team's Owner from admin, accepted with their own sign-in and admitted as a member.
+// A new person invited by the team's Owner from admin, accepted with their own sign-in and admitted as a member, then
+// their own devices enrolled from auth keys their team credential makes and admitted, the first by admin, the inviting
+// device, with the invited mark once its join's MAC verifies, the rest by that first (WorldTeam.AdmitMemberDevices).
+// The member is kept once its devices are, so no departure takes it while they enroll.
 func (self *churnLoadCase) enrollMember(ctx context.Context, network *churnLoadNetwork, admin *churnLoadDevice, token int) error {
 	team := network.team
 	person, err := self.world.NewPerson(ctx, fmt.Sprintf("churn-member-%d", token))
@@ -904,10 +909,26 @@ func (self *churnLoadCase) enrollMember(ctx context.Context, network *churnLoadN
 	if _, err := team.AdmitMember(ctx, admin.device, member); err != nil {
 		return fmt.Errorf("%s's MemberAdmit: %w", person.Name, err)
 	}
+	devices, deviceErr := team.EnrollMemberDevices(ctx, member, self.settings.MemberDeviceCount, fmt.Sprintf("%s-member-%d", team.Name, token))
+	if deviceErr == nil {
+		deviceErr = team.AdmitMemberDevices(ctx, member, invite, devices)
+	}
+	kept := []*churnLoadDevice{}
+	if deviceErr == nil {
+		for _, device := range devices {
+			memberDevice := &churnLoadDevice{device: device, network: network, member: member}
+			memberDevice.watch()
+			kept = append(kept, memberDevice)
+		}
+	}
 	network.stateLock.Lock()
 	defer network.stateLock.Unlock()
 	network.joined = append(network.joined, member)
+	network.memberDevices = append(network.memberDevices, kept...)
 	network.membershipTime = time.Now()
+	if deviceErr != nil {
+		return fmt.Errorf("%s's own devices: %w", person.Name, deviceErr)
+	}
 	return nil
 }
 
@@ -927,17 +948,22 @@ func (self *churnLoadCase) enrollOwnerDevice(ctx context.Context, network *churn
 	defer network.stateLock.Unlock()
 	network.devices = append(network.devices, device)
 	network.enrolled = append(network.enrolled, device)
-	if len(network.savers) < self.settings.TeamAclSaverCount {
+	if self.settings.TeamAclSaverCount <= 0 || len(network.savers) < self.settings.TeamAclSaverCount {
 		network.savers = append(network.savers, device)
 	}
 	network.membershipTime = time.Now()
 	return nil
 }
 
-// A tagged sidecar of the team's first tag, enrolled from an auth key carrying it and admitted with it by admin.
-func (self *churnLoadCase) enrollTagged(ctx context.Context, network *churnLoadNetwork, admin *churnLoadDevice) error {
+// A tagged sidecar of the team's first tag, enrolled from an auth key the first Owner makes carrying it and admitted
+// with it by admin.
+func (self *churnLoadCase) enrollTagged(ctx context.Context, network *churnLoadNetwork, admin *churnLoadDevice, token int) error {
 	team := network.team
-	devices, err := team.AddTagged(ctx, admin.device, self.settings.Team.Tags[0], 1)
+	tag := self.settings.Team.Tags[0]
+	devices, err := team.EnrollTagged(ctx, team.Owner, tag, 1, fmt.Sprintf("%s-tagged-%d", team.Name, token))
+	if err == nil {
+		err = team.AdmitTaggedDevices(ctx, admin.device, tag, devices)
+	}
 	if err != nil {
 		return fmt.Errorf("the tagged sidecar: %w", err)
 	}
@@ -950,22 +976,36 @@ func (self *churnLoadCase) enrollTagged(ctx context.Context, network *churnLoadN
 	return nil
 }
 
-// A departure: the team's Owner removing a member the churn added (member-remove, then MemberRevoke), or revoking a
-// device of its own or a tagged sidecar the churn added, StepCount times, each kept; a step with nothing to take away
-// does nothing.
+// A departure: the team's Owner removing a member the churn added (member-remove, then MemberRevoke), its own devices
+// leaving with it, or revoking a device of the Owner's, a tagged sidecar or a member's own device the churn added,
+// StepCount times, each kept; a step with nothing to take away does nothing.
 func (self *churnLoadCase) departureBurst(round int, random *rand.Rand, picked map[any]bool) *WorldBurst {
 	network := self.team
 	team := network.team
 	admin := network.owner()
+	// out of every worker's use, and its alarms only logged from now on, before it goes
+	depart := func(device *churnLoadDevice) {
+		device.useLock.Lock()
+		device.stateLock.Lock()
+		device.departed = true
+		device.stateLock.Unlock()
+		device.useLock.Unlock()
+	}
 	steps := []func(ctx context.Context, random *rand.Rand) error{}
 	for range self.settings.Mix.Departures.StepCount {
 		steps = append(steps, func(ctx context.Context, random *rand.Rand) error {
 			network.stateLock.Lock()
 			members := slices.DeleteFunc(slices.Clone(network.joined), func(member *WorldTeamMember) bool { return member.Removed() })
-			devices := slices.DeleteFunc(slices.Concat(network.enrolled, network.tagged), func(device *churnLoadDevice) bool { return device.gone() })
+			devices := slices.DeleteFunc(slices.Concat(network.enrolled, network.tagged, network.memberDevices), func(device *churnLoadDevice) bool { return device.gone() })
+			memberDevices := slices.Clone(network.memberDevices)
 			network.stateLock.Unlock()
 			if 0 < len(members) && (len(devices) == 0 || random.IntN(2) == 0) {
 				member, _ := churnLoadPick(random, members)
+				for _, device := range memberDevices {
+					if device.member == member {
+						depart(device)
+					}
+				}
 				_, err := admin.use(func() error {
 					if _, err := team.RemoveMember(ctx, team.Owner, admin.device, member); err != nil {
 						return fmt.Errorf("%s's removal: %w", member.Name, err)
@@ -982,12 +1022,7 @@ func (self *churnLoadCase) departureBurst(round int, random *rand.Rand, picked m
 			if !ok {
 				return nil
 			}
-			// out of every worker's use before it goes
-			device.useLock.Lock()
-			device.stateLock.Lock()
-			device.departed = true
-			device.stateLock.Unlock()
-			device.useLock.Unlock()
+			depart(device)
 			_, err := admin.use(func() error {
 				if _, err := team.RevokeDevice(ctx, admin.device, device.device, bridge.SidecarRevokeReason_SIDECAR_REVOKE_REASON_REMOVED); err != nil {
 					return fmt.Errorf("%s's revocation: %w", device.device.Name, err)

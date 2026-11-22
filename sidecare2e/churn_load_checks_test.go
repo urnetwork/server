@@ -10,6 +10,7 @@
 package sidecare2e
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"maps"
@@ -167,7 +168,9 @@ func (self *churnLoadCase) checkKeyConvergence(ctx context.Context, phase string
 
 // The team's members and devices as the churn left them, in every live device's verified state and in api's rows:
 // every joined member not removed named, every removed one gone, every enrolled device admitted and every revoked one
-// revoked.
+// revoked; every member's own device admitted under its member, and revoked once revoked or its member removed (§7.10:
+// a MemberRevoke revokes the member's untagged devices), its client active at api until then and deactivated once its
+// member is removed there (POST /network/member-remove).
 func (self *churnLoadCase) checkMembership(ctx context.Context, phase string) {
 	t := self.t
 	network := self.team
@@ -177,6 +180,7 @@ func (self *churnLoadCase) checkMembership(ctx context.Context, phase string) {
 	removed := slices.Clone(network.removed)
 	enrolled := slices.Clone(network.enrolled)
 	tagged := slices.Clone(network.tagged)
+	memberDevices := slices.Clone(network.memberDevices)
 	revoked := slices.Clone(network.revoked)
 	network.stateLock.Unlock()
 	expected := map[sidecar.Id]string{team.Owner.MemberId: team.Owner.Name}
@@ -228,6 +232,21 @@ func (self *churnLoadCase) checkMembership(ctx context.Context, phase string) {
 				t.Errorf("%s: %s's state holds %s revoked at %d, which the churn never revoked", phase, device.device.Name, other.device.Name, row.GetRevokedAt())
 			}
 		}
+		for _, other := range memberDevices {
+			row := state.SidecarRow(other.device.Sidecar().Identity().SidecarId)
+			memberRemoved := slices.Contains(removed, other.member)
+			wantRevoked := memberRemoved || slices.Contains(revoked, other)
+			switch {
+			case row == nil:
+				t.Errorf("%s: %s's state never admitted %s, %s's own device", phase, device.device.Name, other.device.Name, other.member.Name)
+			case !bytes.Equal(row.GetMemberId(), other.member.MemberId.Bytes()) || len(row.GetTagIds()) != 0:
+				t.Errorf("%s: %s's state admits %s under member %x with %d tags, not %s's own device", phase, device.device.Name, other.device.Name, row.GetMemberId(), len(row.GetTagIds()), other.member.Name)
+			case wantRevoked && row.GetRevokedAt() == 0:
+				t.Errorf("%s: %s's state holds %s admitted after its revocation or its member's removal (removed %t)", phase, device.device.Name, other.device.Name, memberRemoved)
+			case !wantRevoked && row.GetRevokedAt() != 0:
+				t.Errorf("%s: %s's state holds %s revoked at %d, which the churn never revoked nor removed its member", phase, device.device.Name, other.device.Name, row.GetRevokedAt())
+			}
+		}
 	}
 	roles, err := churnLoadMemberRoles(ctx, network.NetworkId)
 	if err != nil {
@@ -255,7 +274,17 @@ func (self *churnLoadCase) checkMembership(ctx context.Context, phase string) {
 			t.Errorf("%s: api holds no active client of %s, which the churn enrolled and never revoked", phase, device.device.Name)
 		}
 	}
-	t.Logf("%s: the team holds %d members (%d joined, %d removed), %d Owner devices and %d tagged sidecars the churn enrolled (%d revoked)", phase, len(expected), len(joined), len(removed), len(enrolled), len(tagged), len(revoked))
+	for _, device := range memberDevices {
+		clientId := server.Id(device.device.Sidecar().Identity().ClientId)
+		memberRemoved := slices.Contains(removed, device.member)
+		switch {
+		case memberRemoved && clientIds[clientId]:
+			t.Errorf("%s: api holds %s's client active, %s's own device, after its member's removal there", phase, device.device.Name, device.member.Name)
+		case !memberRemoved && !slices.Contains(revoked, device) && !clientIds[clientId]:
+			t.Errorf("%s: api holds no active client of %s, %s's own device, which the churn never revoked nor removed its member", phase, device.device.Name, device.member.Name)
+		}
+	}
+	t.Logf("%s: the team holds %d members (%d joined, %d removed), %d Owner devices, %d members' own devices and %d tagged sidecars the churn enrolled (%d revoked)", phase, len(expected), len(joined), len(removed), len(enrolled), len(memberDevices), len(tagged), len(revoked))
 }
 
 // Every ACL save its saver was answered for stands at a log position of its own, and the newest is the document the
@@ -726,7 +755,7 @@ func (self *churnLoadCase) checkWriteBudgets(ctx context.Context, phase string) 
 		}
 		t.Logf("%s: %s's write budget, each process's newest report: %s", phase, clusterId, strings.Join(lines, "; "))
 		if blockProcesses < blockRuns {
-			t.Errorf("%s: %s's write budget holds the reports of %d block processes, fewer than the %d runs of evs and gkm that spent on it: a run that lived under a report interval reported nothing before it stopped (finding write-budget-close-report)", phase, clusterId, blockProcesses, blockRuns)
+			t.Errorf("%s: %s's write budget holds the reports of %d block processes, fewer than the %d runs of evs and gkm that spent on it: a run that lived under a report interval reported nothing before it stopped, which write-budget-close-report's report at close (sidecar 5736a959) should have written", phase, clusterId, blockProcesses, blockRuns)
 		}
 	}
 	if len(clusterReports) == 0 {

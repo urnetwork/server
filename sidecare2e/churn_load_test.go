@@ -58,12 +58,17 @@
 //	               the successor from its stored CSR and its order pass orders it by DNS-01, at most CertRenewalCount
 //	               across the case; the device installs it and a visitor through tlsedge is shown it
 //	acl saver      a config writer saves its network's document: every grant the network's services need and one
-//	               rule of its own, previewed and saved EXACT_HEAD, previewed again while another save moved the head
-//	enrollment     the team's Owner invites a new person, who accepts and is admitted as a member, enrolls and
-//	               admits a new device of its own, or enrolls a tagged sidecar of tag:ci from an auth key carrying the
-//	               tag and admits it with that tag (World.AddTagged)
-//	departure      the team's Owner removes a member the churn added (member-remove, then MemberRevoke), or revokes a
-//	               device of its own or a tagged sidecar the churn added
+//	               rule of its own, previewed and saved EXACT_HEAD, previewed again while another save moved the head;
+//	               every device of a personal network and every Owner device of the team saves (PersonalAclSaverCount,
+//	               TeamAclSaverCount)
+//	enrollment     the team's Owner invites a new person, who accepts, is admitted as a member and enrolls
+//	               MemberDeviceCount devices of its own from its own auth keys (§7.5's Member: own devices), the first
+//	               admitted by the inviting device with the invited mark; or enrolls and admits a new device of the
+//	               Owner's; or enrolls a tagged sidecar of tag:ci from an auth key carrying the tag and admits it with
+//	               that tag
+//	departure      the team's Owner removes a member the churn added (member-remove, then MemberRevoke), its own
+//	               devices revoked with it, or revokes a device of its own, a tagged sidecar or a member's own device
+//	               the churn added
 //
 // Chaos (ChaosTargets) restarts a random host or device, keeping its stores: between rounds, ChaosBetweenRoundCount
 // restarts, and during each round past ChaosFreeRoundCount, ChaosDuringRoundCount restarts at random points. The
@@ -81,8 +86,9 @@
 //     a state the journal had, every set served (dnsCertsCheckRecords); every mail message in each mailbox it names
 //     once, each mail network's reader given MailboxRoundTimeout of its own to list them; every ACL save at a log
 //     position of its own, the newest the head's document; every enrollment and departure in every live device's
-//     verified state and api's rows; every subnet and forward reached by every bridge client its rules grant, and none
-//     it denies answering (ItBridgeWorld.Sweep);
+//     verified state and api's rows, a member's own devices admitted under it and revoked and deactivated at api with
+//     its removal; every subnet and forward reached by every bridge client its rules grant, and none it denies
+//     answering (ItBridgeWorld.Sweep);
 //   - every device converges within the design's bounds: each network's live devices on one pin and one base after a
 //     sync to the owner's tip (§8.9); every reader of each repo holding gkm's newest generation of it (§10.5's
 //     convergence, bounded by §8.9's latencies, the writers' pending wait, a holder's late jitter and, with a lost
@@ -107,36 +113,37 @@
 // case is bounded by CaseTimeout, 10 minutes by default.
 //
 // Not here, each for its reason: a restart of a mail, dns, blog or bridge device (above; the bridge's own device and
-// handler restarts are its case's); a team member's own device, whose auth key a Member cannot make
-// (team-member-own-auth-key), so the churn's members join without devices and the Owner's devices and tagged sidecars
-// are the ones that come and go; and an exact count of the
-// blocks' own write budget spend against the objects they wrote, which no harness attributes yet, so the blocks are
-// held to a report a run and nothing in flight.
+// handler restarts are its case's), nor of a member's own device or a tagged sidecar, which device chaos leaves to the
+// Owner's; and an exact count of the blocks' own write budget spend against the objects they wrote, which no harness
+// attributes yet, so the blocks are held to a report a run and nothing in flight.
 //
-// Known findings this case meets, each queued or running as it was placed (2026-11-22), are reported with their
-// evidence where they show: an evs run's spend since its last report lost at close (write-budget-close-report), a
-// commit answered just before a drain losing its stored-byte delta (evs-drain-step8), a network's first device
-// publishing its ReaderKey late (gkm-reader-key-upload-retry), writes refused 503 after a resumed re-form
-// (evs-after-reform-resume), and after an api restart a network whose base a second device signed not loading
-// (config-replay-base-signer), which the case keeps out of the way by having each network's first device save its
-// documents (PersonalAclSaverCount, TeamAclSaverCount).
+// The findings this case met as it landed (e2e-churn-load, 2026-11-22, runs of four to six minutes), with their fixes'
+// state as e2e-control-plane-verify refreshed them (2026-11-22); a failure from a product bug stays failing, reported
+// with its evidence where it shows:
 //
-// A failure from a product bug stays failing. As the case landed (2026-11-22, runs of four to six minutes, on the
-// sidecar branches as they stood after team-tagged-enroll and write-budget-close-report landed), it failed on these,
-// each with its evidence, every other check passing:
-//
-//   - a group mailbox's message lost, in three runs of five: a message to a personal network's group "team" (the
-//     internet sender's to a's in round 0, before any chaos; a same-network send to b's in round 0, and to a's after an
-//     api restart), answered delivered and never listed in the group's mailbox through the end, while evs answered the
-//     mailbox repo's racing ingest pushes 429 RESOURCE_EXHAUSTED and 409 PATH_CONFLICT and once a listing's read "reply
-//     invalid: a read reply that ends before its last frame"; ACL saves ran in the same rounds;
-//   - api's write budget one log object's price (9216 B) past the objects api wrote, in every run with the it bridge
-//     network and in none without it: model's ConfigLogSequencer issues P0 before each PUT, so a base whose rows equal
-//     an earlier base's (the bridge's block base after its first) spends on a projrows/ PutImmutable that makes
-//     nothing, or an append whose outcome was unknown and which landed spends twice;
-//   - an evs writer's second write of a path refused 409 PATH_CONFLICT 48 ms after its first was answered, no other
-//     push to the repo between: a write plans its first attempt on evs's cache (EvsPlanArgs.Fresh false), which its own
-//     push had not reached, and a file-mode 409 on an update goes back to the caller (the blog writer's own article);
+//   - landed: an evs run's spend since its last report lost at close (write-budget-close-report, sidecar 5736a959); a
+//     network's first device publishing its ReaderKey late (gkm-reader-key-upload-retry, sidecar 92aef6ed, 96cdf1ca,
+//     0b53b292); writes refused 503 after a resumed re-form (evs-after-reform-resume, sidecar c58bb25c, 3b2ee4df);
+//     after an api restart a network whose base a second device signed not loading at api's gate
+//     (config-replay-base-signer, sidecar 9ac79c88 to f5892c63, QD-1192), which kept each network's documents to its
+//     first device until this refresh raised the savers back to every device; a team's tagged enrollment answered 500
+//     (team-tagged-enroll, server c730a0441 to e9b9598d1) and a Member's own auth key refused 403
+//     (team-member-own-auth-key, server c5579f826 to 927a07e0d), which kept tagged sidecars and members' own devices
+//     out of the churn until they landed; a group mailbox's message lost, in three runs of five (a message to a
+//     personal network's group "team", the internet sender's or a same-network send, before any chaos and after an api
+//     restart, answered delivered and never listed: deposits pushed on a state two bases behind the group's writer,
+//     whose own ACL saves landed those bases, judged at a pin its log no longer retained), which mail-group-ingest-loss
+//     classes at the installed state (sidecar 840e3738 to abfab622, QD-1196; a group repo's ingest still waits for the
+//     mail component's pass, 2 s in this world, which mail-group-hint-watch, queued, watches hints for); and an evs
+//     writer's second write of a path refused 409 PATH_CONFLICT 48 ms after its first was answered, its plan read on
+//     evs's cache before its own push reached it (evs-write-update-stale-cache, sidecar af2e0136, 52848695; plain reads
+//     right after a device's own push wait on evs-read-own-writes, queued)
+//   - running: a commit answered just before a drain losing its stored-byte delta (evs-drain-step8, committed on its
+//     track, sidecar 75f66a56, not landed as this refresh ran)
+//   - queued: api's write budget one log object's price (9216 B) past the objects api wrote, in every run with the it
+//     bridge network and in none without it (api-budget-p0-double-spend: model's ConfigLogSequencer issues P0 before
+//     each PUT, so a base whose rows equal an earlier base's spends on a projrows/ PutImmutable that makes nothing, or
+//     an append whose outcome was unknown and which landed spends twice)
 //
 // Run it through the build's wrapper: -tags 'sidecar_e2e sidecar_pending sidecar_localstack' -run TestE2eChurnLoad.
 
@@ -253,13 +260,18 @@ type churnLoadSettings struct {
 	// The rule each ACL save adds past its network's grants, one of its own by the save's number, so every save
 	// changes the head.
 	AclChurnGrant func(index int) string
-	// The devices of each personal network, and of the team's Owner, from the first, that save their network's
-	// documents: one each, so no base is signed by a second device, which after an api restart leaves the network
-	// unloaded at api's gate (finding config-replay-base-signer, which a run with the team's raised to its Owner's every
-	// device met on 2026-11-22: after round 2's api restarts the gate held the team at 0, and every team device's token
-	// exchange answered 503 temporarily_unavailable), masking every later check of that network.
+	// How many devices of each personal network, and of the team's Owner, from the first, save their network's
+	// documents; not positive, every one of them, the Owner's devices the churn enrolls joining as they come. Every
+	// device saves by default, so the api restarts chaos runs meet bases later devices signed. These were one each
+	// until config-replay-base-signer landed (sidecar 9ac79c88 to f5892c63, QD-1192): before it a base a second device
+	// signed left the network unloaded at api's gate after an api restart (on 2026-11-22, with every Owner device of
+	// the team saving, the gate held the team at 0 after round 2's api restarts, and every team device's token exchange
+	// answered 503 temporarily_unavailable).
 	PersonalAclSaverCount int
 	TeamAclSaverCount     int
+	// The devices each member the churn invites enrolls from auth keys of its own (§7.5's Member: own devices), its
+	// first admitted by the inviting device with the invited mark (§7.5) and the rest by that first.
+	MemberDeviceCount int
 	// The certs worker's renewals the case runs across its rounds, the certs renewal kind's bursts past it doing
 	// nothing: each order writes its name's challenge twice, under §12.7's ten an hour (dns_challenges_per_name_hour).
 	CertRenewalCount int
@@ -372,8 +384,9 @@ func defaultChurnLoadSettings() *churnLoadSettings {
 		AclChurnGrant: func(index int) string {
 			return fmt.Sprintf(`{"src": ["autogroup:member"], "dst": ["dns:churn-%d"], "allow": ["admin"]}`, index)
 		},
-		PersonalAclSaverCount: 1,
-		TeamAclSaverCount:     1,
+		PersonalAclSaverCount: 0,
+		TeamAclSaverCount:     0,
+		MemberDeviceCount:     1,
 		CertRenewalCount:      1,
 		CertDeviceCount:       1,
 		Bridge:                bridge,
@@ -424,6 +437,8 @@ func (self *churnLoadSettings) configConvergenceBound(lostHints bool) time.Durat
 type churnLoadDevice struct {
 	device  *sidecart3.T3Device
 	network *churnLoadNetwork
+	// the member the churn invited whose own device it is, nil for an owner's device or a tagged sidecar
+	member *WorldTeamMember
 	// whether device chaos may restart it: no mail client, dns writer or webserver is bound to its Sidecar
 	restartable bool
 	// a step holds it shared, a restart or a departure exclusive (T3Device.Restart must not run beside a use)
@@ -546,8 +561,10 @@ type churnLoadNetwork struct {
 	saves  []*churnLoadAclSave
 	// the members the churn added, the ones it removed, and the devices it added and revoked
 	joined []*WorldTeamMember
-	// the tagged sidecars the churn admitted, which read the config repo alone, so no evs or gkm worker takes them
+	// the tagged sidecars the churn admitted, and the devices its members enrolled, which read the config repo and the
+	// team's directory alone, so no evs or gkm worker takes them
 	tagged         []*churnLoadDevice
+	memberDevices  []*churnLoadDevice
 	removed        []*WorldTeamMember
 	enrolled       []*churnLoadDevice
 	revoked        []*churnLoadDevice
@@ -566,14 +583,22 @@ func (self *churnLoadNetwork) liveDevices() []*churnLoadDevice {
 	return slices.DeleteFunc(self.deviceList(), func(device *churnLoadDevice) bool { return device.gone() })
 }
 
-// Every device the case runs on the network, its tagged sidecars last.
+// Every device the case runs on the network, its tagged sidecars and its members' own devices last.
 func (self *churnLoadNetwork) everyDevice() []*churnLoadDevice {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
-	return slices.Concat(self.devices, self.tagged)
+	return slices.Concat(self.devices, self.tagged, self.memberDevices)
 }
 
-// Every device that has not left, its tagged sidecars last: what a convergence check holds.
+// The first count of devices that save a network's documents, every one where count is not positive.
+func churnLoadSavers(devices []*churnLoadDevice, count int) []*churnLoadDevice {
+	if count <= 0 || len(devices) < count {
+		return slices.Clone(devices)
+	}
+	return slices.Clone(devices[:count])
+}
+
+// Every device that has not left, its tagged sidecars and members' devices last: what a convergence check holds.
 func (self *churnLoadNetwork) everyLiveDevice() []*churnLoadDevice {
 	return slices.DeleteFunc(self.everyDevice(), func(device *churnLoadDevice) bool { return device.gone() })
 }
@@ -802,8 +827,7 @@ func (self *churnLoadCase) setUp(ctx context.Context) error {
 		network := self.addNetwork(added, nil, false)
 		network.baseGrants = slices.Concat(settings.MailGrants, []string{settings.DnsGrant, settings.TlsGrant(time.Now().Add(settings.TlsGrantLife))})
 		network.document = worldAclPolicy
-		devices := network.deviceList()
-		network.savers = devices[:min(max(1, settings.PersonalAclSaverCount), len(devices))]
+		network.savers = churnLoadSavers(network.deviceList(), settings.PersonalAclSaverCount)
 		if _, err := world.SaveAclPolicy(ctx, added, added.Owner(), network.document(network.baseGrants...)); err != nil {
 			return fmt.Errorf("%s's document: %w", added.Name, err)
 		}
@@ -847,8 +871,7 @@ func (self *churnLoadCase) setUp(ctx context.Context) error {
 	self.team = self.addNetwork(team.WorldNetwork, team, true)
 	self.team.baseGrants = []string{}
 	self.team.document = func(grants ...string) string { return team.AclPolicy(grants...) }
-	teamDevices := self.team.deviceList()
-	self.team.savers = teamDevices[:min(max(1, settings.TeamAclSaverCount), len(teamDevices))]
+	self.team.savers = churnLoadSavers(self.team.deviceList(), settings.TeamAclSaverCount)
 	self.team.directoryRepoId = team.DirectoryId()
 
 	// the shared evs repos, and each personal network's partial repo
