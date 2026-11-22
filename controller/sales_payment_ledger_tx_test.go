@@ -177,6 +177,23 @@ func (self *salesLedgerTx) Query(ctx context.Context, sql string, args ...any) (
 		})
 		return &salesLedgerRows{rows: rows}, nil
 
+	case strings.Contains(sql, "play-purchase-data-credit-end-times"):
+		// GetPlayPurchaseDataCreditEndTimesInTx: the network's Play data plan
+		// purchase's data balances, latest first
+		networkId := args[0].(server.Id)
+		purchaseToken := args[1].(string)
+		self.log = append(self.log, "data_credit_history "+purchaseToken)
+		rows := [][]any{}
+		for _, balance := range self.balances {
+			if balance.networkId == networkId && balance.purchaseToken == purchaseToken && !balance.pro && 0 < balance.byteCount {
+				rows = append(rows, []any{balance.endTime})
+			}
+		}
+		slices.SortFunc(rows, func(a []any, b []any) int {
+			return b[0].(time.Time).Compare(a[0].(time.Time))
+		})
+		return &salesLedgerRows{rows: rows}, nil
+
 	case strings.Contains(sql, "FROM transfer_balance") && strings.Contains(sql, "purchase_token = $1"):
 		// the overlap read: a balance of the token covering the expiry
 		purchaseToken := args[0].(string)
