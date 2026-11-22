@@ -18,23 +18,40 @@ import (
 //	client                                   concurrent_clients   100 create cap, peer valve   sidecar_clients
 //	app device client                        counts               counts                       -
 //	sidecar child of a device client         exempt               -                            counts
+//	a sidecar's forwarding client and its    exempt               exempt                       - (its sidecar
+//	  window clients (§18.6)                                                                     counts once)
 //	standalone, declared no-egress           exempt               exempt                       counts
 //	standalone, with ur proxy or public exits counts              counts                       counts
 //
-// The sidecar mark is network_client_owner.strict_exp (§7.4): app device clients are
-// minted admin_refused and carry none, so they never count here. A sidecar child is in no
-// peer registry, since only top-level clients register (peer_model.go), so every marked
-// client, child or top-level, whatever its category, joins one zset of its own,
-// {sq_<network_id>}connected_sidecar, scored by its expiry in ms as the other connected
-// zsets are, written and refreshed on its resident's poll, the key living 48 h past its
-// last write (plan-QUOTA-sidecar-clients-store; §2.8 api-13's {sq_} family, which §19.7
-// keeps out of the rdb bundles). sidecar_clients is one ZCOUNT of it.
+// The sidecar mark is a sidecar's own client: network_client_owner.strict_exp (§7.4), on a
+// client that is no child of a strict_exp client and not forward_only. App device clients
+// are minted admin_refused and carry no strict_exp, so they never count here. A client's
+// children inherit its marks at mint (clientMarks.union), so a sidecar's links' window
+// clients (§17.5), its forwarding client F (owner decision 197) and F's own window clients
+// are strict_exp too, but each is the child of a strict_exp client, S's or F, and F and its
+// children are also forward_only: none is marked, and the sidecar counts once, by its own
+// client. That client is top-level, or the child of its device's client, which has no
+// strict_exp (§5.6's sdk host and pairing; owner decision 4), as newClientIsOwnAclSubject
+// reads it too. The children of either kind are not top-level, so the other two columns
+// exempt them already.
+//
+// A sidecar child is in no peer registry, since only top-level clients register
+// (peer_model.go), so every marked client, child or top-level, whatever its category, joins
+// one zset of its own, {sq_<network_id>}connected_sidecar, scored by its expiry in ms as
+// the other connected zsets are, written and refreshed on its resident's poll, the key
+// living 48 h past its last write (plan-QUOTA-sidecar-clients-store; §2.8 api-13's {sq_}
+// family, which §19.7 keeps out of the rdb bundles). sidecar_clients is one ZCOUNT of it.
 //
 // A declared no-egress top-level client takes NetworkPeerCategorySidecar: unlisted, no
 // peer subscription, in no {np_} zset, so GetNetworkEnforceableConnectedCount leaves it
 // out, and the create cap's and the peer valve's counts skip it (the NOT EXISTS on
 // declares_no_egress, run only where MG0 is linked). A standalone sidecar with egress
 // stays an ordinary client and joins the zset too, so it counts in all three columns.
+//
+// Three paths write or judge the zset, and each reads the mark from getSidecarClientMark,
+// so they cannot disagree: the nomination gate (CanConnectSidecarClient), the announce's
+// registration (RegisterNetworkSidecarClientIfMarked) and the resident's poll, whose
+// resident asks CountsAsSidecarClient as it is built.
 //
 // The limit is dark behind enforce_sidecar_limits, with no I/O while off: no mark is read
 // at a resident, no zset is written, and both checks pass. Turned on, a client counts from
@@ -109,9 +126,10 @@ func AddNetworkSidecarClient(ctx context.Context, networkId server.Id, clientId 
 	})
 }
 
-// Registers the client as connected until ttl from now when it is a sidecar's, as its
-// connection survives the announce window, so it counts from then rather than from its
-// resident's first poll. Nothing while sidecar clients are not counted.
+// Registers the client as connected until ttl from now when it is a sidecar's own client,
+// as its connection survives the announce window, so it counts from then rather than from
+// its resident's first poll; a sidecar's window or forwarding client registers nothing.
+// Nothing while sidecar clients are not counted.
 func RegisterNetworkSidecarClientIfMarked(ctx context.Context, clientId server.Id, ttl time.Duration) {
 	if !SidecarClientCountingOn() {
 		return
@@ -120,6 +138,19 @@ func RegisterNetworkSidecarClientIfMarked(ctx context.Context, clientId server.I
 	if marked {
 		AddNetworkSidecarClient(ctx, networkId, clientId, ttl)
 	}
+}
+
+// Whether the client counts toward its network's sidecar_clients, a sidecar's own client:
+// what a resident asks as it is built, of a client its profile calls strict_exp, so that
+// its poll never heartbeats a sidecar's window or forwarding client into the zset. The
+// nomination gate asked just before (CanConnectSidecarClient) and the answer is kept, so
+// this costs no query there. False, with no I/O, while sidecar clients are not counted.
+func CountsAsSidecarClient(ctx context.Context, clientId server.Id) bool {
+	if !SidecarClientCountingOn() {
+		return false
+	}
+	_, marked := getSidecarClientMark(ctx, clientId)
+	return marked
 }
 
 // Removes one marked client, as its resident closes.
@@ -196,9 +227,9 @@ func sidecarClientsExceeded(ctx context.Context, tx server.PgTx, networkId serve
 // Whether the client may become a connected sidecar client of its network: the
 // connection-activation gate beside CanConnectNetworkPeer at a resident's nomination,
 // whose refusal closes the connection with 4001 as the concurrent limit's does. Always
-// true, with no I/O, while the limit is dark; true for a client with no sidecar mark, for
-// one already connected (a re-nomination), and while the network has room. Clients
-// already connected stay.
+// true, with no I/O, while the limit is dark; true for a client with no sidecar mark, a
+// sidecar's window and forwarding clients among them, for one already connected (a
+// re-nomination), and while the network has room. Clients already connected stay.
 func CanConnectSidecarClient(ctx context.Context, clientId server.Id) bool {
 	if !SidecarClientCountingOn() {
 		return true
@@ -213,9 +244,11 @@ func CanConnectSidecarClient(ctx context.Context, clientId server.Id) bool {
 	return SidecarClientsExceeded(ctx, networkId) == nil
 }
 
-// A client's network and sidecar mark. Both are written with the client and never
-// change, so a process keeps each answer it read, bounded as ClientRefusesAdmin's are,
-// and a re-nomination asks no query.
+// A client's network and sidecar mark. Each fact the mark reads, the client's network,
+// its marks and its source's strict_exp, is written at a mint and never changes, so a
+// process keeps each answer it read, bounded as ClientRefusesAdmin's are, and a
+// re-nomination asks no query. A source row the child reap removes later leaves a kept
+// answer as it was read.
 type sidecarClientMark struct {
 	networkId server.Id
 	marked    bool
@@ -223,8 +256,16 @@ type sidecarClientMark struct {
 
 var sidecarClientMarkAnswers = newBoundedClientMap[sidecarClientMark](DefaultClientAdminSettings().CachedClientMaxCount)
 
-// The client's network and whether its owner row marks it strict_exp. An inactive or
-// unknown client is unmarked, and that answer is not kept. Only while MG0 is linked.
+// The client's network and whether it is a sidecar's own client (the header): its owner
+// row marks it strict_exp, its source client's row, if it has a source, does not, and it is
+// not forward_only, MG8's column, which a binary without MG8 reads as false since it mints
+// no forwarding client. An inactive or unknown client is unmarked, and that answer is not
+// kept. Only while MG0 is linked.
+//
+// A child whose source row is gone, which only the child reap leaves (it removes a stale
+// child with no connection, such as an app's sidecar client while the app is closed), reads
+// as an unmarked client's child: F, which its VPN component keeps connected, stays exempt
+// by forward_only, and any other strict_exp child counts.
 func getSidecarClientMark(ctx context.Context, clientId server.Id) (networkId server.Id, marked bool) {
 	if answer, ok := sidecarClientMarkAnswers.Load(clientId); ok {
 		return answer.networkId, answer.marked
@@ -235,16 +276,24 @@ func getSidecarClientMark(ctx context.Context, clientId server.Id) (networkId se
 			sidecarClientMarkAnswers.Store(clientId, sidecarClientMark{networkId: networkId, marked: marked})
 		}
 	}()
+	forwardOnlyColumn := "false"
+	if server.SidecarMg8Linked() {
+		forwardOnlyColumn = "COALESCE(network_client_owner.forward_only, false)"
+	}
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
 				SELECT
 					network_client.network_id,
-					COALESCE(network_client_owner.strict_exp, false)
+					COALESCE(network_client_owner.strict_exp, false) AND
+						NOT COALESCE(source_owner.strict_exp, false) AND
+						NOT `+forwardOnlyColumn+`
 				FROM network_client
 				LEFT JOIN network_client_owner ON
 					network_client_owner.client_id = network_client.client_id
+				LEFT JOIN network_client_owner source_owner ON
+					source_owner.client_id = network_client.source_client_id
 				WHERE
 					network_client.client_id = $1 AND
 					network_client.active = true

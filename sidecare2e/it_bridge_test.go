@@ -38,9 +38,12 @@
 //   - each incarnation is reached in its stable window, outside chaos, and after the churn every subnet and forward,
 //     joined again, is reached by every client its rules grant and by no other (the sweeps);
 //   - no link's own NAT dialed anything locally;
-//   - the transfer balance reconciles exactly at the end: every byte drawn from the network's balances is a debit on a
-//     meter, the relay meter's debits are exactly each relayed contract's settled count recomputed from its close
-//     reports, none overdraws, and they cover at least the bytes the clients moved; every network of the case alike.
+//   - the transfer balance reconciles exactly at the end, as §20.6 bills each contract: every byte drawn from the
+//     network's balances is a debit on a meter or what escrow paid for a share contract the network dialed, which no
+//     meter counts (§20.6's share row: a cross-network share is FriendsAndFamily, escrowed as Public from the dialer's
+//     network, both directions; owner decision 11), the relay meter's debits are exactly each relayed contract's
+//     settled count and each share contract's payout its own, recomputed from its close reports, none overdraws, and
+//     together they cover at least the bytes the clients moved; every network of the case alike.
 //
 // Run it through the build's wrapper: -tags 'sidecar_e2e sidecar_pending sidecar_localstack' -run TestE2eItBridge.
 
@@ -62,6 +65,7 @@ import (
 
 	"github.com/urnetwork/sidecar"
 
+	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/sidecart3"
 )
 
@@ -665,9 +669,10 @@ func itBridgeTime(at time.Time) string {
 }
 
 // The ledgers at the end (the file's header's last row): every bridge and every sidecar of this network and its peers
-// ended, so each relayed contract is closed by both its parties, then each network's relayed contracts with their close
-// reports and the relay meter's rows, all read before the flush moves them, then the World's ledgers, flushed, each
-// network's reconciled on its own.
+// ended, so each relayed and share contract is closed by both its parties, then each network's relayed contracts with
+// their close reports and the relay meter's rows, all read before the flush moves them, and the share contracts between
+// the networks once each settled and its debit was flushed to its dialer's balances, then the World's ledgers,
+// flushed, each network's reconciled on its own.
 func (self *ItBridgeWorld) Reconcile(ctx context.Context, t testing.TB) {
 	t.Helper()
 	self.stateLock.Lock()
@@ -684,12 +689,64 @@ func (self *ItBridgeWorld) Reconcile(ctx context.Context, t testing.TB) {
 	for index, network := range networks {
 		contracts[index], stayedOpenCounts[index] = network.closedContracts(ledgerCtx, t)
 	}
+	shares := self.settledShareContracts(ctx, ledgerCtx, t, networks)
 	ledgers, err := self.world.ReadLedgers(ctx, time.Time{})
 	if err != nil {
 		t.Fatalf("the ledgers: %v", err)
 	}
 	for index, network := range networks {
-		network.reconcileLedgers(t, ledgers, contracts[index], stayedOpenCounts[index])
+		network.reconcileLedgers(t, ledgers, contracts[index], stayedOpenCounts[index], shares)
+	}
+}
+
+// The share contracts between the case's networks, every contract between clients of two of them, once each one
+// settled and its debit was flushed to its dialer's balances (itBridgeFlushTransferDebits), the flush run before each
+// read; past ledgerCtx's bound, the ones that did not are reported and kept, since their escrow is still reserved from
+// the balances, which the ledgers then count (reconcileLedgers). ctx bounds the flushes and reads, which run once
+// more past the bound, as the relayed contracts' wait reads before it ends.
+func (self *ItBridgeWorld) settledShareContracts(ctx context.Context, ledgerCtx context.Context, t testing.TB, networks []*ItBridgeWorld) []*ItBridgeShareContract {
+	t.Helper()
+	for {
+		if err := itBridgeFlushTransferDebits(ctx, self.settings.LedgerFlushBalanceCount); err != nil {
+			t.Fatalf("the transfer debits: %v", err)
+		}
+		// each pair of networks read once, from the earlier
+		shares := []*ItBridgeShareContract{}
+		for index, network := range networks {
+			laterNetworkIds := []server.Id{}
+			for _, later := range networks[index+1:] {
+				laterNetworkIds = append(laterNetworkIds, later.network.NetworkId)
+			}
+			if len(laterNetworkIds) == 0 {
+				continue
+			}
+			read, err := itBridgeShareContracts(ctx, network.network.NetworkId, laterNetworkIds)
+			if err != nil {
+				t.Fatalf("%s's share contracts: %v", network.settings.NetworkName, err)
+			}
+			shares = append(shares, read...)
+		}
+		unsettled := 0
+		for _, share := range shares {
+			if !share.Settled() {
+				unsettled += 1
+			}
+		}
+		if unsettled == 0 {
+			return shares
+		}
+		select {
+		case <-ledgerCtx.Done():
+			for _, share := range shares {
+				if !share.Settled() {
+					t.Errorf("%s is not settled", share.Describe())
+				}
+			}
+			t.Errorf("%d of the %d share contracts stayed unsettled past the ledgers' bound of %s: %v", unsettled, len(shares), self.settings.LedgerTimeout,
+				ledgerCtx.Err())
+			return shares
+		case <-time.After(self.settings.LedgerPollInterval):
+		}
 	}
 }
 
@@ -738,10 +795,13 @@ func (self *ItBridgeWorld) closedContracts(ledgerCtx context.Context, t testing.
 	}), stayedOpenCount
 }
 
-// The network's ledgers against its closed relayed contracts (Reconcile): the balances lost exactly what its meters
-// debited, the relay meter exactly what the contracts settle, nothing overdrawn, and the contracts covering what the
-// network's clients moved.
-func (self *ItBridgeWorld) reconcileLedgers(t testing.TB, ledgers *WorldLedgers, contracts []*ItBridgeRelayedContract, stayedOpenCount int) {
+// The network's ledgers against its closed relayed contracts and the case's share contracts (Reconcile), as §20.6
+// bills them: the relay meter exactly what its relayed contracts settle; each share contract it dialed escrowed from
+// its balances alone, both directions, and paid exactly what the contract settles, with nothing on any meter; the
+// balances lost exactly what its meters debited and what share escrow drew from them, paid or still reserved by a
+// contract that never settled; nothing overdrawn; and its relayed and share contracts covering what its clients moved.
+func (self *ItBridgeWorld) reconcileLedgers(t testing.TB, ledgers *WorldLedgers, contracts []*ItBridgeRelayedContract, stayedOpenCount int,
+	shares []*ItBridgeShareContract) {
 	t.Helper()
 	networkId := self.network.NetworkId
 	ledger := ledgers.Networks[networkId]
@@ -753,10 +813,43 @@ func (self *ItBridgeWorld) reconcileLedgers(t testing.TB, ledgers *WorldLedgers,
 				contract.ContractId, contract.SettledByteCount(), contract.CloseReports, contract.RelayDebitByteCount, contract.RelayDebitRowCount)
 		}
 	}
+	// what share escrow drew from this network's balances, on any share contract: what a settled one paid from them, and
+	// what an unsettled one still reserves there
+	sharePaid, shareReserved := int64(0), int64(0)
+	// the share contracts this network dialed: what they settle, and how many did not settle
+	dialedCount, shareSettled, unsettledCount := 0, int64(0), 0
+	for _, share := range shares {
+		if share.Settled() {
+			sharePaid += share.PayoutByteCounts[networkId]
+		} else {
+			shareReserved += share.EscrowByteCounts[networkId]
+		}
+		if share.DialerNetworkId() != networkId {
+			continue
+		}
+		dialedCount += 1
+		if escrowNetworkIds := slices.Collect(maps.Keys(share.EscrowByteCounts)); len(escrowNetworkIds) != 1 || escrowNetworkIds[0] != networkId {
+			t.Errorf("%s: its escrow is reserved from networks %v, where only its dialer's, %s's (%s), pays a share's both directions (owner decision 11)",
+				share.Describe(), escrowNetworkIds, self.settings.NetworkName, networkId)
+		}
+		if 0 < share.ServiceDebitRowCount {
+			t.Errorf("%s: service_debit_journal holds %d B in %d rows under it, where escrow alone bills a share and no meter counts it (§20.6)",
+				share.Describe(), share.ServiceDebitByteCount, share.ServiceDebitRowCount)
+		}
+		if !share.Settled() {
+			unsettledCount += 1
+			continue
+		}
+		shareSettled += share.SettledByteCount()
+		if share.PaidByteCount() != share.SettledByteCount() {
+			t.Errorf("%s: it settles %d B from its reports, and its escrow paid %d B", share.Describe(), share.SettledByteCount(), share.PaidByteCount())
+		}
+	}
 	relay := ledgers.Meters.ByteCount(networkId, sidecar.QuotaMeterRelay)
 	metered := ledgers.Meters.TotalByteCount(networkId)
-	if ledger.DebitedByteCount() != metered {
-		t.Errorf("%s's balances lost %d B, and its meters debited %d B: %s", self.settings.NetworkName, ledger.DebitedByteCount(), metered, ledgers.Meters.Describe(networkId))
+	if ledger.DebitedByteCount() != metered+sharePaid+shareReserved {
+		t.Errorf("%s's balances lost %d B, and its meters debited %d B and share escrow drew %d B from them, %d B paid and %d B still reserved by unsettled contracts: %s",
+			self.settings.NetworkName, ledger.DebitedByteCount(), metered, sharePaid+shareReserved, sharePaid, shareReserved, ledgers.Meters.Describe(networkId))
 	}
 	if relay != settled {
 		t.Errorf("%s's relay meter debited %d B, and the relayed contracts settle %d B", self.settings.NetworkName, relay, settled)
@@ -770,13 +863,15 @@ func (self *ItBridgeWorld) reconcileLedgers(t testing.TB, ledgers *WorldLedgers,
 			payload += attempt.PayloadByteCount
 		}
 	}
-	if 0 < stayedOpenCount {
-		t.Logf("%s's relayed contracts' cover of the clients' bytes goes unchecked, since %d contracts stayed open", self.settings.NetworkName, stayedOpenCount)
-	} else if settled < int64(payload) {
-		t.Errorf("%s's relayed contracts settle %d B, under the %d B of requests and answers the clients moved", self.settings.NetworkName, settled, payload)
+	if 0 < stayedOpenCount+unsettledCount {
+		t.Logf("%s's contracts' cover of the clients' bytes goes unchecked, since %d relayed contracts stayed open and %d share contracts it dialed did not settle",
+			self.settings.NetworkName, stayedOpenCount, unsettledCount)
+	} else if settled+shareSettled < int64(payload) {
+		t.Errorf("%s's relayed contracts settle %d B and the share contracts it dialed %d B, under the %d B of requests and answers the clients moved",
+			self.settings.NetworkName, settled, shareSettled, payload)
 	}
-	t.Logf("%s's ledgers: %d relayed contracts settle %d B, the relay meter %d B, every meter %d B, the balances lost %d B; the clients' reached attempts moved %d B",
-		self.settings.NetworkName, len(contracts), settled, relay, metered, ledger.DebitedByteCount(), payload)
+	t.Logf("%s's ledgers: %d relayed contracts settle %d B, the relay meter %d B, every meter %d B; %d share contracts it dialed settle %d B, and share escrow paid %d B from its balances; the balances lost %d B; the clients' reached attempts moved %d B",
+		self.settings.NetworkName, len(contracts), settled, relay, metered, dialedCount, shareSettled, sharePaid, ledger.DebitedByteCount(), payload)
 }
 
 // Logs what the case did: attempts by phase, protocol and outcome, arrivals by destination, and each device's wires.

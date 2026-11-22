@@ -5,11 +5,13 @@ package connect
 // sidecar_clients at connect (DESIGN.md 20.7, 20.8): a sidecar client over its network's
 // limit is refused at nomination and closed with 4001, on WebSocket and H3, in the shape
 // of provider_intent_test.go; and the resident's poll heartbeats a marked client in its
-// network's connected sidecar set, a declared one in no {np_} zset. The owner row is MG0's,
+// network's connected sidecar set, a declared one in no {np_} zset, while a sidecar's window
+// clients connect past the limit uncounted (§20.8's forwarding row). The owner row is MG0's,
 // so these run under -tags sidecar_pending, through .stack/server-test.sh.
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -19,6 +21,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/session"
 )
 
 // Marks a client of the test server's network as a sidecar's.
@@ -195,4 +198,96 @@ func TestResidentReadsTheMarkWhileSidecarClientsAreCounted(t *testing.T) {
 			connect.AssertEqual(t, marks.StrictExp, enforced)
 		}()
 	}
+}
+
+// §20.8's forwarding row on a real exchange: a network at its sidecar_clients limit of one,
+// its one sidecar connected and counted, still connects the window client of that
+// sidecar's link, which the sidecar's own token mints as its child and which inherits its
+// strict_exp, and the window client's resident never counts it, its heartbeat included;
+// a second sidecar is still refused at nomination.
+func TestExchangeSidecarClientLimitServesWindowClients(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		env := testing_newPeerDiscoveryEnvWithAllSettings(ctx, t, nil, func(settings *ConnectHandlerSettings) {
+			// the self-signed test identity, not the environment's tls.yml
+			settings.transportTlsLoader = func(tlsSettings *server.TransportTlsSettings) (*server.TransportTls, error) {
+				return server.NewTransportTls(map[string]bool{}, tlsSettings), nil
+			}
+		})
+		defer env.Close()
+		defer server.Testing_PushSidecarConfig(fmt.Sprintf("sidecar:\n  preview_networks: [%q]\n", env.networkId))()
+		defer model.Testing_SetEnforceSidecarLimits(true)()
+		for _, tier := range []model.NetworkTier{model.NetworkTierFree, model.NetworkTierPro, model.NetworkTierTeam} {
+			defer model.Testing_SetSidecarLimits(tier, map[string]int64{"sidecar_clients": 1})()
+		}
+		model.Testing_ForgetSidecarClientMarks()
+
+		connectClient := func(clientId server.Id, byJwt string) {
+			client := env.newClient(clientId)
+			transport := env.newTransport(byJwt, server.NewId(), client.RouteManager())
+			t.Cleanup(func() {
+				transport.Close()
+				client.Close()
+			})
+		}
+		residentOf := func(clientId server.Id) *Resident {
+			if !waitFor(ctx, 30*time.Second, func() bool { return env.exchange.testingResident(clientId) != nil }) {
+				return nil
+			}
+			return env.exchange.testingResident(clientId)
+		}
+
+		sidecarClientId, sidecarJwt := env.authClient(&model.AuthNetworkClientArgs{Description: "sidecar", DeviceSpec: "test", StrictExp: true, DeclaresNoEgress: true})
+		connectClient(sidecarClientId, sidecarJwt)
+		sidecarResident := residentOf(sidecarClientId)
+		if sidecarResident == nil {
+			t.Fatal("the sidecar has no resident")
+		}
+		if sidecarResident.sidecarCountNetworkId == nil || *sidecarResident.sidecarCountNetworkId != env.networkId {
+			t.Fatal("the sidecar's resident does not count it")
+		}
+		if !waitFor(ctx, 30*time.Second, func() bool { return model.GetNetworkSidecarConnectedCount(ctx, env.networkId) == 1 }) {
+			t.Fatal("the sidecar is not counted")
+		}
+
+		sidecarByJwt, err := session.ParseByJwt(ctx, sidecarJwt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		window, err := model.AuthNetworkClient(&model.AuthNetworkClientArgs{
+			SourceClientId: &sidecarClientId,
+			Description:    "window",
+			DeviceSpec:     "test",
+		}, session.Testing_CreateClientSession(ctx, sidecarByJwt))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if window.Error != nil || window.ClientId == nil || window.ByClientJwt == nil || !window.StrictExp {
+			t.Fatalf("the window client's mint: %+v %+v", window, window.Error)
+		}
+		windowClientId := *window.ClientId
+		connectClient(windowClientId, *window.ByClientJwt)
+		windowResident := residentOf(windowClientId)
+		if windowResident == nil {
+			t.Fatal("the sidecar's window client was refused at its network's sidecar_clients limit")
+		}
+		connect.AssertEqual(t, windowResident.sidecarCountNetworkId == nil, true)
+		// one heartbeat, as the resident's poll runs it, while the window client holds its transport
+		if !waitFor(ctx, 30*time.Second, func() bool { return 0 < windowResident.TransportCount() }) {
+			t.Fatal("the window client holds no transport")
+		}
+		connect.AssertEqual(t, env.exchange.refreshResidentRegistration(windowResident), true)
+		connect.AssertEqual(t, model.GetNetworkSidecarConnectedCount(ctx, env.networkId), int64(1))
+
+		refusals := nominationRefusedCounter.WithLabelValues("sidecar_client_limit")
+		refusalsBefore := testutil.ToFloat64(refusals)
+		furtherClientId, furtherJwt := env.authClient(&model.AuthNetworkClientArgs{Description: "second sidecar", DeviceSpec: "test", StrictExp: true, DeclaresNoEgress: true})
+		connectClient(furtherClientId, furtherJwt)
+		if !waitFor(ctx, 30*time.Second, func() bool { return refusalsBefore < testutil.ToFloat64(refusals) }) {
+			t.Fatal("a second sidecar was not refused at its network's sidecar_clients limit")
+		}
+		connect.AssertEqual(t, env.exchange.testingResident(furtherClientId) == nil, true)
+		connect.AssertEqual(t, model.GetNetworkSidecarConnectedCount(ctx, env.networkId), int64(1))
+	})
 }

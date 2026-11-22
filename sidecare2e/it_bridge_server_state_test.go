@@ -5,9 +5,11 @@
 // a link's window client's out-of-band control, which reaches server's controller in process as the world's sidecars'
 // clients do, whether server holds the key a window client published in band, how many sidecar clients server counts
 // connected against the network's sidecar_clients, the provide modes a client provides as the controller reads them,
-// §21.7's standing reads api's process installs at its start, and the network's relayed contracts,
-// whose close reports §20.6's relay meter debits (model/relayed_contract_settle.go), for the case's exact
-// reconciliation of its transfer balances.
+// §21.7's standing reads api's process installs at its start, and, for the case's exact reconciliation of its transfer
+// balances, the network's relayed contracts, whose close reports §20.6's relay meter debits
+// (model/relayed_contract_settle.go), and its share contracts, which §20.6's share row escrows from the dialer's
+// network as Public and escrow's settle debits through transfer_debit_journal, which the case flushes as taskworker's
+// FlushTransferDebits does.
 
 package sidecare2e
 
@@ -225,6 +227,299 @@ func itBridgeRelayedContracts(ctx context.Context, networkId server.Id) (contrac
 		return nil, returnErr
 	}
 	return contracts, nil
+}
+
+// One share contract of a network as server holds it (§20.6's cross-network share row, §6.10.1 item 5, owner decision
+// 11): a contract between a client of the network and a client of another network of the case, the FriendsAndFamily
+// contract a share link's window client opens to its target's host or the companion the host answers on. Escrow
+// reserves both directions from the dialer's network's balances, as for Public, at CreateContract, and settles each
+// from both parties' close reports, its payout debiting those balances through transfer_debit_journal, which the flush
+// applies before it releases the reservation. No service meter journals it, and the relay meter's settle reads only a
+// contract both of whose ends are one network's (model/relayed_contract_settle.go).
+type ItBridgeShareContract struct {
+	ContractId           server.Id
+	SourceId             server.Id
+	DestinationId        server.Id
+	SourceNetworkId      server.Id
+	DestinationNetworkId server.Id
+	// The forward contract a companion answers; nil for a forward contract.
+	CompanionContractId *server.Id
+	// The bytes its signed grant allows.
+	TransferByteCount int64
+	// Whether an outcome is claimed, and which.
+	Open    bool
+	Outcome string
+	// Each party's close report, by party, and the parties whose report is a checkpoint rather than a final close.
+	CloseReports      map[string]int64
+	CheckpointReports map[string]bool
+	// Its escrow rows by the network whose balance each draws: the bytes they reserve, and what the settled ones paid
+	// (transfer_escrow's payout_byte_count); and how many rows are not settled yet.
+	EscrowByteCounts  map[server.Id]int64
+	PayoutByteCounts  map[server.Id]int64
+	UnsettledRowCount int
+	// transfer_debit_journal's rows under it, which the flush applies and deletes once their reservations are released.
+	JournalRowCount int
+	// What service_debit_journal holds under its id on any meter, summed over its balances' rows.
+	ServiceDebitByteCount int64
+	ServiceDebitRowCount  int
+}
+
+// The network that dialed the share, which pays both directions: a forward contract's source's, a companion's
+// destination's.
+func (self *ItBridgeShareContract) DialerNetworkId() server.Id {
+	if self.CompanionContractId != nil {
+		return self.DestinationNetworkId
+	}
+	return self.SourceNetworkId
+}
+
+// What escrow's settle counts for the contract (model's contractSettlementReportAmounts for an ordinary close, its
+// deadline close's rule where one party reported), capped at its grant: the mean of both reports, or the one report
+// there is. A dispute's outcomes are not the case's, and read as the ordinary rule.
+func (self *ItBridgeShareContract) SettledByteCount() int64 {
+	source, sourceOk := self.CloseReports[model.ContractPartySource]
+	destination, destinationOk := self.CloseReports[model.ContractPartyDestination]
+	used := int64(0)
+	switch {
+	case sourceOk && destinationOk:
+		lower, upper := min(source, destination), max(source, destination)
+		used = lower + (upper-lower)/2
+	case sourceOk:
+		used = source
+	case destinationOk:
+		used = destination
+	}
+	return min(max(0, used), self.TransferByteCount)
+}
+
+// What its escrow paid, from every network's balances.
+func (self *ItBridgeShareContract) PaidByteCount() int64 {
+	paid := int64(0)
+	for _, byteCount := range self.PayoutByteCounts {
+		paid += byteCount
+	}
+	return paid
+}
+
+// What its escrow reserves, from every network's balances.
+func (self *ItBridgeShareContract) EscrowedByteCount() int64 {
+	escrowed := int64(0)
+	for _, byteCount := range self.EscrowByteCounts {
+		escrowed += byteCount
+	}
+	return escrowed
+}
+
+// Whether its settle is done and flushed: an outcome claimed, every escrow row settled, and no journal row left.
+func (self *ItBridgeShareContract) Settled() bool {
+	return !self.Open && self.UnsettledRowCount == 0 && self.JournalRowCount == 0
+}
+
+// The contract as one line, for a failure's message.
+func (self *ItBridgeShareContract) Describe() string {
+	direction := "forward"
+	if self.CompanionContractId != nil {
+		direction = fmt.Sprintf("companion of %s", *self.CompanionContractId)
+	}
+	return fmt.Sprintf("share contract %s (%s) from %s to %s, granted %d B, open %t, outcome %q, close reports %v, checkpoints %v, escrow by network %v, paid by network %v, %d escrow rows unsettled, %d journal rows",
+		self.ContractId, direction, self.SourceId, self.DestinationId, self.TransferByteCount, self.Open, self.Outcome, self.CloseReports,
+		self.CheckpointReports, self.EscrowByteCounts, self.PayoutByteCounts, self.UnsettledRowCount, self.JournalRowCount)
+}
+
+// networkId's share contracts: every contract one of whose ends is a client of networkId and the other a client of one
+// of peerNetworkIds, the case's other networks, so no edge's Service contract is among them, with their close reports,
+// their escrow rows by the network whose balance each draws, their transfer debit journal rows and any service debit
+// journaled under their ids.
+func itBridgeShareContracts(ctx context.Context, networkId server.Id, peerNetworkIds []server.Id) (contracts []*ItBridgeShareContract, returnErr error) {
+	byId := map[server.Id]*ItBridgeShareContract{}
+	server.HandleError(func() {
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`
+					SELECT
+						contract_id,
+						source_id,
+						destination_id,
+						source_network_id,
+						destination_network_id,
+						companion_contract_id,
+						transfer_byte_count,
+						open,
+						COALESCE(outcome, '')
+					FROM transfer_contract
+					WHERE
+						(source_network_id = $1 AND destination_network_id = ANY($2)) OR
+						(destination_network_id = $1 AND source_network_id = ANY($2))
+					ORDER BY contract_id
+				`,
+				networkId,
+				peerNetworkIds,
+			)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					contract := &ItBridgeShareContract{
+						CloseReports:      map[string]int64{},
+						CheckpointReports: map[string]bool{},
+						EscrowByteCounts:  map[server.Id]int64{},
+						PayoutByteCounts:  map[server.Id]int64{},
+					}
+					var transferByteCount model.ByteCount
+					server.Raise(result.Scan(
+						&contract.ContractId,
+						&contract.SourceId,
+						&contract.DestinationId,
+						&contract.SourceNetworkId,
+						&contract.DestinationNetworkId,
+						&contract.CompanionContractId,
+						&transferByteCount,
+						&contract.Open,
+						&contract.Outcome,
+					))
+					contract.TransferByteCount = int64(transferByteCount)
+					byId[contract.ContractId] = contract
+					contracts = append(contracts, contract)
+				}
+			})
+			if len(contracts) == 0 {
+				return
+			}
+			contractIds := []server.Id{}
+			for _, contract := range contracts {
+				contractIds = append(contractIds, contract.ContractId)
+			}
+			reports, err := conn.Query(
+				ctx,
+				`
+					SELECT contract_id, party, used_transfer_byte_count, checkpoint
+					FROM contract_close
+					WHERE contract_id = ANY($1)
+				`,
+				contractIds,
+			)
+			server.WithPgResult(reports, err, func() {
+				for reports.Next() {
+					var contractId server.Id
+					var party string
+					var byteCount model.ByteCount
+					var checkpoint bool
+					server.Raise(reports.Scan(&contractId, &party, &byteCount, &checkpoint))
+					if contract := byId[contractId]; contract != nil {
+						contract.CloseReports[party] = int64(byteCount)
+						if checkpoint {
+							contract.CheckpointReports[party] = true
+						}
+					}
+				}
+			})
+			escrows, err := conn.Query(
+				ctx,
+				`
+					SELECT
+						transfer_escrow.contract_id,
+						transfer_balance.network_id,
+						transfer_escrow.balance_byte_count,
+						transfer_escrow.settled,
+						COALESCE(transfer_escrow.payout_byte_count, 0)
+					FROM transfer_escrow
+					INNER JOIN transfer_balance ON transfer_balance.balance_id = transfer_escrow.balance_id
+					WHERE transfer_escrow.contract_id = ANY($1)
+				`,
+				contractIds,
+			)
+			server.WithPgResult(escrows, err, func() {
+				for escrows.Next() {
+					var contractId server.Id
+					var balanceNetworkId server.Id
+					var escrowByteCount model.ByteCount
+					var settled bool
+					var payoutByteCount model.ByteCount
+					server.Raise(escrows.Scan(&contractId, &balanceNetworkId, &escrowByteCount, &settled, &payoutByteCount))
+					if contract := byId[contractId]; contract != nil {
+						contract.EscrowByteCounts[balanceNetworkId] += int64(escrowByteCount)
+						if settled {
+							contract.PayoutByteCounts[balanceNetworkId] += int64(payoutByteCount)
+						} else {
+							contract.UnsettledRowCount += 1
+						}
+					}
+				}
+			})
+			journal, err := conn.Query(
+				ctx,
+				`
+					SELECT contract_id, COUNT(*)
+					FROM transfer_debit_journal
+					WHERE contract_id = ANY($1)
+					GROUP BY contract_id
+				`,
+				contractIds,
+			)
+			server.WithPgResult(journal, err, func() {
+				for journal.Next() {
+					var contractId server.Id
+					var rowCount int
+					server.Raise(journal.Scan(&contractId, &rowCount))
+					if contract := byId[contractId]; contract != nil {
+						contract.JournalRowCount += rowCount
+					}
+				}
+			})
+			debits, err := conn.Query(
+				ctx,
+				`
+					SELECT usage_id, SUM(debit_byte_count), COUNT(*)
+					FROM service_debit_journal
+					WHERE usage_id = ANY($1)
+					GROUP BY usage_id
+				`,
+				contractIds,
+			)
+			server.WithPgResult(debits, err, func() {
+				for debits.Next() {
+					var usageId server.Id
+					var byteCount int64
+					var rowCount int
+					server.Raise(debits.Scan(&usageId, &byteCount, &rowCount))
+					if contract := byId[usageId]; contract != nil {
+						contract.ServiceDebitByteCount += byteCount
+						contract.ServiceDebitRowCount += rowCount
+					}
+				}
+			})
+		})
+	}, func(err error) {
+		returnErr = fmt.Errorf("the share contracts: %w", err)
+	})
+	if returnErr != nil {
+		return nil, returnErr
+	}
+	return contracts, nil
+}
+
+// Applies every transfer debit escrow's settles journaled to the payers' balances and releases each one's reservation,
+// each shard's balances until none is left, pageBalanceCount a page (FlushTransferDebits' maxBalances, at most 64), as
+// taskworker's FlushTransferDebits does on its schedule, which the World does not run: a share contract's settle
+// debits its dialer's balances only through this journal (§20.6's share row), so the case's ledgers read after it. A
+// balance another pass holds is busy and stays for the next call.
+func itBridgeFlushTransferDebits(ctx context.Context, pageBalanceCount int) error {
+	for shard := range model.TransferDebitShardCount {
+		var after *server.Id
+		for {
+			result, err := model.FlushTransferDebits(ctx, shard, after, pageBalanceCount)
+			if err != nil {
+				return fmt.Errorf("shard %d's transfer debits: %w", shard, err)
+			}
+			if 0 < result.Failed {
+				return fmt.Errorf("shard %d: %d balances' transfer debits failed to apply", shard, result.Failed)
+			}
+			if !result.More || result.LastBalanceId == nil {
+				break
+			}
+			after = result.LastBalanceId
+		}
+	}
+	return nil
 }
 
 // The provide modes server holds for clientId, by name, as the controller reads them when it settles a contract to it
