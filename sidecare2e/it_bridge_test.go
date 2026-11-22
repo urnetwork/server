@@ -680,7 +680,7 @@ func (self *ItBridgeWorld) Summarize(t testing.TB) {
 		}
 		passed := int64(0)
 		if device.gate != nil {
-			passed = device.gate.PassedCount()
+			passed = device.gate.ApprovedCount()
 		}
 		t.Logf("%s: %d wires, %d dials, %d refused, %d exposures the stock gate held for a person", device.name, device.WireCount(),
 			len(device.dialer.Dials()), refused, passed)

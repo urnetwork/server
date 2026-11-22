@@ -30,9 +30,13 @@
 // port its rule leaves out still enters the link and is the forwarding role's to refuse (§17.6's rule 6).
 //
 // The filings go through each device's BridgeFiler, the path `ur bridge` and MCP's bridge tools take, through §16.6's
-// stock approval gate over the device's follower, whose standing grants are the document's, and a stand-in in front of
-// it that passes an exposure the stock gate holds for a person although the document's standing rule covers it
-// (itBridgeStandingGate, a product finding). A filing seals its body
+// stock approval gate over the device's follower, whose standing grants are the document's, behind the World's
+// worldDeviceGate approving exposures as a person would: the stock gate holds every exposure, route or map, for a
+// person's decision, even one the document's standing route or dial rule covers, since its standing check is
+// AclEngine.ActiveGrant, which covers only an action with grant fields, and an exposure's CanonicalAction carries none
+// (a product finding the case reports). The filer then files the rule with no approval, which every reader holds in
+// force only while the document covers it (§17.7; AclLocalPolicy.StandingCovers), so the stand-in opens nothing the
+// document does not. A filing seals its body
 // under the config repo's key, which each Sidecar holds through the follower's keys the case installs
 // (itBridgeConfigKeys): a follower installs them itself only over a key client of forwarding setup's, which the World's
 // FakeGkm client is not; and the config repo's group, which a real-keys bootstrap forms at gkm, is formed at the World's
@@ -54,7 +58,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -606,14 +609,12 @@ func (self *ItBridgeWorld) build(ctx context.Context) error {
 		self.world.T3().OnClose(remove)
 	}
 	// filings go through §16.6's stock gate over each filer's follower, its standing grants the document's, behind the
-	// stand-in that passes an exposure the stock gate holds for a person (itBridgeStandingGate)
+	// World's stand-in approving the exposures it holds for a person (the file's header)
 	for _, filer := range slices.Concat([]*itBridgeDevice{self.owner}, self.routerDevices(), self.hosts) {
-		stock, err := self.world.InstallApprovalGate(ctx, filer.t3)
-		if err != nil {
+		var err error
+		if filer.gate, err = self.world.InstallDeviceGate(ctx, filer.t3, sidecar.SidecarActionExpose); err != nil {
 			return err
 		}
-		filer.gate = &itBridgeStandingGate{next: stock}
-		self.world.T3().OnClose(filer.t3.Sidecar().InstallGate(filer.gate))
 		if filer.filer, err = self.newFiler(filer, nil); err != nil {
 			return err
 		}
@@ -653,44 +654,6 @@ func (self *ItBridgeWorld) build(ctx context.Context) error {
 		return err
 	}
 	return self.AwaitAdopted(ctx, self.tip())
-}
-
-// A stand-in in front of §16.6's stock gate behind one device's Authorize (the file's header): the stock gate holds
-// every exposure, route or map, for a person's decision, even one the document's standing route or dial rule covers,
-// since its standing check is AclEngine.ActiveGrant, which covers only an action with grant fields, and an exposure's
-// CanonicalAction carries none (a product finding the case reports); so where it answers pending for an exposure, this
-// runs the exposure's effect under an empty key, as the gate's step 2 runs one a standing grant covers. The filer then
-// files the rule with no approval, which every reader holds in force only while the document covers it (§17.7;
-// AclLocalPolicy.StandingCovers), so the stand-in opens nothing the document does not. Every other answer is the stock
-// gate's.
-type itBridgeStandingGate struct {
-	next sidecar.SidecarGate
-	// the exposures the stock gate held for a person and this passed
-	passedCount atomic.Int64
-}
-
-func (self *itBridgeStandingGate) Authorize(ctx context.Context, action *sidecar.SidecarAction, decision *bridge.Signed) error {
-	err := self.next.Authorize(ctx, action, decision)
-	var pending *sidecar.ApprovalPendingError
-	if err == nil || action == nil || action.Kind != sidecar.SidecarActionExpose || action.Effect == nil || !errors.As(err, &pending) {
-		return err
-	}
-	effectRef, runErr := action.Effect.Run(ctx, nil)
-	switch {
-	case runErr == nil:
-		action.Outcome = &sidecar.SidecarOutcome{State: sidecar.ApprovalOutcomeDone, EffectRef: effectRef}
-	case errors.Is(runErr, sidecar.ErrSidecarEffectNotDone):
-		action.Outcome = &sidecar.SidecarOutcome{State: sidecar.ApprovalOutcomeNotDone, Err: runErr}
-	default:
-		action.Outcome = &sidecar.SidecarOutcome{State: sidecar.ApprovalOutcomeUncertain, Err: runErr}
-	}
-	self.passedCount.Add(1)
-	return nil
-}
-
-// How many exposures the stock gate held for a person and this passed.
-func (self *itBridgeStandingGate) PassedCount() int64 {
-	return self.passedCount.Load()
 }
 
 // A follower's config repo keys as its Sidecar holds them (sidecar.SidecarConfigKeys), as the follower installs its own

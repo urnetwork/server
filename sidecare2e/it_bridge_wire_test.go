@@ -106,7 +106,7 @@ type itBridgeDevice struct {
 	wireCount int
 	// a filing device's filer, and its gate's stand-in (it_bridge_world_test.go); nil on a client
 	filer *sidecar.BridgeFiler
-	gate  *itBridgeStandingGate
+	gate  *worldDeviceGate
 }
 
 // The device's id in the network's config.
