@@ -54,9 +54,8 @@ func readUrcliConsentBody(r *http.Request) ([]byte, bool) {
 	return body, true
 }
 
-// IsUrcliOwnKeyRequest lets the role gate admit a team member whose role lacks the keys permission to POST
-// /oauth/consent and POST /oauth/authorize for `ur login`'s one command (isUrcliOwnKeyRequest), read from the consent
-// request in the body.
+// Lets the role gate admit a team member whose role lacks the keys permission to POST /oauth/consent and POST
+// /oauth/authorize for `ur login`'s one command (isUrcliOwnKeyRequest), read from the consent request in the body.
 func IsUrcliOwnKeyRequest(r *http.Request) bool {
 	body, ok := readUrcliConsentBody(r)
 	if !ok {
@@ -66,9 +65,9 @@ func IsUrcliOwnKeyRequest(r *http.Request) bool {
 	return json.Unmarshal(body, request) == nil && isUrcliOwnKeyRequest(request.authorizationRequest())
 }
 
-// IsUrcliOwnKeyDeviceRequest is IsUrcliOwnKeyRequest for the device grant's consent page, POST /oauth/device_consent
-// and POST /oauth/device_approve: the waiting device authorization the body's user code names asks `ur login`'s one
-// command. With no store, or one that cannot answer, it admits nothing.
+// IsUrcliOwnKeyRequest's check for the device grant's consent page, POST /oauth/device_consent and POST
+// /oauth/device_approve: the waiting device authorization the body's user code names asks `ur login`'s one command.
+// With no store, or one that cannot answer, it admits nothing.
 func IsUrcliOwnKeyDeviceRequest(r *http.Request) bool {
 	body, ok := readUrcliConsentBody(r)
 	if !ok {
