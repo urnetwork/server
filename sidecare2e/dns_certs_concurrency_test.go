@@ -106,8 +106,8 @@ func defaultDnsCertsSettings() *dnsCertsSettings {
 	bursts := DefaultWorldBurstSettings()
 	bursts.MaxPause = 40 * time.Millisecond
 	return &dnsCertsSettings{
-		NetworkCount:         3,
-		ClientCount:          8,
+		NetworkCount:        3,
+		ClientCount:         8,
 		OwnTxtWriteCount:    4,
 		OwnLinkWriteCount:   3,
 		SharedWriteCount:    3,
@@ -697,4 +697,3 @@ func dnsCertsCheckChangesBudget(t testing.TB, ctx context.Context, settings *dns
 		}
 	}
 }
-
