@@ -178,46 +178,10 @@ func (self *ItBridgeWorld) ActivateRouteGrant(ctx context.Context, grant *itBrid
 	if err != nil {
 		return fmt.Errorf("%s's action: %w", grant.name, err)
 	}
-	newAction := func() (*sidecar.SidecarAction, error) {
-		action, err := sidecar.NewSidecarAction(stored, sidecar.SidecarRiskNormal, sidecar.SidecarRiskNormal, nil, nil)
-		if err != nil {
-			return nil, err
-		}
-		action.Effect = client.grants.Effect(stored)
-		return action, nil
-	}
-	action, err := newAction()
+	grantId, err := self.spendGrant(ctx, client, self.owner, stored)
 	if err != nil {
-		return err
+		return fmt.Errorf("%s: %w", grant.name, err)
 	}
-	err = running.Authorize(ctx, action, nil)
-	var pending *sidecar.ApprovalPendingError
-	if !errors.As(err, &pending) {
-		return fmt.Errorf("%s: the gate answered %v, not a request pending a decision", grant.name, err)
-	}
-	ledger, err := running.ApprovalLedger()
-	if err != nil {
-		return err
-	}
-	approval, err := ledger.State(pending.ApprovalId)
-	if err != nil || approval.Request == nil {
-		return fmt.Errorf("%s: the client's ledger holds no request %s: %v", grant.name, pending.ApprovalId, err)
-	}
-	decision, err := self.approve(self.owner, approval.Request)
-	if err != nil {
-		return fmt.Errorf("%s's approval: %w", grant.name, err)
-	}
-	action, err = newAction()
-	if err != nil {
-		return err
-	}
-	if err := running.Authorize(ctx, action, decision); err != nil {
-		return fmt.Errorf("%s's spend: %w", grant.name, err)
-	}
-	if action.Outcome == nil || action.Outcome.State != sidecar.ApprovalOutcomeDone || len(action.Outcome.EffectRef) == 0 {
-		return fmt.Errorf("%s's spend answered %+v", grant.name, action.Outcome)
-	}
-	grantId := bytes.Clone(action.Outcome.EffectRef)
 	landedAt := time.Now()
 	func() {
 		grant.stateLock.Lock()
@@ -243,6 +207,59 @@ func (self *ItBridgeWorld) ActivateRouteGrant(ctx context.Context, grant *itBrid
 		incarnation.AdoptedAt = time.Now()
 	})
 	return nil
+}
+
+// A grant's action asked and spent on requester's gate, as its grant component spends a decision: requester's
+// Authorize of the action with its grant effect answers it pending, approver signs the decision on the request the
+// requester's ledger stored (approveRequest), and Authorize of the same action with that decision spends it, its effect
+// filing the GrantActivate. Answers the grant's id.
+func (self *ItBridgeWorld) spendGrant(ctx context.Context, requester *itBridgeDevice, approver *itBridgeDevice, stored *sidecar.StoredCanonicalAction) ([]byte, error) {
+	running := requester.t3.Sidecar()
+	newAction := func() (*sidecar.SidecarAction, error) {
+		action, err := sidecar.NewSidecarAction(stored, sidecar.SidecarRiskNormal, sidecar.SidecarRiskNormal, nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		action.Effect = requester.grants.Effect(stored)
+		return action, nil
+	}
+	action, err := newAction()
+	if err != nil {
+		return nil, err
+	}
+	err = running.Authorize(ctx, action, nil)
+	var pending *sidecar.ApprovalPendingError
+	if !errors.As(err, &pending) {
+		return nil, fmt.Errorf("the gate answered %v, not a request pending a decision", err)
+	}
+	decision, err := self.approveRequest(approver, requester, pending.ApprovalId)
+	if err != nil {
+		return nil, fmt.Errorf("the approval: %w", err)
+	}
+	action, err = newAction()
+	if err != nil {
+		return nil, err
+	}
+	if err := running.Authorize(ctx, action, decision); err != nil {
+		return nil, fmt.Errorf("the spend: %w", err)
+	}
+	if action.Outcome == nil || action.Outcome.State != sidecar.ApprovalOutcomeDone || len(action.Outcome.EffectRef) == 0 {
+		return nil, fmt.Errorf("the spend answered %+v", action.Outcome)
+	}
+	return bytes.Clone(action.Outcome.EffectRef), nil
+}
+
+// approver's decision (approve) on requester's request approvalId, as requester's ledger stores it.
+func (self *ItBridgeWorld) approveRequest(approver *itBridgeDevice, requester *itBridgeDevice, approvalId sidecar.Id) (*bridge.Signed, error) {
+	ledger, err := requester.t3.Sidecar().ApprovalLedger()
+	if err != nil {
+		return nil, err
+	}
+	approval, err := ledger.State(approvalId)
+	if err != nil || approval.Request == nil {
+		return nil, fmt.Errorf("%s's ledger holds no request %s: %v", requester.name, approvalId, err)
+	}
+	return self.approve(approver, approval.Request)
 }
 
 // The device decision `ur approve` signs on request once its person confirms (ApprovalApprover.Decide): approve, at

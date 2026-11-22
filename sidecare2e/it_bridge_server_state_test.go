@@ -4,7 +4,8 @@
 // own beside world_server_state_test.go (the e2e conventions; QD-1028's layout move will move sidecar's model code):
 // a link's window client's out-of-band control, which reaches server's controller in process as the world's sidecars'
 // clients do, whether server holds the key a window client published in band, how many sidecar clients server counts
-// connected against the network's sidecar_clients, and the network's relayed contracts,
+// connected against the network's sidecar_clients, the provide modes a client provides as the controller reads them,
+// §21.7's standing reads api's process installs at its start, and the network's relayed contracts,
 // whose close reports §20.6's relay meter debits (model/relayed_contract_settle.go), for the case's exact
 // reconciliation of its transfer balances.
 
@@ -14,6 +15,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
@@ -223,4 +225,47 @@ func itBridgeRelayedContracts(ctx context.Context, networkId server.Id) (contrac
 		return nil, returnErr
 	}
 	return contracts, nil
+}
+
+// The provide modes server holds for clientId, by name, as the controller reads them when it settles a contract to it
+// (controller.GetProvideModes): what a share link's FriendsAndFamily contract needs its host's client to provide.
+func itBridgeProvideModes(ctx context.Context, clientId server.Id) []string {
+	names := []string{}
+	for mode, provided := range controller.GetProvideModes(ctx, clientId) {
+		if provided {
+			// model's modes align with connect's protocol.ProvideMode
+			names = append(names, protocol.ProvideMode(mode).String())
+		}
+	}
+	slices.Sort(names)
+	return names
+}
+
+// §21.7's reads as api's process installs them at its start (controller.InstallAbuseStanding, which cli/api/main.go
+// calls and the World's api does not): among them the standing an outbound share's filing asks
+// (model.SetNetworkBridgeShareOutboundCheck), with none of which every invite is refused 403. ctx bounds the reads'
+// loaders; the answer puts the previous reads back.
+func itBridgeInstallAbuseStanding(ctx context.Context) func() {
+	return controller.InstallAbuseStanding(ctx)
+}
+
+// What POST /acl/invite's three checks read for clientId of networkId (model.AclInvite), for an invite's refusal's
+// message, since api's answer names no reason (I-13): the caller's identity, active or not; acl_network_shares in the
+// network's limits, which a plan that leaves it 0 refuses where limits are enforced; and §21.7's standing as api's
+// database holds it, whose limits give or keep outbound shares. The third reads Postgres, where api's own check reads
+// its gate's memory, so a cold gate refuses what this reports allowed.
+func itBridgeInviteFacts(ctx context.Context, networkId server.Id, clientId server.Id) string {
+	identity := "none"
+	if view := model.GetSidecarIdentityByClient(ctx, networkId, clientId); view != nil {
+		identity = fmt.Sprintf("%v", view.Status)
+	}
+	shares := model.NetworkSidecarLimits(ctx, networkId).Limit("acl_network_shares")
+	standing := "unknown"
+	outbound := false
+	if held, found := model.GetNetworkAbuseStanding(ctx, networkId, server.NowUtc()); found {
+		standing = string(held.Standing)
+		outbound = model.AbuseStandingLimits(held.Standing, model.DefaultAbuseSettings()).OutboundShares
+	}
+	return fmt.Sprintf("the caller's sidecar identity %s, acl_network_shares %d with limits enforced %t, standing %s giving outbound shares %t",
+		identity, shares, model.Pro().EnforceSidecarLimits, standing, outbound)
 }

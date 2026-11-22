@@ -3,10 +3,12 @@
 // The it-bridge case's world (it_bridge_test.go's header): one network of the World, its devices by role, each with
 // its bridge (it_bridge_wire_test.go), the destinations they forward to (it_bridge_targets_test.go), the network's block
 // and ACL document, the filings that join and leave subnets and set up and remove forwards, each on a timeline the
-// oracle reads, and the clients' attempts.
+// oracle reads, and the clients' attempts. A second network of the case on the same World (AddPeer) is built alike,
+// with its own name, device names, block and document, for a share between the two (it_bridge_shares_test.go).
 //
 //	owner    the network's first device: it bootstraps the network, sets its block in a config head (`ur bridge block`)
-//	         and saves the ACL document (`ur acl push`); it runs no bridge
+//	         and saves the ACL document (`ur acl push`), and files a share's acts as the network's admin; it runs no
+//	         bridge
 //	subnets  S devices, each in front of one subnet, a prefix carved from SubnetPrefixes: its route (`ur bridge expose`)
 //	         joins the subnet to the network and its BridgeWithdraw, reset, takes it out (§17.8's revocation row, so
 //	         clients are refused at once rather than drained for 10 minutes)
@@ -172,6 +174,25 @@ type ItBridgeSettings struct {
 	// revoked once probed. false, 90 s.
 	RouteGrants        bool
 	RouteGrantLifetime time.Duration
+	// The network's name in the World, and what every device's name starts with: itb and none. A second network of
+	// the case (AddPeer) takes its own of both.
+	NetworkName      string
+	DeviceNamePrefix string
+	// Shares (it_bridge_shares_test.go): whether the document carries the requests rule a share's inbound grant is
+	// activated under, from any network (network:*) to the share's target hosts, every forward host and subnet device,
+	// with autogroup:admin as approver, as the implicit document's shares rule reads (§8.5). false.
+	ShareTargets bool
+	// The drain an accepting network's release of a share's aliases asks (BridgeShareFilerSettings.ReleaseDrain), so a
+	// released alias leaves the network's tables within the case: 1 s, where 0 would take the ledger's 300 s.
+	ShareReleaseDrain time.Duration
+	// How many times a share's invite is filed while api refuses it 403, ShareInvitePause apart: §21.7's gate reads the
+	// sharing network's standing from memory and loads it at its first ask, refusing that ask as unread, so an invite
+	// on a cold gate is refused once before the load lands (it_bridge_shares_test.go). 10, 1 s.
+	ShareInviteTryCount int
+	ShareInvitePause    time.Duration
+	// How old the sharing network is made before its invite (worldAgeNetwork): §21.7's probation, a network's first
+	// 7 days, gives it no outbound share, and a case cannot wait them out. 8 days.
+	ShareNetworkAge time.Duration
 	// The case's randomness: targets, addresses, holds and pauses. Logged.
 	Seed uint64
 }
@@ -229,6 +250,13 @@ func DefaultItBridgeSettings() *ItBridgeSettings {
 		LedgerPollInterval:         250 * time.Millisecond,
 		RouteGrants:                false,
 		RouteGrantLifetime:         90 * time.Second,
+		NetworkName:                "itb",
+		DeviceNamePrefix:           "",
+		ShareTargets:               false,
+		ShareReleaseDrain:          time.Second,
+		ShareInviteTryCount:        10,
+		ShareInvitePause:           time.Second,
+		ShareNetworkAge:            8 * 24 * time.Hour,
 		Seed:                       uint64(time.Now().UnixNano()),
 	}
 }
@@ -432,6 +460,7 @@ type ItBridgeWorld struct {
 	network  *WorldNetwork
 	random   *rand.Rand
 	// what every window client's transport dials with: the exchange's strategy and transport settings
+	exchangeSettings  *sidecart3.ExchangeSettings
 	clientStrategy    *connect.ClientStrategy
 	transportSettings *connect.PlatformTransportSettings
 
@@ -458,7 +487,11 @@ type ItBridgeWorld struct {
 	alarms    []string
 	attempts  []*ItBridgeAttempt
 	chaos     []*itBridgeChaos
-	closed    bool
+	// the other networks of the case on this World (AddPeer), and the shares between them and this one
+	// (it_bridge_shares_test.go)
+	peers  []*ItBridgeWorld
+	shares []*itBridgeShare
+	closed bool
 }
 
 // One window in which chaos may refuse what is otherwise reachable: a device's bridge, or every one when device is nil,
@@ -503,11 +536,39 @@ func NewItBridgeWorld(t testing.TB, settings *ItBridgeSettings) *ItBridgeWorld {
 	exchangeSettings.Handler = &handlerSettings
 	worldSettings.T3.Exchange = &exchangeSettings
 	world := NewWorld(t, worldSettings)
+	return newItBridgeNetwork(t, world, settings, &exchangeSettings)
+}
+
+// Another network of the case on the World of self, with its own devices, destinations, block and document, built as
+// NewItBridgeWorld builds the first (it_bridge_shares_test.go's accepting network). Its settings' World and
+// ExchangeConnectionMaxCount are the first network's; its NetworkName and DeviceNamePrefix should differ from the
+// first's, so its devices' names are its own. Closed at t's end, before the first.
+func (self *ItBridgeWorld) AddPeer(t testing.TB, settings *ItBridgeSettings) *ItBridgeWorld {
+	t.Helper()
+	if settings == nil {
+		settings = DefaultItBridgeSettings()
+	}
+	if settings.Wire == nil {
+		settings.Wire = DefaultItBridgeWireSettings()
+	}
+	t.Logf("it bridge: %s's seed %d", settings.NetworkName, settings.Seed)
+	peer := newItBridgeNetwork(t, self.world, settings, self.exchangeSettings)
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.peers = append(self.peers, peer)
+	return peer
+}
+
+// One network of the case on world (NewItBridgeWorld), its window clients dialing with exchangeSettings' strategy and
+// transport.
+func newItBridgeNetwork(t testing.TB, world *World, settings *ItBridgeSettings, exchangeSettings *sidecart3.ExchangeSettings) *ItBridgeWorld {
+	t.Helper()
 	self := &ItBridgeWorld{
 		t:                 t,
 		settings:          settings,
 		world:             world,
 		random:            rand.New(rand.NewPCG(settings.Seed, 0)),
+		exchangeSettings:  exchangeSettings,
 		clientStrategy:    connect.NewClientStrategy(world.T3().Context(), exchangeSettings.ClientStrategy),
 		transportSettings: exchangeSettings.Transport,
 	}
@@ -531,7 +592,7 @@ func (self *ItBridgeWorld) build(ctx context.Context) error {
 	if settings.CampusPrefix.IsValid() {
 		deviceCount += 1
 	}
-	network, err := self.world.AddNetwork(ctx, "itb", deviceCount, nil)
+	network, err := self.world.AddNetwork(ctx, settings.NetworkName, deviceCount, nil)
 	if err != nil {
 		return fmt.Errorf("the network: %w", err)
 	}
@@ -543,7 +604,7 @@ func (self *ItBridgeWorld) build(ctx context.Context) error {
 	}
 	postureRoot := self.t.TempDir()
 	newDevice := func(t3 *sidecart3.T3Device, role string, index int) *itBridgeDevice {
-		name := fmt.Sprintf("%s-%d", role, index)
+		name := fmt.Sprintf("%s%s-%d", settings.DeviceNamePrefix, role, index)
 		return &itBridgeDevice{
 			world:            self,
 			t3:               t3,
@@ -558,7 +619,7 @@ func (self *ItBridgeWorld) build(ctx context.Context) error {
 	for index := range settings.SubnetCount {
 		subnetDevice := newDevice(network.Clients[next], "router", index)
 		next += 1
-		name := fmt.Sprintf("subnet-%d", index)
+		name := fmt.Sprintf("%ssubnet-%d", settings.DeviceNamePrefix, index)
 		service, err := newItBridgeService(name, settings.ReadByteCount)
 		if err != nil {
 			return err
@@ -573,14 +634,15 @@ func (self *ItBridgeWorld) build(ctx context.Context) error {
 	if settings.CampusPrefix.IsValid() {
 		campusDevice := newDevice(network.Clients[next], "campus", 0)
 		next += 1
-		service, err := newItBridgeService("campus", settings.ReadByteCount)
+		campusName := settings.DeviceNamePrefix + "campus"
+		service, err := newItBridgeService(campusName, settings.ReadByteCount)
 		if err != nil {
 			return err
 		}
 		campusDevice.dialer.AddSubnet(settings.CampusPrefix, settings.SubnetServicePort, service)
 		// the campus's index in the grant matrix follows the subnets'
 		self.campus = &itBridgeTarget{
-			kind: itBridgeTargetSubnet, index: settings.SubnetCount, name: "campus", device: campusDevice, service: service,
+			kind: itBridgeTargetSubnet, index: settings.SubnetCount, name: campusName, device: campusDevice, service: service,
 			timeline: &itBridgeTimeline{}, prefix: settings.CampusPrefix,
 		}
 		self.devices = append(self.devices, campusDevice)
@@ -594,7 +656,7 @@ func (self *ItBridgeWorld) build(ctx context.Context) error {
 	}
 	for index := range settings.ForwardCount {
 		host := self.hosts[index%len(self.hosts)]
-		name := fmt.Sprintf("forward-%d", index)
+		name := fmt.Sprintf("%sforward-%d", settings.DeviceNamePrefix, index)
 		service, err := newItBridgeService(name, settings.ReadByteCount)
 		if err != nil {
 			return err
@@ -636,7 +698,13 @@ func (self *ItBridgeWorld) build(ctx context.Context) error {
 		if filer.gate, err = self.world.InstallDeviceGate(ctx, filer.t3, sidecar.SidecarActionExpose); err != nil {
 			return err
 		}
-		if filer.filer, err = self.newFiler(filer, nil); err != nil {
+		if filer == self.owner {
+			// the owner, an admin's device, also files the shares' acts (it_bridge_shares_test.go)
+			filer.filer, err = self.newShareFiler(filer)
+		} else {
+			filer.filer, err = self.newFiler(filer, nil)
+		}
+		if err != nil {
 			return err
 		}
 	}
@@ -650,8 +718,7 @@ func (self *ItBridgeWorld) build(ctx context.Context) error {
 	// the document's save waits out the base the block took (one a minute, §7.9) while the bridges start
 	saved := make(chan error, 1)
 	go func() {
-		_, err := self.world.SaveAclPolicy(ctx, network, self.owner.t3, self.policy)
-		saved <- err
+		saved <- self.saveDocument(ctx, self.policy, nil)
 	}()
 	for _, device := range self.devices {
 		if err := device.startWire(); err != nil {
@@ -790,22 +857,42 @@ func (self *ItBridgeWorld) newFiler(device *itBridgeDevice, headWriter sidecar.B
 }
 
 // The owner sets the network's block in a config head, as `ur bridge block <cidr>` does on an admin's device
-// (BridgeFiler.SetBlock), through a config writer over the ref its follower holds for confirmed saves, made for this
-// save and closed after it. §17.4 has the bootstrap draw the first block into the first head, and no bootstrap does, so
-// a network has none until an admin sets one. A base api refuses 429, past §7.9's config_bases_per_min, is saved again
-// once its retry_after has passed, within the World's RateLimitWaitTimeout.
+// (BridgeFiler.SetBlock), through its config writer (itBridgeHeadWriter). §17.4 has the bootstrap draw the first block
+// into the first head, and no bootstrap does, so a network has none until an admin sets one.
 func (self *ItBridgeWorld) setBlock(ctx context.Context) error {
-	owner := self.owner
-	follower := owner.t3.Follower()
-	provider, ok := follower.Heads().(sidecar.ConfirmedAclConfigRefProvider)
-	if !ok {
-		return errors.New("the owner's follower holds no ref for confirmed saves")
-	}
-	api, err := self.generationApi(ctx, owner)
+	filer, err := self.newFiler(self.owner, &itBridgeHeadWriter{world: self, device: self.owner})
 	if err != nil {
 		return err
 	}
-	running := owner.t3.Sidecar()
+	if _, err := filer.SetBlock(ctx, &sidecar.BridgeFileOrigin{Act: sidecar.SidecarActConfirmed}, &sidecar.BridgeBlockRequest{Prefix: self.settings.Block}); err != nil {
+		return fmt.Errorf("the block: %w", err)
+	}
+	return nil
+}
+
+// device's config writer as a daemon's filer saves heads through it (sidecar.BridgeHeadWriter): each SaveHead makes a
+// writer over the ref device's follower holds for confirmed saves, saves through it and closes it, its base published
+// through the device's own api, and then syncs the network at the base. A base api refuses 429, past §7.9's
+// config_bases_per_min, is saved again once its retry_after has passed, within the World's RateLimitWaitTimeout.
+type itBridgeHeadWriter struct {
+	world  *ItBridgeWorld
+	device *itBridgeDevice
+}
+
+var _ sidecar.BridgeHeadWriter = (*itBridgeHeadWriter)(nil)
+
+func (self *itBridgeHeadWriter) SaveHead(ctx context.Context, edit func(head *sidecar.ConfigHead) (*sidecar.ConfigHead, error)) (*bridge.AuthPin, error) {
+	device := self.device
+	follower := device.t3.Follower()
+	provider, ok := follower.Heads().(sidecar.ConfirmedAclConfigRefProvider)
+	if !ok {
+		return nil, fmt.Errorf("%s's follower holds no ref for confirmed saves", device.name)
+	}
+	api, err := self.world.generationApi(ctx, device)
+	if err != nil {
+		return nil, err
+	}
+	running := device.t3.Sidecar()
 	writer, err := sidecar.NewConfigWriter(ctx, &sidecar.ConfigWriterArgs{
 		SidecarId: running.Identity().SidecarId,
 		Sign: func(purpose string, signedType bridge.SignedType, body []byte) (*bridge.Signed, error) {
@@ -816,31 +903,30 @@ func (self *ItBridgeWorld) setBlock(ctx context.Context) error {
 		Publisher: api,
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer writer.Close()
-	filer, err := self.newFiler(owner, writer)
-	if err != nil {
-		return err
-	}
-	waitCtx, cancel := context.WithTimeout(ctx, self.world.Settings().RateLimitWaitTimeout)
+	waitCtx, cancel := context.WithTimeout(ctx, self.world.world.Settings().RateLimitWaitTimeout)
 	defer cancel()
 	for {
-		_, err := filer.SetBlock(waitCtx, &sidecar.BridgeFileOrigin{Act: sidecar.SidecarActConfirmed}, &sidecar.BridgeBlockRequest{Prefix: self.settings.Block})
+		pin, err := writer.SaveHead(waitCtx, edit)
 		var apiErr *sidecar.SidecarApiError
 		if err == nil {
-			break
+			version := follower.Client().Pin().GetVersion()
+			if pin != nil {
+				version = max(version, pin.GetVersion())
+			}
+			return pin, self.world.network.Sync(ctx, version)
 		}
 		if !errors.As(err, &apiErr) || apiErr.Status != http.StatusTooManyRequests {
-			return fmt.Errorf("the block: %w", err)
+			return nil, err
 		}
 		select {
 		case <-waitCtx.Done():
-			return fmt.Errorf("the block: %w, and its retry_after outlasted the wait: %w", err, waitCtx.Err())
+			return nil, fmt.Errorf("%s's head: %w, and its retry_after outlasted the wait: %w", device.name, err, waitCtx.Err())
 		case <-time.After(time.Duration(apiErr.RetryAfterMs) * time.Millisecond):
 		}
 	}
-	return self.network.Sync(ctx, follower.Client().Pin().GetVersion())
 }
 
 // The Sidecar's own api on device's current generation, which a component's Attach is handed: what its base
@@ -945,7 +1031,7 @@ func (self *ItBridgeWorld) policySource() (string, error) {
 		})
 	}
 	document := map[string]any{"grants": grants}
-	if requests := self.routeGrantRequests(selector); requests != nil {
+	if requests := slices.Concat(self.routeGrantRequests(selector), self.shareRequests(selector)); 0 < len(requests) {
 		document["requests"] = requests
 	}
 	source, err := json.Marshal(document)
@@ -1316,6 +1402,10 @@ func (self *ItBridgeWorld) granted(clientIndex int, target *itBridgeTarget, prot
 // Whether client may have sent protocol to target itself over [start, end]: the document's rules, or a route grant
 // whose timeline allows the span (it_bridge_grants_test.go).
 func (self *ItBridgeWorld) grantedOver(client *itBridgeDevice, target *itBridgeTarget, protocol string, start time.Time, end time.Time) bool {
+	if target.device.world != self {
+		// another network's destination, which only a share this network accepted grants (it_bridge_shares_test.go)
+		return self.shareAllows(client, target, protocol, start, end)
+	}
 	return self.grantedBy(client.clientIndex(), target, protocol) || self.routeGrantAllows(client, target, protocol, start, end)
 }
 
@@ -1373,15 +1463,29 @@ func (self *itBridgeDevice) clientIndex() int {
 func (self *ItBridgeWorld) Attempt(ctx context.Context, phase string, client *itBridgeDevice, target *itBridgeTarget, protocol string) *ItBridgeAttempt {
 	start := time.Now()
 	expected := self.answerer(client.clientIndex(), target)
+	granted := self.granted(client.clientIndex(), target, protocol) || self.routeGrantInForce(client, expected, protocol, start)
+	return self.attempt(ctx, phase, client, target, protocol, self.addressOf(target), expected, granted)
+}
+
+// Attempt to address, for target, another network's destination a share reaches through its alias
+// (it_bridge_shares_test.go): the target answers it, and granted says whether the share lets the client reach it as it
+// begins.
+func (self *ItBridgeWorld) AttemptAt(ctx context.Context, phase string, client *itBridgeDevice, target *itBridgeTarget, protocol string, address netip.AddrPort, granted bool) *ItBridgeAttempt {
+	return self.attempt(ctx, phase, client, target, protocol, address, target, granted)
+}
+
+// One attempt (Attempt), its address, the destination that should answer it and whether it is granted given.
+func (self *ItBridgeWorld) attempt(ctx context.Context, phase string, client *itBridgeDevice, target *itBridgeTarget, protocol string,
+	address netip.AddrPort, expected *itBridgeTarget, granted bool) *ItBridgeAttempt {
 	attempt := &ItBridgeAttempt{
 		Phase:    phase,
 		Client:   client,
 		Target:   target,
 		Protocol: protocol,
-		Address:  self.addressOf(target),
+		Address:  address,
 		Expected: expected,
-		Granted:  self.granted(client.clientIndex(), target, protocol) || self.routeGrantInForce(client, expected, protocol, start),
-		Start:    start,
+		Granted:  granted,
+		Start:    time.Now(),
 	}
 	err := func() error {
 		wire := client.currentWire()
