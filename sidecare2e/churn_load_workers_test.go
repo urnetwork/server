@@ -904,7 +904,9 @@ func (self *churnLoadCase) enrollmentBurst(round int, random *rand.Rand, picked 
 				network.stateLock.Lock()
 				network.devices = append(network.devices, device)
 				network.enrolled = append(network.enrolled, device)
-				network.savers = append(network.savers, device)
+				if len(network.savers) < self.settings.TeamAclSaverCount {
+					network.savers = append(network.savers, device)
+				}
 				network.membershipTime = time.Now()
 				network.stateLock.Unlock()
 				return nil
