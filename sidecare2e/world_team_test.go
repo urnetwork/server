@@ -752,13 +752,21 @@ func WorldAdmitTagged(ctx context.Context, network *sidecart3.T3Network, admin *
 	return nil
 }
 
-// remover, an Owner or Admin, removes member at api (POST /network/member-remove, which denies it at once), then admin,
-// an admin's device, signs its MemberRevoke (§7.10); the member's devices are retired from the syncs. The MemberRevoke's
-// pin.
+// remover, an Owner or Admin, removes member at api (DenyMember), then admin, an admin's device, signs its MemberRevoke
+// (RevokeMember). The MemberRevoke's pin.
 func (self *WorldTeam) RemoveMember(ctx context.Context, remover *WorldTeamMember, admin *sidecart3.T3Device, member *WorldTeamMember) (*bridge.AuthPin, error) {
+	if err := self.DenyMember(ctx, remover, member); err != nil {
+		return nil, err
+	}
+	return self.RevokeMember(ctx, admin, member)
+}
+
+// remover, an Owner or Admin, removes member at api: POST /network/member-remove, which denies it at once (§7.10). A
+// refusal, a member api no longer holds among them, answers its status and message.
+func (self *WorldTeam) DenyMember(ctx context.Context, remover *WorldTeamMember, member *WorldTeamMember) error {
 	status, answer, err := self.world.t3.Api().Call(ctx, http.MethodPost, "/network/member-remove", remover.Root, &controller.RemoveNetworkMemberArgs{MemberId: server.Id(member.MemberId)})
 	if err != nil {
-		return nil, err
+		return err
 	}
 	result := &controller.RemoveNetworkMemberResult{}
 	if status != http.StatusOK || json.Unmarshal(answer, result) != nil || result.Error != nil || result.MemberId == nil {
@@ -766,8 +774,14 @@ func (self *WorldTeam) RemoveMember(ctx context.Context, remover *WorldTeamMembe
 		if result.Error != nil {
 			message = result.Error.Message
 		}
-		return nil, fmt.Errorf("POST /network/member-remove: %d %s", status, message)
+		return fmt.Errorf("POST /network/member-remove: %d %s", status, message)
 	}
+	return nil
+}
+
+// admin, an admin's device, signs member's MemberRevoke (§7.10), the removal's cryptographic half, after the member's
+// devices are retired from the syncs. The MemberRevoke's pin.
+func (self *WorldTeam) RevokeMember(ctx context.Context, admin *sidecart3.T3Device, member *WorldTeamMember) (*bridge.AuthPin, error) {
 	func() {
 		member.stateLock.Lock()
 		defer member.stateLock.Unlock()

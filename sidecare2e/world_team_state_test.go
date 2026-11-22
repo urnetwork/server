@@ -4,8 +4,10 @@
 // (control_plane_concurrency_test.go) make outside the hosts and api's routes, in one file, as the e2e conventions ask
 // (QD-1028's layout move will move sidecar's model code): a person's sign-up, which no route the world serves makes; a
 // person's credentials, signed as POST /auth/network-switch would mint them; the team tier, by the team grant
-// invoice.paid writes; and the counts and rows the case reconciles: a network's clients, its members, its rev/
-// objects' subjects and its auth keys' uses.
+// invoice.paid writes; the counts and rows the case reconciles: a network's clients, its members, its unspent invites
+// and its admin events; and the quota case's parts (control_plane_concurrency_quota_test.go): a network's limit rows
+// (§20.5), its dns_entries count, its connected sidecar set, its stored count and api's over-limit list, with the two
+// nightly jobs taskworker runs and the world does not, §20.7's ReconcileSidecarCounters and evs's nightly count.
 
 package sidecare2e
 
@@ -16,11 +18,16 @@ import (
 	"sync"
 	"time"
 
+	"github.com/urnetwork/connect"
+
 	"github.com/urnetwork/sidecar"
+	"github.com/urnetwork/sidecar/evsservice"
+	"github.com/urnetwork/sidecar/sidecartest"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
+	"github.com/urnetwork/server/sidecarhost"
 	"github.com/urnetwork/server/task"
 )
 
@@ -192,6 +199,50 @@ func worldConfigAdmissionCount(state *sidecar.ConfigState, now time.Time) int64 
 	return model.ConfigAdmissionCount(state, now.UnixMilli())
 }
 
+// The invites of networkId's api holds for email, unspent (an accept deletes its invite's row), by invite_id: one per
+// create, so an invite made twice shows twice.
+func worldNetworkInviteIds(ctx context.Context, networkId server.Id, email string) (inviteIds []server.Id, returnErr error) {
+	server.HandleError(func() {
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`SELECT invite_id FROM network_invite WHERE network_id = $1 AND lower(email) = lower($2) ORDER BY invite_id`,
+				networkId,
+				email,
+			)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var inviteId server.Id
+					server.Raise(result.Scan(&inviteId))
+					inviteIds = append(inviteIds, inviteId)
+				}
+			})
+		})
+	}, func(err error) {
+		returnErr = err
+	})
+	return
+}
+
+// How many of networkId's admin events (§7.11's chain) name action on targetId: one per act api ran, so an act run
+// twice shows twice.
+func worldNetworkAdminEventCount(ctx context.Context, networkId server.Id, action string, targetId server.Id) (count int, returnErr error) {
+	server.HandleError(func() {
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(
+				ctx,
+				`SELECT COUNT(*) FROM network_admin_event WHERE network_id = $1 AND action = $2 AND target_id = $3`,
+				networkId,
+				action,
+				targetId,
+			).Scan(&count))
+		})
+	}, func(err error) {
+		returnErr = err
+	})
+	return
+}
+
 // The memberships userId holds in networkId as api's rows hold them, by member_id: one per join, so a membership made
 // twice shows twice.
 func worldNetworkMembersOfUser(ctx context.Context, networkId server.Id, userId server.Id) (memberIds []server.Id, returnErr error) {
@@ -215,4 +266,135 @@ func worldNetworkMembersOfUser(ctx context.Context, networkId server.Id, userId 
 		returnErr = err
 	})
 	return
+}
+
+// Sets one of networkId's sidecar limits by a network_sidecar_limit row of its own (§20.5's override, as an ops change
+// raises a limit or a §21 case tightens one), replacing any row for limitKey, until the returned pop lifts it: a quota
+// phase's limit set just above what the network holds. This process's snapshot reloads at once, and every host of the
+// world is this process.
+func worldSetNetworkLimit(ctx context.Context, networkId server.Id, limitKey string, value int64) (func(), error) {
+	if err := model.SetNetworkSidecarLimit(ctx, networkId, limitKey, value, "e2e control-plane case: "+limitKey+" at its limit"); err != nil {
+		return nil, fmt.Errorf("%s's row: %w", limitKey, err)
+	}
+	return func() {
+		model.ClearNetworkSidecarLimit(context.Background(), networkId, limitKey)
+	}, nil
+}
+
+// §20's dns_entries count of networkId: its user RRsets, one unit each, as the record write counts them under the
+// network's lock (model.DnsEntryCount).
+func worldDnsEntryCount(ctx context.Context, networkId server.Id) (count int64, returnErr error) {
+	server.HandleError(func() {
+		count = model.DnsEntryCount(ctx, networkId)
+	}, func(err error) {
+		returnErr = fmt.Errorf("the dns entries: %w", err)
+	})
+	return
+}
+
+// How many of networkId's sidecar clients server counts connected against sidecar_clients: the live entries of its
+// {sq_<network_id>}connected_sidecar set (§20.7's one ZCOUNT).
+func worldSidecarConnectedCount(ctx context.Context, networkId server.Id) (count int64, returnErr error) {
+	server.HandleError(func() {
+		count = model.GetNetworkSidecarConnectedCount(ctx, networkId)
+	}, func(err error) {
+		returnErr = fmt.Errorf("the connected sidecar clients: %w", err)
+	})
+	return
+}
+
+// networkId's stored count as network_quota_state holds it (§20.7's stored and count rows): the nightly count moved
+// by the usage batches' deltas since. 0 for a network with no row yet.
+func worldNetworkStoredByteCount(ctx context.Context, networkId server.Id) (int64, error) {
+	state, err := model.GetNetworkQuotaState(ctx, networkId)
+	if err != nil || state == nil {
+		return 0, err
+	}
+	return state.StoredByteCount, nil
+}
+
+// The storage refusal api's over-limit list (Quota.OverLimit's answer, model.GetQuotaOverLimit) holds for networkId,
+// nil while the list does not name it.
+func worldStorageOverLimit(ctx context.Context, networkId server.Id) (*sidecar.QuotaRefusal, error) {
+	overLimit, err := model.GetQuotaOverLimit(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return overLimit.StorageNetworkIdRefusals[connect.Id(networkId)], nil
+}
+
+// §20.7's nightly ReconcileSidecarCounters, every page from the start (taskworker's QUOTA-M2-12 job, which the world
+// does not run): storage_over recomputed from each network's stored count and its limit now, which carries a limit's
+// change to the over-limit list.
+func worldReconcileSidecarCounters(ctx context.Context, pageCount int) error {
+	var after *server.Id
+	for {
+		result, err := model.ReconcileSidecarCounters(ctx, time.Now(), after, pageCount)
+		if err != nil {
+			return fmt.Errorf("the nightly reconcile: %w", err)
+		}
+		if result.LastNetworkId == nil {
+			return nil
+		}
+		after = result.LastNetworkId
+	}
+}
+
+// evs's nightly count (evsservice.NightlyPass, as taskworker's evs.nightly lists it, §11.13's bytes row) on a host of
+// its own over the world's clusters, with a write budget of its own that reports beside every block's: the world runs no
+// taskworker. In a world minutes old the pass deletes nothing, since every orphan, container and pack it judges must be
+// a day old first.
+type worldNightlyCount struct {
+	host   *sidecar.ServiceHost
+	budget *evsservice.WriteBudgetClient
+	cancel context.CancelFunc
+}
+
+// The stand-in's host and budget, until close.
+func newWorldNightlyCount(world *World) (*worldNightlyCount, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	host := sidecarhost.NewServiceHost(ctx, &sidecarhost.ServiceHostOptions{
+		Blobs:         world.T3().Host().Blobs,
+		ClockCheck:    sidecartest.NewFakeClockCheck(nil),
+		ServiceTokens: world.T3().ServiceTokens(),
+	})
+	budget, err := evsservice.NewWriteBudget(ctx, host, nil, nil)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("the nightly count's write budget: %w", err)
+	}
+	host.Budget = budget
+	return &worldNightlyCount{host: host, budget: budget, cancel: cancel}, nil
+}
+
+// Ends the stand-in's budget, whose report lapses within its ttl.
+func (self *worldNightlyCount) close() {
+	self.budget.Close()
+	self.cancel()
+}
+
+// networkId's stored count as evs.nightly lists it: its repos' seg/, pack/ and hp/ objects' sizes, plus the record
+// lengths its head windows and log pages give for versions still in batches, over every metadata cluster. An error for
+// a cluster the pass did not count whole.
+func (self *worldNightlyCount) storedByteCount(ctx context.Context, networkId server.Id) (int64, error) {
+	pass, err := evsservice.NewNightlyPass(self.host, &evsservice.NightlyPassDeps{})
+	if err != nil {
+		return 0, err
+	}
+	total := int64(0)
+	for _, clusterId := range self.host.Blobs.MetadataClusterIds() {
+		for _, shard := range pass.Settings().Shards() {
+			result, err := pass.Run(ctx, clusterId, shard, "")
+			if err != nil {
+				return 0, fmt.Errorf("the nightly pass of %s: %w", clusterId, err)
+			}
+			if !result.Complete || result.More {
+				return 0, fmt.Errorf("the nightly pass of %s did not count it whole: complete %t, more %t", clusterId, result.Complete, result.More)
+			}
+			if bytes, ok := result.NetworkBytes[sidecar.Id(networkId)]; ok {
+				total += bytes.StoredByteCount()
+			}
+		}
+	}
+	return total, nil
 }
