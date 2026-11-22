@@ -515,7 +515,10 @@ func (self *ItBridgeWorld) Reconcile(ctx context.Context, t testing.TB) {
 	self.world.T3().CloseNetworks()
 	ledgerCtx, cancel := context.WithTimeout(ctx, self.settings.LedgerTimeout)
 	defer cancel()
+	// every relayed contract closed, or past the bound the ones that stayed open reported and left out: the ledgers
+	// still reconcile the closed ones, since an open contract's reservation debits nothing until it settles
 	var contracts []*ItBridgeRelayedContract
+	stayedOpenCount := 0
 	for {
 		var err error
 		contracts, err = itBridgeRelayedContracts(ledgerCtx, networkId)
@@ -535,13 +538,20 @@ func (self *ItBridgeWorld) Reconcile(ctx context.Context, t testing.TB) {
 		case <-ledgerCtx.Done():
 			for _, contract := range contracts {
 				if contract.Open {
-					t.Errorf("relayed contract %s from %s is still open, close reports %v", contract.ContractId, contract.SourceId, contract.CloseReports)
+					t.Errorf("relayed contract %s from %s is still open, close reports %v, checkpoints %v", contract.ContractId, contract.SourceId, contract.CloseReports, contract.CheckpointReports)
 				}
 			}
-			t.Fatalf("%d of %d relayed contracts stayed open past the ledgers' bound: %v", open, len(contracts), ledgerCtx.Err())
+			t.Errorf("%d of %d relayed contracts stayed open past the ledgers' bound of %s: %v", open, len(contracts), self.settings.LedgerTimeout, ledgerCtx.Err())
+			stayedOpenCount = open
 		case <-time.After(self.settings.LedgerPollInterval):
 		}
+		if 0 < stayedOpenCount {
+			break
+		}
 	}
+	contracts = slices.DeleteFunc(contracts, func(contract *ItBridgeRelayedContract) bool {
+		return contract.Open
+	})
 	ledgers, err := self.world.ReadLedgers(ctx, time.Time{})
 	if err != nil {
 		t.Fatalf("the ledgers: %v", err)
@@ -572,7 +582,9 @@ func (self *ItBridgeWorld) Reconcile(ctx context.Context, t testing.TB) {
 			payload += attempt.PayloadByteCount
 		}
 	}
-	if settled < int64(payload) {
+	if 0 < stayedOpenCount {
+		t.Logf("the relayed contracts' cover of the clients' bytes goes unchecked, since %d contracts stayed open", stayedOpenCount)
+	} else if settled < int64(payload) {
 		t.Errorf("the relayed contracts settle %d B, under the %d B of requests and answers the clients moved", settled, payload)
 	}
 	t.Logf("ledgers: %d relayed contracts settle %d B, the relay meter %d B, every meter %d B, the balances lost %d B; the clients' reached attempts moved %d B",

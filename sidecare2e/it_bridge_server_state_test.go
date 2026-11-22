@@ -97,8 +97,9 @@ type ItBridgeRelayedContract struct {
 	// Whether an outcome is claimed, and which.
 	Open    bool
 	Outcome string
-	// Each party's close report, by party.
-	CloseReports map[string]int64
+	// Each party's close report, by party, and the parties whose report is a checkpoint rather than a final close.
+	CloseReports      map[string]int64
+	CheckpointReports map[string]bool
 	// Whether it rode a P2P stream, which counts nothing.
 	StreamBound bool
 	// What service_debit_journal holds under the contract's id on meter relay, summed over its balances' rows.
@@ -159,7 +160,7 @@ func itBridgeRelayedContracts(ctx context.Context, networkId server.Id) (contrac
 			)
 			server.WithPgResult(result, err, func() {
 				for result.Next() {
-					contract := &ItBridgeRelayedContract{CloseReports: map[string]int64{}}
+					contract := &ItBridgeRelayedContract{CloseReports: map[string]int64{}, CheckpointReports: map[string]bool{}}
 					var transferByteCount model.ByteCount
 					server.Raise(result.Scan(&contract.ContractId, &contract.SourceId, &transferByteCount, &contract.Open, &contract.Outcome, &contract.StreamBound))
 					contract.TransferByteCount = int64(transferByteCount)
@@ -170,7 +171,7 @@ func itBridgeRelayedContracts(ctx context.Context, networkId server.Id) (contrac
 			reports, err := conn.Query(
 				ctx,
 				`
-					SELECT contract_close.contract_id, contract_close.party, contract_close.used_transfer_byte_count
+					SELECT contract_close.contract_id, contract_close.party, contract_close.used_transfer_byte_count, contract_close.checkpoint
 					FROM contract_close
 					INNER JOIN transfer_contract ON transfer_contract.contract_id = contract_close.contract_id
 					WHERE transfer_contract.payer_network_id = $1
@@ -182,9 +183,13 @@ func itBridgeRelayedContracts(ctx context.Context, networkId server.Id) (contrac
 					var contractId server.Id
 					var party string
 					var byteCount model.ByteCount
-					server.Raise(reports.Scan(&contractId, &party, &byteCount))
+					var checkpoint bool
+					server.Raise(reports.Scan(&contractId, &party, &byteCount, &checkpoint))
 					if contract := byId[contractId]; contract != nil {
 						contract.CloseReports[party] = int64(byteCount)
+						if checkpoint {
+							contract.CheckpointReports[party] = true
+						}
 					}
 				}
 			})

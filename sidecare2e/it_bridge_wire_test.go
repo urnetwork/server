@@ -635,7 +635,15 @@ func (self *itBridgeLinkHost) NewBridgeLink(ctx context.Context, target connect.
 			return nil, errors.New("a link dials nothing locally")
 		},
 	}
-	generator := &itBridgeLinkGenerator{host: self, generation: generation, target: target, clients: map[*connect.Client]*itBridgeWindowClient{}}
+	transportSettings := *self.wire.device.world.transportSettings
+	transportSettings.PlatformTransportBudget = connect.DefaultPlatformTransportBudget()
+	generator := &itBridgeLinkGenerator{
+		host:              self,
+		generation:        generation,
+		target:            target,
+		transportSettings: &transportSettings,
+		clients:           map[*connect.Client]*itBridgeWindowClient{},
+	}
 	return connect.NewRemoteUserNatMultiClient(ctx, device.NewBridgeLinkGenerator(ctx, generator, sign), self.wire.receive,
 		protocol.ProvideMode_Network, multiClientSettings), nil
 }
@@ -713,6 +721,10 @@ type itBridgeLinkGenerator struct {
 	host       *itBridgeLinkHost
 	generation *itBridgeGeneration
 	target     connect.Id
+	// the world's transport settings with a carrier budget of the link's own, as connect.ApiMultiClientGenerator
+	// gives each of its windows (one per link in the ur daemon and the sdk): a budget the world's settings shared
+	// would admit DefaultPlatformTransportBudget's carriers across every link of every device, and hold the rest
+	transportSettings *connect.PlatformTransportSettings
 
 	stateLock sync.Mutex
 	clients   map[*connect.Client]*itBridgeWindowClient
@@ -808,7 +820,7 @@ func (self *itBridgeLinkGenerator) NewClient(ctx context.Context, args *connect.
 		settings: settings,
 		client:   client,
 		transport: connect.NewPlatformTransportWithTargetMode(ctx, world.clientStrategy, client.RouteManager(),
-			world.world.T3().Exchange().PlatformUrl(), args.ClientAuth, connect.TransportModeH1, world.transportSettings),
+			world.world.T3().Exchange().PlatformUrl(), args.ClientAuth, connect.TransportModeH1, self.transportSettings),
 	}
 	kept := func() bool {
 		host.stateLock.Lock()
