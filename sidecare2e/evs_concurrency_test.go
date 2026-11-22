@@ -80,7 +80,7 @@
 //   - the stored bytes, in some runs: the commit the hook lets the block answer just before its drain can lose its step
 //     8, its stored-byte delta (the ledger short of evs.nightly's count by that record's bytes) and its hints, since
 //     EvsEngine.Drain waits for requests in flight and not for step 8, which runs off the reply path;
-//   - the writes beside the races, in most runs: two or three writers are refused 403 by gkm on GET
+//   - the writes beside the races, in every run so far: one to three writers are refused 403 by gkm on GET
 //     /gkm/groups/{group_id}/gen, their writes failing "gkm refused: 403". The first round's save is the network's first
 //     ACL document, which drops §8.5's implicit document's admin on general repos, so member devices hold rw there by
 //     the repo's RepoGrant. gkm's state takes the save within milliseconds, before the writers' states do and often
