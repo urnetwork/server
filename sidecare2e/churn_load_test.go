@@ -59,10 +59,11 @@
 //	               across the case; the device installs it and a visitor through tlsedge is shown it
 //	acl saver      a config writer saves its network's document: every grant the network's services need and one
 //	               rule of its own, previewed and saved EXACT_HEAD, previewed again while another save moved the head
-//	enrollment     the team's Owner invites a new person, who accepts and is admitted as a member, or enrolls and
-//	               admits a new device of its own
+//	enrollment     the team's Owner invites a new person, who accepts and is admitted as a member, enrolls and
+//	               admits a new device of its own, or enrolls a tagged sidecar of tag:ci from an auth key carrying the
+//	               tag and admits it with that tag (World.AddTagged)
 //	departure      the team's Owner removes a member the churn added (member-remove, then MemberRevoke), or revokes a
-//	               device of its own the churn added
+//	               device of its own or a tagged sidecar the churn added
 //
 // Chaos (ChaosTargets) restarts a random host or device, keeping its stores: between rounds, ChaosBetweenRoundCount
 // restarts, and during each round past ChaosFreeRoundCount, ChaosDuringRoundCount restarts at random points. The
@@ -105,9 +106,9 @@
 // case is bounded by CaseTimeout, 10 minutes by default.
 //
 // Not here, each for its reason: a restart of a mail, dns, blog or bridge device (above; the bridge's own device and
-// handler restarts are its case's); a tagged enrollment in the team, which answers 500 (finding team-tagged-enroll),
-// and a team member's own device, whose auth key a Member cannot make (team-member-own-auth-key), so the churn's
-// members join without devices and the Owner's devices are the ones that come and go; and an exact count of the
+// handler restarts are its case's); a team member's own device, whose auth key a Member cannot make
+// (team-member-own-auth-key), so the churn's members join without devices and the Owner's devices and tagged sidecars
+// are the ones that come and go; and an exact count of the
 // blocks' own write budget spend against the objects they wrote, which no harness attributes yet, so the blocks are
 // held to a report a run and nothing in flight.
 //
@@ -302,7 +303,7 @@ func defaultChurnLoadSettings() *churnLoadSettings {
 	dnsSettings.CertDeviceCount = 1
 	team := DefaultWorldTeamSettings()
 	team.OwnerDeviceCount = 2
-	team.Tags = []string{}
+	team.Tags = []string{"ci"}
 	configBasesPerMinute := int64(6000)
 	team.SidecarLimits["config_bases_per_min"] = configBasesPerMinute
 	bridge := DefaultItBridgeSettings()
@@ -543,7 +544,9 @@ type churnLoadNetwork struct {
 	savers []*churnLoadDevice
 	saves  []*churnLoadAclSave
 	// the members the churn added, the ones it removed, and the devices it added and revoked
-	joined         []*WorldTeamMember
+	joined []*WorldTeamMember
+	// the tagged sidecars the churn admitted, which read the config repo alone, so no evs or gkm worker takes them
+	tagged         []*churnLoadDevice
 	removed        []*WorldTeamMember
 	enrolled       []*churnLoadDevice
 	revoked        []*churnLoadDevice
@@ -560,6 +563,18 @@ func (self *churnLoadNetwork) deviceList() []*churnLoadDevice {
 // The devices that have not left.
 func (self *churnLoadNetwork) liveDevices() []*churnLoadDevice {
 	return slices.DeleteFunc(self.deviceList(), func(device *churnLoadDevice) bool { return device.gone() })
+}
+
+// Every device the case runs on the network, its tagged sidecars last.
+func (self *churnLoadNetwork) everyDevice() []*churnLoadDevice {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return slices.Concat(self.devices, self.tagged)
+}
+
+// Every device that has not left, its tagged sidecars last: what a convergence check holds.
+func (self *churnLoadNetwork) everyLiveDevice() []*churnLoadDevice {
+	return slices.DeleteFunc(self.everyDevice(), func(device *churnLoadDevice) bool { return device.gone() })
 }
 
 // The case's device of t3, nil for none.
@@ -751,7 +766,7 @@ func (self *churnLoadCase) release() {
 		}
 	}
 	for _, network := range self.networks {
-		for _, device := range network.deviceList() {
+		for _, device := range network.everyDevice() {
 			device.stateLock.Lock()
 			remove := device.removeAlarm
 			device.removeAlarm = nil

@@ -73,7 +73,7 @@ func (self *churnLoadCase) checkConfigConvergence(ctx context.Context, phase str
 			continue
 		}
 		live := []*sidecart3.T3Device{}
-		for _, device := range network.liveDevices() {
+		for _, device := range network.everyLiveDevice() {
 			live = append(live, device.device)
 		}
 		if divergent := controlPlaneDivergent(live); 0 < len(divergent) {
@@ -127,7 +127,7 @@ func (self *churnLoadCase) checkKeyConvergence(ctx context.Context, phase string
 		for _, repo := range self.keyRepos(network) {
 			readers := state.RepoReaders(repo.repoId)
 			holders := []*churnLoadDevice{}
-			for _, device := range network.liveDevices() {
+			for _, device := range network.everyLiveDevice() {
 				if slices.Contains(readers, device.device.Sidecar().Identity().SidecarId) {
 					holders = append(holders, device)
 				}
@@ -176,6 +176,7 @@ func (self *churnLoadCase) checkMembership(ctx context.Context, phase string) {
 	joined := slices.Clone(network.joined)
 	removed := slices.Clone(network.removed)
 	enrolled := slices.Clone(network.enrolled)
+	tagged := slices.Clone(network.tagged)
 	revoked := slices.Clone(network.revoked)
 	network.stateLock.Unlock()
 	expected := map[sidecar.Id]string{team.Owner.MemberId: team.Owner.Name}
@@ -184,13 +185,27 @@ func (self *churnLoadCase) checkMembership(ctx context.Context, phase string) {
 			expected[member.MemberId] = member.Name
 		}
 	}
-	for _, device := range network.liveDevices() {
+	for _, device := range network.everyLiveDevice() {
 		follower := device.device.Follower()
 		if follower == nil || follower.Client() == nil || follower.Client().State() == nil {
 			t.Errorf("%s: %s follows no log", phase, device.device.Name)
 			continue
 		}
 		state := follower.Client().State()
+		for _, other := range tagged {
+			row := state.SidecarRow(other.device.Sidecar().Identity().SidecarId)
+			wantRevoked := slices.Contains(revoked, other)
+			switch {
+			case row == nil:
+				t.Errorf("%s: %s's state never admitted the tagged %s", phase, device.device.Name, other.device.Name)
+			case len(row.GetTagIds()) != 1 || len(row.GetMemberId()) != 0:
+				t.Errorf("%s: %s's state admits the tagged %s with %d tags and member %x, not its one tag alone", phase, device.device.Name, other.device.Name, len(row.GetTagIds()), row.GetMemberId())
+			case wantRevoked && row.GetRevokedAt() == 0:
+				t.Errorf("%s: %s's state holds the tagged %s admitted after its revocation", phase, device.device.Name, other.device.Name)
+			case !wantRevoked && row.GetRevokedAt() != 0:
+				t.Errorf("%s: %s's state holds the tagged %s revoked at %d, which the churn never revoked", phase, device.device.Name, other.device.Name, row.GetRevokedAt())
+			}
+		}
 		for memberId, name := range expected {
 			if state.Member(memberId) == nil {
 				t.Errorf("%s: %s's state names no member %s (%s)", phase, device.device.Name, memberId, name)
@@ -240,7 +255,7 @@ func (self *churnLoadCase) checkMembership(ctx context.Context, phase string) {
 			t.Errorf("%s: api holds no active client of %s, which the churn enrolled and never revoked", phase, device.device.Name)
 		}
 	}
-	t.Logf("%s: the team holds %d members (%d joined, %d removed) and %d devices the churn enrolled (%d revoked)", phase, len(expected), len(joined), len(removed), len(enrolled), len(revoked))
+	t.Logf("%s: the team holds %d members (%d joined, %d removed), %d Owner devices and %d tagged sidecars the churn enrolled (%d revoked)", phase, len(expected), len(joined), len(removed), len(enrolled), len(tagged), len(revoked))
 }
 
 // Every ACL save its saver was answered for stands at a log position of its own, and the newest is the document the
@@ -491,7 +506,7 @@ func (self *churnLoadCase) checkBridge(ctx context.Context, phase string) {
 func (self *churnLoadCase) checkAlarms(phase string) {
 	t := self.t
 	for _, network := range self.networks {
-		for _, device := range network.deviceList() {
+		for _, device := range network.everyDevice() {
 			device.stateLock.Lock()
 			alarms := slices.Clone(device.alarms[min(device.alarmsChecked, len(device.alarms)):])
 			device.alarmsChecked = len(device.alarms)
