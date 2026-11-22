@@ -32,7 +32,9 @@ type clientScorePage struct {
 	modernRecovery bool
 	// The records of the page a selector-mode read keeps
 	// (FP2-PROTOCOL.md §6.4); nil keeps every record. A page's count and
-	// checksum proofs hold for the whole page before it filters.
+	// checksum proofs hold for the whole page before it filters. The filter
+	// reads the page's shared decoded record (mergeClientScorePage) and must
+	// not change it.
 	filter func(*ClientScore) bool
 }
 
@@ -213,6 +215,9 @@ func (self *clientScoreCursor) readWithClient(ctx context.Context, r server.Redi
 	}
 	scores := map[server.Id]*ClientScore{}
 	for _, command := range commands {
+		// the page's decoded records, shared with every reader in the process:
+		// read here, and copied only for the records this read keeps
+		// (mergeClientScorePage)
 		var sample []*ClientScore
 		if command.generation != nil {
 			if command.generation.Err() != nil {
@@ -228,7 +233,7 @@ func (self *clientScoreCursor) readWithClient(ctx context.Context, r server.Redi
 				continue
 			}
 			clientScorePageCacheHits.Inc()
-			sample = copyClientScorePage(command.decoded)
+			sample = command.decoded
 		} else {
 			var data []byte
 			// the sha256 of the page bytes read, by which the decoded page is
@@ -273,7 +278,7 @@ func (self *clientScoreCursor) readWithClient(ctx context.Context, r server.Redi
 				continue
 			}
 			var err error
-			sample, err = decodeClientScorePage(data, checksum)
+			sample, err = decodeClientScorePageShared(data, checksum)
 			if err != nil {
 				sourceErr = errors.Join(sourceErr, err)
 				continue
@@ -283,13 +288,7 @@ func (self *clientScoreCursor) readWithClient(ctx context.Context, r server.Redi
 			sourceErr = errors.Join(sourceErr, fmt.Errorf("%w: page count mismatch", errClientScoreNativeUnavailable))
 			continue
 		}
-		if command.page.filter != nil {
-			// the decoded copies are this reader's own
-			sample = slices.DeleteFunc(sample, func(score *ClientScore) bool {
-				return !command.page.filter(score)
-			})
-		}
-		mergeClientScoreSample(scores, sample)
+		mergeClientScorePage(scores, sample, command.page.filter)
 	}
 	if sourceErr != nil {
 		self.sourceIncomplete = true
@@ -303,6 +302,42 @@ func (self *clientScoreCursor) readWithClient(ctx context.Context, r server.Redi
 // unchanged; successful requests perform no refill.
 func findProviders2RefillLoadCount(count, explicitExclusions, discardedRows int) int {
 	return findProviders2LoadCount(count, max(explicitExclusions, discardedRows))
+}
+
+// Merges the records of one decoded page that a read keeps, as
+// mergeClientScoreSample merges a page of copies: a record the page's filter
+// refuses is dropped, and a later copy replaces an earlier one unless that
+// would trade a location-bearing copy for one without. Each record merged is
+// this reader's own copy (decodeClientScorePage), and records the filter or
+// the location rule drop are never copied. The page is shared with the
+// process cache: the filter and the location rule read its records and never
+// write them. A page's copies share one allocation, sized by the records its
+// filter keeps.
+func mergeClientScorePage(scores map[server.Id]*ClientScore, page []*ClientScore, filter func(*ClientScore) bool) {
+	keepCount := len(page)
+	if filter != nil {
+		keepCount = 0
+		for _, score := range page {
+			if filter(score) {
+				keepCount += 1
+			}
+		}
+	}
+	if keepCount == 0 {
+		return
+	}
+	// never grown past its capacity, so a merged copy's address is stable
+	copies := make([]ClientScore, 0, keepCount)
+	for _, score := range page {
+		if filter != nil && !filter(score) {
+			continue
+		}
+		if existing := scores[score.ClientId]; existing != nil && existing.CountryLocationId != nil && score.CountryLocationId == nil {
+			continue
+		}
+		copies = append(copies, *score)
+		scores[score.ClientId] = &copies[len(copies)-1]
+	}
 }
 
 // Copies from overlapping requested targets can share a provider. Retain a

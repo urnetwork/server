@@ -56,7 +56,8 @@ type clientScorePageCacheItem struct {
 
 // A bounded LRU of decoded pages by checksum. Cached scores, their maps and
 // their lookback scores are never modified: decodeClientScorePage gives each
-// reader its own copy of every score.
+// reader its own copy of every score, and a cursor read copies each score it
+// keeps (mergeClientScorePage).
 type clientScorePageCache struct {
 	lock     sync.Mutex
 	maxBytes int64
@@ -132,19 +133,29 @@ func (self *clientScorePageCache) size() (pages int, bytes int64) {
 // the maps and pointers are the cached page's: a reader that changes a map
 // replaces it with a changed clone (filterPool).
 func decodeClientScorePage(data []byte, checksum [sha256.Size]byte) ([]*ClientScore, error) {
+	sample, err := decodeClientScorePageShared(data, checksum)
+	if err != nil {
+		return nil, err
+	}
+	return copyClientScorePage(sample), nil
+}
+
+// The scores of a page whose bytes hash to checksum, decoded once per process
+// and shared with every other reader of the page, not copied: the caller
+// reads them and copies each one it keeps (mergeClientScorePage).
+func decodeClientScorePageShared(data []byte, checksum [sha256.Size]byte) ([]*ClientScore, error) {
 	sample, ok := clientScorePages.get(checksum)
 	if ok {
 		clientScorePageCacheHits.Inc()
-	} else {
-		clientScorePageCacheMisses.Inc()
-		var err error
-		sample, err = decodeClientScoreSample(data)
-		if err != nil {
-			return nil, err
-		}
-		clientScorePages.put(checksum, sample, clientScorePageDecodedBytesPerByte*int64(len(data)))
+		return sample, nil
 	}
-	return copyClientScorePage(sample), nil
+	clientScorePageCacheMisses.Inc()
+	sample, err := decodeClientScoreSample(data)
+	if err != nil {
+		return nil, err
+	}
+	clientScorePages.put(checksum, sample, clientScorePageDecodedBytesPerByte*int64(len(data)))
+	return sample, nil
 }
 
 // A reader's own copies of a cached page's scores (decodeClientScorePage).
