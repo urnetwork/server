@@ -667,7 +667,7 @@ func dnsCertsCheckCustomHostRecords(t testing.TB, ctx context.Context, stack *dn
 		return
 	}
 	// the host's rrType through the resolver until its answer holds the CNAME to the owner and holds is true of it
-	awaitCnamed := func(rrType uint16, holds func(answer *dns.Msg) bool, wanted string) {
+	awaitCnamed := func(rrType uint16, holds func(answer *dns.Msg) bool, wanted string) bool {
 		waitCtx, cancel := context.WithTimeout(ctx, settings.Timeout)
 		defer cancel()
 		for {
@@ -683,27 +683,34 @@ func dnsCertsCheckCustomHostRecords(t testing.TB, ctx context.Context, stack *dn
 			if err == nil && cnamed && holds(answer) {
 				if err := stack.Keys.Verify(answer, custom.Owner, rrType, time.Now()); err != nil {
 					t.Errorf("%s's %s through its customer's CNAME: %v", custom.Host, dns.TypeToString[rrType], err)
+					return false
 				}
-				return
+				return true
 			}
 			select {
 			case <-waitCtx.Done():
 				t.Errorf("%s's %s through its customer's CNAME never answered %s's %s: %s, %v", custom.Host, dns.TypeToString[rrType], custom.Owner, wanted, dnsCertsDescribeAnswer(answer), err)
-				return
+				return false
 			case <-time.After(settings.RetryInterval):
 			}
 		}
 	}
 	set := dnsCertsSetKey{Owner: custom.Owner, Type: dns.TypeTXT}
-	awaitCnamed(dns.TypeTXT, func(answer *dns.Msg) bool {
+	held := []string{}
+	if awaitCnamed(dns.TypeTXT, func(answer *dns.Msg) bool {
 		return slices.Equal(dnsCertsAnswerValues(answer, set), want)
-	}, fmt.Sprintf("newest %v", want))
+	}, fmt.Sprintf("newest %v", want)) {
+		held = append(held, fmt.Sprintf("TXT %v", want))
+	}
 	for _, rrType := range []uint16{dns.TypeA, dns.TypeAAAA} {
 		addresses := dnsCertsLbAddresses(stack.World, rrType)
-		awaitCnamed(rrType, func(answer *dns.Msg) bool {
+		if awaitCnamed(rrType, func(answer *dns.Msg) bool {
 			return slices.Equal(dnsCertsAnswerAddresses(answer, custom.Owner, rrType), addresses)
-		}, fmt.Sprintf("lb addresses %v", addresses))
+		}, fmt.Sprintf("lb addresses %v", addresses)) {
+			held = append(held, fmt.Sprintf("%s %v", dns.TypeToString[rrType], addresses))
+		}
 	}
+	t.Logf("%s through its customer's CNAME to %s answers, signed: %s", custom.Host, custom.Owner, strings.Join(held, "; "))
 }
 
 // answer's rcode and records, one line, for a log.

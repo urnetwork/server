@@ -716,6 +716,7 @@ func dnsCertsHoldBlockStop(stack *dnsCertsStack, block string, name string) *dns
 func dnsCertsCheckOwnerAddresses(t testing.TB, ctx context.Context, world *World, keys *dnsCertsZoneKeys, settings *dnsCertsSettings, networks []*dnsCertsNetwork) {
 	t.Helper()
 	for _, network := range networks {
+		lines := []string{}
 		for _, host := range []string{settings.TlsHost, settings.UnwrittenHost} {
 			owner := network.OwnerName(host)
 			for _, rrType := range []uint16{dns.TypeA, dns.TypeAAAA} {
@@ -729,7 +730,9 @@ func dnsCertsCheckOwnerAddresses(t testing.TB, ctx context.Context, world *World
 				}
 				if err := keys.Verify(answer, owner, rrType, time.Now()); err != nil {
 					t.Errorf("%s %s at the edge: %v", owner, dns.TypeToString[rrType], err)
+					continue
 				}
+				lines = append(lines, fmt.Sprintf("%s %s %v signed", owner, dns.TypeToString[rrType], want))
 			}
 		}
 		for _, rrType := range []uint16{dns.TypeA, dns.TypeAAAA} {
@@ -738,8 +741,11 @@ func dnsCertsCheckOwnerAddresses(t testing.TB, ctx context.Context, world *World
 			}, settings.Dns)
 			if err != nil || 0 < len(dnsCertsAnswerAddresses(answer, network.Apex, rrType)) {
 				t.Errorf("%s %s, which no grant publishes, answered %s: %v", network.Apex, dns.TypeToString[rrType], dnsCertsDescribeAnswer(answer), err)
+				continue
 			}
+			lines = append(lines, fmt.Sprintf("%s %s none", network.Apex, dns.TypeToString[rrType]))
 		}
+		t.Logf("the edge's addresses in %s: %s", network.Name, strings.Join(lines, "; "))
 	}
 }
 

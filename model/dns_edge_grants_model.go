@@ -11,8 +11,9 @@ package model
 //	          of its own and resolves only through * (§13.9). A scope host, <host>.<scope>, is its Team scope's
 //	          set's (DnsScopeState) and sets neither here
 //	api       after each accepted POST /network/config/delta or /network/config/projection, once its entry's PUT
-//	          has committed, api reads the network's state at the store's tip and syncs (SyncDnsEdgeRecordsAtTip),
-//	          best effort: the entry stands whatever the sync does, a failure is logged, and the pass mends it
+//	          has committed, api reads the network's state as its verifier holds it, at or past the entry, and syncs
+//	          (SyncDnsEdgeRecordsAtTip), best effort: the entry stands whatever the sync does, a failure is logged,
+//	          and the pass mends it
 //	pass      every hour taskworker walks the networks with a log in id order, each one's names from the
 //	          process's published-names source (QD-770), and syncs each (ReconcileDnsEdgeRecords): a grant that
 //	          expired, which no entry marks, loses its records, and a sync a crash lost between an entry's PUT and
@@ -114,8 +115,23 @@ func SyncDnsEdgeRecords(ctx context.Context, networkId server.Id, root string, g
 	return DnsSyncEdgeRecords(ctx, networkId, root, grants.Wildcard, grants.Apex)
 }
 
-// api's sync after an accepted entry (the file header's api row): the network's state at the store's tip through
-// sequencer, its grants at now, written in the root api serves (DnsUserRoot). Best effort, since the entry has
+// The network's verified state as this instance's verifier holds it, nil before base 1: at or past every entry this
+// instance landed, and read with no store request once the network is loaded, as Admitted reads it.
+func (self *ConfigLogSequencer) heldState(ctx context.Context, networkId server.Id) (*sidecar.ConfigState, error) {
+	network := self.network(networkId)
+	network.stateLock.Lock()
+	defer network.stateLock.Unlock()
+	if err := network.loadWithLock(ctx, self, nil); err != nil {
+		return nil, err
+	}
+	if network.log == nil {
+		return nil, nil
+	}
+	return network.log.State(), nil
+}
+
+// api's sync after an accepted entry (the file header's api row): the network's state as sequencer holds it, at or
+// past the entry, its grants at now, written in the root api serves (DnsUserRoot). Best effort, since the entry has
 // committed whatever happens here: a failure is logged and the hourly pass mends it. Does nothing in a binary that
 // links no zones or a process that serves no root.
 func SyncDnsEdgeRecordsAtTip(ctx context.Context, sequencer *ConfigLogSequencer, networkId server.Id) {
@@ -124,7 +140,7 @@ func SyncDnsEdgeRecordsAtTip(ctx context.Context, sequencer *ConfigLogSequencer,
 		return
 	}
 	if r := server.HandleError(func() {
-		state, err := sequencer.CaughtUpState(ctx, networkId)
+		state, err := sequencer.heldState(ctx, networkId)
 		if err != nil {
 			glog.Warningf("[dns]%s edge records wait for the pass, its state unread: %v\n", networkId, err)
 			return

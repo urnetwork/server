@@ -14,6 +14,7 @@ import (
 	"github.com/miekg/dns"
 
 	"github.com/urnetwork/sidecar/dnsservice"
+	"github.com/urnetwork/sidecar/sidecartest"
 
 	"github.com/urnetwork/server"
 )
@@ -144,6 +145,50 @@ func TestSyncDnsEdgeRecordsWritesEachTransitionOnce(t *testing.T) {
 		if _, ok := served[dnsservice.DnsRecordKey{Owner: apex, Type: dns.TypeMX}]; !ok {
 			t.Error("the zone's own set went with its edge records")
 		}
+	})
+}
+
+// api's sync reads the state its sequencer holds: before base 1 a network publishes nothing and gets no zone; a base
+// that publishes nothing takes away the * records a lost sync left; and a sync of the same state writes nothing.
+func TestSyncDnsEdgeRecordsAtTipFollowsTheSequencersState(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		root := testDnsRoot(t, ctx)
+		defer Testing_SetDnsUserRoot(strings.TrimSuffix(root, "."))()
+		blobs := sidecartest.NewFakeBlobs(sidecartest.NewFakeClock(sidecartest.DefaultClockStart()), sidecartest.NewFaultQueue(), nil, sidecartest.DefaultFakeBlobsSettings())
+		cluster, err := blobs.FirstCluster()
+		if err != nil {
+			t.Fatal(err)
+		}
+		world := sidecartest.NewConfigLogSuiteWorld(ctx, cluster)
+		networkId := server.Id(world.NetworkId())
+		Testing_CreateNetwork(ctx, networkId, "edge-"+strings.ReplaceAll(networkId.String()[24:], "-", ""), server.NewId())
+		settings := DefaultConfigLogSettings()
+		settings.Clock = world.Clock()
+		sequencer := NewConfigLogSequencer(cluster, settings, nil)
+
+		SyncDnsEdgeRecordsAtTip(ctx, sequencer, networkId)
+		if state := testDnsEdgeState(ctx, root, networkId); state != nil {
+			t.Fatalf("a network with no log holds a zone %+v", state)
+		}
+		requireDnsSerial(t, ctx, root, 0)
+
+		// the * records of a sync whose state a crash lost
+		if _, err := SyncDnsEdgeRecords(ctx, networkId, root, DnsEdgeGrants{Wildcard: true}); err != nil {
+			t.Fatal(err)
+		}
+		signedHeader, rows, genesis, configPushes := world.BaseOne()
+		if _, err := sequencer.AppendBase(ctx, networkId, &ConfigLogBase{SignedHeader: signedHeader, Rows: rows, Genesis: genesis, ConfigPushes: configPushes}); err != nil {
+			t.Fatal(err)
+		}
+		SyncDnsEdgeRecordsAtTip(ctx, sequencer, networkId)
+		if state := testDnsEdgeState(ctx, root, networkId); state == nil || state.EdgeWildcard || state.EdgeApex {
+			t.Fatalf("after a base that publishes nothing the zone reads %+v", state)
+		}
+		testDnsEdgeServed(t, testDnsSnapshotRows(t, ctx, root), "*."+GetNetworkLabel(ctx, networkId, root)+"."+root, false)
+		serial := testDnsRootSerial(t, ctx, root)
+		SyncDnsEdgeRecordsAtTip(ctx, sequencer, networkId)
+		requireDnsSerial(t, ctx, root, serial)
 	})
 }
 
