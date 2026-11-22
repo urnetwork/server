@@ -286,7 +286,9 @@ type frontServer struct {
 	tlsConfig     *tls.Config
 	quicTlsConfig *tls.Config
 	quicConfig    *quic.Config
-	httpServers   []*http.Server
+	// quicConfig with the whodis handshake idle timeout
+	whodisQuicConfig *quic.Config
+	httpServers      []*http.Server
 
 	// closed when the drain begins; supervisors stop re-creating sockets
 	drainStarted chan struct{}
@@ -471,6 +473,7 @@ func (self *frontServer) start(ctx context.Context, front nginxFront, connectQui
 	quicConfig := connectQuic.NewQuicConfig()
 	quicConfig.Allow0RTT = false
 	self.quicConfig = quicConfig
+	self.whodisQuicConfig = self.newWhodisQuicConfig(quicConfig)
 
 	interfaceNameHttpsServers := map[string]*http.Server{}
 	interfaceNameHttpServers := map[string]*http.Server{}

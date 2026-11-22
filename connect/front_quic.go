@@ -32,7 +32,10 @@ package connect
 //   - the dispatch counts each accepted connection's handshake once: a
 //     completed one by QUIC version and resumption, and a failed one as
 //     handshake_failed with its reason, read from quic-go's typed errors
-//     (frontQuicHandshakeReason).
+//     (frontQuicHandshakeReason);
+//   - the whodis transports have settings of their own: the translation's
+//     pace (FrontServerSettings.WhodisWritePacketsPerSecond, unpaced) and
+//     quic-go's handshake idle timeout (WhodisHandshakeIdleTimeout, 10 s).
 //
 // A socket's run is its place in its group (frontQuicSocketRun), supervised
 // like any socket (front_socket.go): a lost socket leaves its group, costing
@@ -180,18 +183,17 @@ func (self *frontServer) openQuicRun(group *frontQuicGroup) (*frontQuicRun, erro
 		apiServers:  map[*http3.Server]bool{},
 	}
 	var servedConn net.PacketConn
+	quicConfig := self.quicConfig
 	if group.key.portKind == frontPortWhodis {
 		run.whodisFanIn = newFrontWhodisFanIn(localAddr, self.settings)
 		// the translation outlives the transport, so it can't end the
 		// transport under live connections: only close ends it
 		translationCtx, translationCancel := context.WithCancel(context.Background())
-		ptSettings := connect.DefaultPacketTranslationSettings()
-		ptSettings.DnsTlds = self.whodisTlds
 		translation, err := connect.NewPacketTranslation(
 			translationCtx,
 			connect.PacketTranslationModeDecode53,
 			run.whodisFanIn,
-			ptSettings,
+			self.whodisTranslationSettings(),
 		)
 		if err != nil {
 			translationCancel()
@@ -201,12 +203,13 @@ func (self *frontServer) openQuicRun(group *frontQuicGroup) (*frontQuicRun, erro
 		run.translation = translation
 		run.translationCancel = translationCancel
 		servedConn = translation
+		quicConfig = self.whodisQuicConfig
 	} else {
 		run.connGroup = quic.NewConnGroup(localAddr)
 		servedConn = run.connGroup
 	}
 	run.quicTransport = self.connectQuic.NewQuicTransport(servedConn)
-	listener, err := run.quicTransport.ListenEarly(self.quicTlsConfig, self.quicConfig)
+	listener, err := run.quicTransport.ListenEarly(self.quicTlsConfig, quicConfig)
 	if err != nil {
 		run.quicTransport.Close()
 		run.closeFanIn()
@@ -214,6 +217,27 @@ func (self *frontServer) openQuicRun(group *frontQuicGroup) (*frontQuicRun, erro
 	}
 	run.listener = listener
 	return run, nil
+}
+
+// The decode53 settings of a whodis group's translation: connect's, with the
+// route table's tlds and the front's pace.
+func (self *frontServer) whodisTranslationSettings() *connect.PacketTranslationSettings {
+	ptSettings := connect.DefaultPacketTranslationSettings()
+	ptSettings.DnsTlds = self.whodisTlds
+	ptSettings.WritePacketsPerSecond = self.settings.WhodisWritePacketsPerSecond
+	return ptSettings
+}
+
+// The QUIC config of the whodis transports: a copy of quicConfig, the quic
+// port's, with the whodis handshake idle timeout. Every other field, the
+// established connection's idle timeout and keepalive included, is
+// quicConfig's.
+func (self *frontServer) newWhodisQuicConfig(quicConfig *quic.Config) *quic.Config {
+	whodisQuicConfig := quicConfig.Clone()
+	if 0 < self.settings.WhodisHandshakeIdleTimeout {
+		whodisQuicConfig.HandshakeIdleTimeout = self.settings.WhodisHandshakeIdleTimeout
+	}
+	return whodisQuicConfig
 }
 
 // Adds a bound socket to the transport's fan-in.
