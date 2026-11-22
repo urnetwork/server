@@ -108,7 +108,7 @@ func defaultControlPlaneQuotaSettings() *controlPlaneQuotaSettings {
 			return fmt.Sprintf("quota-%d", index)
 		},
 		ClientHeadroom:          3,
-		ClientOverflow:          3,
+		ClientOverflow:          9,
 		ClientSettleTimeout:     90 * time.Second,
 		ClientSampleInterval:    20 * time.Millisecond,
 		StoragePayloadByteCount: 32 * 1024,

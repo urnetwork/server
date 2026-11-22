@@ -28,9 +28,9 @@
 //     racer's document landed once; every device of each network on one pin; and the right the first winning document
 //     took away (§8.5's implicit document gave every member device admin on every general repo, and every racer's
 //     document holds grant 1 alone) refused to the device that held it once evs's gate holds the base, within §8.9's
-//     bound. The config document's other saves (ServiceSettings, which the config writer re-reads and retries on a
-//     race) are not raced: the world's devices run no config writer, which ur daemon composes, only the confirmed ACL
-//     ref, so SaveServiceSettings refuses on every one of them
+//     bound, and at the token exchange for gkm (invalid_scope). The config document's other saves (ServiceSettings,
+//     which the config writer re-reads and retries on a race) are not raced: the world's devices run no config writer,
+//     which ur daemon composes, only the confirmed ACL ref, so SaveServiceSettings refuses on every one of them
 //   - team churn, in bursts at once: ChurnInviteCount new members invited by the Owner and the Admin, accepted and
 //     admitted; a setup member removed (member-remove, then MemberRevoke) and re-invited, rejoining under a new
 //     member_id; the Admin's last device revoked; the Owner's vault shared with the Admin's first device by EvsShare

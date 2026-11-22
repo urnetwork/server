@@ -272,12 +272,21 @@ func worldNetworkMembersOfUser(ctx context.Context, networkId server.Id, userId 
 // raises a limit or a §21 case tightens one), replacing any row for limitKey, until the returned pop lifts it: a quota
 // phase's limit set just above what the network holds. This process's snapshot reloads at once, and every host of the
 // world is this process.
-func worldSetNetworkLimit(ctx context.Context, networkId server.Id, limitKey string, value int64) (func(), error) {
-	if err := model.SetNetworkSidecarLimit(ctx, networkId, limitKey, value, "e2e control-plane case: "+limitKey+" at its limit"); err != nil {
-		return nil, fmt.Errorf("%s's row: %w", limitKey, err)
+func worldSetNetworkLimit(ctx context.Context, networkId server.Id, limitKey string, value int64) (pop func(), returnErr error) {
+	server.HandleError(func() {
+		if err := model.SetNetworkSidecarLimit(ctx, networkId, limitKey, value, "e2e control-plane case: "+limitKey+" at its limit"); err != nil {
+			returnErr = err
+		}
+	}, func(err error) {
+		returnErr = err
+	})
+	if returnErr != nil {
+		return nil, fmt.Errorf("%s's row: %w", limitKey, returnErr)
 	}
 	return func() {
-		model.ClearNetworkSidecarLimit(context.Background(), networkId, limitKey)
+		server.HandleError(func() {
+			model.ClearNetworkSidecarLimit(context.Background(), networkId, limitKey)
+		})
 	}, nil
 }
 
@@ -305,39 +314,60 @@ func worldSidecarConnectedCount(ctx context.Context, networkId server.Id) (count
 
 // networkId's stored count as network_quota_state holds it (§20.7's stored and count rows): the nightly count moved
 // by the usage batches' deltas since. 0 for a network with no row yet.
-func worldNetworkStoredByteCount(ctx context.Context, networkId server.Id) (int64, error) {
-	state, err := model.GetNetworkQuotaState(ctx, networkId)
-	if err != nil || state == nil {
-		return 0, err
-	}
-	return state.StoredByteCount, nil
+func worldNetworkStoredByteCount(ctx context.Context, networkId server.Id) (storedByteCount int64, returnErr error) {
+	server.HandleError(func() {
+		state, err := model.GetNetworkQuotaState(ctx, networkId)
+		if err != nil {
+			returnErr = err
+		} else if state != nil {
+			storedByteCount = state.StoredByteCount
+		}
+	}, func(err error) {
+		returnErr = fmt.Errorf("the stored count: %w", err)
+	})
+	return
 }
 
 // The storage refusal api's over-limit list (Quota.OverLimit's answer, model.GetQuotaOverLimit) holds for networkId,
 // nil while the list does not name it.
-func worldStorageOverLimit(ctx context.Context, networkId server.Id) (*sidecar.QuotaRefusal, error) {
-	overLimit, err := model.GetQuotaOverLimit(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return overLimit.StorageNetworkIdRefusals[connect.Id(networkId)], nil
+func worldStorageOverLimit(ctx context.Context, networkId server.Id) (refusal *sidecar.QuotaRefusal, returnErr error) {
+	server.HandleError(func() {
+		overLimit, err := model.GetQuotaOverLimit(ctx)
+		if err != nil {
+			returnErr = err
+			return
+		}
+		refusal = overLimit.StorageNetworkIdRefusals[connect.Id(networkId)]
+	}, func(err error) {
+		returnErr = fmt.Errorf("the over-limit list: %w", err)
+	})
+	return
 }
 
 // §20.7's nightly ReconcileSidecarCounters, every page from the start (taskworker's QUOTA-M2-12 job, which the world
 // does not run): storage_over recomputed from each network's stored count and its limit now, which carries a limit's
 // change to the over-limit list.
-func worldReconcileSidecarCounters(ctx context.Context, pageCount int) error {
-	var after *server.Id
-	for {
-		result, err := model.ReconcileSidecarCounters(ctx, time.Now(), after, pageCount)
-		if err != nil {
-			return fmt.Errorf("the nightly reconcile: %w", err)
+func worldReconcileSidecarCounters(ctx context.Context, pageCount int) (returnErr error) {
+	server.HandleError(func() {
+		var after *server.Id
+		for {
+			result, err := model.ReconcileSidecarCounters(ctx, time.Now(), after, pageCount)
+			if err != nil {
+				returnErr = err
+				return
+			}
+			if result.LastNetworkId == nil {
+				return
+			}
+			after = result.LastNetworkId
 		}
-		if result.LastNetworkId == nil {
-			return nil
-		}
-		after = result.LastNetworkId
+	}, func(err error) {
+		returnErr = err
+	})
+	if returnErr != nil {
+		return fmt.Errorf("the nightly reconcile: %w", returnErr)
 	}
+	return nil
 }
 
 // evs's nightly count (evsservice.NightlyPass, as taskworker's evs.nightly lists it, §11.13's bytes row) on a host of
