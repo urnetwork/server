@@ -8,11 +8,19 @@
 // It never deletes a row: weeks leave PostgreSQL only through the server's
 // drop fence, under the export control (server/db_provider_usage_archive_export.go).
 //
+// The review commands export, in the same format, the contracts that payments
+// under attribution review paid, and then clear those payments' review flag,
+// so the contract horizon reaper deletes the contracts (usagearchive
+// review.go). The clear is the one write to a table other than the export
+// ledger: the payments' rows, guarded by their values and by a verified
+// export, behind a --commit with the plan's digest.
+//
 //	usagearchivectl export --pg=<yml> --dir=<dir> [--floor=<date>|rolling] [--max-weeks=<n>] [--week=<date>] [--register] [--location=<where>] [--threads=<n>] [--plan]
 //	usagearchivectl verify --dir=<dir> [--manifest=<path>]
 //	usagearchivectl register --pg=<yml> --location=<where> <manifest>...
 //	usagearchivectl restore --pg=<yml> --manifest=<path> --table=<name>
 //	usagearchivectl status --pg=<yml> [--dir=<dir>]
+//	usagearchivectl review plan|export|verify|status|clear|restore-flag ...
 package main
 
 import (
@@ -42,6 +50,7 @@ const usage = `usagearchivectl: export, verify, register and restore weeks of st
   register  record verified exports in the ledger (after its migration is applied)
   restore   load one export into a new table and check it against its manifest
   status    the week leaves, their rows now, and their newest exports
+  review    export the contracts of payments under attribution review, then clear the review
 
 Run "usagearchivectl <command> -h" for a command's flags.
 `
@@ -51,10 +60,22 @@ func main() {
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// a hangup, such as a dropped ssh session, stops a run at its batch
+	// boundary as an interrupt does
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer stop()
 	var err error
 	switch os.Args[1] {
+	case "review":
+		err = runReview(ctx, os.Args[2:])
+		var exit *reviewExit
+		if errors.As(err, &exit) {
+			if exit.err != nil {
+				fmt.Fprintf(os.Stderr, "usagearchivectl review: %s\n", exit.err)
+			}
+			stop()
+			os.Exit(exit.code)
+		}
 	case "export":
 		err = runExport(ctx, os.Args[2:])
 	case "verify":
@@ -83,9 +104,21 @@ type pgResource struct {
 	Db        string `yaml:"db"`
 }
 
+type pgxConn = pgx.Conn
+
 // Connects with the resource at path. The password goes into the config, never
 // into a string that is printed.
 func connect(ctx context.Context, path string) (*pgx.Conn, error) {
+	return connectWith(ctx, path, false)
+}
+
+// Connects with the resource at path in a session whose transactions are read
+// only, so PostgreSQL refuses any write on its path.
+func connectReadOnly(ctx context.Context, path string) (*pgx.Conn, error) {
+	return connectWith(ctx, path, true)
+}
+
+func connectWith(ctx context.Context, path string, readOnly bool) (*pgx.Conn, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -107,6 +140,9 @@ func connect(ctx context.Context, path string) (*pgx.Conn, error) {
 	}
 	config.User = resource.User
 	config.Password = resource.Password
+	if readOnly {
+		config.RuntimeParams["default_transaction_read_only"] = "on"
+	}
 	return pgx.ConnectConfig(ctx, config)
 }
 

@@ -1299,6 +1299,30 @@ its size, `db reindex-index` on the `_l` names). Its heap, about 2.4 TiB
 today, stays until those rows go. **That needs an owner decision** (see
 "Decisions" below).
 
+**Decided 2026-11-17 ~15:30Z: (d), export, then clear the review.** Built
+2026-11-21 as `usagearchivectl review` (server `usagearchive/review*.go`),
+run from the backup host like the usage archive's weekly export:
+- `review export` copies every row of the six tables the reaper deletes with a
+  contract, for each contract a sweep of the named completed payments under
+  review paid, to the archive pool's encrypted dataset, in the week export's
+  format (one COPY per table and batch, zstd, a manifest with row counts, row
+  digests and SHA-256s, each copy read back before its manifest). Batches
+  follow the sweep index `(payment_id, contract_id)` in contract id order,
+  each one short REPEATABLE READ READ ONLY transaction; a stopped run resumes
+  after its last manifest.
+- `review verify` reads every copy back and counts each batch's contracts on
+  Main again.
+- `review clear` refuses unless that verification passed and the coverage
+  still holds, and each payment is the row the export recorded. It writes the
+  rows as they were first, then clears the flag in one transaction guarded by
+  each row's values, journaled as `attribution_review_cleared`;
+  `review restore-flag` reverses it.
+
+The reaper then deletes those contracts at its next pass over them, archiving
+their usage as any deleted contract's. Their mint weeks' usage archive leaves
+were already exported and dropped, so those archive rows land in the archive's
+DEFAULT partition.
+
 ### Disk
 
 Recomputed for days on 2026-11-17 by
@@ -1373,6 +1397,11 @@ the cutover from impossible (15–19 TiB) into one capacity step.
      contracts holds its lock for an hour or more, with the taskworker stopped;
    - (d) export the reviewed contracts to edge-6 and let the reaper delete
      them, a new keep-rule exception.
+
+   **Decided 2026-11-17: (d)**, through the export and the guarded clear of
+   the reviews' flag rather than a keep-rule exception, so the reaper's rules
+   stay as they are ("The legacy partition" above). Capacity is decided after
+   the export, with the disk model run again.
 2. **Capacity for C:** the RAID-1 tablespace, or the trim with weekly legacy
    index rebuilds (above).
 3. **The monitor's §2.4i** still judges a day at 91 + 14 days, since the
