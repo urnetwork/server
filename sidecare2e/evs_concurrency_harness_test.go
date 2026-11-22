@@ -17,8 +17,8 @@
 //     confirms holds (M5), so the hold is placed as api writes its object, through model's AbuseHoldStore on api's own
 //     write budget, read back to price it as it stood, and released as AbuseHoldPass ends one, its object deleted
 //   - api's write budget against what api wrote, exactly: every P0 byte api's process reported against the first
-//     metadata cluster is an object it holds under §7.9's and §7.10's prefixes priced as created, a rev/ raise priced as
-//     its object, or the hold's object priced as it stood, as controlPlaneCheckApiBudget counts api's objects (its
+//     metadata cluster is an object it holds under §7.9's and §7.10's prefixes priced as created, a rev/ raise priced
+//     as its object, or the hold's object priced as it stood, as controlPlaneCheckApiBudget counts api's objects (its
 //     helpers, control_plane_concurrency_harness_test.go), read where the objects stand still across the report
 //   - the write budget's reports: every process reports into {nvb_<set>} under a 15 s ttl, so a sampler reads every
 //     metadata cluster's reports for the case's life, keeping each process's newest, and a run chaos stopped stays in

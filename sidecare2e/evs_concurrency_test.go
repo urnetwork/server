@@ -29,8 +29,8 @@
 //   - a hold placed on the general repo, as api mirrors one (evs_concurrency_harness_test.go), and released once the
 //     drop has committed; no answer, listing or read tells a device it stood (owner decisions 93, 184);
 //   - the network's owner drops the history of one writer's first file with now (§11.7's dropped history): its dry
-//     run, which taskworker's evs.drop runs and the harness's stand-in runs here, then the DROP, which the hook lets the
-//     block commit before it restarts the block and loses the answer, so the restart lands mid-drop;
+//     run, which taskworker's evs.drop runs and the harness's stand-in runs here, then the DROP, which the hook lets
+//     the block commit before it restarts the block and loses the answer, so the restart lands mid-drop;
 //   - the owner erases one writer's inbox file: an ERASE of every key its versions name, then a completion ERASE that
 //     says the erasure complete (§11.12, QD-1137).
 //
@@ -71,20 +71,32 @@
 //
 // Not held to the byte: the blocks' own spend. evs prices each push before it issues it, from its record's and head's
 // sizes, its changes and its slots (sidecar/evsservice/push_commit.go's cost), as gkm prices its writes, and the world
-// builds each block's budget inside its host's run (evshost's newBlockEngine, gkm's Run) with no hook to count what the
-// engine issued, so the case has no count of a block's spend to hold its reports to; it holds each evs run to the report
-// its budget wrote as it closed, and per-object attribution of the blocks' spend waits for the review phase.
+// builds each block's budget inside its host's run (evshost's newBlockEngine, gkm's Run) with no hook to count what
+// the engine issued, so the case has no count of a block's spend to hold its reports to; it holds each evs run to the
+// report its budget wrote as it closed, and per-object attribution of the blocks' spend waits for the review phase.
 //
 // A failure from a product bug stays failing; the case reports it with its evidence. As it landed (2026-11-22) the case
 // failed on five findings, each fixed since and run again here (e2e-evs-verify): the disjoint first creations refused
-// 409 PATH_CONFLICT for all but one writer (evs-dir-creation-conflict, sidecar b9e302b2, 05ec181f); every read of a path
-// untouched since two bases, and every write whose plan read one, refused "config pin before what the reader retains"
-// (QD-1178, evs-unretained-pin-reads, sidecar aeca8de8, a9e7bb50); writes beside the races refused 403 by gkm on a token
-// for a stronger role than gkm's state gave the writer (QD-1179, gkm-stale-scope-retry, sidecar 22a842c3: the client
-// now tries such a call again under its own repo's scope); an evs run's spend since its last report lost as it closed
-// (write-budget-close-report, sidecar 5736a959, ea5593b0); and a commit answered just before the block's drain losing
-// its step 8, its stored-byte delta, hints and a DROP's table append (evs-drain-step8, sidecar 75f66a56), which the
-// drop's listing no longer covers with a fresh read of its path.
+// 409 PATH_CONFLICT for all but one writer (evs-dir-creation-conflict, sidecar b9e302b2, 05ec181f); every read of a
+// path untouched since two bases, and every write whose plan read one, refused "config pin before what the reader
+// retains" (QD-1178, evs-unretained-pin-reads, sidecar aeca8de8, a9e7bb50); writes beside the races refused 403 by gkm
+// on a token for a stronger role than gkm's state gave the writer (QD-1179, gkm-stale-scope-retry, sidecar 22a842c3:
+// the client now tries such a call again under its own repo's scope); an evs run's spend since its last report lost as
+// it closed (write-budget-close-report, sidecar 5736a959, ea5593b0); and a commit answered just before the block's
+// drain losing its step 8, its stored-byte delta, hints and a DROP's table append (evs-drain-step8, sidecar 75f66a56),
+// which the drop's listing no longer covers with a fresh read of its path.
+//
+// On those fixes it fails, in one run of three (e2e-evs-verify's, 2026-11-22), on one more:
+//
+//   - a read beside the races, or a write whose plan reads the head, refused by the device's own verifier "config pin
+//     ahead of the state: gkm auth pin ahead of the state: 13 above 12", at the base the first race round's save had
+//     just published: another writer, whose follower held that base, pushed to the ref under it, and the reader's
+//     follower was still a position behind. EvsVerifier.VerifyStatement answers ErrConfigPinAhead, whose doc says to
+//     wait until the log reaches the pin, as §10.9's judged row has a reader do with a pin above its tip, but nothing
+//     on the read path waits, so the read fails. QD-1202 (question e2e-evs-verify-statement-pin-ahead-of-reader) has
+//     the reader wait for its log to reach the pin, within a bound, and withhold the statement only past it; the fix
+//     has not landed. Run 2 refused a-7's read of files2/a-0.txt, and evs-drain-step8's runs met it on two writes. Each
+//     refusal's message says when it came back and where the device's follower and the newest one stood (pinAheadNote).
 //
 // Each phase has PhaseTimeout and dumps the world's progress when it stalls; the case has the conventions' 10 minutes.
 // Run it through the build's wrapper: -tags 'sidecar_e2e sidecar_pending sidecar_localstack'.
@@ -695,7 +707,7 @@ func (self *evsConcurrencyCase) write(ctx context.Context, device *evsConcurrenc
 	content := evsConcurrencyContent(repo.name, path, sequence)
 	result, err := device.client.Repo(repo.repoId).Write(ctx, &sidecar.EvsWriteArgs{Path: path, Content: bytes.NewReader(content), Size: int64(len(content))})
 	if err != nil {
-		return fmt.Errorf("%s's write %d of %s on %s: %w", device.device.Name, sequence, path, repo.name, err)
+		return fmt.Errorf("%s's write %d of %s on %s: %w%s", device.device.Name, sequence, path, repo.name, err, self.pinAheadNote(device.device, err))
 	}
 	repo.add(&evsConcurrencyCommit{
 		path: path, writer: device.device, sequence: sequence, content: content,
@@ -734,7 +746,7 @@ func (self *evsConcurrencyCase) read(ctx context.Context, device *evsConcurrency
 			}
 			continue
 		default:
-			return fmt.Errorf("%s's read of %s on %s: %w", device.device.Name, path, repo.name, err)
+			return fmt.Errorf("%s's read of %s on %s: %w%s", device.device.Name, path, repo.name, err, self.pinAheadNote(device.device, err))
 		}
 		matched := -1
 		for sequence := range sequenceCount {
@@ -752,6 +764,35 @@ func (self *evsConcurrencyCase) read(ctx context.Context, device *evsConcurrency
 		seen[path] = info.Version
 		return nil
 	}
+}
+
+// For a refusal of a statement pinned past what device's state has reached (sidecar.ErrGkmAuthAhead): when it came
+// back, and the log position device's config follower held then beside the newest any device of the case held, so the
+// failure reads as what it refused (question e2e-evs-verify-statement-pin-ahead-of-reader); "" for any other error.
+// Safe for concurrent use once setUp is done.
+func (self *evsConcurrencyCase) pinAheadNote(device *sidecart3.T3Device, err error) string {
+	if !errors.Is(err, sidecar.ErrGkmAuthAhead) {
+		return ""
+	}
+	refusedAt := time.Now()
+	position := func(device *sidecart3.T3Device) (uint64, bool) {
+		follower := device.Follower()
+		if follower == nil || follower.Client() == nil || follower.Client().State() == nil {
+			return 0, false
+		}
+		return follower.Client().State().Pin().GetVersion(), true
+	}
+	own, held := position(device)
+	newest, newestName := uint64(0), ""
+	for _, other := range self.devices {
+		if otherPosition, ok := position(other.device); ok && newest <= otherPosition {
+			newest, newestName = otherPosition, other.device.Name
+		}
+	}
+	if !held {
+		return fmt.Sprintf(" (refused at %s, its follower holding no state, %s's the newest at log position %d)", refusedAt.Format("15:04:05.000"), newestName, newest)
+	}
+	return fmt.Sprintf(" (refused at %s, its follower at log position %d, %s's the newest at %d)", refusedAt.Format("15:04:05.000"), own, newestName, newest)
 }
 
 // A writer's file path in directory.
@@ -1582,7 +1623,7 @@ func (self *evsConcurrencyCase) racePhase() {
 					info, err := device.client.Repo(repo.repoId).ReadHead(ctx, &sidecar.EvsReadArgs{Path: path, Fresh: true}, &content)
 					switch {
 					case err != nil:
-						unread[index] = append(unread[index], fmt.Sprintf("%s on %s: %v", path, repo.name, err))
+						unread[index] = append(unread[index], fmt.Sprintf("%s on %s: %v%s", path, repo.name, err, self.pinAheadNote(device.device, err)))
 					case info.Version != newest.pathVersion || !bytes.Equal(content.Bytes(), newest.content):
 						unread[index] = append(unread[index], fmt.Sprintf("%s on %s read at version %d as %q, its newest acknowledged %d holding %q", path, repo.name, info.Version, content.String(), newest.pathVersion, newest.content))
 					}
