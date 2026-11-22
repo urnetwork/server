@@ -18,9 +18,10 @@ import (
 	"github.com/urnetwork/server/oauth"
 )
 
-// An Admin's client carrying logs:read reads the admin events and creates no auth key, its scope lacking keys; an
-// Auditor's client carrying auth_keys creates no auth key, its creator's role lacking keys, and reads no admin event,
-// its scope lacking read.
+// An Admin's client carrying logs:read reads the admin events and creates no auth key, its scope lacking own devices;
+// an Auditor's client carrying auth_keys reaches the creation of a key for its creator's own devices, which every role
+// makes and the auth key model holds it to (network_auth_key_model.go), but neither lists nor revokes the network's
+// keys, its creator's role lacking keys, and reads no admin event, its scope lacking read.
 func TestOauthClientTokenScopesMeetTheCreatorsRole(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
@@ -61,7 +62,9 @@ func TestOauthClientTokenScopesMeetTheCreatorsRole(t *testing.T) {
 		}{
 			{token: adminLogs, routeKey: "GET /network/admin-events", method: http.MethodGet, path: "/network/admin-events", reached: true},
 			{token: adminLogs, routeKey: "POST /network/auth-keys", method: http.MethodPost, path: "/network/auth-keys", reached: false},
-			{token: auditorKeys, routeKey: "POST /network/auth-keys", method: http.MethodPost, path: "/network/auth-keys", reached: false},
+			{token: auditorKeys, routeKey: "POST /network/auth-keys", method: http.MethodPost, path: "/network/auth-keys", reached: true},
+			{token: auditorKeys, routeKey: "GET /network/auth-keys", method: http.MethodGet, path: "/network/auth-keys", reached: false},
+			{token: auditorKeys, routeKey: "POST /network/auth-key-revoke", method: http.MethodPost, path: "/network/auth-key-revoke", reached: false},
 			{token: auditorKeys, routeKey: "GET /network/admin-events", method: http.MethodGet, path: "/network/admin-events", reached: false},
 		}
 		for _, c := range cases {
