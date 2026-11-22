@@ -355,7 +355,10 @@ func (self *World) DeliverMail(ctx context.Context, delivery *WorldMailDelivery,
 	if err := writer.Close(); err != nil {
 		return fmt.Errorf("the DATA's end: %w", err)
 	}
-	return client.Quit()
+	// the deposit is durable at the 250, so a QUIT that a cut connection never answers changes nothing, and a retry on
+	// its error would deliver the message again
+	client.Quit()
+	return nil
 }
 
 // DeliverMail until the DATA's end is answered 250, tried again every RetryInterval within Timeout while it is
