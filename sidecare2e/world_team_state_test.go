@@ -4,8 +4,8 @@
 // (control_plane_concurrency_test.go) make outside the hosts and api's routes, in one file, as the e2e conventions ask
 // (QD-1028's layout move will move sidecar's model code): a person's sign-up, which no route the world serves makes; a
 // person's credentials, signed as POST /auth/network-switch would mint them; the team tier, by the team grant
-// invoice.paid writes; the counts and rows the case reconciles: a network's clients, its members, its unspent invites
-// and its admin events; and the quota case's parts (control_plane_concurrency_quota_test.go): a network's limit rows
+// invoice.paid writes; the counts and rows the case reconciles: a network's clients, its members, its unspent invites,
+// its admin events and its owner of record; and the quota case's parts (control_plane_concurrency_quota_test.go): a network's limit rows
 // (§20.5), its dns_entries count, its connected sidecar set, its stored count and api's over-limit list, with the two
 // nightly jobs taskworker runs and the world does not, §20.7's ReconcileSidecarCounters and evs's nightly count.
 
@@ -183,6 +183,23 @@ func worldNetworkMemberRoles(ctx context.Context, networkId server.Id) (roles ma
 		})
 	}, func(err error) {
 		returnErr = err
+	})
+	return
+}
+
+// The user a network's row names as its owner: in a team, the synthetic owner of record team-create made, which never
+// signs in (D-TEAM-2), and which a team's tagged clients' tokens name (QD-1194).
+func worldNetworkOwnerOfRecord(ctx context.Context, networkId server.Id) (userId server.Id, returnErr error) {
+	server.HandleError(func() {
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(
+				ctx,
+				`SELECT admin_user_id FROM network WHERE network_id = $1`,
+				networkId,
+			).Scan(&userId))
+		})
+	}, func(err error) {
+		returnErr = fmt.Errorf("the owner of record of %s: %w", networkId, err)
 	})
 	return
 }

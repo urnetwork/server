@@ -19,8 +19,10 @@
 //	          SIDECAR_CAPABILITY_INVITED (§8.5's invited clause); the member's later devices are admitted by that
 //	          consented first device (§7.9's scoped row)
 //	tags      the team's ACL document names each tag, owned by autogroup:admin; a tagged sidecar enrolls from an auth
-//	          key carrying the tag's id, made under an Owner's credential, and an Owner's device signs its
-//	          SidecarAdmit with that tag id
+//	          key carrying the tag's id, made under an Owner's or Admin's credential, its sponsor, whose live
+//	          membership the enrollment runs on while the client it mints is the team's, its token naming the team's
+//	          owner of record with no member_id (QD-1194), so it outlives its sponsor's membership; and an Owner's
+//	          device signs its SidecarAdmit with that tag id
 //	removal   POST /network/member-remove denies a member at api at once (its row, its untagged clients, its rev/
 //	          object), and an admin device signs its MemberRevoke (§7.10); a device revoked, or whose member left, is
 //	          retired from the network's syncs
@@ -703,30 +705,56 @@ func (self *WorldTeam) admitBy(ctx context.Context, admitter *sidecart3.T3Device
 	return nil
 }
 
-// count tagged sidecars of tag: each enrolled from an auth key carrying the tag's id, made under the first Owner's
-// credential, then admitted by admin, an Owner's device, signing its SidecarAdmit with that tag id (§7.7's tags, set
-// at admission within tagOwners), and following.
+// count tagged sidecars of tag, their keys the first Owner's (EnrollTagged), then admitted by admin, an Owner's device,
+// signing each SidecarAdmit with that tag id (§7.7's tags, set at admission within tagOwners), and following
+// (AdmitTaggedDevices).
 func (self *WorldTeam) AddTagged(ctx context.Context, admin *sidecart3.T3Device, tag string, count int) ([]*sidecart3.T3Device, error) {
+	devices, err := self.EnrollTagged(ctx, self.Owner, tag, count, "")
+	if err != nil {
+		return nil, err
+	}
+	if err := self.AdmitTaggedDevices(ctx, admin, tag, devices); err != nil {
+		return nil, err
+	}
+	return devices, nil
+}
+
+// count tagged sidecars of tag, Online and not yet admitted: each enrolled from a one-use auth key carrying the tag's
+// id, made under sponsor's team credential, an Owner's or an Admin's (a Member makes keys for its own devices alone,
+// §7.5). The enrollment runs on the sponsor's live membership, and the client it mints is the team's: its token names
+// the team's owner of record with no member_id (QD-1194). name, where set, starts their names (T3EnrollArgs.Name), so
+// enrollments may run at once.
+func (self *WorldTeam) EnrollTagged(ctx context.Context, sponsor *WorldTeamMember, tag string, count int, name string) ([]*sidecart3.T3Device, error) {
 	tagId, ok := self.TagId(tag)
 	if !ok {
 		return nil, fmt.Errorf("the team's document names no tag %s", tag)
 	}
-	devices, err := self.AddSidecarsWith(ctx, &sidecart3.T3EnrollArgs{Root: self.Owner.Root, Tags: []string{hex.EncodeToString(tagId.Bytes())}, Count: count})
+	devices, err := self.AddSidecarsWith(ctx, &sidecart3.T3EnrollArgs{Root: sponsor.Root, Tags: []string{hex.EncodeToString(tagId.Bytes())}, Count: count, Name: name})
 	if err != nil {
-		return nil, fmt.Errorf("%s's tagged sidecars: %w", tag, err)
+		return nil, fmt.Errorf("%s's tagged sidecars, %s's keys: %w", tag, sponsor.Name, err)
+	}
+	return devices, nil
+}
+
+// admin, an Owner's device, admits each of devices carrying tag alone (AdmitTagged), and each then follows; the team
+// keeps them among its tagged sidecars.
+func (self *WorldTeam) AdmitTaggedDevices(ctx context.Context, admin *sidecart3.T3Device, tag string, devices []*sidecart3.T3Device) error {
+	tagId, ok := self.TagId(tag)
+	if !ok {
+		return fmt.Errorf("the team's document names no tag %s", tag)
 	}
 	for _, device := range devices {
 		if err := self.AdmitTagged(ctx, admin, device, tagId); err != nil {
-			return nil, err
+			return err
 		}
 	}
 	if err := self.Follow(ctx, devices); err != nil {
-		return nil, err
+		return err
 	}
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	self.tagged = append(self.tagged, devices...)
-	return devices, nil
+	return nil
 }
 
 // admin signs device's SidecarAdmit carrying tagId alone, filed through api.
@@ -828,8 +856,10 @@ func worldTeamServerRole(role bridge.MemberRole) (model.NetworkMemberRole, bool)
 	return "", false
 }
 
-// The team world's own check: a team of its first Owner's two devices, two members who join by invite with two devices
-// each, and a tagged sidecar, every device following one log, which names every member and every sidecar as admitted.
+// The team world's own check: a team of its first Owner's two devices, an Admin who joins by invite with two devices, a
+// Member who joins by invite with one, its auth key its own (§7.5's Member: own devices; team-member-own-auth-key), and
+// a tagged sidecar, its key the first Owner's (team-tagged-enroll), every device following one log, which names every
+// member and every sidecar as admitted, each member's under that member and the tagged one under its one tag.
 func TestE2eWorldTeamNetwork(t *testing.T) {
 	e2eTestEnv().Run(t, func(t testing.TB) {
 		worldSettings := DefaultWorldSettings()
@@ -845,14 +875,21 @@ func TestE2eWorldTeamNetwork(t *testing.T) {
 			world.FailProgress(t, "the team", err, nil)
 		}
 		owner := team.Owner.Devices()[0]
-		// an Admin, whose devices enroll under its own credential, and a member with none
-		roles := []bridge.MemberRole{bridge.MemberRole_MEMBER_ROLE_ADMIN, bridge.MemberRole_MEMBER_ROLE_MEMBER}
-		for index, role := range roles {
+		// an Admin, whose devices enroll under its own credential, and a Member, whose device enrolls from an auth key
+		// its own credential makes
+		joins := []struct {
+			role        bridge.MemberRole
+			deviceCount int
+		}{
+			{role: bridge.MemberRole_MEMBER_ROLE_ADMIN, deviceCount: 2},
+			{role: bridge.MemberRole_MEMBER_ROLE_MEMBER, deviceCount: 1},
+		}
+		for index, join := range joins {
 			person, err := world.NewPerson(ctx, fmt.Sprintf("member-%d", index))
 			if err != nil {
 				t.Fatal(err)
 			}
-			invite, err := team.Invite(ctx, team.Owner, owner, person.Email, role)
+			invite, err := team.Invite(ctx, team.Owner, owner, person.Email, join.role)
 			if err != nil {
 				t.Fatalf("%s's invite: %v", person.Name, err)
 			}
@@ -863,22 +900,19 @@ func TestE2eWorldTeamNetwork(t *testing.T) {
 			if _, err := team.AdmitMember(ctx, owner, member); err != nil {
 				t.Fatalf("%s's MemberAdmit: %v", person.Name, err)
 			}
-			if role != bridge.MemberRole_MEMBER_ROLE_ADMIN {
-				continue
+			if join.role == bridge.MemberRole_MEMBER_ROLE_ADMIN {
+				if _, err := team.SetAdmins(ctx, owner, []*WorldTeamMember{member}); err != nil {
+					t.Fatalf("%s's AdminSet: %v", person.Name, err)
+				}
+				if err := team.AwaitServerRole(ctx, member, model.NetworkMemberRoleAdmin); err != nil {
+					world.FailProgress(t, person.Name+"'s role", err, nil)
+				}
 			}
-			if _, err := team.SetAdmins(ctx, owner, []*WorldTeamMember{member}); err != nil {
-				t.Fatalf("%s's AdminSet: %v", person.Name, err)
-			}
-			if err := team.AwaitServerRole(ctx, member, model.NetworkMemberRoleAdmin); err != nil {
-				world.FailProgress(t, person.Name+"'s role", err, nil)
-			}
-			if _, err := team.AddMemberDevices(ctx, member, invite, 2); err != nil {
-				world.FailProgress(t, person.Name+"'s devices", err, nil)
+			if _, err := team.AddMemberDevices(ctx, member, invite, join.deviceCount); err != nil {
+				t.Errorf("%s's devices: %v", person.Name, err)
 			}
 		}
-		// a tagged enrollment in a team: POST /network/enroll answers 500 as this lands, since the mint's credential
-		// for a tagged or ephemeral key names the key's creator without its member_id and the state check refuses it
-		// (model/network_client_owner_model.go's NetworkEnroll); the failure stands and the rest is checked
+		// a tagged sidecar of the team, its key the first Owner's
 		tagged, err := team.AddTagged(ctx, owner, teamSettings.Tags[0], 1)
 		if err != nil {
 			t.Errorf("the tagged sidecar: %v", err)

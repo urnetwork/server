@@ -5,7 +5,8 @@
 //   - scopes: what the token exchange grants a device, read back from the token it minted (its scope claim, read
 //     unverified: the token is the device's own, and the claim is what the exchange granted), and what §7.8 and §8
 //     give the device, computed from its kind alone (config writer, member device, tagged sidecar) and the repos'
-//     kinds, never from the state the exchange reads, so the two are independent;
+//     kinds, never from the state the exchange reads, so the two are independent; and a device's own api, the
+//     Sidecar's on its token with its ClientKey's proofs, which a check calls as the device's sidecar does;
 //   - refusals: an enrollment's answer as the sidecar's api client reads it (its status and code), a bare sidecar
 //     enrolled from an auth key a test made, and auth keys made through api on a person's credential;
 //   - the exact-head races: rounds of every racer previewing at one verified head and all saving at once, as the evs
@@ -49,8 +50,19 @@ import (
 	"github.com/urnetwork/server/sidecart3"
 )
 
-// The scopes a token carries, from its claims read unverified.
-func controlPlaneTokenScopes(token string) ([]string, error) {
+// What a token's claims name, read unverified: the token is one api or its exchange answered a device of the case, and
+// the claims are what it minted.
+type controlPlaneClaims struct {
+	Scope        string     `json:"scope"`
+	UserId       server.Id  `json:"user_id"`
+	ClientId     *server.Id `json:"client_id"`
+	MemberId     *server.Id `json:"member_id"`
+	StrictExp    bool       `json:"strict_exp"`
+	AdminRefused bool       `json:"admin_refused"`
+}
+
+// A token's claims, read unverified.
+func controlPlaneTokenClaims(token string) (*controlPlaneClaims, error) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
 		return nil, errors.New("the token is no jws")
@@ -59,14 +71,60 @@ func controlPlaneTokenScopes(token string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("the token's claims: %w", err)
 	}
-	claims := &struct {
-		Scope string `json:"scope"`
-	}{}
+	claims := &controlPlaneClaims{}
 	if err := json.Unmarshal(payload, claims); err != nil {
 		return nil, fmt.Errorf("the token's claims: %w", err)
 	}
+	return claims, nil
+}
+
+// The scopes a token carries, from its claims read unverified.
+func controlPlaneTokenScopes(token string) ([]string, error) {
+	claims, err := controlPlaneTokenClaims(token)
+	if err != nil {
+		return nil, err
+	}
 	return strings.Fields(claims.Scope), nil
 }
+
+// The Sidecar's own api on device's current generation, DPoP-signed on its token by its ClientKey, as a component's
+// Attach is handed it (ItBridgeWorld.generationApi takes it the same way): what a check calls api through as the
+// device's sidecar does, its refresh and its window clients among them.
+func controlPlaneDeviceApi(ctx context.Context, device *sidecart3.T3Device) (*sidecar.SidecarApi, error) {
+	capture := &controlPlaneApiComponent{attached: make(chan *sidecar.SidecarApi, 1)}
+	remove, err := device.Sidecar().AddComponent(capture)
+	if err != nil {
+		return nil, err
+	}
+	defer remove()
+	select {
+	case api := <-capture.attached:
+		return api, nil
+	case <-ctx.Done():
+		return nil, fmt.Errorf("%s's generation attached no component: %w", device.Name, ctx.Err())
+	}
+}
+
+// A component that takes the generation's api at its Attach and holds nothing else.
+type controlPlaneApiComponent struct {
+	attached chan *sidecar.SidecarApi
+}
+
+func (self *controlPlaneApiComponent) Name() string {
+	return "control-plane-api"
+}
+
+func (self *controlPlaneApiComponent) Attach(env *sidecar.SidecarEnv) error {
+	if env.SidecarApi != nil {
+		select {
+		case self.attached <- env.SidecarApi:
+		default:
+		}
+	}
+	return nil
+}
+
+func (self *controlPlaneApiComponent) Close() {}
 
 // A repo scope as §7.8 spells it.
 func controlPlaneRepoScope(repoId sidecar.Id, role string) string {

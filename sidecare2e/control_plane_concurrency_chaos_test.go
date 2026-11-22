@@ -33,9 +33,17 @@
 // is posted, and the device's next generation posts the same bytes again), whether or not the held post is then served;
 // a base whose answer was lost, or whose publish was lost unseen or given up by a restarting device, leaves every
 // device of the network converged on one pin whose head holds the saved document, the document saved once more planning
-// no change; and a restarted inviting device still signs, its kept identity's MemberAdmit landing once. At the end
-// api's write budget reconciles exactly with the objects it wrote across every restart
-// (control_plane_concurrency_harness_test.go). Each step is bounded by the case's PhaseTimeout.
+// no change; and a restarted inviting device still signs, its kept identity's MemberAdmit landing once.
+//
+// The personal network's bases are its later-admitted config writers', the bootstrapping device's second and third
+// devices', and api restarts after each: every restart after the first base loads that network cold at a base a writer
+// other than the bootstrapping device signed, as its first exchange or statement after the restart asks, and after the
+// last restart every gate, api's own among them, holds each network at its tip. As the case landed (2026-11-22) a cold
+// reader refused such a base as a fork (finding C, TestE2eControlPlaneConcurrencyColdGate), so the steps ran in an
+// order that kept every api restart from following one; config-replay-base-signer (sidecar 9ac79c88 to f5892c63,
+// QD-1192) fixed it, and e2e-control-plane-verify dropped that order. At the end api's write budget reconciles exactly
+// with the objects it wrote across every restart (control_plane_concurrency_harness_test.go). Each step is bounded by
+// the case's PhaseTimeout.
 
 package sidecare2e
 
@@ -227,6 +235,13 @@ func TestE2eControlPlaneConcurrencyChaos(t *testing.T) {
 			ownerDevice = team.Owner.Devices()[0]
 		})
 
+		// a later-admitted config writer restarted while api holds its base's publish: its base, saved again from its
+		// kept anchor, is the first of a's a writer other than the bootstrapping device signs, and each api restart
+		// below follows it
+		step(func(ctx context.Context) {
+			self.chaosRestartMidSave(ctx, chaos, a, a.Clients[1], settings.Document(1))
+		})
+
 		// an accept whose answer api lost after it acted: one membership, which the retry finds; and an accept api
 		// lost unseen: no membership until the retry makes one
 		step(func(ctx context.Context) { self.chaosAccept(ctx, chaos, "acted-invitee", controlPlaneChaosActed) })
@@ -235,18 +250,13 @@ func TestE2eControlPlaneConcurrencyChaos(t *testing.T) {
 		// a statement whose answer api lost after it acted, posted again verbatim
 		step(func(ctx context.Context) { self.chaosStatement(ctx, chaos, ownerDevice) })
 
-		// The steps on a run in an order finding C asks: a base another config writer than the bootstrapping device
-		// signs is refused by every reader that starts at it, api's own gate after its restart among them
-		// (TestE2eControlPlaneConcurrencyColdGate), so no api restart may follow such a base, or it hides what the
-		// chaos shows. The saves under api's chaos are the bootstrapping device's, and the restart mid-save, whose
-		// device then signs a base, runs after the last restart of api.
-
-		// a base whose answer api lost after it acted, and one api lost unseen
+		// a base whose answer api lost after it acted, and one api lost unseen, each a later-admitted writer's, each
+		// previewed first through api's exchange as api's gate loads a cold after its last restart
 		step(func(ctx context.Context) {
-			self.chaosSave(ctx, chaos, a, a.Clients[0], settings.Document(1), controlPlaneChaosActed)
+			self.chaosSave(ctx, chaos, a, a.Clients[2], settings.Document(2), controlPlaneChaosActed)
 		})
 		step(func(ctx context.Context) {
-			self.chaosSave(ctx, chaos, a, a.Clients[0], settings.Document(2), controlPlaneChaosLost)
+			self.chaosSave(ctx, chaos, a, a.Clients[1], settings.Document(3), controlPlaneChaosLost)
 		})
 
 		// the network's bootstrapping device restarted while api holds its own act's SidecarAdmit
@@ -260,13 +270,12 @@ func TestE2eControlPlaneConcurrencyChaos(t *testing.T) {
 		step(func(ctx context.Context) { self.chaosRemove(ctx, chaos, "acted-removal", controlPlaneChaosActed) })
 		step(func(ctx context.Context) { self.chaosRemove(ctx, chaos, "lost-removal", controlPlaneChaosLost) })
 
-		// a device restarted while api holds its base's publish
-		step(func(ctx context.Context) {
-			self.chaosRestartMidSave(ctx, chaos, a, a.Clients[1], settings.Document(3))
-		})
-
 		// the inviting device restarted between its invite and its MemberAdmit
 		step(func(ctx context.Context) { self.chaosRestartMidInvite(ctx, ownerDevice) })
+
+		// after api's last restart, every gate, api's own among them, holds each network at its tip, a's newest base a
+		// later writer's, and a's devices take the config's read at api's exchange
+		step(func(ctx context.Context) { self.chaosConverged(ctx, []*WorldNetwork{a, self.team.WorldNetwork}) })
 
 		// api's write budget across every restart, exactly
 		step(func(ctx context.Context) { controlPlaneCheckApiBudget(t, ctx, world, base.Ledgers) })
@@ -798,6 +807,35 @@ func (self *controlPlaneCase) chaosRestartMidSave(ctx context.Context, chaos *co
 	self.checkSaved(ctx, network, device, source, before, fmt.Sprintf("%s restarted mid-save (the save answered %v, its held publish %v)", device.Name, saveErr, heldErr))
 }
 
+// After api's last restart: every gate of the world, api's own among them, holds each of networks at its tip, every live
+// device of each on one pin, and each takes the config's read through api's exchange on its own token.
+func (self *controlPlaneCase) chaosConverged(ctx context.Context, networks []*WorldNetwork) {
+	t := self.t
+	for _, network := range networks {
+		if err := self.syncTip(ctx, network.T3Network, network.Owner()); err != nil {
+			t.Errorf("after api's last restart, %s never stood at its tip at every gate: %v", network.Name, err)
+			continue
+		}
+		if divergent := controlPlaneDivergent(network.LiveDevices()); 0 < len(divergent) {
+			t.Errorf("after api's last restart, %s's devices did not converge: %s", network.Name, strings.Join(divergent, "; "))
+		}
+		configRepoId, _, err := controlPlaneNetworkRepos(network.Owner())
+		if err != nil {
+			t.Errorf("%s's config repo: %v", network.Name, err)
+			continue
+		}
+		configRead := []string{controlPlaneRepoScope(configRepoId, "r")}
+		for _, device := range network.LiveDevices() {
+			if granted, err := controlPlaneGrantedScopes(ctx, self.world, device, WorldBlockEvs, configRead); err != nil {
+				t.Errorf("after api's last restart, %s's exchange for %s's config read: %v", device.Name, network.Name, err)
+			} else if !granted[configRead[0]] {
+				t.Errorf("after api's last restart, %s's exchange granted %v, not %s's config read", device.Name, granted, network.Name)
+			}
+		}
+		t.Logf("after api's last restart, %s's %d devices stand at its tip at every gate and take its config's read", network.Name, len(network.LiveDevices()))
+	}
+}
+
 // The inviting device restarts on its store between its invite and the invitee's MemberAdmit, which it then signs: the
 // membership lands once and every device names it.
 func (self *controlPlaneCase) chaosRestartMidInvite(ctx context.Context, device *sidecart3.T3Device) {
@@ -836,13 +874,16 @@ func (self *controlPlaneCase) chaosRestartMidInvite(ctx context.Context, device 
 	t.Logf("the inviter %s restarted mid-invite: the invitee's membership %s admitted by it once", device.Name, member.MemberId)
 }
 
-// A reader that starts at a base, as a gate cache does when it loads a network cold (api's after a restart, a new
-// block's), holds the base an admitted config writer of a personal network signed: its owner's second device saves a
-// document, and a new gate cache then loads the network at that base's pin. As this lands it refuses the base as a fork,
-// "base N's signer is no config writer in its own rows" (sidecar's config_replay.go: the state built from the genesis
-// and the base's rows does not make the signer a config writer, where every warm reader, having replayed the log from
-// the genesis, holds it one), so the cold gate never loads the network, and api's exchange, after api restarts, answers
-// that network's every exchange temporarily_unavailable. The failure stands, with the gate's alarm as its evidence.
+// Readers that start at a base hold the base a later-admitted config writer of a personal network signed: its owner's
+// second device saves a document; then a new gate cache loads the network cold at that base's pin, as api's does after
+// a restart and a new block's at its start; a new device of the owner's is admitted and follows to the tip; and api,
+// restarted, holds the network at its gate and grants each device the config's read at its exchange. As the case
+// landed (2026-11-22) a cold reader refused such a base as a fork, "base N's signer is no config writer in its own
+// rows" (finding C: the state built from the genesis and the base's rows did not make the signer a config writer, where
+// every warm reader, having replayed the log from the genesis, held it one), so the cold gate never loaded the network
+// and api's exchange answered that network's every exchange temporarily_unavailable after a restart.
+// config-replay-base-signer (sidecar 9ac79c88 to f5892c63, QD-1192) judges a base's signer at S(b-1), as a reader
+// present at b-1 does, and anchors the head there; this case holds every such reader to it.
 func TestE2eControlPlaneConcurrencyColdGate(t *testing.T) {
 	settings := defaultControlPlaneChaosSettings()
 	e2eTestEnv().Run(t, func(t testing.TB) {
@@ -860,6 +901,8 @@ func TestE2eControlPlaneConcurrencyColdGate(t *testing.T) {
 		if err != nil {
 			world.FailProgress(t, "the second device's save", err, nil)
 		}
+
+		// a new gate cache, which loads a cold at the base
 		cache, closeCache, err := world.T3().AddGate("cold")
 		if err != nil {
 			t.Fatalf("the cold gate: %v", err)
@@ -871,7 +914,37 @@ func TestE2eControlPlaneConcurrencyColdGate(t *testing.T) {
 			if snapshot != nil {
 				held = snapshot.Pin.GetVersion()
 			}
-			t.Errorf("finding: a gate loading %s cold never holds the base %s signed at n %d: it holds n %d (status %v): %v", a.Name, a.Clients[1].Name, pin.GetVersion(), held, status, err)
+			t.Errorf("a gate loading %s cold never holds the base %s signed at n %d: it holds n %d (status %v): %v", a.Name, a.Clients[1].Name, pin.GetVersion(), held, status, err)
 		}
+
+		// a new device of the owner's, admitted past the base, which follows from its anchor to the tip
+		devices, err := a.AddSidecars(ctx, 1, nil)
+		if err != nil {
+			world.FailProgress(t, "the new device", err, nil)
+		}
+		if err := a.Admit(ctx, devices); err != nil {
+			t.Errorf("%s, admitted past the base %s signed at n %d, never followed %s's log: %v", devices[0].Name, a.Clients[1].Name, pin.GetVersion(), a.Name, err)
+		}
+
+		// api restarted: its gate holds a at its tip, and each device takes the config's read at its exchange
+		if err := world.T3().RestartApi(); err != nil {
+			t.Fatalf("api's restart: %v", err)
+		}
+		if err := self.syncTip(ctx, a.T3Network, a.Owner()); err != nil {
+			t.Errorf("after api's restart, %s never stood at its tip past the base %s signed at every gate: %v", a.Name, a.Clients[1].Name, err)
+		}
+		configRepoId, _, err := controlPlaneNetworkRepos(a.Owner())
+		if err != nil {
+			t.Fatalf("%s's config repo: %v", a.Name, err)
+		}
+		configRead := []string{controlPlaneRepoScope(configRepoId, "r")}
+		for _, device := range a.LiveDevices() {
+			if granted, err := controlPlaneGrantedScopes(ctx, world, device, WorldBlockEvs, configRead); err != nil {
+				t.Errorf("after api's restart, %s's exchange for %s's config read: %v", device.Name, a.Name, err)
+			} else if !granted[configRead[0]] {
+				t.Errorf("after api's restart, %s's exchange granted %v, not %s's config read", device.Name, granted, a.Name)
+			}
+		}
+		t.Logf("%s's base at n %d, %s's: held cold by a new gate, a new device and api's gate after its restart", a.Name, pin.GetVersion(), a.Clients[1].Name)
 	})
 }

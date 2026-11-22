@@ -5,23 +5,28 @@
 // PersonalNetworkCount personal networks and one team network (world_team_test.go) on the world's real keys.
 //
 // Setup: each personal network is its owner's first device, which bootstraps it; the team is its first Owner's device,
-// an Admin who joins by invite (MemberAdmit, then an AdminSet naming them Admin, mirrored into network_member by the
-// log's effects) and PlainMemberCount members who join by invite as members. Network b saves a document naming
-// tag:ci, owned by autogroup:admin.
+// which bootstraps it and saves its first document, naming TeamTag owned by autogroup:admin, an Admin who joins by
+// invite (MemberAdmit, then an AdminSet naming them Admin, mirrored into network_member by the log's effects) and
+// PlainMemberCount members who join by invite as members. Network b saves a document naming tag:ci, owned by
+// autogroup:admin.
 //
 // The phases, each bounded by PhaseTimeout and dumping the world's progress when it stalls:
 //
 //   - enrollment: EnrollCount devices enroll at once (T3WorldSettings.EnrollConcurrency), through api and the exchange:
-//     PersonalEnrollCount owner's devices in each personal network, a tagged sidecar in b, TeamOwnerEnrollCount Owner's
-//     devices and TeamAdminEnrollCount Admin's devices in the team; then each is admitted (an owner's devices by its
-//     first, the Admin's first by the inviting device once its invite join's MAC verifies, with the invited mark, the
-//     rest by that first device, the tagged one by its tag owner) and follows. What must hold: every enrollment lands
-//     once (api holds exactly the devices' clients, each id once); each device gets exactly the scopes §7.8 and §8
-//     give it at evs and gkm (controlPlaneExpectedScopes); and each refusal names the design's reason: a spent
-//     one-use key (auth_key_invalid), a tagged key before base 1 (no_genesis), a network outside preview_networks
-//     (not_preview), an enrolled device no statement admitted (invalid_grant at the exchange). Two findings stay
-//     failing here, each with its evidence: a team member's own untagged auth key (§7.5's "Member: own devices") and a
-//     tagged enrollment in a team
+//     PersonalEnrollCount owner's devices in each personal network, a tagged sidecar in b; in the team,
+//     TeamOwnerEnrollCount Owner's devices, TeamAdminEnrollCount Admin's devices and TeamMemberEnrollCount devices of
+//     each setup member, each from an auth key its own member made (§7.5's Member: own devices), and
+//     TeamTaggedEnrollCount tagged sidecars of TeamTag, their keys the Admin's; then each is admitted (an owner's devices
+//     by its first, a member's first by the inviting device once its invite join's MAC verifies, with the invited mark,
+//     the rest by that first device, a tagged one by its tag owner) and follows, the networks' and the team's members'
+//     and tagged admissions at once. What must hold: every enrollment lands once (api holds exactly the devices'
+//     clients, each id once); each device gets exactly the scopes §7.8 and §8 give it at evs and gkm
+//     (controlPlaneExpectedScopes); each refusal names the design's reason: a spent one-use key (auth_key_invalid), a
+//     tagged key before base 1 (no_genesis), a network outside preview_networks (not_preview), an enrolled device no
+//     statement admitted (invalid_grant at the exchange), and a Member's key for a tag autogroup:admin owns (403: a
+//     Member makes keys for its own devices alone); and each of the team's tagged sidecars works at api on its own
+//     credential, which names the team's owner of record with no member (QD-1194; control_plane_concurrency_team_test.go):
+//     the state check, a refresh, a window client and the exchange
 //   - saves racing: in a personal network and in the team at once, RacerCount config writers race exact-head ACL saves
 //     in rounds (every racer previews at one verified head, all save at once, each signing EXACT_HEAD on what it
 //     previewed). What must hold: one winner per round, every other save refused as the head having moved, every
@@ -32,27 +37,37 @@
 //     which the config writer re-reads and retries on a race) are not raced: the world's devices run no config writer,
 //     which ur daemon composes, only the confirmed ACL ref, so SaveServiceSettings refuses on every one of them
 //   - team churn, in bursts at once: ChurnInviteCount new members invited by the Owner and the Admin, accepted and
-//     admitted; a setup member removed (member-remove, then MemberRevoke) and re-invited, rejoining under a new
-//     member_id; the Admin's last device revoked; the Owner's vault shared with the Admin's first device by EvsShare
-//     and the share revoked; and in b, TaggedChurnCount tagged sidecars admitted and one revoked. Then the Admin is
-//     moved out of the AdminSet and removed. What must hold: every live device's state, api's member rows and the
-//     exchange agree on who is a member and who is admitted; a revoked or removed device is refused at the exchange's
-//     projection (controlPlaneExchange, since a device that learned of its revocation asks for nothing); the share's
-//     subject is granted the vault's read and takes its key while the share stands, is refused the read once it is
-//     revoked, and takes no later generation; and at the next rotation of the config repo every live device takes the
-//     new generation while no revoked or removed one does. The share is judged at the exchange and at gkm, not by a
-//     read: a reader of an owner-bound repo that does not write it deposits a read receipt first (§16.8, D-MCP-18), and
-//     the world's devices wire no receipt gate, so evs refuses that read on each of them (ErrEvsReceiptGate)
+//     admitted; a setup member with devices of its own removed (member-remove, then MemberRevoke) and re-invited,
+//     rejoining under a new member_id; the Admin's last device revoked; the Owner's vault shared with the Admin's first
+//     device by EvsShare and the share revoked; and in b, TaggedChurnCount tagged sidecars admitted and one revoked.
+//     Then the Admin is moved out of the AdminSet and removed. What must hold: every live device's state, api's member
+//     rows and the exchange agree on who is a member and who is admitted; a revoked or removed device is refused at the
+//     exchange's projection (controlPlaneExchange, since a device that learned of its revocation asks for nothing), and
+//     a removed member's devices are revoked in every live device's state (§7.10: a MemberRevoke revokes the member's
+//     untagged devices) and their clients deactivated at api; the share's subject is granted the vault's read and takes
+//     its key while the share stands, is refused the read once it is revoked, and takes no later generation; at the
+//     next rotation of the config repo every live device, the team's tagged sidecars among them, takes the new
+//     generation while no revoked or removed one does; and the team's tagged sidecars, the Admin's keys, outlive the
+//     Admin's removal (owner decision 83, QD-1194): admitted in every live device's state, their clients active at api,
+//     and at api on their own credentials as at the enrollment. The share is judged at the exchange and at gkm, not by
+//     a read: a reader of an owner-bound repo that does not write it deposits a read receipt first (§16.8, D-MCP-18),
+//     and the world's devices wire no receipt gate, so evs refuses that read on each of them (ErrEvsReceiptGate)
 //   - limits: config_admissions in b set to its admissions plus AdmissionHeadroom, then AdmissionHeadroom plus
 //     AdmissionOverflow tagged admissions filed at once: exactly the headroom lands, the rest refused by that limit
 //   - ledgers: api's write budget reconciled exactly with the objects api wrote for every statement, base and
 //     removal of the case (control_plane_concurrency_harness_test.go)
 //
-// A failure from a product bug stays failing, and the case runs on so one finding does not hide the next. Two parts
+// A failure from a product bug stays failing, and the case runs on so one finding does not hide the next. As the case
+// landed (e2e-control-plane-concurrency, 2026-11-22) it failed on two findings, which kept the team's members to
+// devices of an Owner's and the Admin's and its tagged sidecars out of the case: a Member's own auth key refused 403
+// (finding A) and a tagged enrollment in a team answered 500 (finding B). Both fixes have landed,
+// team-member-own-auth-key (server c5579f826 to 927a07e0d) and team-tagged-enroll (server c730a0441 to e9b9598d1,
+// QD-1194), and the case now runs what they blocked; e2e-control-plane-verify (2026-11-22) widened it so. Three parts
 // are cases of their own: the chaos, api and a member device restarted mid-save, mid-invite, mid-removal and
-// mid-statement on their stores (TestE2eControlPlaneConcurrencyChaos), and the other quotas §20 names under
-// concurrent use, evs storage, sidecar_clients and dns_entries (TestE2eControlPlaneConcurrencyQuota). Run through the
-// build's wrapper: -tags 'sidecar_e2e sidecar_pending sidecar_localstack'.
+// mid-statement on their stores (TestE2eControlPlaneConcurrencyChaos), a reader starting cold at a base a later config
+// writer signed (TestE2eControlPlaneConcurrencyColdGate, finding C), and the other quotas §20 names under concurrent
+// use, evs storage, sidecar_clients and dns_entries (TestE2eControlPlaneConcurrencyQuota). Run through the build's
+// wrapper: -tags 'sidecar_e2e sidecar_pending sidecar_localstack'.
 
 package sidecare2e
 
@@ -84,14 +99,20 @@ type controlPlaneSettings struct {
 	PersonalNetworkCount int
 	// The plain members who join the team by invite at setup.
 	PlainMemberCount int
-	// EnrollCount, the devices the first phase enrolls at once: PersonalEnrollCount in each personal network,
-	// TeamOwnerEnrollCount of the Owner's and TeamAdminEnrollCount of the Admin's, and one tagged sidecar in b.
-	EnrollCount          int
-	PersonalEnrollCount  int
-	TeamOwnerEnrollCount int
-	TeamAdminEnrollCount int
+	// EnrollCount, the devices the first phase enrolls at once: PersonalEnrollCount in each personal network, one tagged
+	// sidecar in b, and in the team TeamOwnerEnrollCount of the Owner's, TeamAdminEnrollCount of the Admin's,
+	// TeamMemberEnrollCount of each setup member's and TeamTaggedEnrollCount tagged sidecars of TeamTag.
+	EnrollCount           int
+	PersonalEnrollCount   int
+	TeamOwnerEnrollCount  int
+	TeamAdminEnrollCount  int
+	TeamMemberEnrollCount int
+	TeamTaggedEnrollCount int
 	// The tag network b's document names, owned by autogroup:admin.
 	Tag string
+	// The tag every document of the team names, owned by autogroup:admin (Team.Tags), whose tagged sidecars' keys the
+	// Admin makes, so they outlive their sponsor's removal at the churn's end.
+	TeamTag string
 	// The config writers racing exact-head saves in each raced network.
 	RacerCount int
 	// The new members the churn invites, and the tagged sidecars it admits in b, one of them then revoked.
@@ -129,25 +150,29 @@ type controlPlaneSettings struct {
 }
 
 func defaultControlPlaneSettings() *controlPlaneSettings {
+	teamTag := "team-ci"
 	team := DefaultWorldTeamSettings()
 	team.OwnerDeviceCount = 1
-	team.Tags = []string{}
+	team.Tags = []string{teamTag}
 	team.SidecarLimits["config_bases_per_min"] = 6000
 	return &controlPlaneSettings{
-		PersonalNetworkCount: 2,
-		PlainMemberCount:     2,
-		EnrollCount:          16,
-		PersonalEnrollCount:  4,
-		TeamOwnerEnrollCount: 1,
-		TeamAdminEnrollCount: 6,
-		Tag:                  "ci",
-		RacerCount:           4,
-		ChurnInviteCount:     3,
-		TaggedChurnCount:     2,
-		AdmissionHeadroom:    2,
-		AdmissionOverflow:    2,
-		ConfigBasesPerMinute: 6000,
-		GrantOne:             `{"src": ["autogroup:member", "autogroup:untagged"], "dst": ["autogroup:self"], "via": ["autogroup:self"], "allow": ["dial", "route"]}`,
+		PersonalNetworkCount:  2,
+		PlainMemberCount:      2,
+		EnrollCount:           22,
+		PersonalEnrollCount:   4,
+		TeamOwnerEnrollCount:  1,
+		TeamAdminEnrollCount:  6,
+		TeamMemberEnrollCount: 2,
+		TeamTaggedEnrollCount: 2,
+		Tag:                   "ci",
+		TeamTag:               teamTag,
+		RacerCount:            4,
+		ChurnInviteCount:      3,
+		TaggedChurnCount:      2,
+		AdmissionHeadroom:     2,
+		AdmissionOverflow:     2,
+		ConfigBasesPerMinute:  6000,
+		GrantOne:              `{"src": ["autogroup:member", "autogroup:untagged"], "dst": ["autogroup:self"], "via": ["autogroup:self"], "allow": ["dial", "route"]}`,
 		RaceGrant: func(index int) string {
 			return fmt.Sprintf(`{"src": ["autogroup:member"], "dst": ["dns:race-%d"], "allow": ["admin"]}`, index)
 		},
@@ -173,11 +198,15 @@ type controlPlaneCase struct {
 	personal []*WorldNetwork
 	team     *WorldTeam
 	admin    *WorldTeamMember
-	// the invites each setup member joined by, which their first device proves
-	adminInvite *WorldTeamInvite
-	plain       []*WorldTeamMember
+	// the invites each setup member joined by, which their first device proves, plainInvites by plain's order
+	adminInvite  *WorldTeamInvite
+	plain        []*WorldTeamMember
+	plainInvites []*WorldTeamInvite
 	// b's tag
 	tagId sidecar.Id
+	// the team's owner of record, which its tagged sidecars' tokens name, and its tagged sidecars, the Admin's keys
+	ownerOfRecord server.Id
+	teamTagged    []*sidecart3.T3Device
 
 	// the exchange's own judgment, over a gate cache of the case's
 	exchange *controlPlaneExchange
@@ -229,9 +258,16 @@ func newControlPlaneCase(t testing.TB, settings *controlPlaneSettings) *controlP
 	if settings.PersonalNetworkCount < 2 {
 		t.Fatalf("the case needs two personal networks, not %d", settings.PersonalNetworkCount)
 	}
-	total := settings.PersonalNetworkCount*settings.PersonalEnrollCount + settings.TeamOwnerEnrollCount + settings.TeamAdminEnrollCount + 1
+	if settings.PlainMemberCount < 1 {
+		t.Fatalf("the churn removes a setup member, and %d setup members leave none to remove", settings.PlainMemberCount)
+	}
+	total := settings.PersonalNetworkCount*settings.PersonalEnrollCount + 1 + settings.TeamOwnerEnrollCount + settings.TeamAdminEnrollCount +
+		settings.PlainMemberCount*settings.TeamMemberEnrollCount + settings.TeamTaggedEnrollCount
 	if total != settings.EnrollCount {
 		t.Fatalf("the enrollment phase's counts sum to %d devices, not EnrollCount %d", total, settings.EnrollCount)
+	}
+	if !slices.Contains(settings.Team.Tags, settings.TeamTag) {
+		t.Fatalf("the team's documents name tags %v, not TeamTag %s", settings.Team.Tags, settings.TeamTag)
 	}
 	if settings.PersonalEnrollCount+1 < settings.RacerCount || settings.TeamOwnerEnrollCount+1+settings.TeamAdminEnrollCount < settings.RacerCount {
 		t.Fatalf("%d racers outnumber a network's config writers", settings.RacerCount)
@@ -303,6 +339,12 @@ func (self *controlPlaneCase) setup() {
 		self.world.FailProgress(t, "the team", err, nil)
 	}
 	self.team = team
+	if _, ok := team.TagId(settings.TeamTag); !ok {
+		t.Fatalf("the team's first document holds no tag %s", settings.TeamTag)
+	}
+	if self.ownerOfRecord, err = worldNetworkOwnerOfRecord(ctx, team.NetworkId); err != nil {
+		t.Fatal(err)
+	}
 	self.setKind(controlPlaneDeviceKind{configWriter: true, member: true}, team.Owner.Devices()...)
 	ownerDevice := team.Owner.Devices()[0]
 	join := func(name string, role bridge.MemberRole) (*WorldTeamMember, *WorldTeamInvite) {
@@ -331,8 +373,9 @@ func (self *controlPlaneCase) setup() {
 		self.world.FailProgress(t, "the Admin's mirrored role", err, nil)
 	}
 	for index := range settings.PlainMemberCount {
-		member, _ := join(fmt.Sprintf("member-%d", index), bridge.MemberRole_MEMBER_ROLE_MEMBER)
+		member, invite := join(fmt.Sprintf("member-%d", index), bridge.MemberRole_MEMBER_ROLE_MEMBER)
 		self.plain = append(self.plain, member)
+		self.plainInvites = append(self.plainInvites, invite)
 	}
 }
 
@@ -345,6 +388,7 @@ func (self *controlPlaneCase) enrollment() {
 	defer cancel()
 	team := self.team
 	b := self.personal[1]
+	ownerDevice := team.Owner.Devices()[0]
 
 	// every enrollment at once, one goroutine a network or member
 	type enrolled struct {
@@ -374,6 +418,14 @@ func (self *controlPlaneCase) enrollment() {
 	})
 	start("the team's Admin", func() ([]*sidecart3.T3Device, error) {
 		return team.EnrollMemberDevices(ctx, self.admin, settings.TeamAdminEnrollCount, team.Name+"-admin")
+	})
+	for index, member := range self.plain {
+		start(member.Name+"'s devices", func() ([]*sidecart3.T3Device, error) {
+			return team.EnrollMemberDevices(ctx, member, settings.TeamMemberEnrollCount, fmt.Sprintf("%s-member-%d", team.Name, index))
+		})
+	}
+	start("the team's tagged sidecars", func() ([]*sidecart3.T3Device, error) {
+		return team.EnrollTagged(ctx, self.admin, settings.TeamTag, settings.TeamTaggedEnrollCount, team.Name+"-tagged")
 	})
 	group.Wait()
 	enrolledByName := map[string][]*sidecart3.T3Device{}
@@ -442,6 +494,19 @@ func (self *controlPlaneCase) enrollment() {
 		}
 		return team.AdmitMemberDevices(ctx, self.admin, self.adminInvite, adminDevices)
 	}})
+	for memberIndex, member := range self.plain {
+		devices := enrolledByName[member.Name+"'s devices"]
+		invite := self.plainInvites[memberIndex]
+		self.setKind(controlPlaneDeviceKind{member: true}, devices...)
+		admissions = append(admissions, &WorldBurst{Name: member.Name + "'s admissions", StepCount: 1, Step: func(ctx context.Context, index int, random *rand.Rand) error {
+			return team.AdmitMemberDevices(ctx, member, invite, devices)
+		}})
+	}
+	self.teamTagged = enrolledByName["the team's tagged sidecars"]
+	self.setKind(controlPlaneDeviceKind{}, self.teamTagged...)
+	admissions = append(admissions, &WorldBurst{Name: "the team's tagged admissions", StepCount: 1, Step: func(ctx context.Context, index int, random *rand.Rand) error {
+		return team.AdmitTaggedDevices(ctx, ownerDevice, settings.TeamTag, self.teamTagged)
+	}})
 	if err := RunBursts(ctx, t, "the admissions", admissions, settings.Bursts); err != nil {
 		world.FailProgress(t, "the admissions", err, admissions)
 	}
@@ -454,11 +519,13 @@ func (self *controlPlaneCase) enrollment() {
 	}
 	t.Logf("the enrollment: %d devices enrolled at once, %d clients each landed once, %d devices' scopes checked at evs and gkm", settings.EnrollCount, len(clientIds), checked)
 
-	// the design's refusals
+	// the design's refusals, a Member's key for a tag it does not own among them
 	self.checkEnrollRefusals(ctx)
-	// the team's findings: a member's own key, and a tagged enrollment
-	self.checkTeamMemberOwnKey(ctx)
-	self.checkTeamTaggedEnrollment(ctx)
+	self.checkMemberTaggedKeyRefused(ctx)
+	// the team's tagged sidecars at api on their own credentials, before their sponsor's removal
+	for _, device := range self.teamTagged {
+		self.checkTaggedAgent(ctx, device, "at its enrollment")
+	}
 }
 
 // Every client api holds active for network is a device of the case's there, and every device's client is one of them,
@@ -503,28 +570,38 @@ func (self *controlPlaneCase) checkScopes(ctx context.Context, network *sidecart
 		// §7.5: the bootstrapping Owner's device files the team directory's RepoCreate after base 1
 		t.Errorf("%s's state holds no team directory", network.Name)
 	}
-	candidates := controlPlaneScopeCandidates(configRepoId, directoryRepoId)
 	devices := network.LiveDevices()
 	defer func() {
-		t.Logf("%s: %d devices' scopes of %d candidates checked, its directory %s", network.Name, len(devices), len(candidates), directoryRepoId)
+		t.Logf("%s: %d devices' scopes checked, its directory %s", network.Name, len(devices), directoryRepoId)
 	}()
 	for _, device := range devices {
-		kind := self.kind(device)
-		for _, service := range []string{WorldBlockEvs, WorldBlockGkm} {
-			granted, err := controlPlaneGrantedScopes(ctx, self.world, device, service, candidates)
-			if err != nil {
-				t.Errorf("%s's %s exchange: %v", device.Name, service, err)
-				continue
-			}
-			expected := controlPlaneExpectedScopes(kind, service, configRepoId, directoryRepoId)
-			for _, scope := range candidates {
-				if granted[scope] != expected[scope] {
-					t.Errorf("%s (%+v) was granted %s at %s: %t, where §7.8 and §8 give %t", device.Name, kind, scope, service, granted[scope], expected[scope])
-				}
+		self.checkDeviceScopes(ctx, device, configRepoId, directoryRepoId, "")
+	}
+	return len(devices)
+}
+
+// device takes exactly the scopes its kind gives it of the config repo's and directory's candidates, at evs and at
+// gkm, through api's exchange on its own token; when, where set, says at what point of the case.
+func (self *controlPlaneCase) checkDeviceScopes(ctx context.Context, device *sidecart3.T3Device, configRepoId sidecar.Id, directoryRepoId sidecar.Id, when string) {
+	t := self.t
+	candidates := controlPlaneScopeCandidates(configRepoId, directoryRepoId)
+	kind := self.kind(device)
+	if when != "" {
+		when = " " + when
+	}
+	for _, service := range []string{WorldBlockEvs, WorldBlockGkm} {
+		granted, err := controlPlaneGrantedScopes(ctx, self.world, device, service, candidates)
+		if err != nil {
+			t.Errorf("%s's %s exchange%s: %v", device.Name, service, when, err)
+			continue
+		}
+		expected := controlPlaneExpectedScopes(kind, service, configRepoId, directoryRepoId)
+		for _, scope := range candidates {
+			if granted[scope] != expected[scope] {
+				t.Errorf("%s (%+v) was granted %s at %s%s: %t, where §7.8 and §8 give %t", device.Name, kind, scope, service, when, granted[scope], expected[scope])
 			}
 		}
 	}
-	return len(devices)
 }
 
 // b's owner signs device's tagged SidecarAdmit with b's tag, filed through api.
@@ -592,45 +669,6 @@ func (self *controlPlaneCase) checkEnrollRefusals(ctx context.Context) {
 	}
 	if active, err := worldNetworkActiveClientIds(ctx, outsider.PersonalNetworkId); err != nil || len(active) != 0 {
 		t.Errorf("the outsider's network holds %d active clients after a refused enrollment (%v)", len(active), err)
-	}
-}
-
-// §7.5's table gives a Member "own devices": a plain member's credential makes an untagged one-use key for its own
-// device. As this lands, POST /network/auth-keys asks RolePermissionKeys, which Member does not hold
-// (api/route_permission.go, model/network_member_role_model.go), so a Member's first device cannot enroll from its
-// invite: the failure stands, with the route's answer as its evidence.
-func (self *controlPlaneCase) checkTeamMemberOwnKey(ctx context.Context) {
-	member := self.plain[0]
-	if _, err := controlPlaneAuthKey(ctx, self.world, member.Root, 1, nil, false); err != nil {
-		self.t.Errorf("finding: %s, a team Member, cannot make an untagged auth key for its own device (§7.5's Member: own devices): %v", member.Name, err)
-	}
-}
-
-// A tagged sidecar of the team, its key made by the Owner, enrolls (§7.7, §7.8). As this lands, POST /network/enroll
-// answers 500: NetworkEnroll mints a tagged or ephemeral key's client on a credential naming the key's creator with no
-// member_id (model/network_client_owner_model.go), which the state check refuses in a team as no longer active
-// (network_client_model.go's ValidateByJwtStateInTx). The failure stands, with the answer as its evidence.
-func (self *controlPlaneCase) checkTeamTaggedEnrollment(ctx context.Context) {
-	tag := "team-ci"
-	saved := self.team.AclPolicy(self.settings.GrantOne)
-	saved = strings.Replace(saved, `"tagOwners": {}`, `"tagOwners": {"tag:`+tag+`": ["autogroup:admin"]}`, 1)
-	if _, err := self.team.SaveAclPolicy(ctx, self.team.Owner.Devices()[0], saved); err != nil {
-		self.t.Errorf("the team's tagged document: %v", err)
-		return
-	}
-	tagId, ok := self.team.TagId(tag)
-	if !ok {
-		self.t.Errorf("the team's document holds no tag %s", tag)
-		return
-	}
-	key, err := controlPlaneAuthKey(ctx, self.world, self.team.Owner.Root, 1, []string{controlPlaneTagHex(tagId)}, false)
-	if err != nil {
-		self.t.Errorf("the team's tagged key: %v", err)
-		return
-	}
-	if err := controlPlaneEnroll(ctx, self.world, "team-tagged", key); err != nil {
-		status, code := controlPlaneApiRefusal(err)
-		self.t.Errorf("finding: a tagged enrollment in the team answered %v (%d %q)", err, status, code)
 	}
 }
 
@@ -851,8 +889,9 @@ func (self *controlPlaneCase) churn() {
 		}
 		bursts = append(bursts, controlPlaneBurst(fmt.Sprintf("invite %d", index), steps))
 	}
-	// a setup member removed, then re-invited, rejoining under a new member_id
+	// a setup member removed, its devices with it, then re-invited, rejoining under a new member_id
 	leaving := self.plain[len(self.plain)-1]
+	leavingDevices := leaving.Devices()
 	var rejoined *WorldTeamMember
 	var reinvite *WorldTeamInvite
 	bursts = append(bursts, controlPlaneBurst("remove and re-invite", []func(ctx context.Context) error{
@@ -986,12 +1025,19 @@ func (self *controlPlaneCase) churn() {
 	for _, device := range revoked {
 		self.checkExchangeRefused(ctx, device, "revoked")
 	}
+	// the removed member's devices: revoked in every live device's state by its MemberRevoke, deactivated at api by its
+	// removal there, and refused at the exchange
+	if leaving.Removed() {
+		self.checkMemberDevicesRemoved(ctx, leaving, leavingDevices)
+	}
 	// the vault's next generation: the owner takes it, the share's former subject does not
 	self.checkRotationOf(ctx, team.T3Network, ownerDevice, vaultId, []*sidecart3.T3Device{ownerDevice}, []*sidecart3.T3Device{sharedTo})
-	// the next rotation of the config repo: every live device takes it, the revoked Admin device does not
-	self.checkRotation(ctx, team.T3Network, ownerDevice, []*sidecart3.T3Device{lastAdminDevice})
+	// the next rotation of the config repo: every live device takes it, the team's tagged sidecars among them, and the
+	// revoked Admin device and the removed member's devices do not
+	self.checkRotation(ctx, team.T3Network, ownerDevice, slices.Concat([]*sidecart3.T3Device{lastAdminDevice}, leavingDevices))
 
-	// the Admin moved out of the AdminSet and removed: its devices lose the exchange and the next generation
+	// the Admin moved out of the AdminSet and removed: its devices lose the exchange, their clients and the next
+	// generation, and the tagged sidecars it sponsored outlive it (owner decision 83, QD-1194)
 	if _, err := team.SetAdmins(ctx, ownerDevice, nil); err != nil {
 		t.Errorf("the AdminSet without the Admin: %v", err)
 		return
@@ -1004,8 +1050,9 @@ func (self *controlPlaneCase) churn() {
 		return
 	}
 	adminLive := slices.DeleteFunc(slices.Clone(adminDevices), func(device *sidecart3.T3Device) bool { return device == lastAdminDevice })
-	for _, device := range adminLive {
-		self.checkExchangeRefused(ctx, device, "its member removed")
+	self.checkMemberDevicesRemoved(ctx, self.admin, adminLive)
+	for _, device := range self.teamTagged {
+		self.checkTaggedAgent(ctx, device, "past its sponsor's removal")
 	}
 	self.checkRotation(ctx, team.T3Network, ownerDevice, adminLive)
 }
