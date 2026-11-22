@@ -4,8 +4,8 @@
 // end-to-end tests of 2026-11-21): N sidecars (ClientCount, 8 by default) spread over a few networks, each network aged
 // past §21.7's probation, verified by a paid Pro balance and holding a document that grants its members admin on every
 // one-label host of its zone (dns:*), so its devices write CNAME and TXT records through dns's api under a standing grant
-// while readers query the dns edge, and a standing public publish of tls/443/web, so each network's first sidecar
-// orders the network's certificate. The world runs the real certificate chain in place of its stand-in
+// while readers query the dns edge, and a standing public publish of tls/443/web, so each network's first sidecars
+// order the network's certificate. The world runs the real certificate chain in place of its stand-in
 // (World.IssueTlsCertificateRow): §13.8's certs worker, api's certs routes and Pebble, beside the stand-ins
 // dns_certs_concurrency_certs_test.go names (the canary monitor's validator, the internet's resolvers) and those of
 // the delegated phase (dns_certs_concurrency_desktop_test.go): the custom domain's and host's rows, which a Team's
@@ -19,6 +19,9 @@
 //     addresses alone, which no test may name);
 //   - its network's shared TXT set, shared.<label>.<root>, SharedWriteCount times, each a compare-and-swap on the
 //     zone's version the device read just before (§12.8's expect_version), read again and tried again on a conflict;
+//   - its network's TXT set at the owner a custom domain's host maps to, web.<label>.<root> (§12.8 step 2), which the
+//     tls/ name publishes, OwnerWriteCount times, each a compare-and-swap as the shared set's: what the host answers
+//     through its customer's CNAME once the delegated phase maps it;
 //
 // while ReaderCount readers each read a random set at the edge between two reads of the root's SOA, whose serial is
 // the root's (§12.6), every answer's signature verified against the world's KSK. Chaos restarts the dns API block
@@ -38,13 +41,18 @@
 //   - once the edge serves the root's serial, every set answers its newest row's values, signed as §12.6 says; and
 //     each zone's version, read through dns's api, is the serial of the zone's newest row.
 //
-// The certificates phase: each network's first sidecar (CertDeviceCount of them) runs a tls component and asks for its
-// network's certificate, all at once, as `ur bridge public-tls` does: POST /tls/cert-order through api's certs routes,
-// which queue the row; the certs worker's order pass, kicked once every row is queued, admits each under the policy
-// and orders it from Pebble by DNS-01, its challenges written at _acme-challenge.<label>.<root> through POST
-// /dns/internal/acme-challenge on the certs bearer and served by the edge, GET /dns/internal/ready answering ready
-// once the edge serves the serial and the canary is clean, Pebble refusing 5% of nonces and validating through the
-// resolver, which reaches the edge. What must hold:
+// The certificates phase: each network's first CertDeviceCount sidecars, two by default, run a tls component and ask
+// for their network's certificate, all at once, as `ur bridge public-tls` does: POST /tls/cert-order through api's certs
+// routes, which queue the rows; the certs worker's order pass, kicked once every row is queued, admits each under the
+// policy and orders it from Pebble by DNS-01, so one pass holds two orders of each set, {<label>.<root>,
+// *.<label>.<root>}, whose four authorizations validate at the one name _acme-challenge.<label>.<root>, which holds at
+// most two values (§12.7): as certsservice is built, its solver keeps a name's values together and refuses a third,
+// and the order it refuses, which has already opened its order at Pebble and spent a unit of the budget as a new set,
+// queues again for the next pass, 30 s later, which admits it as a repeated set (QD-1189 has the admission hold a
+// set's second order back until the first has issued instead; the checks hold either way). The challenges are
+// written through POST /dns/internal/acme-challenge on the certs bearer and served by the edge, GET
+// /dns/internal/ready answering ready once the edge serves the serial and the canary is clean, Pebble refusing 5% of
+// nonces and validating through the resolver, which reaches the edge. What must hold:
 //
 //   - every order ends issued: the device is handed a chain that verifies to Pebble's root for <label>.<root> and
 //     web.<label>.<root>, on the device's own key, the chain of the device's one issued row, from LE's place in the
@@ -52,50 +60,64 @@
 //   - each device listens on tls/443/web, and a visitor through tlsedge, behind the lb's PROXY header, verifies the
 //     listener's chain against Pebble's root, not a self-signed leaf, and is answered by the device.
 //
-// The renewals race: Pebble asks for each first certificate's renewal now, its ARI window set to one that began an hour
-// ago (RFC 9773's early renewal); the renewal pass, kicked, re-reads the window and queues each successor from its
-// stored CSR, and the order pass, kicked, orders it by DNS-01, while every device writes its own TXT set and
-// compare-and-swaps the shared one again (RaceTxtWriteCount, RaceSharedWriteCount) and readers read the edge. The
-// challenges move each zone's version as the record writes do, so the compare-and-swaps meet them. Once a successor's
-// order is under way the certs worker restarts, its drain cutting the pass, and the order pass is kicked again; and if
-// a renewal is still under way after that, the dns API restarts on its stores too, which the order's DNS writes and
-// ready reads ride as a restore's 503 (the run logs whether it came). What must hold, beside the records phase's
-// checks over every write and read so far:
+// The renewals race: Pebble asks for the renewal now of each network's first publisher's certificate, its ARI window
+// set to one that began an hour ago (RFC 9773's early renewal); the renewal pass, kicked, re-reads the window and queues
+// each successor from its stored CSR, and the order pass, kicked, orders it by DNS-01, while every device writes its own
+// TXT set and compare-and-swaps the shared one again (RaceTxtWriteCount, RaceSharedWriteCount) and readers read the
+// edge. The challenges move each zone's version as the record writes do, so the compare-and-swaps meet them. One device
+// a network renews (RenewDeviceCount): each order writes its name's challenge twice, the apex's value and then the
+// wildcard's beside it, and a name's ten writes an hour (dns_challenges_per_name_hour) hold the set's two first orders,
+// one renewal and the chaos below, but not a second renewal as well, after which every order of the set fails until
+// the hour frees a slot (QD-1189's question). Chaos comes under the orders' own requests
+// (dns_certs_concurrency_recorders_test.go's holds and gate): the certs worker restarts under the first renewal's
+// challenge write, every write that comes until the restart has ended waiting and cut by the drain before it is sent,
+// and the order pass is kicked again; the dns API block stops under the first write after that restart, which meets
+// the lb's 503 and rides it as a restore's, the block starting again on its stores once the write is answered; and the
+// dns edge restarts on its snapshot under the first renewal's GET /dns/internal/ready, which waits for it. What must
+// hold, beside the records phase's checks over every write and read so far:
 //
 //   - every successor issues from the stored CSR, on the device's key with a serial of its own, and once the device's
 //     pass installs it a visitor through tlsedge is shown it;
-//   - the restart came while a renewal was under way;
+//   - each restart came under a renewal's request: the worker's under a challenge write, the API's under the next
+//     write, the edge's under a ready read;
 //   - no challenge of certs' is left: each network's _acme-challenge.<label>.<root> answers no TXT, and its newest
 //     journal row deletes it.
 //
 // The delegated phase (dns_certs_concurrency_desktop_test.go; TLS-M6-05, QD-1165, DESIGN-DETAILS 17.2.6 to 17.2.9): the
-// first CustomDomainCount networks each verify a custom domain and map its www host to their tls/ name's owner, the
-// customer's one-time CNAME delegating the host's _acme-challenge to the domain's acme name; each network's owner
-// device makes the domain's ACME account at Pebble as an admin's ordering desktop does, and each publisher's pass
-// queues one CSR for its custom host. Then every desktop's orderer runs its passes at once, two desktops on the first
-// domain: each claims the account's lock, orders at Pebble, posts the DNS-01 digest to POST /tls/custom-challenge,
-// which api captures as a receipt and hands to the certs worker's command, which writes it at the acme name through
-// certs' DNS client and answers the serial; the desktop polls GET /tls/custom-challenge/<serial> until ready, Pebble
-// validates through the resolver's CNAME to the edge, and the desktop finalizes and registers the chain. The certs
-// worker restarts while the first command holds its write (controller's barrier before the write), its run cut
-// before the write is sent, so the dispatch is left unheard. What must hold:
+// first CustomDomainCount networks each verify a custom domain and map its www host to their tls/ name's owner, a
+// weak-mode host whose customer's CNAME points it at the owner, and whose one-time CNAME delegates the host's
+// _acme-challenge to the domain's acme name; each network's owner device makes the domain's ACME account at Pebble as
+// an admin's ordering desktop does, and each publisher's pass queues one CSR of its own for its custom host, so each
+// domain holds a row for every device listening on the owner. Then every desktop's orderer runs its passes at once,
+// two desktops on the first domain: each claims the account's lock, orders at Pebble, posts the DNS-01 digest to POST
+// /tls/custom-challenge, which api captures as a receipt and hands to the certs worker's command, which writes it at
+// the acme name through certs' DNS client and answers the serial; the desktop polls GET /tls/custom-challenge/<serial>
+// until ready, Pebble validates through the resolver's CNAME to the edge, and the desktop finalizes and registers the
+// chain. The certs worker restarts while the first command holds its write (controller's barrier before the write),
+// its run cut before the write is sent, so the dispatch is left unheard; and the dns edge restarts under the first
+// command's ready read. What must hold:
 //
-//   - each domain's custom row ends custom_issued with a chain that verifies to Pebble's root for its host, on its
-//     publisher's key, registered by one desktop once: one claim wins;
+//   - each domain's custom rows, one a publisher, end custom_issued with a chain that verifies to Pebble's root for its
+//     host, on its publisher's key, each registered by one desktop once: one claim wins;
 //   - each receipt is one domain and claim, ends written at the serial of the journal's one commit of its digest at
 //     the acme name, and every commit there is a written receipt's: the restarted command's dispatch was settled from
 //     the journal before the write was made again, and nothing was written twice; a desktop's POST sent again under
 //     its claim recovered its receipt and its serial;
-//   - each account's newOrder spends are the newOrders its desktops' passes granted.
+//   - each account's newOrder spends are the newOrders its desktops' passes granted;
+//   - the host's TXT, asked of the resolver, answers through its customer's CNAME its owner's newest TXT commit, signed
+//     under the root's zone keys (what its addresses answer, the owner holding a TXT set of its own, is logged).
 //
 // The delegated value at the acme name is not removed when the order ends: DESIGN-DETAILS 17.2.9's step 5 has it lapse
 // in its hour, and its receipt go once that hour from its capture has passed, which the case does not wait out.
 //
 // The ledgers at the end, exactly: §12.7's dns_changes_per_hour, the dns write budget the case spends, each network's
 // dns.records admin events since the records phase began are its journal rows of user records, and its owner's writes
-// are answered until the events reach the cap, where the next is refused 429 with used at the limit; and certs' budget
-// at LE ({tcb_letsencrypt_<root>}) holds exactly the orders that spent on it, each device's first order, a new set,
-// beside its rebuild's marker: the renewals and the resumed orders spent nothing.
+// are answered until the events reach the cap, where the next is refused 429 with used at the limit; and those
+// dns_certs_concurrency_ledgers_test.go reconciles: certs' budget at LE ({tcb_letsencrypt_<root>}), each set's first
+// certificate's order and any other first order of the set admitted before it issued, and nothing of the renewals or
+// the resumed orders; each challenge name's journal rows against certs' writes, and its count in
+// dns_challenges_per_name_hour's window, which each network's name is then written to and refused at exactly; api's
+// write budget against the objects api's process wrote; and Pebble's nonce refusals, counted, with no nonce replayed.
 //
 // Each phase has PhaseTimeout and dumps the world's progress when it stalls. Run it through the build's wrapper:
 // -tags 'sidecar_e2e sidecar_pending sidecar_localstack'.
@@ -108,12 +130,12 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"maps"
 	"math/rand/v2"
 	"net/http"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -137,13 +159,18 @@ type dnsCertsSettings struct {
 	OwnTxtWriteCount  int
 	OwnLinkWriteCount int
 	SharedWriteCount  int
+	// The compare-and-swaps each device makes on its network's TXT set at the owner a custom domain's host maps to,
+	// <TlsHost>.<label>.<root> (§12.8 step 2): what the host answers through the customer's CNAME.
+	OwnerWriteCount int
 	// The most version conflicts one compare-and-swap rides before it fails.
 	CasTryCount int
-	// The hosts of a device's own sets, %d its place among the case's devices, and its network's shared host.
+	// The hosts of a device's own sets, %d its place among the case's devices, and its network's shared host; and a
+	// host no write names, which the zone's wildcard answers.
 	OwnTxtHostFormat  string
 	OwnLinkHostFormat string
 	WarmHostFormat    string
 	SharedHost        string
+	UnwrittenHost     string
 	// The domain each CNAME write's target sits under, a reserved name (RFC 2606) no zone of the world's serves.
 	LinkTargetDomain string
 	// The readers of the dns edge throughout the phase, and the reads each makes.
@@ -163,6 +190,23 @@ type dnsCertsSettings struct {
 	ExhaustMaxCount int
 	// The journal rows one read takes.
 	JournalPageCount int
+	// §12.7's dns_challenges_per_name_hour as the world's limits set it, the window it counts over (model's
+	// DnsChallengeSettings.RateWindow), and the most writes its exhaustion makes at a name past the orders before it
+	// fails.
+	ChallengesPerNameHour    int64
+	ChallengeWindow          time.Duration
+	ChallengeExhaustMaxCount int
+	// The objects one LIST of the metadata cluster takes, and how many times the ledgers list api's objects around a
+	// budget report before they give up on the two standing still.
+	ObjectPageCount    int
+	BudgetReadTryCount int
+	// The bound on a dns edge restart a ready read's hold started (dns_certs_concurrency_recorders_test.go), and how
+	// long the resolver stand-in asks the edge again while it does not answer: under the 15 s Pebble's validation
+	// waits for its answer.
+	EdgeRestartTimeout   time.Duration
+	ResolverRetryTimeout time.Duration
+	// How many of the newest ready answers and Pebble problems the recorders keep for a stalled phase's dump.
+	DiagnosticKeepCount int
 	// The certificates phase: the sidecars of each network, from its first, that publish its tls/ name and so order
 	// the network's certificate; the document's grant of the name, given when it expires, and its life; the name's
 	// host; and what a visitor sends.
@@ -206,9 +250,13 @@ type dnsCertsSettings struct {
 	DelegatedPhaseTimeout time.Duration
 	// How often a wait on a certificate row reads the rows again: a row moves at a pass, with no hook a test reads.
 	CertPollInterval time.Duration
-	// The renewals race: the window Pebble answers each first certificate's ARI with, starting this long before now
-	// and this long, so the renewal is due at once; each device's writes to its own TXT set and its compare-and-swaps
-	// on the shared one during the race; and the readers of the edge and the reads each makes.
+	// The renewals race: the publishers of each network, from its first, whose first certificates renew, one since an
+	// order writes its name's challenge twice (the apex's value, then the wildcard's beside it) and §12.7's
+	// dns_challenges_per_name_hour gives the name ten writes an hour, which the set's two first orders, a renewal and the
+	// chaos's re-dos come near; the window Pebble answers each such certificate's ARI with, starting this long before
+	// now and this long, so the renewal is due at once; each device's writes to its own TXT set and its
+	// compare-and-swaps on the shared one during the race; and the readers of the edge and the reads each makes.
+	RenewDeviceCount     int
 	RenewalWindowAge     time.Duration
 	RenewalWindowLength  time.Duration
 	RaceTxtWriteCount    int
@@ -231,11 +279,13 @@ func defaultDnsCertsSettings() *dnsCertsSettings {
 		OwnTxtWriteCount:    4,
 		OwnLinkWriteCount:   3,
 		SharedWriteCount:    3,
+		OwnerWriteCount:     2,
 		CasTryCount:         60,
 		OwnTxtHostFormat:    "own-%d",
 		OwnLinkHostFormat:   "link-%d",
 		WarmHostFormat:      "warm-%d",
 		SharedHost:          "shared",
+		UnwrittenHost:       "unwritten",
 		LinkTargetDomain:    "target.example.",
 		ReaderCount:         4,
 		ReadCount:           80,
@@ -246,7 +296,7 @@ func defaultDnsCertsSettings() *dnsCertsSettings {
 		ChangesPerHour:      60,
 		ExhaustMaxCount:     80,
 		JournalPageCount:    500,
-		CertDeviceCount:     1,
+		CertDeviceCount:     2,
 		TlsAclGrant: func(expires time.Time) string {
 			return fmt.Sprintf(`{"src": ["autogroup:member"], "dst": ["dns:web", "sock:tls/443/web"], "allow": ["publish", "listen"], "audience": "public", "app_mode": "raw", "expires": %q}`, expires.UTC().Format(time.RFC3339))
 		},
@@ -273,6 +323,15 @@ func defaultDnsCertsSettings() *dnsCertsSettings {
 		CustomPassInterval:       500 * time.Millisecond,
 		DelegatedPhaseTimeout:    8 * time.Minute,
 		CertPollInterval:         250 * time.Millisecond,
+		ChallengesPerNameHour:    10,
+		ChallengeWindow:          time.Hour,
+		ChallengeExhaustMaxCount: 20,
+		ObjectPageCount:          1000,
+		BudgetReadTryCount:       5,
+		EdgeRestartTimeout:       2 * time.Minute,
+		ResolverRetryTimeout:     10 * time.Second,
+		DiagnosticKeepCount:      40,
+		RenewDeviceCount:         1,
 		RenewalWindowAge:         time.Hour,
 		RenewalWindowLength:      time.Minute,
 		RaceTxtWriteCount:        2,
@@ -370,7 +429,10 @@ func dnsCertsRecordSets(networks []*dnsCertsNetwork, settings *dnsCertsSettings)
 				dnsCertsSetKey{Owner: network.OwnerName(fmt.Sprintf(settings.OwnLinkHostFormat, writer.Index)), Type: dns.TypeCNAME},
 			)
 		}
-		sets = append(sets, dnsCertsSetKey{Owner: network.OwnerName(settings.SharedHost), Type: dns.TypeTXT})
+		sets = append(sets,
+			dnsCertsSetKey{Owner: network.OwnerName(settings.SharedHost), Type: dns.TypeTXT},
+			dnsCertsSetKey{Owner: network.OwnerName(settings.TlsHost), Type: dns.TypeTXT},
+		)
 	}
 	return sets
 }
@@ -380,6 +442,7 @@ const (
 	dnsCertsWriteOwnTxt  = "own-txt"
 	dnsCertsWriteOwnLink = "own-link"
 	dnsCertsWriteShared  = "shared"
+	dnsCertsWriteOwner   = "owner"
 )
 
 // Records under concurrency, with chaos on the dns API and the edge, then the dns write budget (see the file header).
@@ -478,6 +541,9 @@ func dnsCertsRecordsPhase(t testing.TB, world *World, settings *dnsCertsSettings
 		for range settings.SharedWriteCount {
 			plan = append(plan, dnsCertsWriteShared)
 		}
+		for range settings.OwnerWriteCount {
+			plan = append(plan, dnsCertsWriteOwner)
+		}
 		rand.New(rand.NewPCG(settings.Bursts.Seed, uint64(1000+writer.Index))).Shuffle(len(plan), func(i int, j int) {
 			plan[i], plan[j] = plan[j], plan[i]
 		})
@@ -507,6 +573,10 @@ func dnsCertsRecordsPhase(t testing.TB, world *World, settings *dnsCertsSettings
 			case dnsCertsWriteShared:
 				set = dnsCertsSetKey{Owner: network.OwnerName(settings.SharedHost), Type: dns.TypeTXT}
 				value = fmt.Sprintf("w%d-shared-%d", writer.Index, sequence)
+				cas = true
+			case dnsCertsWriteOwner:
+				set = dnsCertsSetKey{Owner: network.OwnerName(settings.TlsHost), Type: dns.TypeTXT}
+				value = fmt.Sprintf("w%d-owner-%d", writer.Index, sequence)
 				cas = true
 			}
 			write, err := writer.Write(ctx, set, value, cas, settings.CasTryCount, settings.Dns)
@@ -597,7 +667,56 @@ func dnsCertsRecordsPhase(t testing.TB, world *World, settings *dnsCertsSettings
 	}
 	records.addReaders(readers...)
 	dnsCertsCheckRecords(t, ctx, world, settings, networks, records)
+	dnsCertsLogOwnerAddresses(t, ctx, world, settings, networks)
 	return records
+}
+
+// Arms a hold on the certs worker's next challenge write that stops block under it (dns_certs_concurrency_recorders_test
+// .go): the write goes out once the block's origin answers 503, as the lb does from the stop's first moment, while the
+// block drains its long-polls (a ready read holds up to 25 s, past the write's own timeout); once the write is
+// answered and the drain has ended, the block starts again on its stores.
+func dnsCertsHoldBlockStop(stack *dnsCertsStack, block string, name string) *dnsCertsHold {
+	world := stack.World
+	var stopped sync.WaitGroup
+	var stopErr error
+	return stack.Dns.HoldNextWrite(name, func() error {
+		stopped.Go(func() {
+			stopErr = world.Stop(block)
+		})
+		// the stop takes the block's run away first, with no hook, so the run is read every RetryInterval
+		deadline := time.After(stack.settings.EdgeRestartTimeout)
+		for world.Block(block).currentRun() != nil {
+			select {
+			case <-deadline:
+				return fmt.Errorf("%s's origin still had an upstream %s after its stop began", block, stack.settings.EdgeRestartTimeout)
+			case <-time.After(stack.settings.Dns.RetryInterval):
+			}
+		}
+		return nil
+	}, func() error {
+		stopped.Wait()
+		if stopErr != nil {
+			return stopErr
+		}
+		return world.Start(block)
+	})
+}
+
+// What the edge answers A with at each network's tls/ name's owner, web.<label>.<root>, which publishes on a grant and
+// now holds a TXT set of its own, beside a host no write names, which the zone's wildcard answers (§12.7's edge records
+// at *): logged, since RFC 4592 has an owner of its own block the wildcard, and §12.7 copies *'s records only to empty
+// non-terminals and canary-only owners (question e2e-dns-certs-concurrency-user-records-hide-edge-addresses); the
+// world's zones answer no address at * at all.
+func dnsCertsLogOwnerAddresses(t testing.TB, ctx context.Context, world *World, settings *dnsCertsSettings, networks []*dnsCertsNetwork) {
+	t.Helper()
+	for _, network := range networks {
+		lines := []string{}
+		for _, host := range []string{settings.TlsHost, settings.UnwrittenHost} {
+			answer, err := world.DnsQuery(ctx, network.OwnerName(host), dns.TypeA, settings.Dns)
+			lines = append(lines, fmt.Sprintf("%s A: %s %v", network.OwnerName(host), dnsCertsDescribeAnswer(answer), err))
+		}
+		t.Logf("the edge's addresses in %s: %s", network.Name, strings.Join(lines, "; "))
+	}
 }
 
 // What committed since the records phase began, the journal to the root's serial now, which the edge must reach,
@@ -904,8 +1023,9 @@ type dnsCertsPublisher struct {
 	ServerName string
 	// the device's sidecar id, which its certificate rows name
 	SidecarId sidecar.Id
-	// its first order's row, once issued
-	firstCertId sidecar.Id
+	// its first order's row, once issued, and when it issued (the row's state_time then)
+	firstCertId   sidecar.Id
+	firstIssuedAt time.Time
 	// its listener's server, once it publishes
 	echo *worldTlsEcho
 
@@ -978,7 +1098,7 @@ func dnsCertsCertificatesPhase(t testing.TB, stack *dnsCertsStack, settings *dns
 	}); err != nil {
 		cancelOrders()
 		orders.Wait()
-		world.FailProgress(t, "the certificate orders' rows", err, nil)
+		world.FailProgress(t, "the certificate orders' rows", fmt.Errorf("%w\n%s", err, stack.DescribeCerts()), nil)
 	}
 	if _, err := dnsCertsKick(ctx, "tls_cert_orders"); err != nil {
 		t.Fatal(err)
@@ -1022,13 +1142,14 @@ func dnsCertsCertificatesPhase(t testing.TB, stack *dnsCertsStack, settings *dns
 			t.Errorf("%s's certificate came from CA %q", publisher.Device.Name, issued[0].Ca)
 		}
 		publisher.firstCertId = issued[0].CertId
+		publisher.firstIssuedAt = issued[0].StateTime
 		presented, err := publisher.Device.Sidecar().TlsDeviceCertificate([]string{publisher.ServerName})
 		if err != nil || len(presented.Certificate) == 0 || !bytes.Equal(presented.Certificate[0], leaf.Raw) {
 			t.Errorf("%s presents something other than its issued certificate for %s: %v", publisher.Device.Name, publisher.ServerName, err)
 		}
 	}
 	if t.Failed() {
-		world.FailProgress(t, "the certificate orders", errors.New("an order did not end as it should"), nil)
+		world.FailProgress(t, "the certificate orders", fmt.Errorf("an order did not end as it should\n%s", stack.DescribeCerts()), nil)
 	}
 
 	// each publisher listens on its network's name, and a visitor through tlsedge verifies the issued chain
@@ -1120,7 +1241,16 @@ func dnsCertsRenewalsPhase(t testing.TB, stack *dnsCertsStack, settings *dnsCert
 	world := stack.World
 	ctx, cancel := world.StepContext(t.Context(), settings.PhaseTimeout)
 	defer cancel()
+	// the publishers whose certificates renew: each network's first RenewDeviceCount
+	renewing := []*dnsCertsPublisher{}
+	networkRenewals := map[*dnsCertsNetwork]int{}
 	for _, publisher := range publishers {
+		if networkRenewals[publisher.Network] < settings.RenewDeviceCount {
+			renewing = append(renewing, publisher)
+			networkRenewals[publisher.Network] += 1
+		}
+	}
+	for _, publisher := range renewing {
 		rows, err := dnsCertsSidecarCerts(ctx, publisher)
 		if err != nil {
 			t.Fatal(err)
@@ -1178,63 +1308,58 @@ func dnsCertsRenewalsPhase(t testing.TB, stack *dnsCertsStack, settings *dnsCert
 		})
 	}
 	records.addReaders(readers...)
-	// the certs driver: the renewal pass kicked until every successor is queued; the order pass kicked, the worker
-	// restarted once a successor's order is under way, and kicked again; the dns API restarted while one is under way
-	// still, which the order's DNS writes and ready reads ride as a restore's 503 (certsservice's solver); then every
-	// successor issued
-	restartedUnderWay := ""
-	apiRestartedUnderWay := ""
+	// the dns edge restarts under the first renewal to read ready: that read is held until the edge is back, on its
+	// snapshot and the feed, so the renewal waits on an edge that restarted under it
+	edgeHold := stack.Dns.HoldNextReady("the dns edge's restart under a renewal's ready read", func() error {
+		return world.Restart(WorldBlockDnsedge)
+	})
+	defer func() {
+		stack.Dns.Disarm(edgeHold)
+		edgeHold.Wait(settings.EdgeRestartTimeout)
+	}()
+	// the certs worker restarts under the first renewal's challenge write: that write and every write that comes until
+	// the restart has ended wait, and the drain cuts each before it is sent, so the renewals are under way and spend
+	// none of their names' writes; then the dns API block's stop is armed under the first write after the restart,
+	// which goes out to the lb's 503 and rides it as a restore's (certsservice's solver), the block starting again on
+	// its stores once that write is answered; and the order pass is kicked again
+	var apiHold atomic.Pointer[dnsCertsHold]
+	workerGate := stack.Dns.GateWrites("the certs worker's restart under a renewal's challenge write", func() error {
+		if err := stack.Worker.Restart(); err != nil {
+			return err
+		}
+		apiHold.Store(dnsCertsHoldBlockStop(stack, WorldBlockDns, "the dns API's stop under a renewal's challenge write"))
+		_, err := dnsCertsKick(ctx, "tls_cert_orders")
+		return err
+	})
+	defer func() {
+		stack.Dns.Disarm(workerGate)
+		workerGate.Wait(settings.EdgeRestartTimeout)
+		if hold := apiHold.Load(); hold != nil {
+			stack.Dns.Disarm(hold)
+			hold.Wait(settings.EdgeRestartTimeout)
+		}
+	}()
+	// the certs driver: the renewal pass kicked until every successor is queued; the order pass kicked, and the
+	// worker's restart under its first write awaited; then every successor issued
 	bursts = append(bursts, &WorldBurst{
 		Name:      "renewals",
-		StepCount: 4,
+		StepCount: 3,
 		Step: func(ctx context.Context, index int, random *rand.Rand) error {
 			switch index {
 			case 0:
 				if _, err := dnsCertsKick(ctx, "tls_cert_renewals"); err != nil {
 					return err
 				}
-				return dnsCertsAwaitRows(ctx, publishers, settings, func(publisher *dnsCertsPublisher, rows []*sidecar.TlsCertRecord) bool {
+				return dnsCertsAwaitRows(ctx, renewing, settings, func(publisher *dnsCertsPublisher, rows []*sidecar.TlsCertRecord) bool {
 					return successor(publisher, rows) != nil
 				})
 			case 1:
 				if _, err := dnsCertsKick(ctx, "tls_cert_orders"); err != nil {
 					return err
 				}
-				if err := dnsCertsAwaitRows(ctx, publishers, settings, func(publisher *dnsCertsPublisher, rows []*sidecar.TlsCertRecord) bool {
-					renewal := successor(publisher, rows)
-					if renewal != nil && (renewal.State == sidecar.TlsCertStateOrdering || renewal.State == sidecar.TlsCertStateWaitingDns) && restartedUnderWay == "" {
-						restartedUnderWay = fmt.Sprintf("%s's renewal %s %s", publisher.Device.Name, renewal.CertId, renewal.State)
-					}
-					return restartedUnderWay != "" || (renewal != nil && renewal.State == sidecar.TlsCertStateIssued)
-				}); err != nil {
-					return err
-				}
-				if err := stack.Worker.Restart(); err != nil {
-					return fmt.Errorf("the certs worker's restart: %w", err)
-				}
-				_, err := dnsCertsKick(ctx, "tls_cert_orders")
-				return err
-			case 2:
-				rows := map[*dnsCertsPublisher][]*sidecar.TlsCertRecord{}
-				for _, publisher := range publishers {
-					publisherRows, err := dnsCertsSidecarCerts(ctx, publisher)
-					if err != nil {
-						return err
-					}
-					rows[publisher] = publisherRows
-				}
-				for _, publisher := range publishers {
-					if renewal := successor(publisher, rows[publisher]); renewal != nil && renewal.State != sidecar.TlsCertStateIssued && renewal.State != sidecar.TlsCertStateFailed {
-						apiRestartedUnderWay = fmt.Sprintf("%s's renewal %s %s", publisher.Device.Name, renewal.CertId, renewal.State)
-						break
-					}
-				}
-				if apiRestartedUnderWay == "" {
-					return nil
-				}
-				return world.Restart(WorldBlockDns)
+				return workerGate.AwaitDone(ctx)
 			default:
-				return dnsCertsAwaitRows(ctx, publishers, settings, func(publisher *dnsCertsPublisher, rows []*sidecar.TlsCertRecord) bool {
+				return dnsCertsAwaitRows(ctx, renewing, settings, func(publisher *dnsCertsPublisher, rows []*sidecar.TlsCertRecord) bool {
 					renewal := successor(publisher, rows)
 					return renewal != nil && (renewal.State == sidecar.TlsCertStateIssued || renewal.State == sidecar.TlsCertStateFailed)
 				})
@@ -1242,16 +1367,40 @@ func dnsCertsRenewalsPhase(t testing.TB, stack *dnsCertsStack, settings *dnsCert
 		},
 	})
 	if err := RunBursts(ctx, t, "the renewals race", bursts, settings.Bursts); err != nil {
-		world.FailProgress(t, "the renewals race", err, bursts)
+		world.FailProgress(t, "the renewals race", fmt.Errorf("%w\n%s", err, stack.DescribeCerts()), bursts)
 	}
 	FailBurstErrors(t, bursts)
-	t.Logf("the renewals race: the certs worker restarted at run %d, %s; the dns API restarted %q", stack.Worker.RunCount(), restartedUnderWay, apiRestartedUnderWay)
-	if restartedUnderWay == "" {
-		t.Errorf("the certs worker restarted with no renewal under way: every renewal issued first")
+	stack.Dns.Disarm(workerGate)
+	workerStarted, workerName := workerGate.Started()
+	if err := workerGate.Wait(settings.EdgeRestartTimeout); err != nil {
+		t.Errorf("%v", err)
+	}
+	stack.Dns.Disarm(edgeHold)
+	edgeStarted, edgeSerial := edgeHold.Started()
+	if err := edgeHold.Wait(settings.EdgeRestartTimeout); err != nil {
+		t.Errorf("%v", err)
+	}
+	apiStarted, apiName := false, ""
+	if hold := apiHold.Load(); hold != nil {
+		stack.Dns.Disarm(hold)
+		apiStarted, apiName = hold.Started()
+		if err := hold.Wait(settings.EdgeRestartTimeout); err != nil {
+			t.Errorf("%v", err)
+		}
+	}
+	t.Logf("the renewals race: the certs worker restarted at run %d under a challenge write at %q, %d writes held; the dns edge restarted under a ready read of serial %q; the dns API stopped under a challenge write at %q", stack.Worker.RunCount(), workerName, workerGate.HeldCount(), edgeSerial, apiName)
+	if !workerStarted {
+		t.Errorf("no renewal wrote a challenge, so the certs worker never restarted under one")
+	}
+	if !edgeStarted {
+		t.Errorf("no renewal read ready, so the dns edge never restarted under one")
+	}
+	if !apiStarted {
+		t.Errorf("no renewal wrote a challenge after the certs worker's restart, so the dns API never stopped under one")
 	}
 
 	// every successor issued on its device's key, installed by the device's pass, presented and seen by a visitor
-	for _, publisher := range publishers {
+	for _, publisher := range renewing {
 		rows, err := dnsCertsSidecarCerts(ctx, publisher)
 		if err != nil {
 			t.Fatal(err)
@@ -1333,30 +1482,9 @@ func dnsCertsLedgersPhase(t testing.TB, stack *dnsCertsStack, settings *dnsCerts
 		t.Fatal(err)
 	}
 	dnsCertsCheckChangesBudget(t, ctx, settings, networks, rows, records.BaselineEvents, records.PhaseStart)
-
-	firstCertIds := map[sidecar.Id]bool{}
-	for _, publisher := range publishers {
-		if publisher.firstCertId != (sidecar.Id{}) {
-			firstCertIds[publisher.firstCertId] = true
-		}
-	}
-	members, err := dnsCertsBudgetMembers(ctx, world, certsservice.CertsCaLetsEncrypt, strings.TrimSuffix(stack.Keys.root, "."))
-	if err != nil {
-		t.Fatal(err)
-	}
-	spent := map[sidecar.Id]bool{}
-	for _, member := range members {
-		if member == certsservice.CertsBudgetMarker {
-			continue
-		}
-		certId, err := sidecar.ParseId(member)
-		if err != nil {
-			t.Errorf("the certs budget holds %q, which is no order's id", member)
-			continue
-		}
-		spent[certId] = true
-	}
-	if !maps.Equal(spent, firstCertIds) {
-		t.Errorf("the certs budget holds %v, not the first orders' %v", slices.Collect(maps.Keys(spent)), slices.Collect(maps.Keys(firstCertIds)))
-	}
+	dnsCertsCheckCertsBudget(t, ctx, stack, publishers)
+	dnsCertsCheckChallengeCounts(t, ctx, stack, settings, records)
+	dnsCertsExhaustChallenges(t, ctx, stack, settings, networks, records)
+	dnsCertsCheckApiBudget(t, ctx, world, settings)
+	dnsCertsCheckNonces(t, stack, settings)
 }

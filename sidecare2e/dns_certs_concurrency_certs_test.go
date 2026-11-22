@@ -13,9 +13,12 @@
 //	          answers ready once its other checks pass; the real monitor's validator is unbound-host, which no test host
 //	          runs and nothing may be fetched to run
 //	resolver  a stand-in for the internet's recursive resolvers (dnsCertsResolver): every name under the world's root
-//	          is asked of the dns edge as it runs, the edge's restarts included, and a custom domain's one-time
-//	          _acme-challenge CNAME, which the customer's own DNS holds in production, is answered with the target's
-//	          records beside it; Pebble's validation authority asks it, as a CA's resolvers ask the internet
+//	          is asked of the dns edge as it runs, asked again while the edge does not answer, as a resolver asks an
+//	          NS again and production's second edge answers for the first, within ResolverRetryTimeout, under the
+//	          15 s Pebble's validation waits for an answer; a custom domain's one-time _acme-challenge CNAME and its
+//	          host's weak-mode CNAME to the owner it maps to (§12.8 steps 2 and 3), which the customer's own DNS holds
+//	          in production, are answered with the target's records beside them; Pebble's validation authority asks
+//	          it, as a CA's resolvers ask the internet
 //	ca        sidecartest's Pebble in process, refusing §22.9's 5% of nonces as the local stack's Pebble does
 //	api       api's certs install (controller.NewTlsCertsInstall) over a gate cache of the world's, as api's process
 //	          builds it when sidecar.yml's certs switch is on, on certs.yml's root, so §13.15's routes serve devices'
@@ -24,7 +27,8 @@
 //	          (work.NewTlsCertChainsInstall) on the harness's certs.yml, its LE account file and its internal-certs.yml,
 //	          and a task worker of taskworker's queue claiming only certs' targets, each run built afresh on the same
 //	          stores, so chaos's restart is a deploy's: the drain cuts what a pass has under way, and the next pass
-//	          takes it up
+//	          takes it up; its DNS client's transport and its ACME client's, and the desktops' ACME client's, each
+//	          behind a recorder of the case's (dns_certs_concurrency_recorders_test.go)
 //
 // The chains run on taskworker's own cadences, which no install sets: an order pass every 30 s and a renewal scan
 // every hour. The case kicks a chain's next run (task.KickTasks) where it waits on one, as an operator's `bringyourctl
@@ -88,6 +92,14 @@ type dnsCertsStack struct {
 	Canary   *dnsCertsCanary
 	Pebble   *sidecartest.Pebble
 	Worker   *dnsCertsWorkerBlock
+	// what the certs worker's DNS client sends the dns API and is answered, and the hold a phase arms on its next ready
+	// read (dns_certs_concurrency_recorders_test.go)
+	Dns *dnsCertsDnsRecorder
+	// what the certs worker and the ordering desktops send Pebble, and its nonce refusals, each on a client of its own
+	WorkerAcme      *dnsCertsAcmeRecorder
+	workerAcmeHttp  *http.Client
+	DesktopAcme     *dnsCertsAcmeRecorder
+	desktopAcmeHttp *http.Client
 	// certs.yml as the api and the worker read it
 	certsYaml []byte
 }
@@ -158,7 +170,7 @@ func newDnsCertsStack(t testing.TB, settings *dnsCertsSettings) *dnsCertsStack {
 	if self.Keys, err = newDnsCertsZoneKeys(ctx, world, settings.Dns); err != nil {
 		t.Fatal(err)
 	}
-	if self.Resolver, err = startDnsCertsResolver(world, self.Keys.root, settings.Dns); err != nil {
+	if self.Resolver, err = startDnsCertsResolver(world, self.Keys.root, settings.ResolverRetryTimeout, settings.Dns); err != nil {
 		t.Fatal(err)
 	}
 	world.T3().OnClose(self.Resolver.Close)
@@ -180,6 +192,9 @@ func newDnsCertsStack(t testing.TB, settings *dnsCertsSettings) *dnsCertsStack {
 	pebbleSettings.NonceRejectPercent = settings.PebbleNonceRejectPercent
 	pebbleSettings.DnsAddress = self.Resolver.TcpAddress()
 	self.Pebble = sidecartest.StartPebble(t, pebbleSettings)
+	self.WorkerAcme, self.workerAcmeHttp = newDnsCertsAcmeRecorder("the certs worker", self.Pebble.HttpClient, settings.DiagnosticKeepCount)
+	self.DesktopAcme, self.desktopAcmeHttp = newDnsCertsAcmeRecorder("the ordering desktops", self.Pebble.HttpClient, settings.DiagnosticKeepCount)
+	self.Dns = newDnsCertsDnsRecorder(world.T3().Api().Transport(), settings.DiagnosticKeepCount)
 	self.certsYaml = []byte(strings.Join([]string{
 		"root: " + strings.TrimSuffix(self.Keys.root, "."),
 		"dns_url: " + world.T3().Api().ServiceOrigin("dns"),
@@ -208,6 +223,11 @@ func newDnsCertsStack(t testing.TB, settings *dnsCertsSettings) *dnsCertsStack {
 		}
 	})
 	return self
+}
+
+// What the certs worker's and the desktops' requests said, for a stalled phase's dump (the recorders' Describe).
+func (self *dnsCertsStack) DescribeCerts() string {
+	return strings.Join([]string{self.Dns.Describe(self.Keys.root), self.WorkerAcme.Describe(), self.DesktopAcme.Describe()}, "\n")
 }
 
 // api's certs install as its process builds it with sidecar.yml's certs switch on, on certs.yml: the engine with no
@@ -262,32 +282,67 @@ func (self *dnsCertsStack) installApiCerts() error {
 // One POST of body to the dns API's internal path on bearer, through the world's lb, its answer decoded into answer
 // when one is given: an error naming the status for anything but a 2xx.
 func dnsCertsInternalPost(ctx context.Context, world *World, bearer string, path string, body any, answer any) error {
-	encoded, err := json.Marshal(body)
+	status, data, err := dnsCertsInternalCall(ctx, world, bearer, path, body)
 	if err != nil {
 		return err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, world.T3().Api().ServiceOrigin("dns")+path, bytes.NewReader(encoded))
-	if err != nil {
-		return err
-	}
-	request.Header.Set("Authorization", "Bearer "+bearer)
-	request.Header.Set("Content-Type", "application/json")
-	response, err := world.T3().Api().Transport().RoundTrip(request)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	data, err := io.ReadAll(response.Body)
-	if err != nil {
-		return err
-	}
-	if response.StatusCode/100 != 2 {
-		return fmt.Errorf("POST %s answered %d: %s", path, response.StatusCode, strings.TrimSpace(string(data)))
+	if status/100 != 2 {
+		return fmt.Errorf("POST %s answered %d: %s", path, status, strings.TrimSpace(string(data)))
 	}
 	if answer != nil {
 		return json.Unmarshal(data, answer)
 	}
 	return nil
+}
+
+// One POST of body to the dns API's internal path on bearer, through the world's lb: the answer's status and body.
+func dnsCertsInternalCall(ctx context.Context, world *World, bearer string, path string, body any) (int, []byte, error) {
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		return 0, nil, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, world.T3().Api().ServiceOrigin("dns")+path, bytes.NewReader(encoded))
+	if err != nil {
+		return 0, nil, err
+	}
+	request.Header.Set("Authorization", "Bearer "+bearer)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := world.T3().Api().Transport().RoundTrip(request)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer response.Body.Close()
+	data, err := io.ReadAll(response.Body)
+	if err != nil {
+		return 0, nil, err
+	}
+	return response.StatusCode, data, nil
+}
+
+// One challenge write as certs' DNS client sends it, POST /dns/internal/acme-challenge on certs' bearer through the
+// world's lb, sent again while the API or the lb answers 503, which wrote nothing: the answer's status, and a 200's
+// serial.
+func dnsCertsChallengePost(ctx context.Context, stack *dnsCertsStack, challenge *dnsservice.DnsChallengeRequest) (int, *dnsservice.DnsChallengeAnswer, error) {
+	for {
+		status, data, err := dnsCertsInternalCall(ctx, stack.World, stack.certsBearer, dnsservice.DnsAcmeChallengePath, challenge)
+		switch {
+		case err != nil:
+			return 0, nil, err
+		case status == http.StatusOK:
+			answer := &dnsservice.DnsChallengeAnswer{}
+			if err := json.Unmarshal(data, answer); err != nil {
+				return status, nil, fmt.Errorf("the challenge's answer: %w", err)
+			}
+			return status, answer, nil
+		case status != http.StatusServiceUnavailable:
+			return status, nil, nil
+		}
+		select {
+		case <-ctx.Done():
+			return status, nil, fmt.Errorf("the dns API stayed unavailable to a challenge write: %w", ctx.Err())
+		case <-time.After(stack.settings.Dns.RetryInterval):
+		}
+	}
 }
 
 // A stand-in for §12.6's site monitor (see the file header). Safe for concurrent use.
@@ -395,19 +450,21 @@ type dnsCertsResolver struct {
 	world    *World
 	root     string
 	settings *WorldDnsSettings
-	tcp      *dns.Server
-	udp      *dns.Server
+	// how long a question is asked of the edge again while it does not answer
+	retryTimeout time.Duration
+	tcp          *dns.Server
+	udp          *dns.Server
 
 	stateLock sync.Mutex
-	// a custom host's _acme-challenge owner, canonical, to the target its CNAME names
+	// a custom host's _acme-challenge owner, or a weak-mode custom host, canonical, to the target its CNAME names
 	delegations map[string]string
 	// the questions asked, by name, canonical
 	asked map[string]int
 }
 
-// A resolver for root, answered from world's dns edge.
-func startDnsCertsResolver(world *World, root string, settings *WorldDnsSettings) (*dnsCertsResolver, error) {
-	self := &dnsCertsResolver{world: world, root: root, settings: settings, delegations: map[string]string{}, asked: map[string]int{}}
+// A resolver for root, answered from world's dns edge, asking it again within retryTimeout while it does not answer.
+func startDnsCertsResolver(world *World, root string, retryTimeout time.Duration, settings *WorldDnsSettings) (*dnsCertsResolver, error) {
+	self := &dnsCertsResolver{world: world, root: root, settings: settings, retryTimeout: retryTimeout, delegations: map[string]string{}, asked: map[string]int{}}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
@@ -446,6 +503,14 @@ func (self *dnsCertsResolver) Delegate(host string, target string) {
 	self.delegations[dns.CanonicalName(model.DnsChallengeLabel+"."+host)] = dns.CanonicalName(target)
 }
 
+// Answers host itself with a CNAME to owner, as a customer's zone does for a weak-mode custom host, a CNAME into the
+// root (§12.8 step 2).
+func (self *dnsCertsResolver) MapHost(host string, owner string) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.delegations[dns.CanonicalName(host)] = dns.CanonicalName(owner)
+}
+
 // How many times name was asked.
 func (self *dnsCertsResolver) Asked(name string) int {
 	self.stateLock.Lock()
@@ -453,16 +518,29 @@ func (self *dnsCertsResolver) Asked(name string) int {
 	return self.asked[dns.CanonicalName(name)]
 }
 
-// name's question of qtype as the edge answers it now: nil with an error while the edge does not answer.
+// name's question of qtype as the edge answers it, asked again every RetryInterval while the edge does not answer,
+// stopped or restarting, within retryTimeout (see the file header): nil with the last error past it.
 func (self *dnsCertsResolver) forward(ctx context.Context, name string, qtype uint16) (*dns.Msg, error) {
-	return self.world.DnsQuery(ctx, name, qtype, self.settings)
+	ctx, cancel := context.WithTimeout(ctx, self.retryTimeout)
+	defer cancel()
+	for {
+		answer, err := self.world.DnsQuery(ctx, name, qtype, self.settings)
+		if err == nil {
+			return answer, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, err
+		case <-time.After(self.settings.RetryInterval):
+		}
+	}
 }
 
 func (self *dnsCertsResolver) serve(writer dns.ResponseWriter, request *dns.Msg) {
 	reply := new(dns.Msg)
 	reply.SetReply(request)
 	reply.RecursionAvailable = true
-	ctx, cancel := context.WithTimeout(context.Background(), self.settings.ExchangeTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), self.retryTimeout+self.settings.ExchangeTimeout)
 	defer cancel()
 	for _, question := range request.Question {
 		name := dns.CanonicalName(question.Name)
@@ -613,7 +691,6 @@ func (self *dnsCertsWorkerBlock) RunCount() int {
 // run schedules certs' chains, as taskworker's start does (taskworker.initTaskSchedule).
 func (self *dnsCertsWorkerBlock) Start() error {
 	settings := self.stack.settings
-	world := self.stack.World
 	ctx, cancel := context.WithCancel(context.Background())
 	certsYaml := self.stack.certsYaml
 	accountFile := self.accountFile
@@ -635,8 +712,8 @@ func (self *dnsCertsWorkerBlock) Start() error {
 			}
 			return nil, fmt.Errorf("the case's vault holds no %s", name)
 		},
-		DnsTransport:   world.T3().Api().Transport(),
-		AcmeHttpClient: self.stack.Pebble.HttpClient,
+		DnsTransport:   self.stack.Dns,
+		AcmeHttpClient: self.stack.workerAcmeHttp,
 		CaaResolver:    dnsCertsNoCaaResolver{},
 	}, nil)
 	logged := []string{}
