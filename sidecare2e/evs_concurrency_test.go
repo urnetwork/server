@@ -29,8 +29,8 @@
 //   - a hold placed on the general repo, as api mirrors one (evs_concurrency_harness_test.go), and released once the
 //     drop has committed; no answer, listing or read tells a device it stood (owner decisions 93, 184);
 //   - the network's owner drops the history of one writer's first file with now (§11.7's dropped history): its dry
-//     run, which taskworker's evs.drop runs and the harness's stand-in runs here, then the DROP, which the hook lets the
-//     block commit before it restarts the block and loses the answer, so the restart lands mid-drop;
+//     run, which taskworker's evs.drop runs and the harness's stand-in runs here, then the DROP, which the hook lets
+//     the block commit before it restarts the block and loses the answer, so the restart lands mid-drop;
 //   - the owner erases one writer's inbox file: an ERASE of every key its versions name, then a completion ERASE that
 //     says the erasure complete (§11.12, QD-1137).
 //
@@ -58,39 +58,45 @@
 //   - the dropped path reads as §11.7 says on every device: each listed version dropped, its history kept, and the
 //     DROP's kept version, the path's next, holding the head's bytes; the erased path reads erased on every device, and
 //     both ERASEs read back with the completion ending the erasure;
-//   - the drop lists the same while the hold stands and after it ends, pending until its job's start;
+//   - the drop lists the same while the hold stands and after it ends, pending until its job's start, and lists at
+//     once when its retry is answered, the restart mid-drop having drained the block that committed it;
 //   - the ledgers at the end, the evs block drained by a restart: the network's stored bytes in server's quota ledger
 //     are exactly the count evs.nightly lists from the clusters; every byte drawn from its balances is a debit on a
-//     meter, exactly; every process that spent on the metadata cluster's write budget has a report in the ledger, each
-//     evs run that answered commits reported spend, and the live ones hold nothing in flight or queued.
+//     meter, exactly; api's write budget is exactly what the objects api wrote price at as created, the hold's object
+//     among them (evs_concurrency_harness_test.go); the taskworker stand-in's report, written as its budget closed, is
+//     exactly what its jobs were granted; every evs run a restart stopped wrote its newest report as its budget closed
+//     in that restart, so the report holds all it spent, and each run that answered commits reported spend; every
+//     process that spent on the metadata cluster's write budget has a report in the ledger, and the live ones hold
+//     nothing in flight or queued.
+//
+// Not held to the byte: the blocks' own spend. evs prices each push before it issues it, from its record's and head's
+// sizes, its changes and its slots (sidecar/evsservice/push_commit.go's cost), as gkm prices its writes, and the world
+// builds each block's budget inside its host's run (evshost's newBlockEngine, gkm's Run) with no hook to count what
+// the engine issued, so the case has no count of a block's spend to hold its reports to; it holds each evs run to the
+// report its budget wrote as it closed, and per-object attribution of the blocks' spend waits for the review phase.
 //
 // A failure from a product bug stays failing; the case reports it with its evidence. As it landed (2026-11-22) the case
-// fails on these, every other check passing:
+// failed on five findings, each fixed since and run again here (e2e-evs-verify): the disjoint first creations refused
+// 409 PATH_CONFLICT for all but one writer (evs-dir-creation-conflict, sidecar b9e302b2, 05ec181f); every read of a
+// path untouched since two bases, and every write whose plan read one, refused "config pin before what the reader
+// retains" (QD-1178, evs-unretained-pin-reads, sidecar aeca8de8, a9e7bb50); writes beside the races refused 403 by gkm
+// on a token for a stronger role than gkm's state gave the writer (QD-1179, gkm-stale-scope-retry, sidecar 22a842c3:
+// the client now tries such a call again under its own repo's scope); an evs run's spend since its last report lost as
+// it closed (write-budget-close-report, sidecar 5736a959, ea5593b0); and a commit answered just before the block's
+// drain losing its step 8, its stored-byte delta, hints and a DROP's table append (evs-drain-step8, sidecar 75f66a56),
+// which the drop's listing no longer covers with a fresh read of its path.
 //
-//   - the disjoint first creations: all but one writer are refused 409 PATH_CONFLICT, the conflict naming no written
-//     path, since Write's retry of a refused creation (sidecar/evs_write.go) counts the parent directory its plan
-//     created among the creations that must not stand, so a peer's creation of that parent sends the 409 back;
-//   - the reads after the races: once two bases land past a path's newest version, every device's read of it, and
-//     every write whose plan reads it, is refused "config pin before what the reader retains", since VerifyStatement
-//     judges each statement at its own auth pin and ConfigState.At keeps states only from the previous base (question
-//     e2e-evs-concurrency-statement-pin-before-previous-base, QD-1178);
-//   - the write budget: an evs run's spend since its last report never reaches the ledger, since the budget client
-//     reports every 5 s and writes none as it closes, so a run that lives under 5 s, as the case's runs between restarts
-//     do, reports nothing;
-//   - the stored bytes, in some runs: the commit the hook lets the block answer just before its drain can lose its step
-//     8, its stored-byte delta (the ledger short of evs.nightly's count by that record's bytes) and its hints, since
-//     EvsEngine.Drain waits for requests in flight and not for step 8, which runs off the reply path;
-//   - the writes beside the races, in every run so far: one to three writers are refused 403 by gkm on GET
-//     /gkm/groups/{group_id}/gen, their writes failing "gkm refused: 403". The first round's save is the network's first
-//     ACL document, which drops §8.5's implicit document's admin on general repos, so member devices hold rw there by
-//     the repo's RepoGrant. gkm's state takes the save within milliseconds, before the writers' states do and often
-//     before the saver hears its own save. A writer's gkm client still presents the token it minted for the strongest
-//     roles its own state gave, admin (GkmApi.scopesFor's batches), and gkm's guard asks the state for that right
-//     together with its weaker ones, admin, rw and r, which it refuses whole (QD-975). The client retries only a 429 or
-//     a 503 (GkmApi.do), so the write fails though its writer holds rw and the read needs r. Its state catches up tens
-//     of milliseconds later, and its next token carries rw (question e2e-evs-concurrency-gkm-stale-strongest-scope).
-//     The recorder at gkm's origin (evs_concurrency_harness_test.go) logs each refusal with the token's log position and
-//     scopes, and the roles the caller's state and the newest state any device follows give it.
+// On those fixes it fails, in one run of six (e2e-evs-verify's, 2026-11-22), on one more:
+//
+//   - a read beside the races, or a write whose plan reads the head, refused by the device's own verifier "config pin
+//     ahead of the state: gkm auth pin ahead of the state: 13 above 12", at the base the first race round's save had
+//     just published: another writer, whose follower held that base, pushed to the ref under it, and the reader's
+//     follower was still a position behind. EvsVerifier.VerifyStatement answers ErrConfigPinAhead, whose doc says to
+//     wait until the log reaches the pin, as §10.9's judged row has a reader do with a pin above its tip, but nothing
+//     on the read path waits, so the read fails. QD-1202 (question e2e-evs-verify-statement-pin-ahead-of-reader) has
+//     the reader wait for its log to reach the pin, within a bound, and withhold the statement only past it; the fix
+//     has not landed. Run 2 refused a-7's read of files2/a-0.txt, and evs-drain-step8's runs met it on two writes. Each
+//     refusal's message says when it came back and where the device's follower and the newest one stood (pinAheadNote).
 //
 // Each phase has PhaseTimeout and dumps the world's progress when it stalls; the case has the conventions' 10 minutes.
 // Run it through the build's wrapper: -tags 'sidecar_e2e sidecar_pending sidecar_localstack'.
@@ -102,7 +108,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"maps"
 	"math/rand/v2"
 	"net/http"
@@ -183,12 +188,12 @@ type evsConcurrencySettings struct {
 	UnavailableRetryInterval time.Duration
 	// How often the taskworker stand-in runs the general repo's dry runs while the drop's preview waits.
 	DryRunInterval time.Duration
-	// How long the committed drop may take to list, evs's table taking it off the reply path (§11.8's step 8) or, where
-	// a restart lost that append, at a fresh read of its ref (§11.13's who row), and how often it is asked meanwhile.
-	DropListTimeout      time.Duration
-	DropListPollInterval time.Duration
 	// How often the budget sampler reads every metadata cluster's reports: inside their 15 s ttl.
 	BudgetSampleInterval time.Duration
+	// How many times api's objects are listed around a ledger read before the check of api's write budget gives up on
+	// their standing still, and the objects one LIST page asks for.
+	ApiBudgetReadTryCount int
+	ApiObjectPageCount    int
 	// How many devices verify at once at the end.
 	VerifyConcurrency int
 	// The note the erasure's ERASEs seal.
@@ -231,9 +236,9 @@ func defaultEvsConcurrencySettings() *evsConcurrencySettings {
 		UnavailableTimeout:       2 * time.Minute,
 		UnavailableRetryInterval: 500 * time.Millisecond,
 		DryRunInterval:           time.Second,
-		DropListTimeout:          20 * time.Second,
-		DropListPollInterval:     500 * time.Millisecond,
 		BudgetSampleInterval:     time.Second,
+		ApiBudgetReadTryCount:    5,
+		ApiObjectPageCount:       1000,
 		VerifyConcurrency:        4,
 		ErasureNote:              "e2e-evs-concurrency erasure",
 		FailurePathCount:         4,
@@ -489,6 +494,10 @@ type evsConcurrencyCase struct {
 	// what the drop and the erasure did, nil where they did not
 	droppedState *evsConcurrencyDropped
 	erasedState  *evsConcurrencyErased
+	// the rev/ writer's writes in this process as the world began, and the P0 api's budget spent on the hold's object,
+	// which api's write budget is read against
+	revWritesAtStart    *controlPlaneRevWrites
+	holdPricedByteCount int64
 
 	stateLock sync.Mutex
 	// reads answered unavailable while the evs block restarted, then read again
@@ -514,6 +523,10 @@ func runEvsConcurrency(t testing.TB, settings *evsConcurrencySettings) {
 		t.Fatalf("the drop's and the erasure's targets must be writers other than the owner, of %d", settings.ClientCount)
 	case settings.RacerCount < 2 || settings.ClientCount < settings.RacerCount:
 		t.Fatalf("%d racers of %d sidecars race nothing", settings.RacerCount, settings.ClientCount)
+	}
+	revWritesAtStart, err := controlPlaneRevWriteCounts()
+	if err != nil {
+		t.Fatalf("the rev/ writer's writes: %v", err)
 	}
 	worldSettings := DefaultWorldSettings()
 	worldSettings.NetworkCount = 1
@@ -542,7 +555,10 @@ func runEvsConcurrency(t testing.TB, settings *evsConcurrencySettings) {
 		t.Fatal(err)
 	}
 	defer worker.close()
-	self := &evsConcurrencyCase{t: t, settings: settings, world: world, worker: worker, origin: origin, gkmOrigin: gkmOrigin, runStarts: map[int][2]time.Time{}}
+	self := &evsConcurrencyCase{
+		t: t, settings: settings, world: world, worker: worker, origin: origin, gkmOrigin: gkmOrigin, runStarts: map[int][2]time.Time{},
+		revWritesAtStart: revWritesAtStart,
+	}
 
 	ctx, cancel := world.StepContext(t.Context(), settings.PhaseTimeout)
 	if err := self.setUp(ctx); err != nil {
@@ -691,7 +707,7 @@ func (self *evsConcurrencyCase) write(ctx context.Context, device *evsConcurrenc
 	content := evsConcurrencyContent(repo.name, path, sequence)
 	result, err := device.client.Repo(repo.repoId).Write(ctx, &sidecar.EvsWriteArgs{Path: path, Content: bytes.NewReader(content), Size: int64(len(content))})
 	if err != nil {
-		return fmt.Errorf("%s's write %d of %s on %s: %w", device.device.Name, sequence, path, repo.name, err)
+		return fmt.Errorf("%s's write %d of %s on %s: %w%s", device.device.Name, sequence, path, repo.name, err, self.pinAheadNote(device.device, err))
 	}
 	repo.add(&evsConcurrencyCommit{
 		path: path, writer: device.device, sequence: sequence, content: content,
@@ -730,7 +746,7 @@ func (self *evsConcurrencyCase) read(ctx context.Context, device *evsConcurrency
 			}
 			continue
 		default:
-			return fmt.Errorf("%s's read of %s on %s: %w", device.device.Name, path, repo.name, err)
+			return fmt.Errorf("%s's read of %s on %s: %w%s", device.device.Name, path, repo.name, err, self.pinAheadNote(device.device, err))
 		}
 		matched := -1
 		for sequence := range sequenceCount {
@@ -748,6 +764,35 @@ func (self *evsConcurrencyCase) read(ctx context.Context, device *evsConcurrency
 		seen[path] = info.Version
 		return nil
 	}
+}
+
+// For a refusal of a statement pinned past what device's state has reached (sidecar.ErrGkmAuthAhead): when it came
+// back, and the log position device's config follower held then beside the newest any device of the case held, so the
+// failure reads as what it refused (question e2e-evs-verify-statement-pin-ahead-of-reader); "" for any other error.
+// Safe for concurrent use once setUp is done.
+func (self *evsConcurrencyCase) pinAheadNote(device *sidecart3.T3Device, err error) string {
+	if !errors.Is(err, sidecar.ErrGkmAuthAhead) {
+		return ""
+	}
+	refusedAt := time.Now()
+	position := func(device *sidecart3.T3Device) (uint64, bool) {
+		follower := device.Follower()
+		if follower == nil || follower.Client() == nil || follower.Client().State() == nil {
+			return 0, false
+		}
+		return follower.Client().State().Pin().GetVersion(), true
+	}
+	own, held := position(device)
+	newest, newestName := uint64(0), ""
+	for _, other := range self.devices {
+		if otherPosition, ok := position(other.device); ok && newest <= otherPosition {
+			newest, newestName = otherPosition, other.device.Name
+		}
+	}
+	if !held {
+		return fmt.Sprintf(" (refused at %s, its follower holding no state, %s's the newest at log position %d)", refusedAt.Format("15:04:05.000"), newestName, newest)
+	}
+	return fmt.Sprintf(" (refused at %s, its follower at log position %d, %s's the newest at %d)", refusedAt.Format("15:04:05.000"), own, newestName, newest)
 }
 
 // A writer's file path in directory.
@@ -1084,6 +1129,7 @@ func (self *evsConcurrencyCase) dropPhase() {
 	if err != nil {
 		t.Fatalf("the hold: %v", err)
 	}
+	self.holdPricedByteCount = hold.pricedByteCount
 	var group sync.WaitGroup
 	var dropped *evsConcurrencyDropped
 	var dropErr error
@@ -1214,32 +1260,29 @@ func (self *evsConcurrencyCase) drop(ctx context.Context, hold *evsConcurrencyHo
 		}
 		return statuses, nil
 	}
-	// evs's table takes the DROP off the reply path, and where the restart lost that append, a read whose head comes
-	// from the cluster with the DROP's entry past the version it reads makes it again (§11.13's who row), as a device's
-	// fresh read of a version the drop lists does
+	// evs's table takes the DROP in its step 8, off the reply path, and the restart mid-drop drained the block that
+	// committed it before its retry was answered, a drain waiting for every answered commit's step 8 (EvsEngine.Drain):
+	// so the DROP lists at once, asked again only while evs answers unavailable. The case reads nothing of the repo to
+	// make a lost append again, though a push or read that meets the DROP's entry on a head from the cluster does
+	// (§11.13's who row), the bursts' among them, so a lost append need not show here
 	var held []*protocol.EvsDropStatus
 	var listErr error
-	listDeadline := time.Now().Add(settings.DropListTimeout)
+	listDeadline := time.Now().Add(settings.UnavailableTimeout)
 	for {
 		statuses, err := listed()
 		if err == nil && 0 < len(statuses) {
 			held = statuses
 			break
 		}
-		if err != nil && !evsConcurrencyUnavailable(err) {
+		if err == nil {
+			listErr = fmt.Errorf("the committed drop of %s does not list once its retry was answered, the restart mid-drop having drained the block that committed it: the listing %v", path, statuses)
+			break
+		}
+		if !evsConcurrencyUnavailable(err) || !time.Now().Before(listDeadline) {
 			listErr = fmt.Errorf("the drops while the hold stands: %w", err)
 			break
 		}
-		if !time.Now().Before(listDeadline) {
-			listErr = fmt.Errorf("the committed drop of %s never listed within %s, a fresh read of its first version each %s meanwhile: the listing %v (%v)", path, settings.DropListTimeout, settings.DropListPollInterval, statuses, err)
-			break
-		}
-		_, readErr := repo.ReadVersion(ctx, &sidecar.EvsReadArgs{Path: path, Version: commits[0].pathVersion, Fresh: true}, io.Discard)
-		if readErr != nil && !errors.Is(readErr, sidecar.ErrEvsDropped) && !evsConcurrencyUnavailable(readErr) {
-			listErr = fmt.Errorf("the fresh read of %s's first version while its drop does not list: %w", path, readErr)
-			break
-		}
-		if err := evsConcurrencyPause(ctx, settings.DropListPollInterval); err != nil {
+		if err := evsConcurrencyPause(ctx, settings.UnavailableRetryInterval); err != nil {
 			listErr = err
 			break
 		}
@@ -1580,7 +1623,7 @@ func (self *evsConcurrencyCase) racePhase() {
 					info, err := device.client.Repo(repo.repoId).ReadHead(ctx, &sidecar.EvsReadArgs{Path: path, Fresh: true}, &content)
 					switch {
 					case err != nil:
-						unread[index] = append(unread[index], fmt.Sprintf("%s on %s: %v", path, repo.name, err))
+						unread[index] = append(unread[index], fmt.Sprintf("%s on %s: %v%s", path, repo.name, err, self.pinAheadNote(device.device, err)))
 					case info.Version != newest.pathVersion || !bytes.Equal(content.Bytes(), newest.content):
 						unread[index] = append(unread[index], fmt.Sprintf("%s on %s read at version %d as %q, its newest acknowledged %d holding %q", path, repo.name, info.Version, content.String(), newest.pathVersion, newest.content))
 					}
@@ -1750,6 +1793,9 @@ func (self *evsConcurrencyCase) checkLedgers(sampler *evsConcurrencyBudgetSample
 		t.Fatalf("%s has no quota ledger", self.network.Name)
 	}
 	counts, err := self.worker.storedByteCounts(ctx)
+	// the stand-in's last job has run: its budget closes, writing its last report
+	standInClosedAt := time.Now()
+	self.worker.close()
 	if err != nil {
 		t.Errorf("evs.nightly's count: %v", err)
 	} else {
@@ -1771,6 +1817,9 @@ func (self *evsConcurrencyCase) checkLedgers(sampler *evsConcurrencyBudgetSample
 		t.Errorf("%s's balances were debited %d, its meters: %s", self.network.Name, ledger.DebitedByteCount(), ledgers.Meters.Describe(networkId))
 	}
 	t.Logf("%s's meters at the end: %s", self.network.Name, ledgers.Meters.Describe(networkId))
+
+	// api's write budget against the objects api wrote and the hold's object, to the byte
+	evsConcurrencyCheckApiBudget(t, ctx, self.world, settings.ApiBudgetReadTryCount, settings.ApiObjectPageCount, self.revWritesAtStart, self.holdPricedByteCount)
 
 	// the write budget: every live process holds nothing in flight or queued once the case's work ended, read again a
 	// report interval apart while one does, since a report is a level at its time
@@ -1801,10 +1850,49 @@ func (self *evsConcurrencyCase) checkLedgers(sampler *evsConcurrencyBudgetSample
 	for _, err := range sampleErrs {
 		t.Errorf("the budget sampler: %v", err)
 	}
+	// each process's newest report on every cluster, by process id
+	reportsByProcess := map[string][]*evsservice.WriteBudgetReport{}
+	for _, reports := range clusterReports {
+		for processId, report := range reports {
+			reportsByProcess[processId] = append(reportsByProcess[processId], report)
+		}
+	}
+	within := func(timeMs int64, window [2]time.Time) bool {
+		return !time.UnixMilli(timeMs).Before(window[0].Truncate(time.Millisecond)) && !window[1].Before(time.UnixMilli(timeMs))
+	}
+
+	// the stand-in's jobs, to the byte: its newest report, the one its budget wrote as it closed, carries exactly what
+	// its count saw each issue and grant take
+	standInReports := reportsByProcess[self.worker.processId()]
+	standInCount := self.worker.counted.counts()
+	standIn := &evsservice.WriteBudgetReport{P0ByteCounts: map[sidecar.WriteP0Kind]int64{}}
+	closed := 0 < len(standInReports)
+	for _, report := range standInReports {
+		for kind, byteCount := range report.P0ByteCounts {
+			if byteCount != 0 {
+				standIn.P0ByteCounts[kind] += byteCount
+			}
+		}
+		standIn.P1ByteCount += report.P1ByteCount
+		standIn.CreditByteCount += report.CreditByteCount
+		standIn.UnfundedByteCount += report.UnfundedByteCount + report.FundedByteCount
+		closed = closed && !time.UnixMilli(report.TimeMs).Before(standInClosedAt.Truncate(time.Millisecond))
+	}
+	switch {
+	case !closed:
+		t.Errorf("the taskworker stand-in's process %s holds %d reports, none written as its budget closed at %s", self.worker.processId(), len(standInReports), standInClosedAt.Format(time.RFC3339Nano))
+	case !maps.Equal(standIn.P0ByteCounts, standInCount.P0ByteCounts) || standIn.P1ByteCount != standInCount.P1ByteCount || standIn.CreditByteCount != standInCount.CreditByteCount || standIn.UnfundedByteCount != standInCount.UnfundedByteCount:
+		t.Errorf("the taskworker stand-in's process reported P0 %v, P1 %d, credit %d and P2 %d as its budget closed, and its jobs were granted P0 %v, P1 %d, credit %d and P2 %d", standIn.P0ByteCounts, standIn.P1ByteCount, standIn.CreditByteCount, standIn.UnfundedByteCount, standInCount.P0ByteCounts, standInCount.P1ByteCount, standInCount.CreditByteCount, standInCount.UnfundedByteCount)
+	default:
+		t.Logf("the taskworker stand-in's write budget: P0 %v, P1 %d, credit %d and P2 %d, as its jobs were granted", standIn.P0ByteCounts, standIn.P1ByteCount, standIn.CreditByteCount, standIn.UnfundedByteCount)
+	}
+
+	// each evs run's process: for a run a restart started, the block process that started in its window; for the
+	// first, which started beside gkm's, the block process whose newest report the restart that ended it wrote. A run a
+	// restart stopped wrote its newest report as its budget closed, inside that restart, so the report holds all it
+	// spent, and a run that answered commits spent
 	blockRuns := self.world.Block(WorldBlockEvs).RunCount() + self.world.Block(WorldBlockGkm).RunCount()
-	// each evs run a restart started, the first apart, since gkm's process starts beside it: the process that started
-	// in its window, and the commits answered while it ran; a run that answered commits and reported nothing lost
-	// what it spent, since a process reports every WriteBudgetSettings.Interval and writes no report as it stops
+	evsRunCount := self.world.Block(WorldBlockEvs).RunCount()
 	runCommits := map[int]int{}
 	for _, repo := range self.repos {
 		for _, commit := range repo.commitList() {
@@ -1814,28 +1902,49 @@ func (self *evsConcurrencyCase) checkLedgers(sampler *evsConcurrencyBudgetSample
 	self.stateLock.Lock()
 	runStarts := maps.Clone(self.runStarts)
 	self.stateLock.Unlock()
-	for run, window := range runStarts {
-		var reports []*evsservice.WriteBudgetReport
-		for _, processReports := range clusterReports {
-			for processId, report := range processReports {
-				if processId == ledgers.ApiProcessId || processId == self.worker.processId() {
-					continue
+	for run := 1; run <= evsRunCount; run += 1 {
+		start, started := runStarts[run]
+		stop, stopped := runStarts[run+1]
+		processIds := []string{}
+		for processId, reports := range reportsByProcess {
+			if processId == ledgers.ApiProcessId || processId == self.worker.processId() {
+				continue
+			}
+			switch {
+			case started:
+				if within(reports[0].StartMs, start) {
+					processIds = append(processIds, processId)
 				}
-				if !time.UnixMilli(report.StartMs).Before(window[0].Truncate(time.Millisecond)) && !window[1].Before(time.UnixMilli(report.StartMs)) {
-					reports = append(reports, report)
+			case stopped:
+				if within(reports[0].TimeMs, stop) {
+					processIds = append(processIds, processId)
 				}
 			}
 		}
+		slices.Sort(processIds)
+		var reports []*evsservice.WriteBudgetReport
+		if len(processIds) == 1 {
+			reports = reportsByProcess[processIds[0]]
+		}
 		total := int64(0)
+		// the time of a report of a stopped run written outside the restart that stopped it, 0 for none
+		outsideMs := int64(0)
 		for _, report := range reports {
 			total += evsConcurrencyReportByteCount(report)
+			if stopped && !within(report.TimeMs, stop) {
+				outsideMs = report.TimeMs
+			}
 		}
 		t.Logf("evs's run %d answered %d acknowledged commits, its process's newest report %d B over %d reports", run, runCommits[run], total, len(reports))
 		switch {
-		case len(reports) != 1:
-			t.Errorf("evs's run %d, started between %s and %s, matches %d processes' reports", run, window[0].Format(time.RFC3339Nano), window[1].Format(time.RFC3339Nano), len(reports))
+		case started && len(processIds) != 1:
+			t.Errorf("evs's run %d, started between %s and %s, matches %d processes' reports: %v", run, start[0].Format(time.RFC3339Nano), start[1].Format(time.RFC3339Nano), len(processIds), processIds)
+		case !started && len(processIds) != 1:
+			t.Errorf("evs's run %d, which the restart between %s and %s stopped, matches %d block processes whose newest report that restart wrote, not one written as its budget closed: %v", run, stop[0].Format(time.RFC3339Nano), stop[1].Format(time.RFC3339Nano), len(processIds), processIds)
+		case outsideMs != 0:
+			t.Errorf("evs's run %d, which the restart between %s and %s stopped, wrote its newest report at %s, not as its budget closed in that restart: what it spent after that report never reached the ledger", run, stop[0].Format(time.RFC3339Nano), stop[1].Format(time.RFC3339Nano), time.UnixMilli(outsideMs).Format(time.RFC3339Nano))
 		case 0 < runCommits[run] && total == 0:
-			t.Errorf("evs's run %d answered %d acknowledged commits and its write budget reported no spend before it stopped: the budget client reports every %s and writes no report as it closes, so what a run spends after its last report never reaches the ledger", run, runCommits[run], evsservice.DefaultWriteBudgetSettings().Interval)
+			t.Errorf("evs's run %d answered %d acknowledged commits and its write budget reported no spend", run, runCommits[run])
 		}
 	}
 	for clusterId, processReports := range clusterReports {

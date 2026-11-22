@@ -9,14 +9,20 @@
 //     block's, no task queue, and a clock check that answers sure, as the world's evs block's does. It runs a drop's
 //     dry run, which taskworker's evs.drop takes at the {evsd_} hint (evsservice.DropPreviews), and the stored count,
 //     which evs.nightly lists (evsservice.NightlyPass); in a world minutes old the pass deletes nothing, since every
-//     orphan, container and pack it judges must be a day old first
+//     orphan, container and pack it judges must be a day old first. Its jobs spend through a count of what each issue
+//     and grant took, beside the budget that spends it, so the report its process writes as its budget closes is held
+//     to that count to the byte: the one process of the case whose every write the harness sees
 //   - a hold: api mirrors each hold as hold/<network>/<case>/_ on the first metadata cluster, which evs's purge and
 //     drop job read (§21.9); the world runs no abuse staff route, and abuse.yml's holds_enabled stays off until counsel
 //     confirms holds (M5), so the hold is placed as api writes its object, through model's AbuseHoldStore on api's own
-//     write budget, and released as AbuseHoldPass ends one, its object deleted
+//     write budget, read back to price it as it stood, and released as AbuseHoldPass ends one, its object deleted
+//   - api's write budget against what api wrote, exactly: every P0 byte api's process reported against the first
+//     metadata cluster is an object it holds under §7.9's and §7.10's prefixes priced as created, a rev/ raise priced
+//     as its object, or the hold's object priced as it stood, as controlPlaneCheckApiBudget counts api's objects (its
+//     helpers, control_plane_concurrency_harness_test.go), read where the objects stand still across the report
 //   - the write budget's reports: every process reports into {nvb_<set>} under a 15 s ttl, so a sampler reads every
 //     metadata cluster's reports for the case's life, keeping each process's newest, and a run chaos stopped stays in
-//     the ledger after its report lapses
+//     the ledger after its report lapses; the report a process writes as its budget closes is its newest
 //   - the chaos at evs's origin: a hook in front of the world's lb for the evs block (worldLb) that, once armed, takes
 //     the first push it matches, lets the block answer it in full, restarts the block on its stores, and answers the
 //     pusher 502 with no evs body, as an lb whose upstream went away before the answer reached it: the pusher sends the
@@ -24,7 +30,9 @@
 //     so a restart lands exactly between a commit and its answer
 //   - a recorder at gkm's origin, in front of the world's lb for the gkm block: every 401 or 403 gkm answers, with the
 //     bearer's claims read unverified (its log position, scopes and sidecar, never the token) and what the case says of
-//     the caller's device at that moment, so a refusal reads as what it refused
+//     the caller's device at that moment, so a refusal reads as what it refused: since QD-1179 a refusal of a batch
+//     whose role on the call's repo is stronger than gkm's state gives is the client's to try again under the call's
+//     own scope, and one the retry does not cure fails its write
 //
 // Safe for concurrent use.
 
@@ -45,10 +53,12 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"testing"
 	"time"
 
 	"google.golang.org/protobuf/proto"
 
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/evsservice"
 	"github.com/urnetwork/sidecar/protocol"
@@ -64,7 +74,9 @@ type evsConcurrencyWorker struct {
 	world  *World
 	host   *sidecar.ServiceHost
 	budget *evsservice.WriteBudgetClient
-	cancel context.CancelFunc
+	// the budget the stand-in's jobs spend through, counting what each was granted
+	counted *evsConcurrencyCountedBudget
+	cancel  context.CancelFunc
 }
 
 // The stand-in's host and budget, until close.
@@ -80,8 +92,9 @@ func newEvsConcurrencyWorker(world *World) (*evsConcurrencyWorker, error) {
 		cancel()
 		return nil, fmt.Errorf("the stand-in's write budget: %w", err)
 	}
-	host.Budget = budget
-	return &evsConcurrencyWorker{world: world, host: host, budget: budget, cancel: cancel}, nil
+	counted := newEvsConcurrencyCountedBudget(budget)
+	host.Budget = counted
+	return &evsConcurrencyWorker{world: world, host: host, budget: budget, counted: counted, cancel: cancel}, nil
 }
 
 // The process id the stand-in's budget reports under.
@@ -89,10 +102,86 @@ func (self *evsConcurrencyWorker) processId() string {
 	return self.budget.ProcessId()
 }
 
-// Ends the stand-in's budget and gates.
+// Ends the stand-in's budget, which writes its last report as it closes, and its gates. More than once is safe.
 func (self *evsConcurrencyWorker) close() {
 	self.budget.Close()
 	self.cancel()
+}
+
+// A write budget that counts what every grant it passes on spent, beside the budget that spends it: the stand-in's
+// own count of its jobs' writes, which its process's report must hold to the byte (the file's header). Safe for
+// concurrent use.
+type evsConcurrencyCountedBudget struct {
+	sidecar.WriteBudget
+
+	stateLock sync.Mutex
+	// P0 by kind, P1's immediate and deferred parts, and P2, as each issue or grant took them
+	p0ByteCounts    map[sidecar.WriteP0Kind]int64
+	p1ByteCount     int64
+	creditByteCount int64
+	p2ByteCount     int64
+}
+
+func newEvsConcurrencyCountedBudget(budget sidecar.WriteBudget) *evsConcurrencyCountedBudget {
+	return &evsConcurrencyCountedBudget{WriteBudget: budget, p0ByteCounts: map[sidecar.WriteP0Kind]int64{}}
+}
+
+func (self *evsConcurrencyCountedBudget) IssueP0(ctx context.Context, clusterId string, kind sidecar.WriteP0Kind, byteCount int64) context.Context {
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.p0ByteCounts[kind] += byteCount
+	}()
+	return self.WriteBudget.IssueP0(ctx, clusterId, kind, byteCount)
+}
+
+func (self *evsConcurrencyCountedBudget) AdmitP1(ctx context.Context, clusterId string, networkId connect.Id, cost sidecar.WriteCost) (sidecar.WriteGrant, error) {
+	grant, err := self.WriteBudget.AdmitP1(ctx, clusterId, networkId, cost)
+	if err == nil {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.p1ByteCount += cost.ImmediateByteCount
+		self.creditByteCount += cost.DeferredByteCount
+	}
+	return grant, err
+}
+
+func (self *evsConcurrencyCountedBudget) AcquireP2(ctx context.Context, clusterId string, work *sidecar.WriteP2Work) (sidecar.WriteGrant, error) {
+	grant, err := self.WriteBudget.AcquireP2(ctx, clusterId, work)
+	if err == nil {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.p2ByteCount += work.ByteCount
+	}
+	return grant, err
+}
+
+func (self *evsConcurrencyCountedBudget) TryAcquireP2(ctx context.Context, clusterId string, work *sidecar.WriteP2Work) (sidecar.WriteGrant, bool, error) {
+	grant, ok, err := self.WriteBudget.TryAcquireP2(ctx, clusterId, work)
+	if ok && err == nil {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.p2ByteCount += work.ByteCount
+	}
+	return grant, ok, err
+}
+
+// What the grants spent so far, as a report would carry it, P2 funded and unfunded together under UnfundedByteCount.
+func (self *evsConcurrencyCountedBudget) counts() *evsservice.WriteBudgetReport {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	p0ByteCounts := map[sidecar.WriteP0Kind]int64{}
+	for kind, byteCount := range self.p0ByteCounts {
+		if byteCount != 0 {
+			p0ByteCounts[kind] = byteCount
+		}
+	}
+	return &evsservice.WriteBudgetReport{
+		P0ByteCounts:      p0ByteCounts,
+		P1ByteCount:       self.p1ByteCount,
+		CreditByteCount:   self.creditByteCount,
+		UnfundedByteCount: self.p2ByteCount,
+	}
 }
 
 // The metadata cluster repoId is placed on, as place/<repo_id> on the first cluster names it.
@@ -181,6 +270,9 @@ func (self *evsConcurrencyWorker) storedByteCounts(ctx context.Context) (map[sid
 type evsConcurrencyHold struct {
 	store  *model.AbuseHoldStore
 	record *sidecar.HoldRecord
+	// what its object, read back as it stood, prices at as created: the P0 of kind lifecycle api's budget spent on it,
+	// 0 where api runs no budget
+	pricedByteCount int64
 }
 
 // A preserve_2703f hold on networkId's repoIds, placed at now as api writes hold/<network>/<case>/_ on the first
@@ -192,13 +284,17 @@ func placeEvsConcurrencyHold(ctx context.Context, world *World, networkId server
 		return nil, err
 	}
 	store := model.NewAbuseHoldStore(first)
-	if budget := world.T3().ApiWriteBudget(); budget != nil {
-		priceTable, err := evsservice.DefaultPriceTable(evsservice.DefaultEvsSettings().PriceBlockByteCount)
-		if err != nil {
-			return nil, err
-		}
+	priceTable, err := evsservice.DefaultPriceTable(evsservice.DefaultEvsSettings().PriceBlockByteCount)
+	if err != nil {
+		return nil, err
+	}
+	createPrice := func(objectByteCount int64) (int64, error) {
+		return priceTable.Price(evsservice.WriteOperation{Kind: evsservice.WriteOperationCreate, ObjectByteCount: objectByteCount, Count: 1})
+	}
+	budget := world.T3().ApiWriteBudget()
+	if budget != nil {
 		store.SetWriteBudget(budget, func(objectByteCount int64) int64 {
-			priced, err := priceTable.Price(evsservice.WriteOperation{Kind: evsservice.WriteOperationCreate, ObjectByteCount: objectByteCount, Count: 1})
+			priced, err := createPrice(objectByteCount)
 			if err != nil {
 				return objectByteCount
 			}
@@ -221,7 +317,17 @@ func placeEvsConcurrencyHold(ctx context.Context, world *World, networkId server
 	if !stored.PlaceTime.Equal(record.PlaceTime) {
 		return nil, fmt.Errorf("the hold's object holds another placement, at %s", stored.PlaceTime)
 	}
-	return &evsConcurrencyHold{store: store, record: record}, nil
+	hold := &evsConcurrencyHold{store: store, record: record}
+	if budget != nil {
+		object, found, err := store.Read(ctx, networkId, server.Id(record.CaseId))
+		if err != nil || !found {
+			return nil, fmt.Errorf("the hold's object read back: found %t: %v", found, err)
+		}
+		if hold.pricedByteCount, err = createPrice(int64(len(object.Body))); err != nil {
+			return nil, err
+		}
+	}
+	return hold, nil
 }
 
 // Ends the hold as AbuseHoldPass ends one: its object deleted.
@@ -321,6 +427,117 @@ func (self *evsConcurrencyBudgetSampler) reports() (map[string]map[string]*evsse
 		clusterReports[clusterId] = maps.Clone(processReports)
 	}
 	return clusterReports, slices.Clone(self.errs)
+}
+
+// api's write budget against what api wrote, exactly (the file's header): the P0 bytes api's process reported by kind
+// equal what the objects it holds under proj/, projrows/ and rev/ price at as created, each rev/ raise since
+// revWritesAtStart at its object's price, and the hold's object at its price as it stood (holdByteCount, P0 of kind
+// lifecycle; its release deleted it, which spends nothing); the rev/ writer created exactly the rev/ objects the store
+// holds; and api reported nothing else. Read where api's objects and the rev/ writer's count stand still across the
+// report, at most tryCount times, each LIST asking pageCount objects, as controlPlaneCheckApiBudget reads them.
+func evsConcurrencyCheckApiBudget(t testing.TB, ctx context.Context, world *World, tryCount int, pageCount int, revWritesAtStart *controlPlaneRevWrites, holdByteCount int64) {
+	t.Helper()
+	cluster, err := world.T3().Host().Blobs.FirstCluster()
+	if err != nil {
+		t.Errorf("the first metadata cluster: %v", err)
+		return
+	}
+	prices := evsservice.DefaultPriceTable4KiB()
+	kinds := controlPlaneApiObjectKinds()
+	disagreements := []string{}
+	for range tryCount {
+		writesBefore, err := controlPlaneRevWriteCounts()
+		if err != nil {
+			t.Errorf("the rev/ writer's writes: %v", err)
+			return
+		}
+		before, err := controlPlaneApiObjects(ctx, world, pageCount)
+		if err != nil {
+			t.Errorf("api's objects: %v", err)
+			return
+		}
+		ledgers, err := world.ReadLedgers(ctx, time.Now())
+		if err != nil {
+			t.Errorf("the ledgers: %v", err)
+			return
+		}
+		after, err := controlPlaneApiObjects(ctx, world, pageCount)
+		if err != nil {
+			t.Errorf("api's objects: %v", err)
+			return
+		}
+		writesAfter, err := controlPlaneRevWriteCounts()
+		if err != nil {
+			t.Errorf("the rev/ writer's writes: %v", err)
+			return
+		}
+		if !maps.Equal(before, after) || *writesBefore != *writesAfter {
+			disagreements = append(disagreements, fmt.Sprintf("%d objects, then %d; rev/ writes %+v, then %+v", len(before), len(after), *writesBefore, *writesAfter))
+			continue
+		}
+		want := map[sidecar.WriteP0Kind]int64{}
+		objectCounts := map[sidecar.WriteP0Kind]int{}
+		revPrices := map[int64]bool{}
+		for key, byteCount := range after {
+			for prefix, kind := range kinds {
+				if !strings.HasPrefix(key, prefix) {
+					continue
+				}
+				price, err := prices.Price(evsservice.WriteOperation{Kind: evsservice.WriteOperationCreate, ObjectByteCount: byteCount, Count: 1})
+				if err != nil {
+					t.Errorf("the price of %s's %d bytes: %v", key, byteCount, err)
+					return
+				}
+				want[kind] += price
+				objectCounts[kind] += 1
+				if kind == sidecar.WriteP0KindRevocation {
+					revPrices[price] = true
+				}
+			}
+		}
+		createCount := int64(writesAfter.createdCount - revWritesAtStart.createdCount)
+		if createCount != int64(objectCounts[sidecar.WriteP0KindRevocation]) {
+			t.Errorf("the rev/ writer created %d objects since the world began, and api holds %d under rev/", createCount, objectCounts[sidecar.WriteP0KindRevocation])
+		}
+		raiseCount := int64(writesAfter.raisedCount - revWritesAtStart.raisedCount)
+		if 0 < raiseCount {
+			if len(revPrices) != 1 {
+				t.Errorf("api raised rev/ objects %d times, and its rev/ objects price at %v, not one price a raise takes", raiseCount, slices.Sorted(maps.Keys(revPrices)))
+				return
+			}
+			for price := range revPrices {
+				want[sidecar.WriteP0KindRevocation] += raiseCount * price
+			}
+		}
+		if 0 < holdByteCount {
+			want[sidecar.WriteP0KindLifecycle] += holdByteCount
+		}
+		var report *evsservice.WriteBudgetReport
+		for _, candidate := range ledgers.BudgetReports[cluster.ClusterId()] {
+			if candidate.ProcessId == ledgers.ApiProcessId {
+				report = candidate
+			}
+		}
+		if ledgers.ApiProcessId == "" || report == nil {
+			t.Errorf("api's process %q holds no budget report of %s", ledgers.ApiProcessId, cluster.ClusterId())
+			return
+		}
+		got := map[sidecar.WriteP0Kind]int64{}
+		for kind, byteCount := range report.P0ByteCounts {
+			if byteCount != 0 {
+				got[kind] = byteCount
+			}
+		}
+		if !maps.Equal(got, want) {
+			t.Errorf("api's process reported P0 %v against %s, and the objects it holds there price at %v as created with %d rev/ raises and the hold's object at %d B (%v objects by kind): a write spent and never made, or made and never spent", got, cluster.ClusterId(), want, raiseCount, holdByteCount, objectCounts)
+		}
+		if report.P1ByteCount != 0 || report.UnfundedByteCount != 0 || report.FundedByteCount != 0 || report.CreditByteCount != 0 {
+			t.Errorf("api's process reported P1 %d, P2 %d unfunded and %d funded, and credit %d, where all it writes is P0", report.P1ByteCount, report.UnfundedByteCount, report.FundedByteCount, report.CreditByteCount)
+		}
+		t.Logf("api's write budget: P0 %v against %s for %v objects, %d rev/ raises and the hold's object", got, cluster.ClusterId(), objectCounts, raiseCount)
+		return
+	}
+	t.Errorf("api's objects never stood still across a budget report: %v", disagreements)
 }
 
 // The priced bytes a report says its process issued: P0 by kind, P1 and both P2s.
