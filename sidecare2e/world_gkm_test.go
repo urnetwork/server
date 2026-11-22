@@ -2,7 +2,7 @@
 
 // The world's gkm helpers (world_test.go): a device's writes and reads through its own EvsClient, and the wait for a
 // device's key client to hold a repo's generation, which the smoke's gkm step (world_smoke_test.go) and the real-keys
-// case (world_keys_test.go) run under T3WorldSettings.RealKeys, each device's key client its own at gkm's block.
+// case (world_keys_test.go) run on the world's real keys, each device's key client its own at gkm's block.
 
 package sidecare2e
 

@@ -30,6 +30,13 @@
 //	          production
 //	clients   sidecart3's T3Network and T3Device: full sidecar.Sidecar cores on memory instances, enrolled through
 //	          T3Api from their owners' auth keys, Online on the exchange, their service origins at the blocks
+//	keys      each device's real key client at gkm's block, its network's KeyDelivery group client with no MLS, and its
+//	          EvsClient over it, the config repo's heads on evs and each network bootstrapped by its first owner's
+//	          follower, as ur daemon composes them (sidecart3's T3WorldSettings.RealKeys, world_keys.go): each repo's
+//	          group forms at gkm, and a joining device takes the config repo's key by the late delivery gkm's hint by
+//	          sidecar id asks for. WorldSettings.FakeGkm runs the T3World's FakeGkm instead, its deliveries reaching each
+//	          device and the config heads in memory, for a scenario built on it (the it bridge case forms its config
+//	          group there)
 //
 // Every block verifies service tokens and rev/ under the T3World's svc- verifier and reads its authorization state from
 // a gate cache the world's syncs wait on (T3World.AddGate), so a statement's filer knows the block holds it before a
@@ -73,13 +80,7 @@
 //     resolves no public name;
 //   - §13.8's certs worker and its ACME CA: a device's issued certificate row is written as the worker writes it
 //     (World.IssueTlsCertificateRow), on the device's own key, and no chain is issued, so a visitor to a published name
-//     is shown the device's self-signed leaf on that key;
-//   - keys: the T3World's FakeGkm, whose deliveries reach each device, and the config repo's heads in memory; gkm's
-//     block runs and answers. sidecart3's T3WorldSettings.RealKeys gives each device its real key client at gkm's
-//     block and the config heads on evs, as ur daemon composes them (world_keys.go); there a joining device takes the
-//     config repo's key by a late delivery that gkm's hints by sidecar id ask for, but a repo's creation is refused
-//     by gkm's cached 404 of its placement, so the world runs FakeGkm by default until gkm-repo-create-race lands
-//     (world_keys_test.go has the evidence, and TestE2eWorldSmokeRealKeys runs the smoke's gkm step on real keys).
+//     is shown the device's self-signed leaf on that key.
 //
 // The dns edge's lb probes are real: the dns API's lb inventory is the world's one interface, whose tlsedge ports and
 // TCP 25 reach tlsedge and mxedge's router behind the lb's PROXY header (world_lb_test.go), and a mail host's address
@@ -161,7 +162,7 @@ func WorldBlockNames() []string {
 // What a world runs with (QD-702): every count, bound and name it uses.
 type WorldSettings struct {
 	// The T3World the stores, api, oauth, exchange and clients are. nil: its defaults, with every service's gate
-	// opened on sidecar.yml (NewWorld sets SidecarYaml whatever this holds).
+	// opened on sidecar.yml (NewWorld sets SidecarYaml, RealKeys and KeyResyncInterval whatever this holds).
 	T3 *sidecart3.T3WorldSettings
 	// The blocks' names, roots, credentials' windows and waits, as e2e-hosts-in-process's harness has them. nil:
 	// defaultE2eHostsSettings.
@@ -202,8 +203,14 @@ type WorldSettings struct {
 	// production's block does (server.SidecarIdentityClientsResolver), so a hint by sidecar id reaches its sidecar's
 	// client: true. false gives the block no resolver, so it loses every hint by sidecar id.
 	GkmHintResolver bool
-	// Each sidecar's gkm hint resync under RealKeys (T3WorldSettings.KeyResyncInterval): 0, the sidecar's own hourly
-	// one, since the hints reach every sidecar.
+	// Whether the world's keys are the T3World's FakeGkm, its deliveries reaching each device and the config repo's
+	// heads in memory, for a scenario built on it (the it bridge case forms its config group there): false, so each
+	// device's key client is its real KeyDelivery one at gkm's block, with no MLS, the config heads on evs and each
+	// network bootstrapped by its first owner's follower, as ur daemon composes them. NewWorld sets
+	// T3WorldSettings.RealKeys from this whatever T3 holds.
+	FakeGkm bool
+	// Each sidecar's gkm hint resync on real keys (T3WorldSettings.KeyResyncInterval): 0, the sidecar's own hourly one,
+	// since the hints reach every sidecar.
 	KeyResyncInterval time.Duration
 	// pro.yml's pro: sidecar: block for the world's life, beside the T3World's tier (§20.4's Community column), so a
 	// network a scenario makes Pro runs under Pro's numbers: §20.4's Pro column. nil leaves the process's, where every
@@ -284,6 +291,7 @@ func DefaultWorldSettings() *WorldSettings {
 		DumpLogLineCount:            40,
 		Push:                        true,
 		GkmHintResolver:             true,
+		FakeGkm:                     false,
 		KeyResyncInterval:           0,
 		ProSidecarLimits:            DefaultWorldProSidecarLimits(),
 		LbName:                      "e2e-lb-1",
@@ -396,6 +404,7 @@ func NewWorld(t testing.TB, settings *WorldSettings) *World {
 		t3Settings = &copied
 	}
 	t3Settings.SidecarYaml = worldSidecarYaml(self.urnetworkEdge, settings.Push, settings.AclContractGate)
+	t3Settings.RealKeys = !settings.FakeGkm
 	t3Settings.KeyResyncInterval = settings.KeyResyncInterval
 	// api spends on a budget of its own over the world's Redis, as its process does, never the Net's fake
 	t3Settings.ApiWriteBudget = true

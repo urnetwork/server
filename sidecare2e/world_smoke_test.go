@@ -8,10 +8,10 @@
 //   - evs: in each network a shared repo the owner created through evs, every sidecar writes its own path and reads
 //     every other sidecar's back at the version its writer was answered, and the second network reads none of the
 //     first's, refused by its own client and by evs's 403 to its token;
-//   - gkm, on a world of real keys (T3WorldSettings.RealKeys, TestE2eWorldSmokeRealKeys until it is the world's
-//     default): each network's repo, whose creation formed its group at gkm's block, held at generation 1 by every
-//     sidecar's own key client, rotated by its owner, and held at generation 2 under the rotation's group and
-//     commitment by every sidecar, which writes under it and reads every other's write;
+//   - gkm, on the world's real keys (a world of FakeGkm skips it): each network's repo, whose creation formed its group
+//     at gkm's block, held at generation 1 by every sidecar's own key client, rotated by its owner, and held at
+//     generation 2 under the rotation's group and commitment by every sidecar, which writes under it and reads every
+//     other's write;
 //   - mcp: a tools/list call with an access token the world's issuer minted for mcp's origin lists mcp's tools, and
 //     the same call with no token is answered 401 with the protected resource's challenge;
 //   - dns: the first network's owner saves an ACL document granting its members admin on dns:smoke, as `ur acl push`
@@ -162,7 +162,7 @@ func TestE2eWorldSmokeUnderTheContractGate(t *testing.T) {
 }
 
 // The smoke on a world of worldSettings, its networks and clients the smoke's own. The gkm step runs on a world of
-// real keys alone (T3WorldSettings.RealKeys).
+// real keys alone, which a world of FakeGkm is not (WorldSettings.FakeGkm).
 func runWorldSmoke(t *testing.T, worldSettings *WorldSettings) {
 	settings := defaultWorldSmokeSettings()
 	e2eTestEnv().Run(t, func(t testing.TB) {
@@ -326,7 +326,7 @@ func runWorldSmoke(t *testing.T, worldSettings *WorldSettings) {
 		if world.T3().Settings().RealKeys {
 			worldSmokeGkm(t, world, settings, networks, repoIds)
 		} else {
-			t.Logf("the gkm step runs on a world of real keys alone (TestE2eWorldSmokeRealKeys): T3WorldSettings.RealKeys is off by default")
+			t.Logf("the gkm step runs on a world of real keys alone, and this world runs FakeGkm (WorldSettings.FakeGkm)")
 		}
 
 		// mcp: tools/list with the issuer's access token for mcp's origin, and 401 with none

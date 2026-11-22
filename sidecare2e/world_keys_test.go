@@ -1,10 +1,10 @@
-//go:build sidecar_e2e && sidecar_pending && sidecar_localstack && sidecar_e2e_realkeys
+//go:build sidecar_e2e && sidecar_pending && sidecar_localstack
 
-// The world on real keys (sidecart3's T3WorldSettings.RealKeys, world_keys.go): every device's key client is its own
-// real one, ur daemon's composition, at the world's gkm block, the config repo's heads live on evs, and each network is
-// bootstrapped by its first owner's follower as ur daemon's is. A network of KeysClientCount sidecars: the owner's
-// follower bootstraps it (KF1's draft of the config group at gkm, the first head on evs, base 1), the others are
-// admitted and join, and then:
+// The world on its real keys (the World's default, WorldSettings.FakeGkm false; sidecart3's T3WorldSettings.RealKeys,
+// world_keys.go): every device's key client is its own real one, ur daemon's composition, at the world's gkm block, the
+// config repo's heads live on evs, and each network is bootstrapped by its first owner's follower as ur daemon's is. A
+// network of KeysClientCount sidecars: the owner's follower bootstraps it (KF1's draft of the config group at gkm, the
+// first head on evs, base 1), the others are admitted and join, and then:
 //
 //   - a gkm group formed: the owner creates a general repo through evs, whose KF1 forms its group at gkm's host, and
 //     grants its member writer, so every sidecar reads generation 1 through its own key client;
@@ -12,38 +12,23 @@
 //   - the group rotated: the owner rotates the repo (`ur keys rotate`), every sidecar reads generation 2, writes again
 //     under it, and reads every other's second write back.
 //
-// TestE2eWorldSmokeRealKeys runs the whole smoke (world_smoke_test.go) on such a world, its gkm step with it: a group
-// formed at gkm's block by each network's repo creation, held at generation 1 by every sidecar, rotated by the owner and
-// held at generation 2.
+// The smoke's gkm step (world_smoke_test.go) runs the same on each network of the smoke.
 //
-// Both fail today, and stay behind their own tag, sidecar_e2e_realkeys, until they pass, so the world's default run
-// stays a signal. What e2e-world's runs of 2026-11-21 found, each a product finding for a fix track:
+// e2e-world's runs of 2026-11-21 found three product bugs here, each fixed since, and this case, behind a tag of its own
+// until then, now runs with the package:
 //
-//   - the join, found: in KeyDelivery mode a joining member device takes the config repo's generation only by a LATE
-//     wrap (§10.6's late wraps row, KF2's wrapped row), which a holder writes on gkm's wrap-pending hint; gkm's own hint
-//     writer resolves no sidecar id (plan-KEYS-hint-addressing's api route is not built), so in production that hint is
-//     lost, the holders' hourly resync answers no late ask (GkmGroupClient's KeyDelivery resync runs SyncRepo,
-//     RunPending and RenewDropKey alone), and no admission writes the first wrap either (DeliverFirstWrap has no caller
-//     outside tests), so the joiner stands no sooner than the config group's next rotation, which a schedule makes
-//     every 30 days (GkmSettings.ScheduleInterval). With the world's stand-in resolver and the exchange's push on (the
-//     World's header) the hint reaches the owner, who delivers, and gkm's pending hint wakes the joiner, which stands;
-//   - the join's minute: gkm caches repo/ 5 s (§10.6's checks row), so a gkm that read the config repo as keying at
-//     KF1's group create, just before its activation, refuses 409 a late delivery judged inside those 5 s ("a keying
-//     repo takes only its creation's deliveries"), DeliverLate drops a 409 for the next hint, and the joiner's next late
-//     ask is LateAskInterval, a minute, away. Of five runs, the three whose owner delivered 1.7 s, 4.8 s and 4.8 s after
-//     the activation stalled past the world's 60 s follow bound; the two at 12.3 s and 15.1 s joined at once. Under the
-//     world's join bound (T3WorldSettings.KeyJoinTimeout) a sixth, refused 4.3 s after the activation, joined 124 s
-//     after it, at its follower's retry past that minute: a joiner admitted at its network's start waits two minutes;
-//   - the repo's group, open: CreateSharedRepo fails "evs: the repo's group: gkm refused: 404" in every run that got
-//     that far. When the RepoCreate lands, every reader's group client, the creator's own included, syncs the new repo
-//     (GkmGroupClient.syncNewReaderRepos: GET /gkm/repos/<id>/forms), before the creator's PUT /evs/v1/repos/<id> has
-//     placed it; gkm's placement resolver caches that 404 for 5 s (§11.8's resolve row, EvsRepoPlaceSettings.NotFoundTtl)
-//     and refuses KF1's POST /gkm/groups, sent right after the placement, with it, and EvsClient.CreateRepo does not
-//     retry. The network's bootstrap meets the same 404 on the config repo and recovers only through its follower's 10 s
-//     anchor retry ("config bootstrap: the config repo: evs: the repo's group: gkm refused: 404").
+//   - a joining member device took the config repo's generation only at the config group's next rotation: gkm's hint
+//     writer resolved no sidecar id, the holders' resync answered no late ask, and nothing wrote a joiner's first wrap
+//     (keys-late-delivery: gkm's hints by sidecar id reach their clients through api's internal identity route, every
+//     sync answers late asks, and the signer delivers a joiner's first wrap at once);
+//   - a late delivery judged inside gkm's 5 s repo/ cache of a keying repo was refused, so a joiner waited a minute or
+//     two for its next late ask;
+//   - a repo's creation was refused by gkm's cached 404 of its placement, which every reader's sync of the new repo
+//     caused before the creator's PUT placed it (gkm-repo-create-race, with the one before: a write resolves placement
+//     from a fresh read alone, and gkm's repo/ keying cache's TTL is a setting, 0 by default).
 //
-// Run it through the build's wrapper with -tags 'sidecar_e2e sidecar_pending sidecar_localstack sidecar_e2e_realkeys';
-// the dump carries each sidecar's newest log.
+// Run it through the build's wrapper with -tags 'sidecar_e2e sidecar_pending sidecar_localstack'; the dump carries each
+// sidecar's newest log.
 
 package sidecare2e
 
@@ -58,23 +43,11 @@ import (
 	"github.com/urnetwork/server/sidecart3"
 )
 
-// The smoke (world_smoke_test.go) on a world of real keys, its gkm step with it: what TestE2eWorldSmoke runs once
-// RealKeys is the world's default.
-func TestE2eWorldSmokeRealKeys(t *testing.T) {
-	worldSettings := DefaultWorldSettings()
-	worldSettings.T3 = sidecart3.DefaultT3WorldSettings()
-	worldSettings.T3.RealKeys = true
-	runWorldSmoke(t, worldSettings)
-}
-
 // See the file's header.
 func TestE2eWorldRealKeys(t *testing.T) {
 	settings := defaultWorldKeysSettings()
 	e2eTestEnv().Run(t, func(t testing.TB) {
-		worldSettings := DefaultWorldSettings()
-		worldSettings.T3 = sidecart3.DefaultT3WorldSettings()
-		worldSettings.T3.RealKeys = true
-		world := NewWorld(t, worldSettings)
+		world := NewWorld(t, DefaultWorldSettings())
 		defer world.Close()
 
 		ctx, cancel := world.StepContext(t.Context(), settings.PhaseTimeout)

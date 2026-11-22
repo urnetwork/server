@@ -42,7 +42,8 @@
 // under the config repo's key, which each Sidecar holds through the follower's keys the case installs
 // (itBridgeConfigKeys): a follower installs them itself only over a key client of forwarding setup's, which the World's
 // FakeGkm client is not; and the config repo's group, which a real-keys bootstrap forms at gkm, is formed at the World's
-// FakeGkm by the owner's key client (formConfigGroup). Each filing's timeline
+// FakeGkm by the owner's key client (formConfigGroup), so the case runs its World on FakeGkm (WorldSettings.FakeGkm)
+// where a World runs real keys by default. Each filing's timeline
 // records when it was begun, when it returned, the log position it landed at, and when every device's bridge had
 // adopted it (followed, compiled, published, serving). Safe for concurrent use once made.
 
@@ -519,6 +520,10 @@ func NewItBridgeWorld(t testing.TB, settings *ItBridgeSettings) *ItBridgeWorld {
 	if worldSettings == nil {
 		worldSettings = DefaultWorldSettings()
 	}
+	// the case forms its config repo's group at the World's FakeGkm and installs each follower's config keys in its
+	// Sidecar over that client (formConfigGroup, itBridgeConfigKeys), so its World runs FakeGkm, not the real keys a
+	// World runs by default
+	worldSettings.FakeGkm = true
 	if worldSettings.T3 == nil {
 		worldSettings.T3 = sidecart3.DefaultT3WorldSettings()
 	}
