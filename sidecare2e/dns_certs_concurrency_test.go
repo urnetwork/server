@@ -4,7 +4,10 @@
 // end-to-end tests of 2026-11-21): N sidecars (ClientCount, 8 by default) spread over a few networks, each network aged
 // past §21.7's probation, verified by a paid Pro balance and holding a document that grants its members admin on every
 // one-label host of its zone (dns:*), so its devices write CNAME and TXT records through dns's api under a standing grant
-// while readers query the dns edge.
+// while readers query the dns edge, and a standing public publish of tls/443/web, so each network's first sidecar
+// orders the network's certificate. The world runs the real certificate chain in place of its stand-in
+// (World.IssueTlsCertificateRow): §13.8's certs worker, api's certs routes and Pebble, beside the stand-ins
+// dns_certs_concurrency_certs_test.go names (the canary monitor's validator, the internet's resolvers).
 //
 // The records phase: every device writes, with random pauses, in an order of its own,
 //
@@ -35,6 +38,22 @@
 //   - §12.7's dns_changes_per_hour, the dns write budget the phase spends, reconciles exactly: each network's
 //     dns.records admin events since the phase began are its journal rows, and its owner's writes after the phase are
 //     answered until the events reach the cap, exactly, where the next write is refused 429 with used at the limit.
+//
+// The certificates phase: each network's first sidecar (CertDeviceCount of them) runs a tls component and asks for its
+// network's certificate, all at once, as `ur bridge public-tls` does: POST /tls/cert-order through api's certs routes,
+// which queue the row; the certs worker's order pass, kicked once every row is queued, admits each under the policy
+// and orders it from Pebble by DNS-01, its challenges written at _acme-challenge.<label>.<root> through POST
+// /dns/internal/acme-challenge on the certs bearer and served by the edge, GET /dns/internal/ready answering ready
+// once the edge serves the serial and the canary is clean, Pebble refusing 5% of nonces and validating through the
+// resolver, which reaches the edge. What must hold:
+//
+//   - every order ends issued: the device is handed a chain that verifies to Pebble's root for <label>.<root> and
+//     web.<label>.<root>, on the device's own key, the chain of the device's one issued row, from LE's place in the
+//     CA order, and what TlsDeviceCertificate presents for the name;
+//   - each device listens on tls/443/web, and a visitor through tlsedge, behind the lb's PROXY header, verifies the
+//     listener's chain against Pebble's root, not a self-signed leaf, and is answered by the device;
+//   - certs' budget at LE ({tcb_letsencrypt_<root>}) holds exactly the orders that spent on it, each device's first
+//     order, a new set, beside its rebuild's marker.
 //
 // Each phase has PhaseTimeout and dumps the world's progress when it stalls. Run it through the build's wrapper:
 // -tags 'sidecar_e2e sidecar_pending sidecar_localstack'.
