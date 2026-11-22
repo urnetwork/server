@@ -214,6 +214,9 @@ type churnLoadSettings struct {
 	ConfigBasesPerMinute int64
 	// The tier limits the case installs past the world's (churn_load_harness_test.go), filled from the fields above.
 	TierLimits map[model.NetworkTier]map[string]int64
+	// How long a round's check waits for each mail network's reader to list every message so far: under the mail
+	// settings' MailboxTimeout, which the end waits, so a lost message costs the case its bound once.
+	MailboxRoundTimeout time.Duration
 	// How old the personal networks read, past §21.7's probation.
 	NetworkAge time.Duration
 	// The grants of a personal network's document: mail's, dns:* admin and tls/443/web's standing publish, given when
@@ -331,6 +334,7 @@ func defaultChurnLoadSettings() *churnLoadSettings {
 		WorkAllowance:           20 * time.Second,
 		ConvergencePollInterval: 500 * time.Millisecond,
 		ConfigBasesPerMinute:    configBasesPerMinute,
+		MailboxRoundTimeout:     45 * time.Second,
 		NetworkAge:              8 * 24 * time.Hour,
 		MailGrants:              defaultWorldSmokeMailSettings().AclGrants,
 		DnsGrant:                dnsSettings.DnsAclGrant,
@@ -596,6 +600,9 @@ type churnLoadCase struct {
 	renewals   int
 	// each publisher's newest issued certificate row, from its first on, which the next renewal renews
 	currentCertIds map[*dnsCertsPublisher]sidecar.Id
+	// each message a mailbox check reported missing, "<token> in <mailbox>" or "<token> (its sent copy)", which later
+	// checks wait for no more
+	mailMissing map[string]bool
 	// the blog's chaos windows of the round under way, which its visit checks read
 	blogChaos *bloggerChaos
 }
@@ -675,6 +682,7 @@ func runChurnLoad(t testing.TB, settings *churnLoadSettings) {
 		kindCounts:     map[string]int{},
 		retryCounts:    map[string]int{},
 		currentCertIds: map[*dnsCertsPublisher]sidecar.Id{},
+		mailMissing:    map[string]bool{},
 	}
 	defer self.release()
 
