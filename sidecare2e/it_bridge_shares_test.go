@@ -11,41 +11,49 @@
 //	accept    Y's owner claims the invite by the code's hash (POST /acl/accept-invite), opens the targets, plans an alias
 //	          of each in Y's block's upper /17 and files the BridgeAliases, writes the share's first ShareSigner into a
 //	          head of Y's, and completes the share with its sealed alias table and ShareKey
-//	activate  X's owner previews the share (GET /network/bridge/share/<id>), then activates it as shown: the share's
-//	          inbound grant, a dial on both target hosts for Y's network under the document's shares rule, spent through
-//	          §16.6's stock gate on a decision another device of X's member signs, and the BridgeShareGrant pin file in a
-//	          head of X's
+//	activate  X's owner previews the share (GET /network/bridge/share/<id>), then activates it as shown: ActivateShare
+//	          asks the share's inbound grant, a dial on both target hosts for Y's network under the document's shares
+//	          rule, through §16.6's stock gate, which holds it for an admin; another device of X's member signs the
+//	          decision, and ActivateShare asked again with it presents the action its request was filed with, kept in
+//	          the invite's record, spends the decision into the grant it activates and writes the BridgeShareGrant pin
+//	          file in a head of X's; asked once more it answers that grant and files nothing
 //	reach     Y's first client, whose document dials network:X (Y's half of §8.11's intersection), routes each alias over
-//	          a share link to its target's host, whose hook maps it to the target; Y's second client has no such rule
+//	          a share link to its target's host, whose hook maps it to the target, the host providing FriendsAndFamily
+//	          while it serves the share; Y's second client has no such rule
 //	end       X's owner revokes the share's grant (RevokeShare's GrantRevoke) and Y's owner releases its aliases
 //	          (ReleaseShare)
 //
 // The checks: the alias tables, Y's accept and X's preview naming the same aliases, one a target at its length, in Y's
-// upper /17; X's target hosts compiling the share with those aliases, Y's first client's table an entry of each alias
-// linked to its target's host under the share, and Y's second client's none; Y's first client reaching each target
-// through its alias, by each protocol the target takes, while the share is in force, and Y's second never; and once the
-// share is revoked and released, past LeaveBound, nothing reaching either target from Y. The oracle (Check) holds
-// every arrival at X's targets from Y's clients to the share's targets, its timeline and its reachers.
+// upper /17; the activation's grant the one the admin's decision activates, AclGrantId of the request and the action
+// it stored, spent once; X's target hosts compiling the share with those aliases, Y's first client's table an entry of
+// each alias linked to its target's host under the share, and Y's second client's none; Y's first client reaching
+// each target through its alias, by each protocol the target takes, while the share is in force, and Y's second never;
+// neither network counting a share link's window client against sidecar_clients; and once the share is revoked and
+// released, past LeaveBound, nothing reaching either target from Y. The oracle (Check) holds every arrival at X's
+// targets from Y's clients to the share's targets, its timeline and its reachers.
 //
 // What stands in, beside the case's own (it_bridge_world_test.go's header): the share grant's person, whose decision
 // the approve stand-in signs on another device of X's member (it_bridge_grants_test.go's header); Y's document's
 // network:X selector, which a writer resolves only through networks its own host is enrolled in
 // (sidecar.AclWriterSubjects.Networks), so Y's save hands it X's owner's Sidecar, as one daemon of a person who is an
-// admin of both networks would hold both; X's label it reads from the network label table in X's owner's own dns/
-// directory, which Sidecar.NetworkLabels opens where no composition fed its DnsClient one (dns-feed-labels-wiring).
-// Y's network starts with a document that grants nothing and saves its own once X's label is known. X is aged past
-// §21.7's probation, a network's first 7 days, which gives no outbound share (worldAgeNetwork, as the World's mail
-// steps age a sender), and §21.7's standing reads api's process installs at its start, which the World's api does not,
-// are installed for the case (itBridgeInstallAbuseStanding). The platform settles a share's contracts by §8.10's
-// contract gate, which the World turns on (WorldSettings.AclContractGate), as FriendsAndFamily, escrowed from Y's
-// network in both directions (§20.6's share row), which the case's ledgers reconcile (it_bridge_test.go's Reconcile).
+// admin of both networks would hold both. X's label it reads from the network label table in X's owner's own dns/
+// directory, which Sidecar.NetworkLabels opens where no composition fed its DnsClient one (dns-feed-labels-wiring), and
+// the activation is ActivateShare's own (listen-actions-mcp-tls), where the case stood in for both before those fixes.
+// Y's network starts with a document that grants nothing and saves its own once X's label is known. Both networks
+// subscribe to Pro (ItBridgeSettings.Pro), since §20.4's Community column gives no acl_network_shares, which X's invite
+// and network:* selector and Y's claim and network:X selector each need. X is aged past §21.7's probation, a network's
+// first 7 days, which gives no outbound share (worldAgeNetwork, as the World's mail steps age a sender), and §21.7's
+// standing reads api's process installs at its start, which the World's api does not, are installed for the case
+// (itBridgeInstallAbuseStanding); a first invite on that cold gate is refused 403 while it loads X's standing, and the
+// case files it again (ShareInviteTryCount). The platform settles a share's contracts by §8.10's contract gate, which
+// the World turns on (WorldSettings.AclContractGate), as FriendsAndFamily, escrowed from Y's network in both directions
+// (§20.6's share row), which the case's ledgers reconcile (it_bridge_test.go's Reconcile).
 
 package sidecare2e
 
 import (
 	"bytes"
 	"context"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -56,11 +64,8 @@ import (
 	"testing"
 	"time"
 
-	"google.golang.org/protobuf/proto"
-
 	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/device"
-	"github.com/urnetwork/sidecar/protocol"
 	"github.com/urnetwork/sidecar/protocol/bridge"
 
 	"github.com/urnetwork/server"
@@ -99,8 +104,6 @@ type itBridgeShare struct {
 	preview   *sidecar.BridgeSharePreview
 	// how many invites api refused 403 before one was taken
 	inviteRefusedCount int
-	// what the case found broken in the product and went on past (activate)
-	findings []error
 }
 
 // A share from self to y of targets, X destinations self's devices host, which y's reachers may reach.
@@ -218,7 +221,7 @@ func (self *itBridgeShare) Open(ctx context.Context) error {
 			shareTarget.alias = netip.PrefixFrom(itBridgeAddr(itBridgeIpv4(y.settings.Block.Masked().Addr())|alias.GetAliasHostBits()), int(alias.GetLength()))
 		}
 	}()
-	grantId, err := self.activate(ctx, preview, invite.Code)
+	grantId, err := self.activate(ctx, preview)
 	if err != nil {
 		return err
 	}
@@ -240,16 +243,14 @@ func (self *itBridgeShare) Open(ctx context.Context) error {
 }
 
 // X's activation of the share as preview showed it (the file's header's activate row), answering the share grant's id.
-// ActivateShare asks its grant through §16.6's gate, which answers it pending; another device of X's member signs the
-// decision (approve), and ActivateShare, given it, must spend it. It cannot today: ActivateShare builds its grant's
-// action afresh at every call, its expires_millis from the clock and its sealed detail under a fresh nonce, while the
-// gate spends a decision only on the very action its request stored (record_gate_spend.go), so the second call
-// answers a decision on another action and every later call files a new request; BridgeFiler.Forward keeps its
-// request's sealed action for its retries (forwardApprovalAction), and ActivateShare keeps none. That finding fails the
-// case (self.findings), and the case then activates in ActivateShare's place, as its rows do: the same grant action,
-// built once, asked, decided and spent through the same gate, and the same BridgeShareGrant pin file, its table key
-// derived from the invite's code, written into a head of X's through the owner's config writer.
-func (self *itBridgeShare) activate(ctx context.Context, preview *sidecar.BridgeSharePreview, code []byte) ([]byte, error) {
+// ActivateShare asks its grant through §16.6's gate, which holds it for an admin's decision (the document's shares
+// rule, owner decision 74): its first call must answer pending, having filed nothing. Another device of X's member
+// signs the decision (approve), and ActivateShare asked again with it must spend it into the grant that decision
+// activates, AclGrantId of the request and the action it stored, since it presents the action its request was filed
+// with, kept in the invite's record (listen-actions-mcp-tls, sidecar 468b7a92; the case activated in its place until
+// then, the gate answering every later call a decision on another action). Asked once more with no decision, it must
+// answer that grant again, filing no second request: a person's decision is spent once.
+func (self *itBridgeShare) activate(ctx context.Context, preview *sidecar.BridgeSharePreview) ([]byte, error) {
 	x := self.x
 	origin := &sidecar.BridgeFileOrigin{Act: sidecar.SidecarActConfirmed}
 	filing, err := x.owner.filer.ActivateShare(ctx, origin, preview, 0)
@@ -258,103 +259,36 @@ func (self *itBridgeShare) activate(ctx context.Context, preview *sidecar.Bridge
 		if err != nil {
 			return nil, fmt.Errorf("%s's activation: %w", self.name, err)
 		}
-		// a gate that spent with no decision: the activation is done
-		return bytes.Clone(filing.GrantId), nil
+		return nil, fmt.Errorf("%s's activation answered grant %x with no admin's decision, where the document's shares rule holds it for one", self.name, filing.GrantId)
 	}
 	if len(x.clients) == 0 {
 		return nil, fmt.Errorf("%s: no other device of X's member approves", self.name)
 	}
-	decision, err := x.approveRequest(x.clients[0], x.owner, pending.ApprovalId)
+	request, err := x.storedRequest(x.owner, pending.ApprovalId)
+	if err != nil {
+		return nil, fmt.Errorf("%s's request: %w", self.name, err)
+	}
+	decision, err := x.approve(x.clients[0], request)
 	if err != nil {
 		return nil, fmt.Errorf("%s's approval: %w", self.name, err)
 	}
 	filing, err = x.owner.filer.ActivateShare(ctx, &sidecar.BridgeFileOrigin{Act: sidecar.SidecarActConfirmed, Decision: decision}, preview, 0)
-	if err == nil {
-		return bytes.Clone(filing.GrantId), nil
-	}
-	if !errors.Is(err, sidecar.ErrApprovalRefused) {
-		return nil, fmt.Errorf("%s's activation with its decision: %w", self.name, err)
-	}
-	self.finding(fmt.Errorf("%s: ActivateShare refuses the decision signed on its own request: %w: it builds its grant's action afresh at every "+
-		"call, its expiry from the clock and its sealed detail under a fresh nonce, and the gate spends a decision only on the action its request "+
-		"stored (record_gate_spend.go), so no call after the first spends a person's decision; BridgeFiler.Forward keeps its request's sealed "+
-		"action for retries (forwardApprovalAction), ActivateShare none. The case activates in its place", self.name, err))
-	return self.activateInPlace(ctx, preview, code)
-}
-
-// ActivateShare's rows, in its place (activate): the share's grant, a dial on the targets' hosts for Y's network with
-// the targets' prefixes sealed in its detail, as ActivateShare asks it, built once and spent through the owner's gate on
-// another device's decision; then its BridgeShareGrant pin file, pinning Y's ShareKey, K and both tables' hashes and
-// versions as the preview read them, written into X's head.
-func (self *itBridgeShare) activateInPlace(ctx context.Context, preview *sidecar.BridgeSharePreview, code []byte) ([]byte, error) {
-	x := self.x
-	owner := x.owner
-	running := owner.t3.Sidecar()
-	destinations, prefixes := []string{}, []string{}
-	requests, err := self.targetRequests()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s's activation handed the decision signed on its own request %s: %w", self.name, pending.ApprovalId, err)
 	}
-	for _, request := range requests {
-		if destination := "sidecar:" + hex.EncodeToString(request.Host.Bytes()); !slices.Contains(destinations, destination) {
-			destinations = append(destinations, destination)
-		}
-		if prefix := "ip:" + request.Prefix.String(); !slices.Contains(prefixes, prefix) {
-			prefixes = append(prefixes, prefix)
-		}
+	grantId := sidecar.AclGrantId(pending.ApprovalId, request.Action.PayloadSha256())
+	if !bytes.Equal(filing.GrantId, grantId[:]) || filing.ApprovalId != pending.ApprovalId {
+		return nil, fmt.Errorf("%s's activation spent under %s into grant %x, where the decision on request %s activates grant %x", self.name,
+			filing.ApprovalId, filing.GrantId, pending.ApprovalId, grantId)
 	}
-	slices.Sort(destinations)
-	slices.Sort(prefixes)
-	stored, err := owner.grants.Action(ctx, &protocol.CanonicalAction{Kind: uint32(sidecar.SidecarActionForward)}, &sidecar.AclGrantRequest{
-		Subject:        running.Identity().SidecarId,
-		GrantDst:       destinations,
-		GrantAllow:     []string{"dial"},
-		Detail:         &protocol.CanonicalActionDetail{GrantDst: prefixes},
-		ShareNetworkId: preview.AcceptingNetworkId,
-	}, time.Now())
+	again, err := x.owner.filer.ActivateShare(ctx, origin, preview, 0)
 	if err != nil {
-		return nil, fmt.Errorf("%s's grant action: %w", self.name, err)
+		return nil, fmt.Errorf("%s's activation asked again after its decision was spent: %w", self.name, err)
 	}
-	grantId, err := x.spendGrant(ctx, owner, x.clients[0], stored)
-	if err != nil {
-		return nil, fmt.Errorf("%s's grant: %w", self.name, err)
+	if !bytes.Equal(again.GrantId, grantId[:]) {
+		return nil, fmt.Errorf("%s's activation asked again answered grant %x, not the spent decision's %x", self.name, again.GrantId, grantId)
 	}
-	seal, err := sidecar.NewBridgeShareSeal(code, sidecar.Id(x.network.NetworkId), nil)
-	if err != nil {
-		return nil, err
-	}
-	pin := &bridge.BridgeShareGrant{
-		ShareId:            preview.ShareId.Bytes(),
-		GrantId:            bytes.Clone(grantId),
-		SharePublicKey:     bytes.Clone(preview.SharePublicKey),
-		TargetTableSha256:  bytes.Clone(preview.TargetTableSha256),
-		TableKey:           seal.TableKey(),
-		AcceptingNetworkId: preview.AcceptingNetworkId.Bytes(),
-		AliasTableSha256:   bytes.Clone(preview.AliasTableSha256),
-		TargetTableVersion: preview.TargetTableVersion,
-		AliasTableVersion:  preview.AliasTableVersion,
-	}
-	if err := sidecar.CheckBridgeShareGrant(pin); err != nil {
-		return nil, fmt.Errorf("%s's pin: %w", self.name, err)
-	}
-	pinBytes, err := proto.MarshalOptions{Deterministic: true}.Marshal(pin)
-	if err != nil {
-		return nil, err
-	}
-	writer := &itBridgeHeadWriter{world: x, device: owner}
-	if _, err := writer.SaveHead(ctx, func(head *sidecar.ConfigHead) (*sidecar.ConfigHead, error) {
-		return head.WithFile(sidecar.ConfigHeadBridgeShareGrantPath(preview.ShareId), pinBytes)
-	}); err != nil {
-		return nil, fmt.Errorf("%s's pin file: %w", self.name, err)
-	}
-	return grantId, nil
-}
-
-// A finding that fails the case once its cycle reports (Cycle), the case going on past it.
-func (self *itBridgeShare) finding(err error) {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	self.findings = append(self.findings, err)
+	return grantId[:], nil
 }
 
 // The alias tables (the file's header's checks): Y's accept active with one alias a target at its length in Y's upper
@@ -403,10 +337,10 @@ func (self *itBridgeShare) checkTables(accepted *sidecar.BridgeShareAccepted, pr
 
 // Waits until the compiles hold the share, or with held false hold it no more: each target host's rules hold the
 // share with its targets there at their aliases, and each reacher's table an entry of each alias linked to its target's
-// host under the share; Y's other clients' tables link no alias under it either way. A host holds a revoked share no more once its rules drop it or once its role's posture holds
-// the GrantRevoke of the share's grant as a denial, which is how §17.8's forwarding roles apply one between compiles,
-// so its rules may keep the share until the next compile. Bounded by AdoptTimeout; the error names what each compile
-// held.
+// host under the share; Y's other clients' tables link no alias under it either way. A host holds a revoked share no
+// more once its rules drop it or once its role's posture holds the GrantRevoke of the share's grant as a denial, which
+// is how §17.8's forwarding roles apply one between compiles, so its rules may keep the share until the next compile.
+// Bounded by AdoptTimeout; the error names what each compile held.
 func (self *itBridgeShare) awaitCompiled(ctx context.Context, held bool) error {
 	ctx, cancel := context.WithTimeout(ctx, self.x.settings.AdoptTimeout)
 	defer cancel()
@@ -838,22 +772,18 @@ func (self *itBridgeShare) SaveAcceptingDocument(ctx context.Context, t testing.
 }
 
 // The share's whole cycle (the file's header), failing t with a progress dump where an act fails: open, probe while in
-// force, close, and past the end and LeaveBound probe again.
+// force and read both networks' sidecar client counts, close, and past the end and LeaveBound probe again.
 func (self *itBridgeShare) Cycle(ctx context.Context, t testing.TB) {
 	t.Helper()
-	err := self.Open(ctx)
-	self.stateLock.Lock()
-	findings := slices.Clone(self.findings)
-	self.stateLock.Unlock()
-	for _, finding := range findings {
-		t.Errorf("%v", finding)
-	}
-	if err != nil {
+	if err := self.Open(ctx); err != nil {
 		self.y.FailProgress(t, "the share's opening", err, nil)
 	}
 	for _, err := range self.Probe(ctx, "share", true) {
 		t.Errorf("%v", err)
 	}
+	// the share links' window clients, children of Y's reachers' clients, count against neither network
+	self.x.CheckSidecarClients(ctx, t)
+	self.y.CheckSidecarClients(ctx, t)
 	if err := self.Close(ctx); err != nil {
 		self.y.FailProgress(t, "the share's end", err, nil)
 	}
