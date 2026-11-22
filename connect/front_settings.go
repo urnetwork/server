@@ -107,8 +107,9 @@ type FrontServerSettings struct {
 	WhodisHandshakeIdleTimeout time.Duration
 	// whether the whodis transports trace each handshake for the class of
 	// its failure (front_quic_trace.go): one small object a connection, and
-	// quic-go's construction of each event of a traced connection, for its
-	// whole life. true. The quic port never traces.
+	// quic-go's construction of the connection's events during its handshake
+	// only, since the trace is a quic.HandshakeOnlyTrace; an established
+	// connection costs nothing. true. The quic port never traces.
 	WhodisHandshakeTrace bool
 	// binds one public udp socket, when set, in place of
 	// listenFrontPacket's SO_REUSEPORT bind to the exact address. Tests use

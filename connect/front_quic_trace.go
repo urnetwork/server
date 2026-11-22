@@ -24,13 +24,15 @@ package connect
 // in each connection's context (traceFrontQuicHandshakes), and the
 // transport's QUIC config hands it to quic-go (newFrontQuicHandshakeTracer),
 // so the dispatch reads it from the connection's context. It keeps one word of
-// progress bits and allocates nothing per event. Once the handshake completes,
-// or the client acknowledged the flight, the class can't change, and every
-// later event costs one atomic load. quic-go still builds each event of a
-// traced connection before it hands the event to any recorder, so a traced
-// connection costs quic-go's own event construction for every packet of its
-// life. Only the whodis transports trace, while
-// FrontServerSettings.WhodisHandshakeTrace is set; the quic port never does.
+// progress bits and allocates nothing per event; once the client acknowledged
+// the flight the class can't change, and every later event costs one atomic
+// load. quic-go builds each event of a traced connection before it hands the
+// event to any recorder, a few allocations a packet, so the trace is a
+// quic.HandshakeOnlyTrace (URnetwork's quic-go, URNETWORK.md "A trace of the
+// handshake only"): once the handshake completes, the connection drops it and
+// builds no event again, and an established connection costs nothing. Only
+// the whodis transports trace, while FrontServerSettings.WhodisHandshakeTrace
+// is set; the quic port never does.
 //
 // A trace is safe for concurrent use: quic-go records from the connection's
 // run loop, and the dispatch reads the class from its own goroutine.
@@ -60,12 +62,15 @@ const (
 )
 
 // The handshake trace of one connection: a qlogwriter.Trace whose one
-// recorder is itself.
+// recorder is itself, recording the handshake only.
 type frontQuicHandshakeTrace struct {
 	progress atomic.Uint32
+	// set once quic-go closed the recorder: at the end of the handshake, or
+	// of a connection it was joined to another trace for
+	closed atomic.Bool
 }
 
-var _ qlogwriter.Trace = (*frontQuicHandshakeTrace)(nil)
+var _ quic.HandshakeOnlyTrace = (*frontQuicHandshakeTrace)(nil)
 var _ qlogwriter.Recorder = (*frontQuicHandshakeTrace)(nil)
 
 // The context key of a connection's handshake trace.
@@ -133,6 +138,11 @@ func (self *frontQuicHandshakeTrace) AddProducer() qlogwriter.Recorder {
 // its producer without asking; http3 asks, and its events add nothing here.
 func (self *frontQuicHandshakeTrace) SupportsSchemas(schema string) bool {
 	return schema == qlog.EventSchema
+}
+
+// quic.HandshakeOnlyTrace: nothing after the handshake moves the class.
+func (self *frontQuicHandshakeTrace) HandshakeOnly() bool {
+	return true
 }
 
 // qlogwriter.Recorder: reads the events that move the handshake's class, and
@@ -204,10 +214,12 @@ func (self *frontQuicHandshakeTrace) recordMetrics(event qlog.MetricsUpdated) {
 
 // qlogwriter.Recorder
 func (self *frontQuicHandshakeTrace) Close() error {
+	self.closed.Store(true)
 	return nil
 }
 
-// Stops reading events once the handshake completed. Nil-safe.
+// Stops reading events once the handshake completed, for a trace joined to
+// another, which records on. Nil-safe.
 func (self *frontQuicHandshakeTrace) settle() {
 	if self == nil {
 		return
@@ -239,10 +251,22 @@ func (self *frontQuicHandshakeTrace) class(err error) string {
 }
 
 // Two traces of one connection as one: the front's handshake trace and the
-// trace connect's QUIC config had.
+// trace connect's QUIC config had. It records only the handshake when both do,
+// so the other trace keeps every event it asks for.
 type frontQuicJoinedTrace struct {
 	first  qlogwriter.Trace
 	second qlogwriter.Trace
+}
+
+var _ quic.HandshakeOnlyTrace = (*frontQuicJoinedTrace)(nil)
+
+// quic.HandshakeOnlyTrace: when both traces record only the handshake.
+func (self *frontQuicJoinedTrace) HandshakeOnly() bool {
+	handshakeOnly := func(trace qlogwriter.Trace) bool {
+		handshakeOnlyTrace, ok := trace.(quic.HandshakeOnlyTrace)
+		return ok && handshakeOnlyTrace.HandshakeOnly()
+	}
+	return handshakeOnly(self.first) && handshakeOnly(self.second)
 }
 
 // qlogwriter.Trace

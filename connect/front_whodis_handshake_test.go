@@ -10,8 +10,11 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"slices"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -245,9 +248,11 @@ func TestFrontQuicHandshakeTraceRecordsWithoutAllocating(t *testing.T) {
 // A trace that records the events it was given.
 type testFrontRecordingTrace struct {
 	schema   string
-	events   []qlogwriter.Event
 	closeErr error
-	closed   int
+
+	stateLock sync.Mutex
+	events    []qlogwriter.Event
+	closed    int
 }
 
 // qlogwriter.Trace
@@ -262,20 +267,33 @@ func (self *testFrontRecordingTrace) SupportsSchemas(schema string) bool {
 
 // qlogwriter.Recorder
 func (self *testFrontRecordingTrace) RecordEvent(event qlogwriter.Event) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
 	self.events = append(self.events, event)
 }
 
 // qlogwriter.Recorder
 func (self *testFrontRecordingTrace) Close() error {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
 	self.closed += 1
 	return self.closeErr
+}
+
+// The events so far and the closes.
+func (self *testFrontRecordingTrace) snapshot() (int, int) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return len(self.events), self.closed
 }
 
 // The whodis tracer hands quic-go the connection's handshake trace from its
 // context, beside the trace the quic port's tracer gives, when either
 // exists: both see every event, a schema either takes is taken, and closing
 // closes both. A connection with neither gets no trace at all, the nil
-// interface, so quic-go builds no events for it.
+// interface, so quic-go builds no events for it. The handshake trace records
+// only the handshake, and so does a joined trace when both of its traces do,
+// so a trace that wants every event keeps getting them.
 func TestFrontQuicHandshakeTracerJoinsTheQuicPortsTracer(t *testing.T) {
 	withTrace := func() (context.Context, *frontQuicHandshakeTrace) {
 		handshakeTrace := &frontQuicHandshakeTrace{}
@@ -289,6 +307,13 @@ func TestFrontQuicHandshakeTracerJoinsTheQuicPortsTracer(t *testing.T) {
 	if trace := newFrontQuicHandshakeTracer(nil)(ctx, false, quic.ConnectionID{}); trace != qlogwriter.Trace(handshakeTrace) {
 		t.Fatalf("a traced connection got %T, want its handshake trace", trace)
 	}
+	if !handshakeTrace.HandshakeOnly() {
+		t.Fatal("the handshake trace records past the handshake")
+	}
+	bothHandshakeOnly := &frontQuicJoinedTrace{first: &frontQuicHandshakeTrace{}, second: &frontQuicHandshakeTrace{}}
+	if !bothHandshakeOnly.HandshakeOnly() {
+		t.Fatal("a joined trace of two handshake traces records past the handshake")
+	}
 	otherTrace := &testFrontRecordingTrace{schema: "urn:ietf:params:qlog:events:http3", closeErr: errors.New("the other trace's close")}
 	otherTracer := func(context.Context, bool, quic.ConnectionID) qlogwriter.Trace {
 		return otherTrace
@@ -301,18 +326,145 @@ func TestFrontQuicHandshakeTracerJoinsTheQuicPortsTracer(t *testing.T) {
 	if !trace.SupportsSchemas(qlog.EventSchema) || !trace.SupportsSchemas(otherTrace.schema) || trace.SupportsSchemas("urn:example") {
 		t.Fatal("the joined trace doesn't take exactly the schemas either takes")
 	}
+	if handshakeOnlyTrace, ok := trace.(quic.HandshakeOnlyTrace); !ok || handshakeOnlyTrace.HandshakeOnly() {
+		t.Fatal("a trace joined to one that wants every event records the handshake only")
+	}
 	recorder := trace.AddProducer()
 	recorder.RecordEvent(testFrontQlogSent(&qlog.CryptoFrame{}))
 	recorder.RecordEvent(testFrontQlogReceived(qlog.PacketTypeInitial))
 	if class := handshakeTrace.class(nil); class != frontQuicHandshakeClassReplyUnacked {
 		t.Fatalf("the handshake trace read class %s through the joined trace", class)
 	}
-	if len(otherTrace.events) != 2 {
-		t.Fatalf("the quic port's trace saw %d events, want 2", len(otherTrace.events))
+	if eventCount, _ := otherTrace.snapshot(); eventCount != 2 {
+		t.Fatalf("the quic port's trace saw %d events, want 2", eventCount)
 	}
-	if err := recorder.Close(); !errors.Is(err, otherTrace.closeErr) || otherTrace.closed != 1 {
-		t.Fatalf("closing the joined recorder = %v, closing the other %d times", err, otherTrace.closed)
+	err := recorder.Close()
+	if _, closeCount := otherTrace.snapshot(); !errors.Is(err, otherTrace.closeErr) || closeCount != 1 || !handshakeTrace.closed.Load() {
+		t.Fatalf("closing the joined recorder = %v, closing the other %d times and the handshake trace %t", err, closeCount, handshakeTrace.closed.Load())
 	}
+}
+
+// A whodis connection's trace ends with its handshake: quic-go closes it, and
+// so builds no event for the connection's packets from then on, before the
+// handshake reads as complete. A whodis connection whose trace is joined to
+// the quic port's tracer, which wants every event, keeps its trace open
+// until the connection closes.
+func TestFrontWhodisTraceEndsWithTheHandshake(t *testing.T) {
+	for _, joined := range []bool{false, true} {
+		otherTrace := &testFrontRecordingTrace{schema: qlog.EventSchema}
+		env := newTestFrontEnv(t, func(env *testFrontEnv) {
+			if joined {
+				env.connectQuic.tracer = func(context.Context, bool, quic.ConnectionID) qlogwriter.Trace {
+					return otherTrace
+				}
+			}
+		})
+		address, _ := env.address(testFrontInterfaceA, frontFamilyIpv4)
+		conn, err := env.dialQuic(address, frontPortWhodis, testFrontConnectName, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		handled := env.nextHandled()
+		handshakeTrace := frontQuicHandshakeTraceOf(handled.conn)
+		if handshakeTrace == nil {
+			t.Fatal("the whodis connection has no trace")
+		}
+		if closed := handshakeTrace.closed.Load(); closed == joined {
+			t.Fatalf("joined %t: the trace was closed %t once the handshake completed", joined, closed)
+		}
+		conn.CloseWithError(0, "")
+		testFrontWait(t, handled.conn.Context().Done(), "the whodis connection's close")
+		if joined {
+			// the close is recorded before the connection's context ends
+			if _, closeCount := otherTrace.snapshot(); !handshakeTrace.closed.Load() || closeCount != 1 {
+				t.Fatalf("the joined trace was closed %t, the other %d times, with the connection", handshakeTrace.closed.Load(), closeCount)
+			}
+		}
+	}
+}
+
+// What a whodis trace costs an established connection, on the server of a
+// client streaming 1000-byte writes over plain QUIC on loopback: untraced,
+// and with the front's trace, which ends with the handshake, so the two
+// allocate the same per write.
+func BenchmarkFrontWhodisHandshakeTrace(b *testing.B) {
+	identity := newTestFrontIdentity(b, []string{testFrontConnectName})
+	const alpn = "front-whodis-trace-bench"
+	run := func(b *testing.B, traced bool) {
+		serverConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+		if err != nil {
+			b.Fatal(err)
+		}
+		server := &quic.Transport{Conn: serverConn}
+		defer server.Close()
+		serverConfig := testFrontClientQuicConfig()
+		if traced {
+			traceFrontQuicHandshakes(server)
+			serverConfig.Tracer = newFrontQuicHandshakeTracer(nil)
+		}
+		listener, err := server.Listen(&tls.Config{
+			Certificates: []tls.Certificate{identity.certificate},
+			NextProtos:   []string{alpn},
+		}, serverConfig)
+		if err != nil {
+			b.Fatal(err)
+		}
+		read := make(chan error, 1)
+		go func() {
+			conn, err := listener.Accept(context.Background())
+			if err != nil {
+				read <- err
+				return
+			}
+			stream, err := conn.AcceptStream(context.Background())
+			if err != nil {
+				read <- err
+				return
+			}
+			_, err = io.Copy(io.Discard, stream)
+			read <- err
+		}()
+		clientConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+		if err != nil {
+			b.Fatal(err)
+		}
+		client := &quic.Transport{Conn: clientConn}
+		defer client.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), testFrontProgressTimeout)
+		defer cancel()
+		conn, err := client.Dial(ctx, serverConn.LocalAddr(), &tls.Config{
+			RootCAs:    identity.roots,
+			ServerName: testFrontConnectName,
+			NextProtos: []string{alpn},
+		}, testFrontClientQuicConfig())
+		if err != nil {
+			b.Fatal(err)
+		}
+		defer conn.CloseWithError(0, "")
+		stream, err := conn.OpenStreamSync(ctx)
+		if err != nil {
+			b.Fatal(err)
+		}
+		message := make([]byte, 1000)
+		b.ReportAllocs()
+		b.ResetTimer()
+		for range b.N {
+			if _, err := stream.Write(message); err != nil {
+				b.Fatal(err)
+			}
+		}
+		stream.Close()
+		if err := <-read; err != nil {
+			b.Fatal(err)
+		}
+		b.StopTimer()
+	}
+	b.Run("untraced", func(b *testing.B) {
+		run(b, false)
+	})
+	b.Run("front-trace", func(b *testing.B) {
+		run(b, true)
+	})
 }
 
 // A QUIC v1 datagram with every packet after its first zeroed, so the
