@@ -61,9 +61,11 @@
 // A failure from a product bug stays failing, and the case runs on so one finding does not hide the next. As the case
 // landed (e2e-control-plane-concurrency, 2026-11-22) it failed on two findings, which kept every team device but the
 // Owner's and the Admin's out of it: a Member's own auth key refused 403 (finding A) and a tagged enrollment in a team
-// answered 500 (finding B). Both fixes have landed,
-// team-member-own-auth-key (server c5579f826 to 927a07e0d) and team-tagged-enroll (server c730a0441 to e9b9598d1,
-// QD-1194), and the case now runs what they blocked; e2e-control-plane-verify (2026-11-22) widened it so. Three parts
+// answered 500 (finding B). Both fixes have landed, team-member-own-auth-key (server c5579f826 to 927a07e0d) and
+// team-tagged-enroll (server c730a0441 to e9b9598d1, QD-1194), and the case now runs what they blocked;
+// e2e-control-plane-verify (2026-11-22) widened it so, and ran it and the three cases below seven times (server
+// 3a453b5dd to a130c0cf1): each passed in every run but the first, where this case's budget check took a designed raise
+// of a rev/ object for a double spend before it counted raises (control_plane_concurrency_harness_test.go). Three parts
 // are cases of their own: the chaos, api and a member device restarted mid-save, mid-invite, mid-removal and
 // mid-statement on their stores (TestE2eControlPlaneConcurrencyChaos), a reader starting cold at a base a later config
 // writer signed (TestE2eControlPlaneConcurrencyColdGate, finding C), and the other quotas §20 names under concurrent
