@@ -235,6 +235,13 @@ type WorldSettings struct {
 	// gate_retry_timeout, 60 s in production): a gate's facts load at a network's first preamble, so its first send
 	// is always held once, and the world's sidecars run on real time.
 	SmtpGateRetryTimeout time.Duration
+	// The retry_after smtpedge answers TRY_LATER with when it reached no MX of a domain for now (smtpedge.yml's
+	// mx_retry_timeout, 5 min in production): a send whose dial falls while chaos restarts mxedge's router is held so
+	// long, and the world's sidecars run on real time.
+	SmtpMxRetryTimeout time.Duration
+	// How long smtpedge backs off an MX host whose banner answered 421 (smtpedge.yml's mx_banner_backoff, 5 min in
+	// production), which mxedge's router may answer while chaos restarts it.
+	SmtpMxBannerBackoffTimeout time.Duration
 	// How the world signs the DNS path above its root (world_mail_dns_test.go).
 	Dnssec *worldDnssecSettings
 }
@@ -306,6 +313,8 @@ func DefaultWorldSettings() *WorldSettings {
 		LbProbeSource:               netip.MustParseAddrPort("203.0.113.53:40053"),
 		MxLanSources:                []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")},
 		SmtpGateRetryTimeout:        2 * time.Second,
+		SmtpMxRetryTimeout:          2 * time.Second,
+		SmtpMxBannerBackoffTimeout:  2 * time.Second,
 		Dnssec:                      defaultWorldDnssecSettings(),
 	}
 }

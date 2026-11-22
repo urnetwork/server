@@ -377,6 +377,8 @@ func (self *World) runSmtpedge(ctx context.Context, listeners *worldBlockListene
 	}
 	config.Settings.MxRefusedPrefixes = refused
 	config.Settings.GateRetryTimeout = self.settings.SmtpGateRetryTimeout
+	config.Settings.MxRetryTimeout = self.settings.SmtpMxRetryTimeout
+	config.Settings.MxBannerBackoffTimeout = self.settings.SmtpMxBannerBackoffTimeout
 	world, err := sidecartest.NewMxWorld(sidecartest.DefaultMxWorldSettings())
 	if err != nil {
 		listeners.close()
