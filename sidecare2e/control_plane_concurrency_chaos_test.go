@@ -1,30 +1,41 @@
 //go:build sidecar_e2e && sidecar_pending && sidecar_localstack
 
 // The control-plane case's chaos (control_plane_concurrency_test.go's fifth part; the end-to-end plan's
-// e2e-control-plane-concurrency): api's host and a member's device restarted mid-save and mid-invite, each keeping its
-// stores, on a personal network of ChaosDeviceCount devices and a team of its Owner's devices and an Admin's.
+// e2e-control-plane-concurrency): api's host and a member's device restarted mid-save, mid-invite, mid-removal and
+// mid-statement, each keeping its stores, on a personal network of ChaosDeviceCount devices and a team of its Owner's
+// devices and an Admin's.
 //
 // api's restart is sidecart3's: its sequencer with its caches, its gate cache and the installs over it dropped and
 // built again on the same stores (T3World.RestartApi), at a request a chaos hook in front of api matches
 // (controlPlaneApiChaos, on T3Api.SetApiHook):
 //
 //	acted     api answers the request in full, then restarts, and the answer is lost (502, as an lb whose upstream
-//	          went away before the answer reached it): an invite's accept, a base's publish, a statement's delta
-//	lost      api restarts with the request unseen, which is lost the same way: an invite's accept, a base's publish
+//	          went away before the answer reached it): an invite's create and accept, a member's removal, a base's
+//	          publish, a statement's delta
+//	lost      api restarts with the request unseen, which is lost the same way: an invite's create and accept, a
+//	          member's removal, a base's publish
 //	held      the request waits at the hook until the test releases it, or until its sender gives it up: a device's
-//	          base publish held while that device restarts
+//	          base publish, and a device's own statement, each held while that device restarts
 //
 // A device's restart is T3Device.Restart: its Sidecar and instance end and a new one starts on the same store and key
 // store, keeping its enrollment, keys and anchor, with new key clients and a follower from its kept anchor.
 //
-// What must hold, after each chaos and its retry where the sender has one: nothing acknowledged is lost, and nothing
-// is applied twice. An accept whose answer was lost made one membership, which a retry finds (§7.5: the invite is
-// spent); an accept lost unseen made none, and its retry makes one; a statement whose answer was lost stands once, and
-// the same signed bytes posted again are refused as a replay or answered at the entry already holding them, never a
-// second entry; a base whose answer was lost, or whose publish was lost unseen or given up by a restarting device,
-// leaves every device of the network converged on one pin whose head holds the saved document, the document saved once
-// more planning no change; and a restarted inviting device still signs, its kept identity's MemberAdmit landing once.
-// Each step is bounded by the case's PhaseTimeout.
+// What must hold, after each chaos and its retry where the sender has one: nothing acknowledged is lost, and nothing is
+// applied twice. An accept whose answer was lost made one membership, which a retry finds (§7.5: the invite is spent);
+// an accept lost unseen made none, and its retry makes one; an invite whose answer was lost is a row nobody holds the
+// bearer of, since api keeps only its secret's hash (§7.5), left to expire beside the one the inviter makes again, as
+// the invite route says of a lost answer (model's network_invite_model.go), and the person joins once by the one it
+// holds; a removal whose answer was lost denied the member once, the retry refused as finding no such member, and one
+// lost unseen denies it at the retry, one denial logged either way, and the admin device's MemberRevoke lands once; a
+// statement whose answer was lost stands once, and the same signed bytes posted again are refused as a replay or
+// answered at the entry already holding them, never a second entry; a statement a device's own act signed, its post
+// held while the device restarts, lands once from the act's pending records (§5.9: a signed statement is kept before it
+// is posted, and the device's next generation posts the same bytes again), whether or not the held post is then served;
+// a base whose answer was lost, or whose publish was lost unseen or given up by a restarting device, leaves every
+// device of the network converged on one pin whose head holds the saved document, the document saved once more planning
+// no change; and a restarted inviting device still signs, its kept identity's MemberAdmit landing once. At the end
+// api's write budget reconciles exactly with the objects it wrote across every restart
+// (control_plane_concurrency_harness_test.go). Each step is bounded by the case's PhaseTimeout.
 
 package sidecare2e
 
@@ -35,6 +46,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -47,7 +59,9 @@ import (
 	"github.com/urnetwork/sidecar/protocol"
 	"github.com/urnetwork/sidecar/protocol/bridge"
 
+	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/sidecart3"
 )
 
@@ -162,7 +176,11 @@ type controlPlaneChaosSettings struct {
 	ChaosDeviceCount int
 	// The documents the saves under chaos write: grant 1 and a dns rule each, so each differs.
 	Document func(index int) string
-	// The base case's settings: its team, its grant 1, its retries, bounds and limits.
+	// How long a statement a restarted device's pending records hold may take to land, its new generation posting it
+	// as it starts, and how often the log is read meanwhile: a generation's start has no hook a test reads.
+	PendingSettleTimeout  time.Duration
+	PendingSettleInterval time.Duration
+	// The base case's settings: its team, its grant 1, its retries, bounds, limits and ledgers.
 	Base *controlPlaneSettings
 }
 
@@ -173,7 +191,9 @@ func defaultControlPlaneChaosSettings() *controlPlaneChaosSettings {
 		Document: func(index int) string {
 			return worldAclPolicy(base.GrantOne, fmt.Sprintf(`{"src": ["autogroup:member"], "dst": ["dns:chaos-%d"], "allow": ["admin"]}`, index))
 		},
-		Base: base,
+		PendingSettleTimeout:  60 * time.Second,
+		PendingSettleInterval: 200 * time.Millisecond,
+		Base:                  base,
 	}
 }
 
@@ -185,39 +205,330 @@ func TestE2eControlPlaneConcurrencyChaos(t *testing.T) {
 		defer self.world.Close()
 		world := self.world
 		chaos := newControlPlaneApiChaos(world)
-		ctx, cancel := world.StepContext(t.Context(), base.PhaseTimeout)
-		defer cancel()
-		a, err := world.AddNetwork(ctx, "a", settings.ChaosDeviceCount, nil)
-		if err != nil {
-			world.FailProgress(t, "the personal network", err, nil)
+		// each step its own bound, so a stall in one leaves the next and the ledgers theirs
+		step := func(run func(ctx context.Context)) {
+			ctx, cancel := world.StepContext(t.Context(), base.PhaseTimeout)
+			defer cancel()
+			run(ctx)
 		}
-		team, err := world.AddTeamNetwork(ctx, base.Team)
-		if err != nil {
-			world.FailProgress(t, "the team", err, nil)
-		}
-		self.team = team
-		ownerDevice := team.Owner.Devices()[0]
+		var a *WorldNetwork
+		var ownerDevice *sidecart3.T3Device
+		step(func(ctx context.Context) {
+			var err error
+			a, err = world.AddNetwork(ctx, "a", settings.ChaosDeviceCount, nil)
+			if err != nil {
+				world.FailProgress(t, "the personal network", err, nil)
+			}
+			team, err := world.AddTeamNetwork(ctx, base.Team)
+			if err != nil {
+				world.FailProgress(t, "the team", err, nil)
+			}
+			self.team = team
+			ownerDevice = team.Owner.Devices()[0]
+		})
 
-		// an accept whose answer api lost after it acted: one membership, which the retry finds
-		self.chaosAccept(ctx, chaos, "acted-invitee", controlPlaneChaosActed)
-		// an accept api lost unseen: no membership until the retry makes one
-		self.chaosAccept(ctx, chaos, "lost-invitee", controlPlaneChaosLost)
+		// an accept whose answer api lost after it acted: one membership, which the retry finds; and an accept api
+		// lost unseen: no membership until the retry makes one
+		step(func(ctx context.Context) { self.chaosAccept(ctx, chaos, "acted-invitee", controlPlaneChaosActed) })
+		step(func(ctx context.Context) { self.chaosAccept(ctx, chaos, "lost-invitee", controlPlaneChaosLost) })
 
 		// a statement whose answer api lost after it acted, posted again verbatim
-		self.chaosStatement(ctx, chaos, ownerDevice)
+		step(func(ctx context.Context) { self.chaosStatement(ctx, chaos, ownerDevice) })
 
-		// a base whose answer api lost after it acted, and one api lost unseen, both by the network's bootstrapping
-		// device: a base another config writer signs is refused by every reader that starts at it, api's own gate after
-		// its restart among them (TestE2eControlPlaneConcurrencyColdGate), which would hide what the chaos shows
-		self.chaosSave(ctx, chaos, a, a.Clients[0], settings.Document(1), controlPlaneChaosActed)
-		self.chaosSave(ctx, chaos, a, a.Clients[0], settings.Document(2), controlPlaneChaosLost)
+		// The steps on a run in an order finding C asks: a base another config writer than the bootstrapping device
+		// signs is refused by every reader that starts at it, api's own gate after its restart among them
+		// (TestE2eControlPlaneConcurrencyColdGate), so no api restart may follow such a base, or it hides what the
+		// chaos shows. The saves under api's chaos are the bootstrapping device's, and the restart mid-save, whose
+		// device then signs a base, runs after the last restart of api.
+
+		// a base whose answer api lost after it acted, and one api lost unseen
+		step(func(ctx context.Context) {
+			self.chaosSave(ctx, chaos, a, a.Clients[0], settings.Document(1), controlPlaneChaosActed)
+		})
+		step(func(ctx context.Context) {
+			self.chaosSave(ctx, chaos, a, a.Clients[0], settings.Document(2), controlPlaneChaosLost)
+		})
+
+		// the network's bootstrapping device restarted while api holds its own act's SidecarAdmit
+		step(func(ctx context.Context) { self.chaosRestartMidStatement(ctx, chaos, a, a.Clients[0], settings) })
+
+		// an invite's create whose answer api lost after it acted, and one api lost unseen
+		step(func(ctx context.Context) { self.chaosInviteCreate(ctx, chaos, "acted-invite", controlPlaneChaosActed) })
+		step(func(ctx context.Context) { self.chaosInviteCreate(ctx, chaos, "lost-invite", controlPlaneChaosLost) })
+
+		// a member's removal whose answer api lost after it acted, and one api lost unseen
+		step(func(ctx context.Context) { self.chaosRemove(ctx, chaos, "acted-removal", controlPlaneChaosActed) })
+		step(func(ctx context.Context) { self.chaosRemove(ctx, chaos, "lost-removal", controlPlaneChaosLost) })
 
 		// a device restarted while api holds its base's publish
-		self.chaosRestartMidSave(ctx, chaos, a, a.Clients[1], settings.Document(3))
+		step(func(ctx context.Context) {
+			self.chaosRestartMidSave(ctx, chaos, a, a.Clients[1], settings.Document(3))
+		})
 
 		// the inviting device restarted between its invite and its MemberAdmit
-		self.chaosRestartMidInvite(ctx, ownerDevice)
+		step(func(ctx context.Context) { self.chaosRestartMidInvite(ctx, ownerDevice) })
+
+		// api's write budget across every restart, exactly
+		step(func(ctx context.Context) { controlPlaneCheckApiBudget(t, ctx, world, base.Ledgers) })
 	})
+}
+
+// A person joins the team: invited by the first Owner's device, accepted with their own sign-in and admitted by
+// MemberAdmit, with no device of their own.
+func (self *controlPlaneCase) joinTeam(ctx context.Context, name string) (*WorldTeamMember, error) {
+	team := self.team
+	ownerDevice := team.Owner.Devices()[0]
+	person, err := self.world.NewPerson(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	invite, err := team.Invite(ctx, team.Owner, ownerDevice, person.Email, bridge.MemberRole_MEMBER_ROLE_MEMBER)
+	if err != nil {
+		return nil, fmt.Errorf("%s's invite: %w", name, err)
+	}
+	member, err := team.Accept(ctx, person, invite)
+	if err != nil {
+		return nil, fmt.Errorf("%s's accept: %w", name, err)
+	}
+	if _, err := team.AdmitMember(ctx, ownerDevice, member); err != nil {
+		return nil, fmt.Errorf("%s's MemberAdmit: %w", name, err)
+	}
+	return member, nil
+}
+
+// An invite's create under chaos kind at api (the file's header): the inviter, its answer lost, invites again, and the
+// person accepts the invite it holds and joins once. acted leaves api's first invite unspent beside it, a row nobody
+// holds the bearer of, left to expire; lost leaves none but the retry's, which the accept spends.
+func (self *controlPlaneCase) chaosInviteCreate(ctx context.Context, chaos *controlPlaneApiChaos, name string, kind int) {
+	t := self.t
+	team := self.team
+	ownerDevice := team.Owner.Devices()[0]
+	person, err := self.world.NewPerson(ctx, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// the invites api made under the chaos: acted's one, lost's none
+	made := 0
+	if kind == controlPlaneChaosActed {
+		made = 1
+	}
+	arm := chaos.arm(http.MethodPost+" /network/member-invite", kind)
+	if _, err := team.Invite(ctx, team.Owner, ownerDevice, person.Email, bridge.MemberRole_MEMBER_ROLE_MEMBER); err == nil {
+		t.Errorf("%s's invite answered through the chaos", name)
+	}
+	if err := <-arm.done; err != nil {
+		t.Errorf("api's restart at %s's invite: %v", name, err)
+	}
+	inviteIds, err := worldNetworkInviteIds(ctx, team.NetworkId, person.Email)
+	if err != nil {
+		t.Errorf("%s's invites: %v", name, err)
+		return
+	}
+	if len(inviteIds) != made {
+		t.Errorf("api holds %d invites of %s after an invite under chaos (kind %d), not %d", len(inviteIds), name, kind, made)
+	}
+	invite, err := team.Invite(ctx, team.Owner, ownerDevice, person.Email, bridge.MemberRole_MEMBER_ROLE_MEMBER)
+	if err != nil {
+		t.Errorf("%s's invite again after api's restart: %v", name, err)
+		return
+	}
+	if again, err := worldNetworkInviteIds(ctx, team.NetworkId, person.Email); err != nil || len(again) != made+1 || !slices.Contains(again, server.Id(invite.InviteId)) {
+		t.Errorf("api holds invites %v of %s after the invite again, not the %d before and the retry's %s (%v)", again, name, made, invite.InviteId, err)
+	}
+	member, err := team.Accept(ctx, person, invite)
+	if err != nil {
+		t.Errorf("%s's accept of the invite it holds: %v", name, err)
+		return
+	}
+	if memberIds, err := worldNetworkMembersOfUser(ctx, team.NetworkId, person.UserId); err != nil || len(memberIds) != 1 {
+		t.Errorf("%s holds %d memberships of the team after one accept (%v)", name, len(memberIds), err)
+	}
+	// the accept spent its own invite; acted's lost one stays unspent, its bearer held by nobody
+	left, err := worldNetworkInviteIds(ctx, team.NetworkId, person.Email)
+	if err != nil || len(left) != made || slices.Contains(left, server.Id(invite.InviteId)) {
+		t.Errorf("api holds invites %v of %s after the accept, not the %d whose answer was lost (%v)", left, name, made, err)
+	}
+	if _, err := team.AdmitMember(ctx, ownerDevice, member); err != nil {
+		t.Errorf("%s's MemberAdmit after api's restart: %v", name, err)
+		return
+	}
+	for _, device := range team.LiveDevices() {
+		if device.Follower().VerifiedState().Member(member.MemberId) == nil {
+			t.Errorf("%s's state names no member %s after the chaos", device.Name, name)
+		}
+	}
+	t.Logf("the chaos at %s's invite (kind %d): %d invites left unspent, one membership %s, admitted", name, kind, len(left), member.MemberId)
+}
+
+// A member's removal under chaos kind at api (the file's header): acted denied the member before its answer was lost,
+// so the remover's retry is refused as finding no such member; lost denied nothing, so the retry denies it. Either way
+// api ran one denial, its row gone and one member.remove logged, and the admin device's MemberRevoke lands once, after
+// which no device names the member.
+func (self *controlPlaneCase) chaosRemove(ctx context.Context, chaos *controlPlaneApiChaos, name string, kind int) {
+	t := self.t
+	team := self.team
+	ownerDevice := team.Owner.Devices()[0]
+	member, err := self.joinTeam(ctx, name)
+	if err != nil {
+		t.Errorf("the member the removal takes: %v", err)
+		return
+	}
+	held := func() (bool, error) {
+		roles, err := worldNetworkMemberRoles(ctx, team.NetworkId)
+		_, ok := roles[server.Id(member.MemberId)]
+		return ok, err
+	}
+	arm := chaos.arm(http.MethodPost+" /network/member-remove", kind)
+	if err := team.DenyMember(ctx, team.Owner, member); err == nil {
+		t.Errorf("%s's removal answered through the chaos", name)
+	}
+	if err := <-arm.done; err != nil {
+		t.Errorf("api's restart at %s's removal: %v", name, err)
+	}
+	if stands, err := held(); err != nil || stands != (kind == controlPlaneChaosLost) {
+		t.Errorf("api holds %s's membership: %t after its removal under chaos (kind %d) (%v)", name, stands, kind, err)
+	}
+	retryErr := team.DenyMember(ctx, team.Owner, member)
+	switch kind {
+	case controlPlaneChaosActed:
+		// the first removal denied the member; the retry finds none
+		if retryErr == nil {
+			t.Errorf("%s's removal again denied a member the first removal, its answer lost, had denied", name)
+		}
+	default:
+		if retryErr != nil {
+			t.Errorf("%s's removal again, the first lost unseen: %v", name, retryErr)
+		}
+	}
+	if stands, err := held(); err != nil || stands {
+		t.Errorf("api still holds %s's membership after its removal and the retry (%v)", name, err)
+	}
+	if count, err := worldNetworkAdminEventCount(ctx, team.NetworkId, model.AdminEventActionMemberRemove, server.Id(member.MemberId)); err != nil || count != 1 {
+		t.Errorf("api logged %d removals of %s after one removal under chaos and its retry, not one (%v)", count, name, err)
+	}
+	client := ownerDevice.Follower().Client()
+	if err := client.CatchUp(ctx); err != nil {
+		t.Errorf("%s's catch-up: %v", ownerDevice.Name, err)
+		return
+	}
+	before := client.Pin().GetVersion()
+	pin, err := team.RevokeMember(ctx, ownerDevice, member)
+	if err != nil {
+		t.Errorf("%s's MemberRevoke after its removal under chaos: %v", name, err)
+		return
+	}
+	if pin.GetVersion() != before+1 {
+		t.Errorf("%s's MemberRevoke landed at n %d, the log at n %d before it", name, pin.GetVersion(), before)
+	}
+	for _, device := range team.LiveDevices() {
+		if device.Follower().VerifiedState().Member(member.MemberId) != nil {
+			t.Errorf("%s's state still names %s after its MemberRevoke", device.Name, name)
+		}
+	}
+	t.Logf("the chaos at %s's removal (kind %d): one denial, the retry answering %v, its MemberRevoke at n %d", name, kind, retryErr, pin.GetVersion())
+}
+
+// A new device of network's owner admitted by admitter, a device of the same member, through its own act (OpenAdmission
+// and DecideApproval, as `ur approve` does), the act's SidecarAdmit held at api while admitter restarts on its store
+// (the file's header): the restarted device's new generation posts the same signed bytes from its pending records,
+// which land while the first post is still held; then the held post is released, and the log holds the admission once
+// whether api serves it, answering it at the entry holding it, or its sender gave it up.
+func (self *controlPlaneCase) chaosRestartMidStatement(ctx context.Context, chaos *controlPlaneApiChaos, network *WorldNetwork, admitter *sidecart3.T3Device, settings *controlPlaneChaosSettings) {
+	t := self.t
+	devices, err := network.AddSidecarsWith(ctx, &sidecart3.T3EnrollArgs{Count: 1, Name: network.Name + "-mid"})
+	if err != nil {
+		t.Errorf("the device the admission takes: %v", err)
+		return
+	}
+	device := devices[0]
+	identity := device.Sidecar().Identity()
+	client := admitter.Follower().Client()
+	if err := client.CatchUp(ctx); err != nil {
+		t.Errorf("%s's catch-up: %v", admitter.Name, err)
+		return
+	}
+	before := client.Pin().GetVersion()
+	running := admitter.Sidecar()
+	approvalId, err := running.OpenAdmission(&sidecar.SidecarAdmissionRequest{
+		SidecarId:         identity.SidecarId,
+		MemberId:          network.MemberId(),
+		IdentityPublicKey: identity.IdentityPublicKey,
+	})
+	if err != nil {
+		t.Errorf("%s's admission item on %s: %v", device.Name, admitter.Name, err)
+		return
+	}
+	arm := chaos.arm(http.MethodPost+" /network/config/delta", controlPlaneChaosHeld)
+	decided := make(chan error, 1)
+	go func() {
+		decided <- running.DecideApproval(ctx, approvalId, sidecar.SidecarDecisionApprove, sidecar.SidecarActConfirmed, nil)
+	}()
+	select {
+	case <-arm.taken:
+	case err := <-decided:
+		chaos.disarm()
+		t.Errorf("%s's admission of %s ended before its statement reached api: %v", admitter.Name, device.Name, err)
+		return
+	case <-ctx.Done():
+		chaos.disarm()
+		t.Errorf("%s's admission of %s never reached api: %v", admitter.Name, device.Name, ctx.Err())
+		return
+	}
+	restartErr := admitter.Restart(ctx)
+	// the restarted device's pending post lands while the first post is held, unless its sender gave it up
+	var landedErr error
+	if restartErr == nil {
+		landedErr = self.awaitAdmitted(ctx, admitter, identity.SidecarId, settings)
+	}
+	close(arm.release)
+	heldErr := <-arm.done
+	decideErr := <-decided
+	if restartErr != nil {
+		t.Errorf("%s's restart mid-statement: %v", admitter.Name, restartErr)
+		return
+	}
+	if landedErr != nil {
+		t.Errorf("%s's admission of %s, its act's post held while %s restarted (the act answered %v, its held post %v), never landed from the pending records: %v", admitter.Name, device.Name, admitter.Name, decideErr, heldErr, landedErr)
+		return
+	}
+	client = admitter.Follower().Client()
+	if err := client.CatchUp(ctx); err != nil {
+		t.Errorf("%s's catch-up after the held post's end: %v", admitter.Name, err)
+		return
+	}
+	after := client.Pin().GetVersion()
+	if after != before+1 {
+		t.Errorf("one admission, its post held while %s restarted (the act answered %v, its held post %v), took %s's log from n %d to %d, not one entry", admitter.Name, decideErr, heldErr, network.Name, before, after)
+	}
+	if err := network.Follow(ctx, devices); err != nil {
+		t.Errorf("%s's follow after its admission under chaos: %v", device.Name, err)
+		return
+	}
+	if divergent := controlPlaneDivergent(network.LiveDevices()); 0 < len(divergent) {
+		t.Errorf("%s's devices did not converge after the restart mid-statement: %s", network.Name, strings.Join(divergent, "; "))
+	}
+	t.Logf("%s restarted mid-statement (the act answered %v, its held post %v): %s admitted once, n %d to %d", admitter.Name, decideErr, heldErr, device.Name, before, after)
+}
+
+// Waits until device's follower, caught up to the log's tip, holds sidecarId admitted, within PendingSettleTimeout.
+func (self *controlPlaneCase) awaitAdmitted(ctx context.Context, device *sidecart3.T3Device, sidecarId sidecar.Id, settings *controlPlaneChaosSettings) error {
+	ctx, cancel := context.WithTimeout(ctx, settings.PendingSettleTimeout)
+	defer cancel()
+	for {
+		client := device.Follower().Client()
+		if client == nil {
+			return fmt.Errorf("%s's follower no longer stands", device.Name)
+		}
+		err := client.CatchUp(ctx)
+		if err == nil && device.Follower().VerifiedState().Sidecar(sidecarId) != nil {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("the log at n %d admits no %s: %v (%w)", client.Pin().GetVersion(), sidecarId, err, ctx.Err())
+		case <-time.After(settings.PendingSettleInterval):
+		}
+	}
 }
 
 // An invitee's accept under chaos kind at api (the file's header): exactly one membership of the person's after the

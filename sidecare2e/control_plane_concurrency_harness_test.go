@@ -9,7 +9,12 @@
 //   - refusals: an enrollment's answer as the sidecar's api client reads it (its status and code), a bare sidecar
 //     enrolled from an auth key a test made, and auth keys made through api on a person's credential;
 //   - the exact-head races: rounds of every racer previewing at one verified head and all saving at once, as the evs
-//     case's third phase races them (evs_concurrency_test.go), here across the networks of the case at once.
+//     case's third phase races them (evs_concurrency_test.go), here across the networks of the case at once;
+//   - api's write budget (§11.13, evsservice's reports) against the objects api wrote: every P0 byte api's process
+//     reported against the first metadata cluster is an object it holds under §7.9's and §7.10's prefixes, priced as a
+//     create, by kind (log for proj/ and projrows/, revocation for rev/), and it reported no P1, P2 or credit; read
+//     where the objects listed before and after the report agree, since a report is a level at its time, as the dns
+//     and certificates case reads it (dns_certs_concurrency_ledgers_test.go).
 //
 // Safe for concurrent use.
 
@@ -22,16 +27,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"sort"
 	"strings"
 	"sync"
+	"testing"
 	"time"
 
 	"google.golang.org/protobuf/proto"
 
 	"github.com/urnetwork/sidecar"
+	"github.com/urnetwork/sidecar/evsservice"
 	"github.com/urnetwork/sidecar/protocol"
 	"github.com/urnetwork/sidecar/protocol/bridge"
 
@@ -484,4 +492,134 @@ func (self *controlPlaneExchange) grant(ctx context.Context, device *sidecart3.T
 		case <-time.After(self.retry.Interval):
 		}
 	}
+}
+
+// How the ledgers at a case's end are read (QD-702).
+type controlPlaneLedgerSettings struct {
+	// Objects one LIST page of the first metadata cluster asks for.
+	ObjectPageCount int
+	// How many times the objects are listed around a ledger read before the check gives up on their standing still:
+	// a read whose objects moved between the two lists is read again.
+	BudgetReadTryCount int
+}
+
+func defaultControlPlaneLedgerSettings() *controlPlaneLedgerSettings {
+	return &controlPlaneLedgerSettings{
+		ObjectPageCount:    1000,
+		BudgetReadTryCount: 5,
+	}
+}
+
+// The key prefixes of the objects api's process writes on the first metadata cluster, and the P0 kind it spends each
+// one's PUT as: §7.9's log entries and a base's rows (model.ConfigLogSequencer), and §7.10's revocation records
+// (model.SidecarRevStore), the member removals' among them.
+func controlPlaneApiObjectKinds() map[string]sidecar.WriteP0Kind {
+	return map[string]sidecar.WriteP0Kind{
+		"proj/":     sidecar.WriteP0KindLog,
+		"projrows/": sidecar.WriteP0KindLog,
+		"rev/":      sidecar.WriteP0KindRevocation,
+	}
+}
+
+// Every object under controlPlaneApiObjectKinds' prefixes on the world's first metadata cluster, its byte count by
+// key, read a page of pageCount at a time.
+func controlPlaneApiObjects(ctx context.Context, world *World, pageCount int) (map[string]int64, error) {
+	cluster, err := world.T3().Host().Blobs.FirstCluster()
+	if err != nil {
+		return nil, err
+	}
+	objects := map[string]int64{}
+	for prefix := range controlPlaneApiObjectKinds() {
+		startAfter := ""
+		for {
+			page, more, err := cluster.List(ctx, prefix, startAfter, pageCount)
+			if err != nil {
+				return nil, fmt.Errorf("the objects under %s: %w", prefix, err)
+			}
+			for _, object := range page {
+				objects[object.Key] = object.ByteCount
+				startAfter = object.Key
+			}
+			if !more || len(page) == 0 {
+				break
+			}
+		}
+	}
+	return objects, nil
+}
+
+// api's write budget against the objects it wrote, exactly (the file's header): the P0 bytes api's process reported by
+// kind equal what the objects it holds price at as created, and it reported nothing else.
+func controlPlaneCheckApiBudget(t testing.TB, ctx context.Context, world *World, settings *controlPlaneLedgerSettings) {
+	t.Helper()
+	cluster, err := world.T3().Host().Blobs.FirstCluster()
+	if err != nil {
+		t.Errorf("the first metadata cluster: %v", err)
+		return
+	}
+	prices := evsservice.DefaultPriceTable4KiB()
+	kinds := controlPlaneApiObjectKinds()
+	disagreements := []string{}
+	for range settings.BudgetReadTryCount {
+		before, err := controlPlaneApiObjects(ctx, world, settings.ObjectPageCount)
+		if err != nil {
+			t.Errorf("api's objects: %v", err)
+			return
+		}
+		ledgers, err := world.ReadLedgers(ctx, time.Now())
+		if err != nil {
+			t.Errorf("the ledgers: %v", err)
+			return
+		}
+		after, err := controlPlaneApiObjects(ctx, world, settings.ObjectPageCount)
+		if err != nil {
+			t.Errorf("api's objects: %v", err)
+			return
+		}
+		if !maps.Equal(before, after) {
+			disagreements = append(disagreements, fmt.Sprintf("%d objects, then %d", len(before), len(after)))
+			continue
+		}
+		want := map[sidecar.WriteP0Kind]int64{}
+		objectCounts := map[sidecar.WriteP0Kind]int{}
+		for key, byteCount := range after {
+			for prefix, kind := range kinds {
+				if !strings.HasPrefix(key, prefix) {
+					continue
+				}
+				price, err := prices.Price(evsservice.WriteOperation{Kind: evsservice.WriteOperationCreate, ObjectByteCount: byteCount, Count: 1})
+				if err != nil {
+					t.Errorf("the price of %s's %d bytes: %v", key, byteCount, err)
+					return
+				}
+				want[kind] += price
+				objectCounts[kind] += 1
+			}
+		}
+		var report *evsservice.WriteBudgetReport
+		for _, candidate := range ledgers.BudgetReports[cluster.ClusterId()] {
+			if candidate.ProcessId == ledgers.ApiProcessId {
+				report = candidate
+			}
+		}
+		if ledgers.ApiProcessId == "" || report == nil {
+			t.Errorf("api's process %q holds no budget report of %s", ledgers.ApiProcessId, cluster.ClusterId())
+			return
+		}
+		got := map[sidecar.WriteP0Kind]int64{}
+		for kind, byteCount := range report.P0ByteCounts {
+			if byteCount != 0 {
+				got[kind] = byteCount
+			}
+		}
+		if !maps.Equal(got, want) {
+			t.Errorf("api's process reported P0 %v against %s, and the objects it holds there price at %v as created (%v objects by kind): a write spent and never made, or made and never spent", got, cluster.ClusterId(), want, objectCounts)
+		}
+		if report.P1ByteCount != 0 || report.UnfundedByteCount != 0 || report.FundedByteCount != 0 || report.CreditByteCount != 0 {
+			t.Errorf("api's process reported P1 %d, P2 %d unfunded and %d funded, and credit %d, where all it writes is P0", report.P1ByteCount, report.UnfundedByteCount, report.FundedByteCount, report.CreditByteCount)
+		}
+		t.Logf("api's write budget: P0 %v against %s for %v objects", got, cluster.ClusterId(), objectCounts)
+		return
+	}
+	t.Errorf("api's objects never stood still across a budget report: %v", disagreements)
 }

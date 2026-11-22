@@ -28,9 +28,9 @@
 //     racer's document landed once; every device of each network on one pin; and the right the first winning document
 //     took away (§8.5's implicit document gave every member device admin on every general repo, and every racer's
 //     document holds grant 1 alone) refused to the device that held it once evs's gate holds the base, within §8.9's
-//     bound. The config document's other saves (ServiceSettings, which the config writer re-reads and retries on a
-//     race) are not raced: the world's devices run no config writer, which ur daemon composes, only the confirmed ACL
-//     ref, so SaveServiceSettings refuses on every one of them
+//     bound, and at the token exchange for gkm (invalid_scope). The config document's other saves (ServiceSettings,
+//     which the config writer re-reads and retries on a race) are not raced: the world's devices run no config writer,
+//     which ur daemon composes, only the confirmed ACL ref, so SaveServiceSettings refuses on every one of them
 //   - team churn, in bursts at once: ChurnInviteCount new members invited by the Owner and the Admin, accepted and
 //     admitted; a setup member removed (member-remove, then MemberRevoke) and re-invited, rejoining under a new
 //     member_id; the Admin's last device revoked; the Owner's vault shared with the Admin's first device by EvsShare
@@ -45,11 +45,14 @@
 //     the world's devices wire no receipt gate, so evs refuses that read on each of them (ErrEvsReceiptGate)
 //   - limits: config_admissions in b set to its admissions plus AdmissionHeadroom, then AdmissionHeadroom plus
 //     AdmissionOverflow tagged admissions filed at once: exactly the headroom lands, the rest refused by that limit
+//   - ledgers: api's write budget reconciled exactly with the objects api wrote for every statement, base and
+//     removal of the case (control_plane_concurrency_harness_test.go)
 //
-// A failure from a product bug stays failing, and the case runs on so one finding does not hide the next. The chaos
-// phase, api and a member device restarted mid-save and mid-invite on their stores, is a case of its own
-// (TestE2eControlPlaneConcurrencyChaos). Run through the build's wrapper: -tags 'sidecar_e2e sidecar_pending
-// sidecar_localstack'.
+// A failure from a product bug stays failing, and the case runs on so one finding does not hide the next. Two parts
+// are cases of their own: the chaos, api and a member device restarted mid-save, mid-invite, mid-removal and
+// mid-statement on their stores (TestE2eControlPlaneConcurrencyChaos), and the other quotas §20 names under
+// concurrent use, evs storage, sidecar_clients and dns_entries (TestE2eControlPlaneConcurrencyQuota). Run through the
+// build's wrapper: -tags 'sidecar_e2e sidecar_pending sidecar_localstack'.
 
 package sidecare2e
 
@@ -118,6 +121,8 @@ type controlPlaneSettings struct {
 	Retry *controlPlaneRetrySettings
 	// The team's settings.
 	Team *WorldTeamSettings
+	// How the ledgers at the end are read.
+	Ledgers *controlPlaneLedgerSettings
 	// The bursts' pauses and each phase's bound.
 	Bursts       *WorldBurstSettings
 	PhaseTimeout time.Duration
@@ -153,6 +158,7 @@ func defaultControlPlaneSettings() *controlPlaneSettings {
 		RotationSettleInterval: 250 * time.Millisecond,
 		Retry:                  &controlPlaneRetrySettings{Timeout: 2 * time.Minute, Interval: 500 * time.Millisecond},
 		Team:                   team,
+		Ledgers:                defaultControlPlaneLedgerSettings(),
 		Bursts:                 DefaultWorldBurstSettings(),
 		PhaseTimeout:           4 * time.Minute,
 	}
@@ -207,7 +213,15 @@ func TestE2eControlPlaneConcurrency(t *testing.T) {
 		self.saves()
 		self.churn()
 		self.limits()
+		self.ledgers()
 	})
+}
+
+// The ledgers phase (the file's header).
+func (self *controlPlaneCase) ledgers() {
+	ctx, cancel := self.world.StepContext(self.t.Context(), self.settings.PhaseTimeout)
+	defer cancel()
+	controlPlaneCheckApiBudget(self.t, ctx, self.world, self.settings.Ledgers)
 }
 
 // The world, with no network yet, its Community limits taking the case's base rate and its enrollments all at once.
@@ -703,11 +717,18 @@ func (self *controlPlaneCase) saves() {
 		t.Logf("%s's races: %d rounds in %s", race.network.Name, len(race.rounds), time.Since(raceStart))
 	}
 
-	// the right the first winning document took away: refused to its holder once evs's gate holds the base
+	// the right the first winning document took away: refused to its holder once evs's gate holds the base, and at the
+	// token exchange for gkm, whose token for the repo's keys the holder no longer takes
 	if err := self.awaitReadRefused(ctx, reader, repoId, "implicit.txt"); err != nil {
 		t.Errorf("%s still reads a's general repo after a document holding grant 1 alone landed: %v", reader.Name, err)
 	} else {
 		t.Logf("the saves: %s's implicit read of a's general repo is refused once the races' bases landed", reader.Name)
+	}
+	repoRead := []string{controlPlaneRepoScope(repoId, "r")}
+	if granted, err := controlPlaneGrantedScopes(ctx, world, reader, WorldBlockGkm, repoRead); err == nil {
+		t.Errorf("%s still takes a gkm token holding %v of a's general repo after a document holding grant 1 alone landed", reader.Name, granted)
+	} else if _, code := controlPlaneApiRefusal(err); code != "invalid_scope" {
+		t.Errorf("%s's gkm exchange for a's general repo after the races was refused %v, not invalid_scope", reader.Name, err)
 	}
 
 	// every device of each network on one pin
