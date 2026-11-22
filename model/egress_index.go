@@ -209,6 +209,24 @@ type EgressIndexSettings struct {
 	// (publishProviderCountryFloor). Neither holds up its pass: the export
 	// keeps its pages, and the counts count the decisions alone. Code only.
 	CountryFloorRedisTimeout time.Duration
+	// Whether the score export writes its score pages in the typed format
+	// (network_client_score_page_codec.go) instead of gob. Readers from
+	// CPUOPT8 on (api, alt, proxy, mcp and the taskworker) read both, but a
+	// reader from before fails every typed page it reads, so this waits
+	// until every reader runs CPUOPT8 (CPUOPT8.md, "Rollout"). The
+	// taskworker's export reads it at the start of each pass, so a change is
+	// a config release and a taskworker restart, and turning it off is the
+	// rollback: the next pass writes gob again. False, the default, writes
+	// gob. `typed_score_pages` in the egress_index block.
+	TypedScorePages bool
+}
+
+// The format the score export writes its pages in.
+func (self *EgressIndexSettings) scorePageFormat() clientScorePageFormat {
+	if self.TypedScorePages {
+		return clientScorePageFormatTyped
+	}
+	return clientScorePageFormatGob
 }
 
 // The most a connect client adds to a provider's tier from what it sees
@@ -290,7 +308,8 @@ type egressIndexSettingsBlock struct {
 	RankModernFirst      *bool          `yaml:"rank_modern_first"`
 	LocationFallback     *bool          `yaml:"location_fallback"`
 	// non-positive turns the country floor off
-	CountryFloorProviders *int `yaml:"country_floor_providers"`
+	CountryFloorProviders *int  `yaml:"country_floor_providers"`
+	TypedScorePages       *bool `yaml:"typed_score_pages"`
 }
 
 // Whether this process has logged that its provider.yml still carries the
@@ -575,6 +594,9 @@ func decodeEgressIndexSettings() (*EgressIndexSettings, string) {
 	}
 	if overrides.LocationFallback != nil {
 		settings.LocationFallback = *overrides.LocationFallback
+	}
+	if overrides.TypedScorePages != nil {
+		settings.TypedScorePages = *overrides.TypedScorePages
 	}
 	return settings, modernGateFailure
 }

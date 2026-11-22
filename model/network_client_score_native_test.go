@@ -14,6 +14,11 @@ import (
 // Fixture encoding uses the same bounded page contract as the publisher;
 // callers choose facets explicitly to make late-page order deterministic.
 func nativeTestFacets(t testing.TB, scores map[ipFamilyFacet][]*ClientScore) map[ipFamilyFacet]clientScoreFacetPayload {
+	return nativeTestFacetsInFormat(t, scores, clientScorePageFormatGob)
+}
+
+// nativeTestFacets with its pages in format.
+func nativeTestFacetsInFormat(t testing.TB, scores map[ipFamilyFacet][]*ClientScore, format clientScorePageFormat) map[ipFamilyFacet]clientScoreFacetPayload {
 	t.Helper()
 	result := map[ipFamilyFacet]clientScoreFacetPayload{}
 	for _, facet := range ipFamilyFacets {
@@ -21,7 +26,11 @@ func nativeTestFacets(t testing.TB, scores map[ipFamilyFacet][]*ClientScore) map
 		counts := []int{}
 		for start := 0; start < len(scores[facet]); start += ClientScoreSampleCount {
 			page := scores[facet][start:min(start+ClientScoreSampleCount, len(scores[facet]))]
-			pages = append(pages, gobEncodeForTest(t, page))
+			if format == clientScorePageFormatGob {
+				pages = append(pages, gobEncodeForTest(t, page))
+			} else {
+				pages = append(pages, encodeClientScorePage(updateClientScoresPhaseMetrics, format, page))
+			}
 			counts = append(counts, len(page))
 		}
 		result[facet] = clientScoreFacetPayload{
@@ -47,6 +56,12 @@ func nativeTestScore(mode RankMode, facet ipFamilyFacet) *ClientScore {
 // native pages contain only the requested mode's admitted native members.
 func nativeTestPublishLocation(t testing.TB, location server.Id, mode RankMode, scores map[ipFamilyFacet][]*ClientScore) {
 	t.Helper()
+	nativeTestPublishLocationInFormat(t, location, mode, scores, clientScorePageFormatGob)
+}
+
+// nativeTestPublishLocation with its pages in format.
+func nativeTestPublishLocationInFormat(t testing.TB, location server.Id, mode RankMode, scores map[ipFamilyFacet][]*ClientScore, format clientScorePageFormat) {
+	t.Helper()
 	ctx := t.Context()
 	natives := map[ipFamilyFacet][]*ClientScore{}
 	for facet, members := range scores {
@@ -58,7 +73,7 @@ func nativeTestPublishLocation(t testing.TB, location server.Id, mode RankMode, 
 		}
 	}
 	server.Redis(ctx, func(r server.RedisClient) {
-		legacy := nativeTestFacets(t, scores)
+		legacy := nativeTestFacetsInFormat(t, scores, format)
 		pipe := r.Pipeline()
 		for _, facet := range ipFamilyFacets {
 			payload := legacy[facet]
@@ -75,7 +90,7 @@ func nativeTestPublishLocation(t testing.TB, location server.Id, mode RankMode, 
 			t.Fatal(err)
 		}
 		key := clientScoreNativeKey(clientScoreLocationCountsKey(false, mode, location, server.Id{}))
-		if err := writeClientScoreNativeSnapshot(ctx, r, key, time.Hour, nativeTestFacets(t, natives)); err != nil {
+		if err := writeClientScoreNativeSnapshot(ctx, r, key, time.Hour, nativeTestFacetsInFormat(t, natives, format)); err != nil {
 			t.Fatal(err)
 		}
 		for _, caller := range countryCodeLocationIds() {
