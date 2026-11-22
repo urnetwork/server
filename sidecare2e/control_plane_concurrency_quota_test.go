@@ -141,7 +141,7 @@ func TestE2eControlPlaneConcurrencyQuota(t *testing.T) {
 		self.storage()
 		ctx, cancel := self.world.StepContext(t.Context(), settings.PhaseTimeout)
 		defer cancel()
-		controlPlaneCheckApiBudget(t, ctx, self.world, settings.Base.Ledgers)
+		controlPlaneCheckApiBudget(t, ctx, self.world, settings.Base.Ledgers, self.revWritesAtStart)
 	})
 }
 

@@ -674,6 +674,8 @@ type churnLoadCase struct {
 	mailMissing map[string]bool
 	// the blog's chaos windows of the round under way, which its visit checks read
 	blogChaos *bloggerChaos
+	// the rev/ writer's writes in this process as the world began, which api's write budget is read against
+	revWritesAtStart *controlPlaneRevWrites
 }
 
 // See the file's header.
@@ -697,6 +699,10 @@ func runChurnLoad(t testing.TB, settings *churnLoadSettings) {
 		t.Fatalf("a team of %d Owner devices leaves device chaos no device beside the one that admits", settings.Team.OwnerDeviceCount)
 	}
 	t.Logf("the churn load: seed %d, %d rounds", settings.Seed, settings.RoundCount)
+	revWritesAtStart, err := controlPlaneRevWriteCounts()
+	if err != nil {
+		t.Fatalf("the rev/ writer's writes: %v", err)
+	}
 	dnsSettings := *settings.Dns
 	dnsSettings.CaseTimeout = settings.CaseTimeout
 	dnsSettings.CertDeviceCount = settings.CertDeviceCount
@@ -738,20 +744,21 @@ func runChurnLoad(t testing.TB, settings *churnLoadSettings) {
 		t.Fatal(err)
 	}
 	self := &churnLoadCase{
-		t:              t,
-		settings:       settings,
-		stack:          stack,
-		world:          world,
-		origin:         origin,
-		reconciler:     reconciler,
-		sampler:        sampler,
-		worker:         worker,
-		socketCalls:    socketCalls,
-		mailLedger:     newMailLedger(),
-		kindCounts:     map[string]int{},
-		retryCounts:    map[string]int{},
-		currentCertIds: map[*dnsCertsPublisher]sidecar.Id{},
-		mailMissing:    map[string]bool{},
+		t:                t,
+		settings:         settings,
+		stack:            stack,
+		world:            world,
+		origin:           origin,
+		reconciler:       reconciler,
+		sampler:          sampler,
+		worker:           worker,
+		socketCalls:      socketCalls,
+		mailLedger:       newMailLedger(),
+		kindCounts:       map[string]int{},
+		retryCounts:      map[string]int{},
+		currentCertIds:   map[*dnsCertsPublisher]sidecar.Id{},
+		mailMissing:      map[string]bool{},
+		revWritesAtStart: revWritesAtStart,
 	}
 	defer self.release()
 

@@ -278,7 +278,9 @@ func TestE2eControlPlaneConcurrencyChaos(t *testing.T) {
 		step(func(ctx context.Context) { self.chaosConverged(ctx, []*WorldNetwork{a, self.team.WorldNetwork}) })
 
 		// api's write budget across every restart, exactly
-		step(func(ctx context.Context) { controlPlaneCheckApiBudget(t, ctx, world, base.Ledgers) })
+		step(func(ctx context.Context) {
+			controlPlaneCheckApiBudget(t, ctx, world, base.Ledgers, self.revWritesAtStart)
+		})
 	})
 }
 

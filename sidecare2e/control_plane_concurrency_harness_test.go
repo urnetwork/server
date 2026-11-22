@@ -13,9 +13,14 @@
 //     case's third phase races them (evs_concurrency_test.go), here across the networks of the case at once;
 //   - api's write budget (§11.13, evsservice's reports) against the objects api wrote: every P0 byte api's process
 //     reported against the first metadata cluster is an object it holds under §7.9's and §7.10's prefixes, priced as a
-//     create, by kind (log for proj/ and projrows/, revocation for rev/), and it reported no P1, P2 or credit; read
-//     where the objects listed before and after the report agree, since a report is a level at its time, as the dns
-//     and certificates case reads it (dns_certs_concurrency_ledgers_test.go).
+//     create, by kind (log for proj/ and projrows/, revocation for rev/), or a raise of a rev/ object's not_before,
+//     priced as its object (§7.10's write row: If-None-Match to create, If-Match to raise), and it reported no P1, P2
+//     or credit; read where the objects listed before and after the report agree, since a report is a level at its
+//     time, as the dns and certificates case reads it (dns_certs_concurrency_ledgers_test.go). A raise writes an object
+//     the store lists once a second time, as a member's rev/ object is when api's denial and its MemberRevoke's effect
+//     round their not_befores to different seconds, so the raises come from the rev/ writer's own count of its writes
+//     that landed (model's urnetwork_sidecar_rev_writes_total, outcome raised) since the world began; a PUT spent and
+//     never landed, a lost race or a refused one, is counted by neither and still fails the check.
 //
 // Safe for concurrent use.
 
@@ -37,6 +42,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/urnetwork/sidecar"
@@ -606,9 +612,47 @@ func controlPlaneApiObjects(ctx context.Context, world *World, pageCount int) (m
 	return objects, nil
 }
 
+// The rev/ writer's writes in this process so far that landed, by outcome (model's urnetwork_sidecar_rev_writes_total),
+// from the default registry: created, an If-None-Match write of a new object, and raised, an If-Match write of one
+// already standing. One world runs in a process at a time, so what a world's checks count is the rise since it began.
+type controlPlaneRevWrites struct {
+	createdCount float64
+	raisedCount  float64
+}
+
+// The rev/ writer's writes so far.
+func controlPlaneRevWriteCounts() (*controlPlaneRevWrites, error) {
+	families, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		return nil, err
+	}
+	writes := &controlPlaneRevWrites{}
+	for _, family := range families {
+		if family.GetName() != "urnetwork_sidecar_rev_writes_total" {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			for _, label := range metric.GetLabel() {
+				if label.GetName() != "outcome" {
+					continue
+				}
+				switch label.GetValue() {
+				case "created":
+					writes.createdCount = metric.GetCounter().GetValue()
+				case "raised":
+					writes.raisedCount = metric.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	return writes, nil
+}
+
 // api's write budget against the objects it wrote, exactly (the file's header): the P0 bytes api's process reported by
-// kind equal what the objects it holds price at as created, and it reported nothing else.
-func controlPlaneCheckApiBudget(t testing.TB, ctx context.Context, world *World, settings *controlPlaneLedgerSettings) {
+// kind equal what the objects it holds price at as created, and each raise of a rev/ object since revWritesAtStart,
+// the rev/ writer's writes as the world began (controlPlaneRevWriteCounts), at its object's price; the writer created
+// exactly the rev/ objects the store holds, which holds its count to the store; and it reported nothing else.
+func controlPlaneCheckApiBudget(t testing.TB, ctx context.Context, world *World, settings *controlPlaneLedgerSettings, revWritesAtStart *controlPlaneRevWrites) {
 	t.Helper()
 	cluster, err := world.T3().Host().Blobs.FirstCluster()
 	if err != nil {
@@ -619,6 +663,11 @@ func controlPlaneCheckApiBudget(t testing.TB, ctx context.Context, world *World,
 	kinds := controlPlaneApiObjectKinds()
 	disagreements := []string{}
 	for range settings.BudgetReadTryCount {
+		writesBefore, err := controlPlaneRevWriteCounts()
+		if err != nil {
+			t.Errorf("the rev/ writer's writes: %v", err)
+			return
+		}
 		before, err := controlPlaneApiObjects(ctx, world, settings.ObjectPageCount)
 		if err != nil {
 			t.Errorf("api's objects: %v", err)
@@ -634,12 +683,18 @@ func controlPlaneCheckApiBudget(t testing.TB, ctx context.Context, world *World,
 			t.Errorf("api's objects: %v", err)
 			return
 		}
-		if !maps.Equal(before, after) {
-			disagreements = append(disagreements, fmt.Sprintf("%d objects, then %d", len(before), len(after)))
+		writesAfter, err := controlPlaneRevWriteCounts()
+		if err != nil {
+			t.Errorf("the rev/ writer's writes: %v", err)
+			return
+		}
+		if !maps.Equal(before, after) || *writesBefore != *writesAfter {
+			disagreements = append(disagreements, fmt.Sprintf("%d objects, then %d; rev/ writes %+v, then %+v", len(before), len(after), *writesBefore, *writesAfter))
 			continue
 		}
 		want := map[sidecar.WriteP0Kind]int64{}
 		objectCounts := map[sidecar.WriteP0Kind]int{}
+		revPrices := map[int64]bool{}
 		for key, byteCount := range after {
 			for prefix, kind := range kinds {
 				if !strings.HasPrefix(key, prefix) {
@@ -652,6 +707,26 @@ func controlPlaneCheckApiBudget(t testing.TB, ctx context.Context, world *World,
 				}
 				want[kind] += price
 				objectCounts[kind] += 1
+				if kind == sidecar.WriteP0KindRevocation {
+					revPrices[price] = true
+				}
+			}
+		}
+		// the writer created each rev/ object the store holds, once
+		createCount := int64(writesAfter.createdCount - revWritesAtStart.createdCount)
+		if createCount != int64(objectCounts[sidecar.WriteP0KindRevocation]) {
+			t.Errorf("the rev/ writer created %d objects since the world began, and api holds %d under rev/", createCount, objectCounts[sidecar.WriteP0KindRevocation])
+		}
+		// each raise wrote an object again, the object as it stands; every rev/ object prices alike, its body a few
+		// hundred bytes, or a raise's price is not known
+		raiseCount := int64(writesAfter.raisedCount - revWritesAtStart.raisedCount)
+		if 0 < raiseCount {
+			if len(revPrices) != 1 {
+				t.Errorf("api raised rev/ objects %d times, and its rev/ objects price at %v, not one price a raise takes", raiseCount, slices.Sorted(maps.Keys(revPrices)))
+				return
+			}
+			for price := range revPrices {
+				want[sidecar.WriteP0KindRevocation] += raiseCount * price
 			}
 		}
 		var report *evsservice.WriteBudgetReport
@@ -671,12 +746,12 @@ func controlPlaneCheckApiBudget(t testing.TB, ctx context.Context, world *World,
 			}
 		}
 		if !maps.Equal(got, want) {
-			t.Errorf("api's process reported P0 %v against %s, and the objects it holds there price at %v as created (%v objects by kind): a write spent and never made, or made and never spent", got, cluster.ClusterId(), want, objectCounts)
+			t.Errorf("api's process reported P0 %v against %s, and the objects it holds there price at %v as created with %d rev/ raises (%v objects by kind): a write spent and never made, or made and never spent", got, cluster.ClusterId(), want, raiseCount, objectCounts)
 		}
 		if report.P1ByteCount != 0 || report.UnfundedByteCount != 0 || report.FundedByteCount != 0 || report.CreditByteCount != 0 {
 			t.Errorf("api's process reported P1 %d, P2 %d unfunded and %d funded, and credit %d, where all it writes is P0", report.P1ByteCount, report.UnfundedByteCount, report.FundedByteCount, report.CreditByteCount)
 		}
-		t.Logf("api's write budget: P0 %v against %s for %v objects", got, cluster.ClusterId(), objectCounts)
+		t.Logf("api's write budget: P0 %v against %s for %v objects and %d rev/ raises", got, cluster.ClusterId(), objectCounts, raiseCount)
 		return
 	}
 	t.Errorf("api's objects never stood still across a budget report: %v", disagreements)

@@ -210,6 +210,8 @@ type controlPlaneCase struct {
 
 	// the exchange's own judgment, over a gate cache of the case's
 	exchange *controlPlaneExchange
+	// the rev/ writer's writes in this process as the world began, which api's write budget is read against
+	revWritesAtStart *controlPlaneRevWrites
 
 	stateLock sync.Mutex
 	// each device's kind, which its scopes follow
@@ -250,7 +252,7 @@ func TestE2eControlPlaneConcurrency(t *testing.T) {
 func (self *controlPlaneCase) ledgers() {
 	ctx, cancel := self.world.StepContext(self.t.Context(), self.settings.PhaseTimeout)
 	defer cancel()
-	controlPlaneCheckApiBudget(self.t, ctx, self.world, self.settings.Ledgers)
+	controlPlaneCheckApiBudget(self.t, ctx, self.world, self.settings.Ledgers, self.revWritesAtStart)
 }
 
 // The world, with no network yet, its Community limits taking the case's base rate and its enrollments all at once.
@@ -272,6 +274,10 @@ func newControlPlaneCase(t testing.TB, settings *controlPlaneSettings) *controlP
 	if settings.PersonalEnrollCount+1 < settings.RacerCount || settings.TeamOwnerEnrollCount+1+settings.TeamAdminEnrollCount < settings.RacerCount {
 		t.Fatalf("%d racers outnumber a network's config writers", settings.RacerCount)
 	}
+	revWritesAtStart, err := controlPlaneRevWriteCounts()
+	if err != nil {
+		t.Fatalf("the rev/ writer's writes: %v", err)
+	}
 	worldSettings := DefaultWorldSettings()
 	worldSettings.NetworkCount = 0
 	t3Settings := sidecart3.DefaultT3WorldSettings()
@@ -286,11 +292,12 @@ func newControlPlaneCase(t testing.TB, settings *controlPlaneSettings) *controlP
 		t.Fatalf("the exchange's projection: %v", err)
 	}
 	return &controlPlaneCase{
-		t:        t,
-		settings: settings,
-		world:    world,
-		exchange: exchange,
-		kinds:    map[*sidecart3.T3Device]controlPlaneDeviceKind{},
+		t:                t,
+		settings:         settings,
+		world:            world,
+		exchange:         exchange,
+		revWritesAtStart: revWritesAtStart,
+		kinds:            map[*sidecart3.T3Device]controlPlaneDeviceKind{},
 	}
 }
 

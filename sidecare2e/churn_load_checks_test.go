@@ -629,7 +629,7 @@ func (self *churnLoadCase) finish() {
 	// then every ledger of the case's own networks, which reads no device
 	self.checkLedgers(ctx, phase, mxByteCounts, smtpByteCounts)
 	self.checkWriteBudgets(ctx, phase)
-	controlPlaneCheckApiBudget(t, ctx, self.world, settings.Ledger)
+	controlPlaneCheckApiBudget(t, ctx, self.world, settings.Ledger, self.revWritesAtStart)
 	dnsCertsCheckCertsBudget(t, ctx, self.stack, self.publishers)
 	dnsCertsCheckChallengeCounts(t, ctx, self.stack, settings.Dns, &dnsCertsRecords{Root: self.dnsRecords.Root})
 	self.logRefusals(phase)
