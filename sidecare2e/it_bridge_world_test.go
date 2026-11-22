@@ -36,16 +36,22 @@
 // worldDeviceGate approving exposures as a person would: the stock gate holds every exposure, route or map, for a
 // person's decision, even one the document's standing route or dial rule covers, since its standing check is
 // AclEngine.ActiveGrant, which covers only an action with grant fields, and an exposure's CanonicalAction carries none
-// (a product finding the case reports). The filer then files the rule with no approval, which every reader holds in
-// force only while the document covers it (§17.7; AclLocalPolicy.StandingCovers), so the stand-in opens nothing the
-// document does not. A filing seals its body
-// under the config repo's key, which each Sidecar holds through the follower's keys the case installs
-// (itBridgeConfigKeys): a follower installs them itself only over a key client of forwarding setup's, which the World's
-// FakeGkm client is not; and the config repo's group, which a real-keys bootstrap forms at gkm, is formed at the World's
-// FakeGkm by the owner's key client (formConfigGroup), so the case runs its World on FakeGkm (WorldSettings.FakeGkm)
-// where a World runs real keys by default. Each filing's timeline
-// records when it was begun, when it returned, the log position it landed at, and when every device's bridge had
-// adopted it (followed, compiled, published, serving). Safe for concurrent use once made.
+// (a product finding of the case's, approval-gate-standing-exposures, queued; each device's summary line counts the
+// exposures it held). The filer then files the rule with no approval, which every reader holds in force only while the
+// document covers it (§17.7; AclLocalPolicy.StandingCovers), so the stand-in opens nothing the document does not. A
+// network has no block until its owner sets one (setBlock), since no bootstrap draws the first (§17.4; a finding of the
+// case's, bridge-block-bootstrap, queued).
+//
+// The case keeps its World on FakeGkm (WorldSettings.FakeGkm), where a World runs real keys by default since
+// keys-late-delivery and gkm-repo-create-race landed: a filing seals its body under the config repo's key, which each
+// Sidecar holds through the follower's keys the case installs (itBridgeConfigKeys), since a follower installs them
+// itself only over a key client of forwarding setup's, which neither the World's FakeGkm client nor a real-keys
+// device's key client (sidecart3's t3WorldKeysGkm) is; and the config repo's group, which a real-keys bootstrap forms
+// at gkm, is formed at FakeGkm by the owner's key client (formConfigGroup). On real keys only the second would go, so
+// the case stays on FakeGkm, as it was built.
+//
+// Each filing's timeline records when it was begun, when it returned, the log position it landed at, and when every
+// device's bridge had adopted it (followed, compiled, published, serving). Safe for concurrent use once made.
 
 package sidecare2e
 
@@ -78,10 +84,11 @@ type ItBridgeSettings struct {
 	// The World the network runs in; nil takes DefaultWorldSettings with no networks of its own.
 	World *WorldSettings
 	// Whether the network subscribes to Pro before its bridges start (World.VerifyNetwork), so it runs under §20.4's Pro
-	// column, whose sidecar_clients its links' window clients fit: server counts every window client against
-	// sidecar_clients, where §20.8's table exempts a sidecar's window clients, so on the World's own tier (§20.4's
-	// Community column, 20) a network of the case's devices connects about two (the product finding
-	// TestE2eItBridgeLinksPastSidecarClients holds). true; false runs the network on the World's tier.
+	// column rather than the World's own tier, the Community column: a share's two networks need Pro's
+	// acl_network_shares, which Community leaves off (the sharing network's invite and network:* selector, the accepting
+	// network's claim and network: selector). false: the case's links fit the Community column's sidecar_clients (20),
+	// since a sidecar's window clients count against none (§20.8; window-clients-limit, server f8b013543, before which
+	// the case ran on Pro and server closed all but about two of its window clients at the exchange).
 	Pro bool
 	// Each device's bridge.
 	Wire *ItBridgeWireSettings
@@ -205,7 +212,7 @@ type ItBridgeSettings struct {
 func DefaultItBridgeSettings() *ItBridgeSettings {
 	return &ItBridgeSettings{
 		Wire:                       DefaultItBridgeWireSettings(),
-		Pro:                        true,
+		Pro:                        false,
 		ExchangeConnectionMaxCount: 4000,
 		SubnetCount:                8,
 		ForwardCount:               8,
@@ -868,7 +875,8 @@ func (self *ItBridgeWorld) newFiler(device *itBridgeDevice, headWriter sidecar.B
 
 // The owner sets the network's block in a config head, as `ur bridge block <cidr>` does on an admin's device
 // (BridgeFiler.SetBlock), through its config writer (itBridgeHeadWriter). §17.4 has the bootstrap draw the first block
-// into the first head, and no bootstrap does, so a network has none until an admin sets one.
+// into the first head, and no bootstrap does, so a network has none until an admin sets one (bridge-block-bootstrap,
+// queued).
 func (self *ItBridgeWorld) setBlock(ctx context.Context) error {
 	filer, err := self.newFiler(self.owner, &itBridgeHeadWriter{world: self, device: self.owner})
 	if err != nil {

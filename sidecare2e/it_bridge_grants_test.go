@@ -28,12 +28,15 @@
 //
 // While a grant is in force, its client must reach its subnet by TCP and UDP, and the compiles must say why if not:
 // the client's table needs an entry of the subnet's prefix linked to the subnet's device, and that device's rows a
-// route row of the client's under the grant (rule 6). After a grant ends, past LeaveBound, nothing reaches the subnet
-// from the client: the oracle (ItBridgeWorld.Check) holds every answer and arrival to the document's grants and the
-// grants' timelines. Beside the forwarding role, the save's side of QD-1164 (§8.8's Saving): the owner's `ur acl test`
-// over the document with an ip: accept and an ip: deny of the grant's prefix for its client judges the activated grant
-// by its sealed detail, so before the grants the accept fails and the deny passes, and while a grant is in force the
-// accept passes and the deny fails: an accept the save counts is then one the forwarding role must serve.
+// route row of the client's under the grant (rule 6). Both compiles read the grant's prefixes from its sealed detail,
+// as the save's ip: tests do, by one reader (aclReadGrantRoute): the case failed on both rows, the compiles reading the
+// head's local policy, which holds nothing of an activated grant, until route-grant-compile (sidecar eb98e5e4 to
+// a72d7d95) and acl-engine-route-grants (ae8a1fc8, e9cf5cd1) landed. After a grant ends, past LeaveBound, nothing
+// reaches the subnet from the client: the oracle (ItBridgeWorld.Check) holds every answer and arrival to the document's
+// grants and the grants' timelines. Beside the forwarding role, the save's side of QD-1164 (§8.8's Saving): the owner's
+// `ur acl test` over the document with an ip: accept and an ip: deny of the grant's prefix for its client judges the
+// activated grant by its sealed detail, so before the grants the accept fails and the deny passes, and while a grant is
+// in force the accept passes and the deny fails: an accept the save counts is then one the forwarding role must serve.
 
 package sidecare2e
 
@@ -251,6 +254,15 @@ func (self *ItBridgeWorld) spendGrant(ctx context.Context, requester *itBridgeDe
 
 // approver's decision (approve) on requester's request approvalId, as requester's ledger stores it.
 func (self *ItBridgeWorld) approveRequest(approver *itBridgeDevice, requester *itBridgeDevice, approvalId sidecar.Id) (*bridge.Signed, error) {
+	request, err := self.storedRequest(requester, approvalId)
+	if err != nil {
+		return nil, err
+	}
+	return self.approve(approver, request)
+}
+
+// requester's request approvalId as its ledger stores it, parsed.
+func (self *ItBridgeWorld) storedRequest(requester *itBridgeDevice, approvalId sidecar.Id) (*sidecar.StoredApprovalRequest, error) {
 	ledger, err := requester.t3.Sidecar().ApprovalLedger()
 	if err != nil {
 		return nil, err
@@ -259,18 +271,14 @@ func (self *ItBridgeWorld) approveRequest(approver *itBridgeDevice, requester *i
 	if err != nil || approval.Request == nil {
 		return nil, fmt.Errorf("%s's ledger holds no request %s: %v", requester.name, approvalId, err)
 	}
-	return self.approve(approver, approval.Request)
+	return sidecar.ParseStoredApprovalRequest(approval.Request)
 }
 
 // The device decision `ur approve` signs on request once its person confirms (ApprovalApprover.Decide): approve, at
 // the count the request names, over the request's stored bytes and its action's, by approver's identity key, its
 // member the approver and its pin the approver's state. Like Decide it signs only what the approver's device opens and
 // only as an approval-capable device of the member it names.
-func (self *ItBridgeWorld) approve(approver *itBridgeDevice, requestBytes []byte) (*bridge.Signed, error) {
-	request, err := sidecar.ParseStoredApprovalRequest(requestBytes)
-	if err != nil {
-		return nil, err
-	}
+func (self *ItBridgeWorld) approve(approver *itBridgeDevice, request *sidecar.StoredApprovalRequest) (*bridge.Signed, error) {
 	running := approver.t3.Sidecar()
 	if _, err := running.OpenActionDetail(request.Action); err != nil {
 		return nil, fmt.Errorf("%s opens no detail of the action it would approve: %w", approver.name, err)
@@ -483,7 +491,9 @@ func (self *ItBridgeWorld) probeRouteGrants(ctx context.Context, phase string, i
 
 // What grant's compiles hold while it is in force (the file's header): an entry of the subnet's prefix in its client's
 // table linked to the subnet's device, and a route row of the client's under the grant in that device's rows, holding
-// the prefix. One error for each that is missing, naming where the compile reads a grant's prefixes.
+// the prefix. One error for each that is missing, naming where the compile reads a grant's prefixes: from its sealed
+// detail by aclReadGrantRoute (route-grant-compile, sidecar eb98e5e4 to a72d7d95), where both compiles read the head's
+// local policy before, which holds none for an activated grant, and gave neither.
 func (self *ItBridgeWorld) routeGrantRows(grant *itBridgeRouteGrant) []error {
 	errs := []error{}
 	grantId := grant.GrantId()
@@ -498,7 +508,7 @@ func (self *ItBridgeWorld) routeGrantRows(grant *itBridgeRouteGrant) []error {
 		})
 	}) {
 		errs = append(errs, fmt.Errorf("%s's table holds no entry of %s linked to %s, which the grant's sealed detail names (the sender's compile "+
-			"reads an activated grant's prefixes from the head's local policy, which holds none for it: bridge_compile_rows.go's mayUseRoute), %d entries",
+			"reads an activated grant's prefixes from its sealed detail, aclReadGrantRoute, in bridge_compile_rows.go's mayUseRoute), %d entries",
 			grant.client.name, prefix, router.name, len(clientRules.GetEntries())))
 	}
 	routerRules, err := compiledBridgeRules(router)
@@ -518,8 +528,8 @@ func (self *ItBridgeWorld) routeGrantRows(grant *itBridgeRouteGrant) []error {
 		return bytes.Equal(row.GetGrantId(), grantId) && bridgeWirePrefixHolds(row.GetPrefix(), prefix)
 	}) {
 		errs = append(errs, fmt.Errorf("%s's rows give %s no route row of %s under the grant, so its forwarding role refuses the grant's flows "+
-			"(rule 6; bridge_compile_rows.go's reachRows reads an activated grant's prefixes from the head's local policy, which holds none for it, so "+
-			"routeRowPrefixes gives it none), %d route rows", router.name, grant.client.name, prefix, len(rows)))
+			"(rule 6; bridge_compile_rows.go's reachRows reads an activated grant's prefixes from its sealed detail, aclReadGrantRoute, for "+
+			"routeRowPrefixes), %d route rows", router.name, grant.client.name, prefix, len(rows)))
 	}
 	return errs
 }
