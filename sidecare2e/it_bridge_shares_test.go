@@ -31,12 +31,14 @@
 // the approve stand-in signs on another device of X's member (it_bridge_grants_test.go's header); Y's document's
 // network:X selector, which a writer resolves only through networks its own host is enrolled in
 // (sidecar.AclWriterSubjects.Networks), so Y's save hands it X's owner's Sidecar, as one daemon of a person who is an
-// admin of both networks would hold both; and the network label table each owner's DnsClient is fed, which no daemon
-// feeds (SaveAcceptingDocument's finding). Y's network starts with a document that grants nothing and saves its own
-// once X's label is known. X is aged past §21.7's probation, a network's first 7 days, which gives no outbound share
-// (worldAgeNetwork, as the World's mail steps age a sender), and §21.7's standing reads api's process installs at its
-// start, which the World's api does not, are installed for the case (itBridgeInstallAbuseStanding). The platform
-// settles a share's contracts by §8.10's contract gate, which the World turns on (WorldSettings.AclContractGate).
+// admin of both networks would hold both; X's label it reads from the network label table in X's owner's own dns/
+// directory, which Sidecar.NetworkLabels opens where no composition fed its DnsClient one (dns-feed-labels-wiring).
+// Y's network starts with a document that grants nothing and saves its own once X's label is known. X is aged past
+// §21.7's probation, a network's first 7 days, which gives no outbound share (worldAgeNetwork, as the World's mail
+// steps age a sender), and §21.7's standing reads api's process installs at its start, which the World's api does not,
+// are installed for the case (itBridgeInstallAbuseStanding). The platform settles a share's contracts by §8.10's
+// contract gate, which the World turns on (WorldSettings.AclContractGate), as FriendsAndFamily, escrowed from Y's
+// network in both directions (§20.6's share row), which the case's ledgers reconcile (it_bridge_test.go's Reconcile).
 
 package sidecare2e
 
@@ -64,12 +66,9 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// The store directories and seal classes an admin's device keeps its ShareKeys under (sidecar.NewBridgeShareKeyLocalStore)
-// and the network label table the case feeds its DnsClient (itBridgeFeedNetworkLabels). Format values of the case's.
-const (
-	itBridgeShareKeyDirectory = "itb-share-key"
-	itBridgeLabelDirectory    = "itb-labels"
-)
+// The store directory and seal class an admin's device keeps its ShareKeys under (sidecar.NewBridgeShareKeyLocalStore). A
+// format value of the case's.
+const itBridgeShareKeyDirectory = "itb-share-key"
 
 // One target of a share: an X destination, and the alias Y's accept gave it.
 type itBridgeShareTarget struct {
@@ -627,8 +626,8 @@ func (self *itBridgeShare) Probe(ctx context.Context, phase string, inForce bool
 						defer errsLock.Unlock()
 						errs = append(errs, fmt.Errorf("%s: %s never reached %s at its alias %s over %s in %d tries while the share was in force, last %s: %s; "+
 							"%s's client provides %v, and a share link's contracts settle FriendsAndFamily only to a client providing it "+
-							"(controller's resolveNonCompanionProvideMode), which nothing a host serving a share holds (sidecar's Subprotocol.HoldProvideMode "+
-							"names FriendsAndFamily for an inbound share, and no caller holds it); %s's links asked %d share links",
+							"(controller's resolveNonCompanionProvideMode), which a host holds while it serves the share (Subprotocol.HoldProvideMode); "+
+							"%s's links asked %d share links",
 							self.name, client.name, shareTarget.target.name, shareTarget.alias, ipProtocol, tryCount, last.Address, last.Err,
 							host.name, itBridgeProvideModes(ctx, clientId), client.name, client.shareLinkCount()))
 					}
@@ -811,11 +810,9 @@ func (self *ItBridgeWorld) saveDocument(ctx context.Context, source string, subj
 }
 
 // The accepting network's document (the file's header's reach row), saved by Y's owner: its reachers dial
-// network:<xLabel>, X's label, which the save resolves through X's owner's Sidecar as a writer subject, and nothing else
-// is granted. First the finding it meets: a writer resolves a label through the label table its DnsClient was fed,
-// and where none was it opens the table on the Sidecar's LocalStore, which has no file class, so the plan fails;
-// nothing in a daemon feeds one (DnsClient.FeedLabels has no caller), and the case feeds each owner's a table of its own
-// (itBridgeFeedNetworkLabels) before it saves.
+// network:<xLabel>, X's label, which the save resolves through X's owner's Sidecar as a writer subject, reading the label
+// from the network label table in that Sidecar's own dns/ directory (Sidecar.NetworkLabels), and nothing else is
+// granted.
 func (self *itBridgeShare) SaveAcceptingDocument(ctx context.Context, t testing.TB, xLabel string) {
 	t.Helper()
 	y := self.y
@@ -828,20 +825,6 @@ func (self *itBridgeShare) SaveAcceptingDocument(ctx context.Context, t testing.
 		t.Fatal(err)
 	}
 	subjects := &sidecar.AclWriterSubjects{Networks: []*sidecar.Sidecar{self.x.owner.t3.Sidecar()}}
-	if _, err := y.owner.t3.Sidecar().PlanAclPolicyWithSubjects(ctx, source, subjects); err != nil {
-		if !errors.Is(err, sidecar.ErrSidecarStoreNoClass) {
-			y.FailProgress(t, "Y's document's plan", err, nil)
-		}
-		t.Errorf("%s plans no document naming network:%s: %v: nothing feeds a DnsClient its NetworkLabelTable (DnsClient.FeedLabels has "+
-			"no caller in ur daemon or the sdk), so a writer's label read (acl_writer_subjects.go's aclWriterNetworkLabel) opens the table on the "+
-			"Sidecar's LocalStore, which has no file class; ur acl push (cli's cmd_acl.go) takes the same path. The case feeds one and goes on",
-			y.owner.name, xLabel, err)
-	}
-	for _, device := range []*itBridgeDevice{y.owner, self.x.owner} {
-		if err := itBridgeFeedNetworkLabels(device); err != nil {
-			y.FailProgress(t, "the network label tables", err, nil)
-		}
-	}
 	if err := y.saveDocument(ctx, string(source), subjects); err != nil {
 		y.FailProgress(t, "Y's document", err, nil)
 	}
@@ -852,27 +835,6 @@ func (self *itBridgeShare) SaveAcceptingDocument(ctx context.Context, t testing.
 	if err := y.AwaitAdopted(ctx, y.tip()); err != nil {
 		y.FailProgress(t, "Y's document", err, nil)
 	}
-}
-
-// The stand-in for the label table a daemon's DNS component would feed device's DnsClient (DnsClient.FeedLabels, which
-// nothing calls; SaveAcceptingDocument's finding): DNS-M2-01's table on a directory of the device's own sealed store,
-// which the client then feeds every zone it fetches.
-func itBridgeFeedNetworkLabels(device *itBridgeDevice) error {
-	running := device.t3.Sidecar()
-	store, err := running.LocalStore().Directory(itBridgeLabelDirectory, itBridgeLabelDirectory)
-	if err != nil {
-		return err
-	}
-	labels, err := sidecar.OpenNetworkLabelTable(store)
-	if err != nil {
-		return fmt.Errorf("%s's label table: %w", device.name, err)
-	}
-	dns, err := running.Dns()
-	if err != nil {
-		return fmt.Errorf("%s's dns client: %w", device.name, err)
-	}
-	dns.FeedLabels(labels)
-	return nil
 }
 
 // The share's whole cycle (the file's header), failing t with a progress dump where an act fails: open, probe while in
