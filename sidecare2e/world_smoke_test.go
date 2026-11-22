@@ -8,19 +8,35 @@
 //   - evs: in each network a shared repo the owner created through evs, every sidecar writes its own path and reads
 //     every other sidecar's back at the version its writer was answered, and the second network reads none of the
 //     first's, refused by its own client and by evs's 403 to its token;
+//   - gkm, on a world of real keys (T3WorldSettings.RealKeys, TestE2eWorldSmokeRealKeys until it is the world's
+//     default): each network's repo, whose creation formed its group at gkm's block, held at generation 1 by every
+//     sidecar's own key client, rotated by its owner, and held at generation 2 under the rotation's group and
+//     commitment by every sidecar, which writes under it and reads every other's write;
 //   - mcp: a tools/list call with an access token the world's issuer minted for mcp's origin lists mcp's tools, and
 //     the same call with no token is answered 401 with the protected resource's challenge;
 //   - dns: the first network's owner saves an ACL document granting its members admin on dns:smoke, as `ur acl push`
 //     does once confirmed (its base waiting out §7.9's one base a minute), writes smoke's TXT record in its zone through
 //     dns's api, since §21.7's probation publishes no address record for a new network, and the dns edge answers it
 //     signed over UDP; the second network's owner is refused the same name, and the edge still answers the first's;
-//   - ledgers: the metadata cluster's write budget holds the evs block's spend for the writes, with no violation on
-//     api's side;
+//   - ledgers: the metadata cluster's write budget holds the evs block's spend for the writes, and api's own budget
+//     its sequencer's spend for the networks' statements;
 //   - chaos: evs stopped mid-run and started again on its stores, after which every write reads back as it was
 //     answered, through the restarted block;
 //   - the quota ledgers: evs's drain at the restart sent its usage window through api's quota surface, so each
 //     network's quota state holds the bytes its writes stored, and its transfer was drawn from its balance, never past
-//     it.
+//     it, every byte drawn a debit on a meter (the evs meter's here), exactly;
+//   - sockets and tlsedge: the second network, made Pro by a paid Pro balance, saves a standing public publish of
+//     tls/443/web, and its member device publishes the name as a raw socket listener; a visitor through tlsedge's 443,
+//     behind the lb's PROXY header, completes TLS with the device's own key and is answered by the device, and a host
+//     no grant publishes is refused at the edge;
+//   - mail (world_smoke_mail_test.go): the first network turns mail on, its receiver serves smtp/25/mx once its TLSA
+//     is live, and an internet sender's message reaches the member's mailbox through the world's lb, mxedge's router
+//     and the receiver, held to the dns edge's signed TLSA, and is read back by the member's reader; then the second
+//     network, aged past probation at its enrollment, turns mail on and its owner's device sends to the first's alias
+//     through smtpedge, the LAN splice to mxedge's router and the receiver, and the first network's reader reads it;
+//   - the ledgers at the end: the blocks that metered the TLS and mail steps restarted, so each drained its usage
+//     window, and every byte drawn from each network's balances a debit on a meter, exactly, no balance overdrawn,
+//     mxedge's meter holding the first network's mail, and smtpedge's and tlsedge's the second's mail and visit.
 //
 // Each phase has its bound and dumps the world's progress when it stalls; the case has the conventions' 10 minutes.
 // Run it through the build's wrapper: -tags 'sidecar_e2e sidecar_pending sidecar_localstack'.
@@ -66,13 +82,35 @@ type worldSmokeSettings struct {
 	// How long the mcp call's access token lives: the issuer's own default is minted, this bounds nothing but the
 	// call's wait.
 	McpCallTimeout time.Duration
-	// The ACL document that grants the first network's members admin on the record's host, the host and the text its
-	// TXT record holds, and the text the second network's refused write names: one character-string each, so no space,
-	// which the API's presentation format reads as two.
-	DnsAclPolicy   string
+	// The grant of the first network's ACL document that gives its members admin on the record's host, beside the mail
+	// step's grants, the host and the text its TXT record holds, and the text the second network's refused write
+	// names: one character-string each, so no space, which the API's presentation format reads as two.
+	DnsAclGrant    string
 	DnsRecordHost  string
 	DnsRecordText  string
 	DnsForeignText string
+	// The second network's ACL document, given the time its tls/ grant expires: its members publish and listen on the
+	// tls/ host under the public audience in raw mode, a standing publish, which §8.5 holds to a Pro or Team document,
+	// beside the mail step's grants, since the network sends mail too.
+	// The tls/ host, the one no grant names that a visitor is refused, the grant's life, the visitor's request line,
+	// and the TLS helpers' bounds.
+	TlsAclPolicy func(expires time.Time) string
+	// The TXT record the second network writes in its zone where its label's map serial is still 0 (the step's
+	// finding), whose write stamps the label into the map's serial order, and its text.
+	TlsRecordHost      string
+	TlsRecordText      string
+	TlsHost            string
+	TlsUnpublishedHost string
+	TlsGrantLife       time.Duration
+	TlsRequest         string
+	Tls                *WorldTlsSettings
+	// The gkm step's waits for each sidecar's key client.
+	Keys *worldKeysSettings
+	// The mail step's grants, addresses, message and bounds (world_smoke_mail_test.go).
+	Mail *worldSmokeMailSettings
+	// The blocks restarted at the end so each drains, sending its open usage window, before the last ledgers: every
+	// block that metered the TLS and mail steps.
+	FinalDrainBlocks []string
 }
 
 func defaultWorldSmokeSettings() *worldSmokeSettings {
@@ -84,10 +122,26 @@ func defaultWorldSmokeSettings() *worldSmokeSettings {
 		McpToolsListBody:  `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`,
 		McpToolNames:      []string{"providerLocations", "fetch"},
 		McpCallTimeout:    60 * time.Second,
-		DnsAclPolicy:      `{"grants": [{"src": ["autogroup:member"], "dst": ["dns:smoke"], "allow": ["admin"]}]}`,
+		DnsAclGrant:       `{"src": ["autogroup:member"], "dst": ["dns:smoke"], "allow": ["admin"]}`,
 		DnsRecordHost:     "smoke",
 		DnsRecordText:     "e2e-world-smoke",
 		DnsForeignText:    "written-from-another-network",
+		TlsAclPolicy: func(expires time.Time) string {
+			return worldAclPolicy(append([]string{
+				fmt.Sprintf(`{"src": ["autogroup:member"], "dst": ["dns:web", "sock:tls/443/web"], "allow": ["publish", "listen"], "audience": "public", "app_mode": "raw", "expires": %q}`, expires.UTC().Format(time.RFC3339)),
+				`{"src": ["autogroup:member"], "dst": ["dns:about"], "allow": ["admin"]}`,
+			}, defaultWorldSmokeMailSettings().AclGrants...)...)
+		},
+		TlsRecordHost:      "about",
+		TlsRecordText:      "e2e-world-tls",
+		TlsHost:            "web",
+		TlsUnpublishedHost: "shop",
+		TlsGrantLife:       12 * time.Hour,
+		TlsRequest:         "hello through tlsedge",
+		Tls:                DefaultWorldTlsSettings(),
+		Keys:               defaultWorldKeysSettings(),
+		Mail:               defaultWorldSmokeMailSettings(),
+		FinalDrainBlocks:   []string{WorldBlockTlsedge, WorldBlockSockets, WorldBlockSmtpedge, WorldBlockMxedge, WorldBlockEvs},
 	}
 }
 
@@ -99,16 +153,33 @@ type worldSmokeWrite struct {
 	result  *sidecar.EvsWriteResult
 }
 
-// Every block, two networks of three sidecars, and one step through each service the world wires end to end. See the
-// file's header.
+// Every block, two networks of three sidecars, and one step through each service the world wires end to end, on the
+// world's defaults. See the file's header.
 func TestE2eWorldSmoke(t *testing.T) {
+	runWorldSmoke(t, DefaultWorldSettings())
+}
+
+// The smoke on a world whose sidecar.yml turns §8.10's contract gate on (WorldSettings.AclContractGate), so every
+// contract connect makes for the world's streams, the edges' to a published listener among them, is judged by the
+// gate over api's gate cache, which the world installs.
+func TestE2eWorldSmokeUnderTheContractGate(t *testing.T) {
+	worldSettings := DefaultWorldSettings()
+	worldSettings.AclContractGate = true
+	runWorldSmoke(t, worldSettings)
+}
+
+// The smoke on a world of worldSettings, its networks and clients the smoke's own. The gkm step runs on a world of
+// real keys alone (T3WorldSettings.RealKeys).
+func runWorldSmoke(t *testing.T, worldSettings *WorldSettings) {
 	settings := defaultWorldSmokeSettings()
 	e2eTestEnv().Run(t, func(t testing.TB) {
-		worldSettings := DefaultWorldSettings()
 		worldSettings.NetworkCount = settings.NetworkCount
 		worldSettings.ClientsPerNetwork = settings.ClientsPerNetwork
 		world := NewWorld(t, worldSettings)
 		defer world.Close()
+		if active := worldContractGateActive(); active != worldSettings.AclContractGate {
+			t.Fatalf("the contract gate is active %t on a world whose sidecar.yml turns it %t", active, worldSettings.AclContractGate)
+		}
 
 		// enroll
 		ctx, cancel := world.StepContext(t.Context(), settings.PhaseTimeout)
@@ -131,6 +202,12 @@ func TestE2eWorldSmoke(t *testing.T) {
 					t.Fatalf("%s follows no log after its admission", device.Name)
 				}
 			}
+		}
+
+		// the second network sends internet mail in the mail step, which §21.7's probation refuses a network under 7
+		// days old, so it is aged before anything reads its standing and caches it
+		if err := worldAgeNetwork(t.Context(), networks[1].NetworkId, settings.Mail.SenderNetworkAge); err != nil {
+			t.Fatal(err)
 		}
 
 		// evs: a shared repo in each network, every sidecar's write read back by every other
@@ -221,8 +298,14 @@ func TestE2eWorldSmoke(t *testing.T) {
 			reports, _ := json.Marshal(ledgers.BudgetReports)
 			t.Fatalf("no block reported the writes against the metadata clusters' budget: %s", reports)
 		}
-		if 0 < len(ledgers.BudgetViolations) {
-			t.Fatalf("api's budget saw violations: %v", ledgers.BudgetViolations)
+		// api's sequencer spent its statements' objects on its own budget, P0 every one, beside the blocks'
+		apiSpent := int64(0)
+		for clusterId := range ledgers.BudgetReports {
+			apiSpent += ledgers.ApiBudgetByteCount(clusterId)
+		}
+		if ledgers.ApiProcessId == "" || apiSpent <= 0 {
+			reports, _ := json.Marshal(ledgers.BudgetReports)
+			t.Fatalf("api's process %q reported no spend for the networks' statements: %s", ledgers.ApiProcessId, reports)
 		}
 		// the second network reads none of the first's, at its client and at evs
 		first, second := networks[0], networks[1]
@@ -244,6 +327,14 @@ func TestE2eWorldSmoke(t *testing.T) {
 			}
 		}
 		cancel()
+
+		// gkm: on real keys, each network's repo's group formed at gkm's block, generation 1 held by every sidecar, then
+		// rotated by its owner, generation 2 held by every sidecar, and written and read under
+		if world.T3().Settings().RealKeys {
+			worldSmokeGkm(t, world, settings, networks, repoIds)
+		} else {
+			t.Logf("the gkm step runs on a world of real keys alone (TestE2eWorldSmokeRealKeys): T3WorldSettings.RealKeys is off by default")
+		}
 
 		// mcp: tools/list with the issuer's access token for mcp's origin, and 401 with none
 		ctx, cancel = world.StepContext(t.Context(), settings.McpCallTimeout)
@@ -292,7 +383,8 @@ func TestE2eWorldSmoke(t *testing.T) {
 		// dns: the first network's owner saves an ACL document granting its members admin on dns:smoke, writes smoke's A
 		// record through dns's api, and the dns edge answers it signed; the second network's owner writes nothing there
 		ctx, cancel = world.StepContext(t.Context(), settings.PhaseTimeout)
-		if _, err := world.SaveAclPolicy(ctx, first, first.Owner(), settings.DnsAclPolicy); err != nil {
+		// the mail step's grants in the same document, so the network saves one base for both (§7.9's one a minute)
+		if _, err := world.SaveAclPolicy(ctx, first, first.Owner(), worldAclPolicy(append([]string{settings.DnsAclGrant}, settings.Mail.AclGrants...)...)); err != nil {
 			cancel()
 			world.FailProgress(t, "the dns grant", err, nil)
 		}
@@ -355,8 +447,200 @@ func TestE2eWorldSmoke(t *testing.T) {
 			case ledger.DebitedByteCount() <= 0 || ledger.BalanceByteCount <= 0 || ledger.Spent:
 				t.Fatalf("%s's balance after its writes and reads: %+v", network.Name, ledger)
 			}
+			// every byte drawn from its balances is a service debit on a meter, the evs meter's for its writes and reads
+			if ledgers.Meters.ByteCount(network.NetworkId, sidecar.QuotaMeterEvs) <= 0 || ledgers.Meters.TotalByteCount(network.NetworkId) != ledger.DebitedByteCount() {
+				t.Fatalf("%s's balances were debited %d, its meters: %s", network.Name, ledger.DebitedByteCount(), ledgers.Meters.Describe(network.NetworkId))
+			}
+		}
+
+		// sockets and tlsedge: the second network, made Pro, publishes a member's raw tls/ listener on its standing
+		// grant, which a visitor reaches through tlsedge's 443
+		worldSmokeTls(t, world, settings, second)
+
+		// mail: the first network turns mail on and receives an internet sender's message through mxedge's router, then
+		// the second, verified by its Pro balance, sends to it through smtpedge
+		mailbox := worldSmokeMailInbound(t, world, settings, first, append([]string{settings.DnsAclGrant}, settings.Mail.AclGrants...))
+		worldSmokeMailOutbound(t, world, settings, second, mailbox)
+
+		// the ledgers at the end: every block that metered the TLS and mail steps drained by a restart, as a deploy's
+		// SIGTERM drains it, its open usage window sent through api's quota surface, so every byte drawn from each
+		// network's balances is a debit on a meter, exactly, and no balance was overdrawn
+		for _, name := range settings.FinalDrainBlocks {
+			if err := world.Restart(name); err != nil {
+				world.FailProgress(t, name+"'s restart for its drain", err, nil)
+			}
+		}
+		ctx, cancel = world.StepContext(t.Context(), settings.PhaseTimeout)
+		ledgers, err = world.ReadLedgers(ctx, time.Time{})
+		cancel()
+		if err != nil {
+			t.Fatalf("the ledgers at the end: %v", err)
+		}
+		for _, network := range networks {
+			ledger := ledgers.Networks[network.NetworkId]
+			switch {
+			case ledger == nil:
+				t.Fatalf("%s has no quota ledger at the end", network.Name)
+			case ledger.Spent || ledger.BalanceByteCount < 0:
+				t.Fatalf("%s's balance at the end: %+v", network.Name, ledger)
+			case ledgers.Meters.TotalByteCount(network.NetworkId) != ledger.DebitedByteCount():
+				t.Fatalf("%s's balances were debited %d by the end, its meters: %s", network.Name, ledger.DebitedByteCount(), ledgers.Meters.Describe(network.NetworkId))
+			}
+			t.Logf("%s's meters at the end: %s", network.Name, ledgers.Meters.Describe(network.NetworkId))
+		}
+		// each edge's own meter holds its step's bytes: the mail the first network took through mxedge, and the mail
+		// the second sent through smtpedge and the visit it was answered through tlsedge
+		for _, metered := range []struct {
+			network *WorldNetwork
+			meter   string
+		}{{first, sidecar.QuotaMeterMx}, {second, sidecar.QuotaMeterSmtp}, {second, sidecar.QuotaMeterTls}} {
+			if ledgers.Meters.ByteCount(metered.network.NetworkId, metered.meter) <= 0 {
+				t.Fatalf("%s's %s meter holds nothing at the end: %s", metered.network.Name, metered.meter, ledgers.Meters.Describe(metered.network.NetworkId))
+			}
 		}
 	})
+}
+
+// The smoke's gkm step, on real keys: each network's shared repo, whose KF1 its creation ran through the owner's key
+// client at gkm's block, held at generation 1 under one group by every sidecar's own key client; the owner rotates it
+// (`ur keys rotate`), and every sidecar holds generation 2 under the rotation's group and commitment, writes under it
+// and reads every other sidecar's write.
+func worldSmokeGkm(t testing.TB, world *World, settings *worldSmokeSettings, networks []*WorldNetwork, repoIds map[*WorldNetwork]sidecar.Id) {
+	ctx, cancel := world.StepContext(t.Context(), settings.PhaseTimeout)
+	defer cancel()
+	for _, network := range networks {
+		repoId := repoIds[network]
+		groupIds := map[sidecar.Id]bool{}
+		for _, device := range network.Clients {
+			key, err := worldKeysAwaitGeneration(ctx, device, repoId, 1, settings.Keys)
+			if err != nil {
+				world.FailProgress(t, network.Name+"'s generation 1", err, nil)
+			}
+			groupIds[key.GroupId()] = true
+		}
+		if len(groupIds) != 1 {
+			t.Fatalf("%s's sidecars hold its repo under %d groups", network.Name, len(groupIds))
+		}
+		rotated, err := network.Owner().Gkm.RotateRepo(ctx, repoId)
+		if err != nil {
+			world.FailProgress(t, network.Name+"'s rotation", err, nil)
+		}
+		if rotated.Generation() != 2 {
+			t.Fatalf("%s's rotation made generation %d, not 2", network.Name, rotated.Generation())
+		}
+		for _, device := range network.Clients {
+			key, err := worldKeysAwaitGeneration(ctx, device, repoId, 2, settings.Keys)
+			if err != nil {
+				world.FailProgress(t, network.Name+"'s generation 2", err, nil)
+			}
+			if key.GroupId() != rotated.GroupId() || !bytes.Equal(key.Commitment(), rotated.Commitment()) {
+				t.Fatalf("%s holds generation 2 under group %s, commitment %x; the rotation made %s, %x", device.Name, key.GroupId(), key.Commitment(), rotated.GroupId(), rotated.Commitment())
+			}
+		}
+		content := func(device *sidecart3.T3Device) []byte {
+			return []byte(fmt.Sprintf("%s's write under generation 2\n", device.Name))
+		}
+		for _, device := range network.Clients {
+			if err := worldKeysWrite(ctx, device, repoId, device.Name+"-generation-2.txt", content(device)); err != nil {
+				world.FailProgress(t, device.Name+"'s write under generation 2", err, nil)
+			}
+		}
+		for _, reader := range network.Clients {
+			for _, writer := range network.Clients {
+				if err := worldKeysRead(ctx, reader, repoId, writer.Name+"-generation-2.txt", content(writer)); err != nil {
+					world.FailProgress(t, "the reads under generation 2", err, nil)
+				}
+			}
+		}
+	}
+}
+
+// The smoke's sockets and tlsedge step: network, made Pro by a paid Pro balance, so verified and its document able to
+// hold a standing publish (§8.5), saves its members' public publish of tls/443/<TlsHost> in raw mode; its member
+// device's certificate row is issued for the network's pair, and the device starts its socket component and §16.6's
+// approval gate and listens on the name; a visitor through tlsedge's direct 443, behind the lb's PROXY header,
+// completes TLS with the device's own key and is answered by the device; a visitor for a host no grant publishes is
+// refused at the edge.
+func worldSmokeTls(t testing.TB, world *World, settings *worldSmokeSettings, network *WorldNetwork) {
+	ctx, cancel := world.StepContext(t.Context(), settings.PhaseTimeout)
+	defer cancel()
+	device := network.Clients[len(network.Clients)-1]
+	if err := world.VerifyNetwork(ctx, network, true, settings.Tls); err != nil {
+		t.Fatalf("%s's Pro balance: %v", network.Name, err)
+	}
+	if _, err := world.SaveAclPolicy(ctx, network, network.Owner(), settings.TlsAclPolicy(time.Now().Add(settings.TlsGrantLife))); err != nil {
+		world.FailProgress(t, "the tls/ grant", err, nil)
+	}
+	dnsClient, err := network.Owner().Sidecar().Dns()
+	if err != nil {
+		t.Fatalf("%s's dns client: %v", network.Owner().Name, err)
+	}
+	zoneAnswer, err := dnsClient.Zone(ctx)
+	if err != nil || zoneAnswer.Apex() == "" {
+		t.Fatalf("%s's zone: %+v, %v", network.Name, zoneAnswer, err)
+	}
+	zone := zoneAnswer.Apex()
+	if err := world.IssueTlsCertificateRow(ctx, device, zoneAnswer, settings.Tls); err != nil {
+		t.Fatalf("%s's certificate row: %v", device.Name, err)
+	}
+	if err := world.StartSockets(ctx, device); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := world.InstallApprovalGate(ctx, device); err != nil {
+		t.Fatal(err)
+	}
+	name := "tls/443/" + settings.TlsHost
+	listenSettings := &sidecar.SocketListenSettings{AppMode: "raw"}
+	listener, err := world.Listen(ctx, device, name, listenSettings, settings.Tls)
+	if errors.Is(err, sidecar.ErrSidecarActionInvalid) {
+		// a product finding, which the step reports and carries on past to the servers through a stand-in gate
+		t.Errorf("§16.6's approval gate refused %s's Sidecar.Listen on %s: %v; socketListenAction builds the listen's action with no Effect, which ApprovalGate.Authorize refuses before any grant or decision is read", device.Name, name, err)
+		device.Sidecar().InstallGate(worldListenGate{})
+		listener, err = world.Listen(ctx, device, name, listenSettings, settings.Tls)
+	}
+	if err != nil {
+		world.FailProgress(t, "the tls/ listen", err, nil)
+	}
+	serverName := worldTlsServerName(settings.TlsHost, zone)
+	answer := func(line []byte) []byte {
+		return fmt.Appendf(nil, "%s: %s\n", device.Name, line)
+	}
+	echo, err := worldServeTlsEcho(device, listener, serverName, answer, settings.Tls)
+	if err != nil {
+		listener.Close()
+		t.Fatal(err)
+	}
+	defer func() {
+		listener.Close()
+		echo.Wait()
+	}()
+	spkiSha256, err := worldTlsKeySpkiSha256(device)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// tlsedge routes a server name by the label map it follows since its last serial (DnsLabelMapSince), so a label
+	// whose change serial is still 0 never reaches a running tlsedge
+	serial, found, err := worldDnsLabelChangeSerial(ctx, network.NetworkId, zoneAnswer.Root)
+	if err != nil || !found {
+		t.Fatalf("%s's label in the map: found %t, %v", network.Name, found, err)
+	}
+	if serial == 0 {
+		// a product finding, which the step reports and carries on past: a record written in the zone stamps the label
+		t.Errorf("%s's label %s holds change serial 0 in %s's label map, so DnsLabelMapSince never returns it and tlsedge, which follows the map from its start, never routes %s: the label was drawn outside the zone's serial order (model.EnsureNetworkLabelInTx stamps no serial, and ensureNetworkZoneInTx stamps one only when the zone's system rows change)", network.Name, zoneAnswer.Label, zoneAnswer.Root, worldTlsServerName(settings.TlsHost, zone))
+		recordName := settings.TlsRecordHost + "." + zone
+		if _, err := world.SetDnsRecord(ctx, network.Owner(), &sidecar.DnsRecordUpsert{Name: recordName, Type: "TXT", Values: []string{settings.TlsRecordText}}, nil); err != nil {
+			world.FailProgress(t, "the record that stamps the label", err, nil)
+		}
+	}
+	request := []byte(settings.TlsRequest)
+	if err := world.AwaitTlsVisit(ctx, serverName, spkiSha256, request, bytes.TrimSuffix(answer(request), []byte("\n")), settings.Tls); err != nil {
+		world.FailProgress(t, "the visit through tlsedge", fmt.Errorf("%w; the listener's accepts ended: %v; %s", err, echo.Ended(), worldTlsServerState(t.Context(), network.NetworkId, zoneAnswer.Root)), nil)
+	}
+	// a host no grant publishes: tlsedge finds no listener, and the visitor is refused in the handshake
+	unpublished := worldTlsServerName(settings.TlsUnpublishedHost, zone)
+	if answered, err := world.VisitTls(ctx, unpublished, spkiSha256, request, settings.Tls); err == nil {
+		t.Fatalf("a visitor to %s, which no grant publishes, was answered %q", unpublished, answered)
+	}
 }
 
 // One request through T3Api to url with token as its bearer, "" for none, and body as JSON, "" for none: its status

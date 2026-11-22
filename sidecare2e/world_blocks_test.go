@@ -45,6 +45,10 @@ const worldDnsPort = 53
 // The port mxedge's two listeners take SMTP on.
 const worldSmtpPort = 25
 
+// The port mxedge's router takes smtpedge's LAN splices on, mxedge.yml's lan_port (D-SMTP-13): a key of the block's
+// direct listeners, which binds the world's fixed loopback address for it.
+const worldMxLanPort = 2525
+
 // The world's clusters as a block holds them: the T3World's Net's file clusters on the local stack's MinIO, which
 // every block shares as production's share the site's. Ready reads true, since the Net read each cluster's admin
 // info when it made the buckets, and Close leaves them to the world, which ends them with the Net.
@@ -99,7 +103,8 @@ func (self *World) newBlock(name string) (*worldBlock, error) {
 		block.run = self.runSmtpedge
 	case WorldBlockMxedge:
 		block.service = "mxedge"
-		block.directPorts = []int{worldSmtpPort}
+		block.directPorts = []int{worldSmtpPort, worldMxLanPort}
+		block.fixedAddresses = map[int]netip.AddrPort{worldMxLanPort: self.mxLanAddress}
 		block.run = self.runMxedgeRouter
 	case WorldBlockMxedgePlatform:
 		block.directPorts = []int{worldSmtpPort}
@@ -192,6 +197,20 @@ func (self *World) runGkm(ctx context.Context, listeners *worldBlockListeners) e
 		Clusters:      self.clusters(),
 		Quota:         quota,
 		ServiceTokens: self.t3.ServiceTokens(),
+	}
+	if self.settings.GkmHintResolver {
+		// the block's own hint writer, its sidecar ids resolved through api's internal route on the block's gkm bearer,
+		// as server/cli/gkm builds it (plan-KEYS-hint-addressing, QD-1171)
+		resolver, err := server.NewSidecarIdentityClientsResolver(&server.SidecarIdentityClientsResolverArgs{
+			ApiUrl:     self.apiOrigin(),
+			Bearer:     self.bearer(server.InternalGateCallerGkm),
+			HttpClient: self.apiClient(),
+		})
+		if err != nil {
+			listeners.close()
+			return err
+		}
+		deps.PushResolver = resolver
 	}
 	return gkm.Run(ctx, gkm.RunOptions{StatusListener: listeners.status, Settings: settings, Deps: deps})
 }
@@ -329,21 +348,34 @@ func (self *World) runTlsedge(ctx context.Context, listeners *worldBlockListener
 }
 
 // smtpedge on the world's Postgres and Redis: its send store (model.NewSmtpEdgeStore), the abuse gate, the stock
-// gate over the log through api's internal gate on its bearer and the model's facts, its X-UR-Ref keys; sidecartest's
-// MX world for its resolver, PTR and dialer and a fake proof verifier (the World's header); its platform clients in
-// urnetwork-edge, registered with sockets on their own sockets tokens, and its Quota over api's internal quota surface
-// on its bearer.
+// gate over the log through api's internal gate on its bearer and the model's facts, its X-UR-Ref keys; its resolver
+// the world's DNSSEC for a network's names, validated from the world's own anchor through the dns edge
+// (world_mail_dns_test.go), and sidecartest's MX world for every other name, the PTR and the dialer, beside a fake
+// proof verifier (the World's header); mxedge's router at the world's lb interface reached over the LAN splice to the
+// router's LAN listener (router_interfaces, router_lan; D-SMTP-13); its platform clients in urnetwork-edge, registered
+// with sockets on their own sockets tokens, and its Quota over api's internal quota surface on its bearer.
 func (self *World) runSmtpedge(ctx context.Context, listeners *worldBlockListeners) error {
 	hostsSettings := self.HostsSettings()
 	config, err := smtpedgeservice.LoadSmtpEdgeConfig([]byte(fmt.Sprintf(
-		"root: %s\nreport_host: %s\nhelo_domain: %s\nsending_addresses:\n  - {address: %s, helo: %s}\n",
+		"root: %s\nreport_host: %s\nhelo_domain: %s\nsending_addresses:\n  - {address: %s, helo: %s}\nrouter_interfaces: [%s]\nrouter_lan: %s\n",
 		hostsSettings.SmtpRoot, hostsSettings.SmtpReportHost, hostsSettings.SmtpHeloDomain, hostsSettings.SmtpAddress, hostsSettings.SmtpHeloName,
+		self.settings.LbAddress, self.mxLanAddress,
 	)), 0)
 	if err != nil {
 		listeners.close()
 		return err
 	}
 	config.Settings.XUrRefKeys = self.credentials.xUrRefKeys
+	// the lb's interface is a documentation address, which the edge refuses to dial as it refuses the ranges it never
+	// sends to; only its prefix is let through, so every other refused range stays refused
+	refused := []netip.Prefix{}
+	for _, prefix := range config.Settings.MxRefusedPrefixes {
+		if !prefix.Contains(self.settings.LbAddress) {
+			refused = append(refused, prefix)
+		}
+	}
+	config.Settings.MxRefusedPrefixes = refused
+	config.Settings.GateRetryTimeout = self.settings.SmtpGateRetryTimeout
 	world, err := sidecartest.NewMxWorld(sidecartest.DefaultMxWorldSettings())
 	if err != nil {
 		listeners.close()
@@ -360,6 +392,11 @@ func (self *World) runSmtpedge(ctx context.Context, listeners *worldBlockListene
 		return err
 	}
 	resolver := sidecar.NewSmtpMxDnsResolver(world, anchors, nil, sidecar.RealClock{})
+	mxResolver, err := newWorldSmtpMxResolver(self.dnssec, resolver)
+	if err != nil {
+		listeners.close()
+		return err
+	}
 	projection, err := self.projectionSource(server.InternalGateCallerSmtpedge)
 	if err != nil {
 		listeners.close()
@@ -388,7 +425,7 @@ func (self *World) runSmtpedge(ctx context.Context, listeners *worldBlockListene
 		Store:      model.NewSmtpEdgeStore(nil),
 		Projection: projection,
 		Facts:      smtpedgehost.NewModelGateSource(config.Settings.Root, quota),
-		Resolver:   resolver,
+		Resolver:   mxResolver,
 		Ptr:        resolver,
 		Dialer:     world,
 		Verifier:   sidecartest.NewFakeSmtpProofVerifier(nil),
@@ -406,11 +443,16 @@ func (self *World) runSmtpedge(ctx context.Context, listeners *worldBlockListene
 }
 
 // mxedge's router on the world's Postgres and Redis and its store (model.NewMxEdgeStore), TCP 25 on a listener of its
-// own, and its K platform clients in urnetwork-edge on the exchange, minted by api's edge client route on the edge
-// bearer, each Find at sockets' origin, and its Quota over api's internal quota surface on its bearer; its PTR and host
-// lookups faked (the World's header).
+// own and its LAN listener on the world's fixed loopback address, which smtpedge's LAN splices reach from the
+// world's lan_sources (D-SMTP-13), and its K platform clients in urnetwork-edge on the exchange, minted by api's edge
+// client route on the edge bearer, each Find at sockets' origin, and its Quota over api's internal quota surface on
+// its bearer; its PTR and host lookups faked (the World's header).
 func (self *World) runMxedgeRouter(ctx context.Context, listeners *worldBlockListeners) error {
 	settings := e2eMxEdgeSettings(self.HostsSettings())
+	copied := *settings.MxEdge
+	copied.LanPort = worldMxLanPort
+	copied.LanSources = self.settings.MxLanSources
+	settings.MxEdge = &copied
 	mxEdge := settings.MxEdge
 	source, endSource, err := self.edgeClientSource("mxedge", mxEdge.Clients)
 	if err != nil {
@@ -465,8 +507,9 @@ func (self *World) runMxedgeRouter(ctx context.Context, listeners *worldBlockLis
 		},
 		StatusListener: listeners.status,
 		SmtpListener:   listeners.direct[worldSmtpPort],
+		LanListener:    listeners.direct[worldMxLanPort],
 	}
-	return mxedgehost.RunHost(ctx, mxedgehost.HostRoleRouter, settings, nil, deps, &mxedgehost.HostPorts{Smtp: worldSmtpPort})
+	return mxedgehost.RunHost(ctx, mxedgehost.HostRoleRouter, settings, nil, deps, &mxedgehost.HostPorts{Smtp: worldSmtpPort, Lan: worldMxLanPort})
 }
 
 // mxedge's platform listener on the world's Postgres and Redis with its certificate and no report intake, TCP 25 on a
@@ -487,7 +530,8 @@ func (self *World) dnsSettings() (*dnsservice.DnsSettings, error) {
 }
 
 // The dns API's run on the world's Postgres and Redis, releasing the credentials' key window, with the edge's bearer
-// digests, no lb inventory, and the log through api's internal gate on its own bearer (HostDeps.Projection).
+// digests, the world's one lb interface as its inventory (world_lb_test.go), and the log through api's internal gate on
+// its own bearer (HostDeps.Projection).
 func (self *World) dnsApiRun() (func(ctx context.Context, listeners *worldBlockListeners) error, error) {
 	dnsSettings, err := self.dnsSettings()
 	if err != nil {
@@ -517,7 +561,7 @@ func (self *World) dnsApiRun() (func(ctx context.Context, listeners *worldBlockL
 				return window
 			},
 			Auth:           self.credentials.dnsAuth,
-			Interfaces:     []dnsservice.DnsLbInterface{},
+			Interfaces:     self.lbInterfaces(),
 			SoaReader:      &worldSoaReader{world: self},
 			Projection:     projection,
 			ServiceTokens:  self.t3.ServiceTokens(),
@@ -546,8 +590,9 @@ func (self *worldSoaReader) ReadSoa(ctx context.Context, root string, ns string)
 }
 
 // The dns edge's run, feeding from the dns API at its origin through the world's lb, as an edge reaches
-// dns.bringyour.com, with its ZSK and bearer, its probes refused, and DNS on TCP and UDP on listeners of its own; its
-// local snapshot in a directory every run of the world's shares, which a restart serves from.
+// dns.bringyour.com, with its ZSK and bearer, its probes through the world's lb interface to its tlsedge and mxedge
+// (world_lb_test.go), and DNS on TCP and UDP on listeners of its own; its local snapshot in a directory every run of
+// the world's shares, which a restart serves from.
 func (self *World) dnsEdgeRun() (func(ctx context.Context, listeners *worldBlockListeners) error, error) {
 	dnsSettings, err := self.dnsSettings()
 	if err != nil {
@@ -586,7 +631,7 @@ func (self *World) dnsEdgeRun() (func(ctx context.Context, listeners *worldBlock
 			Zsk:            self.credentials.dnsZsk,
 			Feed:           feed,
 			RouteProbes:    routeProbes,
-			ProbeDialer:    e2eNoLbDialer{},
+			ProbeDialer:    &worldLbProbeDialer{world: self},
 			StatusListener: listeners.status,
 			DnsListener:    listeners.direct[worldDnsPort],
 			DnsPacketConn:  listeners.udp,

@@ -9,10 +9,14 @@
 //	          file clusters in buckets of the world's own on the local stack's MinIO; every block holds those clusters
 //	          and that Redis, as production's blocks share the site's
 //	api       T3Api, server's api and oauth in process, with api's installs over its gate cache (the sequencer, the
-//	          exchange's scopes, approvals, dns scopes, edge logins, rev/'s store, the issuer's worker) and api's
-//	          internal gate surface on the world's throwaway bearers (ServeInternalGate), as a block reaches api
+//	          exchange's scopes, approvals, dns scopes, edge logins, rev/'s store, the issuer's worker, and §8.10's
+//	          contract gate when WorldSettings.AclContractGate turns sidecar.yml's switch on), the sequencer and rev/'s
+//	          store spending on api's own write budget over the world's Redis, which reports beside each block's
+//	          (T3WorldSettings.ApiWriteBudget), and api's internal gate surface on the world's throwaway bearers
+//	          (ServeInternalGate), as a block reaches api
 //	exchange  server's exchange and its connect handler on loopback, which every sidecar's and edge client's connect
-//	          client dials
+//	          client dials, with sidecar.yml's push switch on, so each sidecar's client hears its hints from the
+//	          exchange's resident publisher as in production (WorldSettings.Push)
 //	blocks    each new service's block through its own exported Run, on a listener the OS picks, its routes served at
 //	          its origin through T3Api.ServeService by the world's lb (worldLb: http over loopback to the block, with
 //	          X-UR-Forwarded-For set as warp's nginx sets it), and its direct ports on listeners of their own:
@@ -37,20 +41,59 @@
 //
 // What stays a fake, each because the test stack cannot give the real part, named where it is built:
 //
-//   - the clock check (evs): chronyd on warp's services network, which no test host runs; sidecartest's FakeClockCheck
-//     answers an offset of zero;
-//   - smtpedge's MX world (resolver, PTR, dialer, proof verifier): sidecartest's MxWorld and FakeSmtpProofVerifier,
-//     since the test stack resolves no public name and dials no public MX; mxedge's router's PTR and host lookups
-//     answer nothing for the same reason;
-//   - the dns edge's lb probes: refused, since no lb interface answers in the test stack;
+//   - the clock check (evs): chronyd on warp's services network, which no test host runs and nothing may be fetched to
+//     run; sidecartest's FakeClockCheck answers an offset of zero;
+//   - the DNS above the world's root: the world's DNS is authoritative only under zone.e2e.example., signed under the
+//     KSK the world made, and no chain from IANA's root keys reaches it, so the world signs ".", "example." and
+//     "e2e.example." itself, each holding its child's DS, the last its root KSK's (world_mail_dns_test.go). smtpedge's
+//     resolver validates a network's MX, its mail host's address and its TLSA from that parent chain's anchor, every
+//     answer under the root the dns edge's own, and a sending device's DANE validates under the same anchor;
+//   - smtpedge's MX world for every other name: sidecartest's MxWorld answers the sending address's HELO name and PTR,
+//     which no zone of the world serves, and dials an MX off the router's interfaces, which a sending address's
+//     SO_MARK reaches in production. An MX on the world's lb interface is mxedge's router's, which smtpedge reaches
+//     over the LAN splice to the router's LAN listener (router_interfaces, router_lan; D-SMTP-13), as production's
+//     sending host does;
+//   - a sending device's composition (world_mail_send_test.go): built as a desktop's ur daemon builds it, but its
+//     DANE anchor is the world's above, its own DoH, which TL2's and TL3's lookups and DKIM's answers take, asks the
+//     world's dns edge, since public resolvers know no .example name, and its DKIM keys' keychain is a map in the
+//     test, since a Sidecar's keychain is not reachable outside its package;
+//   - a person's approval (worldDeviceGate): §16.6's stock gate holds an alias's creation and a mail send to another
+//     network for a person's decision on another approval-capable device, and the world composes no approver, so a
+//     stand-in in front of the stock gate runs the one use as that decision would, counted;
+//   - a receiver's reception-time checks (SPF, DKIM, DMARC, PTR) go over its own DoH to public resolvers as the
+//     receiver composition builds it, with no seam a test reaches: they know no .example name and no documentation
+//     address's PTR, so every check reads none or temperror, which no deposit is refused for (D-MAIL-5);
+//   - api's smtp routes' §8 checks (worldSmtpApiGate, world_server_state_test.go): api's process installs none
+//     (model.SetSmtpApiGate is called by its handler tests alone, the mail step's finding), so the world installs one
+//     over a gate cache of its own, its mail_send the verified state's send grant;
+//   - smtpedge's proof verifier: sidecartest's FakeSmtpProofVerifier. smtpproof's Groth16 keys come from a production
+//     setup that has not run (smtpproof's SPEC.md section 12), so its real verifier holds no key set and refuses every
+//     part, as its prover does;
+//   - mxedge's router's PTR and host lookups: they answer nothing, since the test stack serves no in-addr.arpa zone and
+//     resolves no public name;
+//   - §13.8's certs worker and its ACME CA: a device's issued certificate row is written as the worker writes it
+//     (World.IssueTlsCertificateRow), on the device's own key, and no chain is issued, so a visitor to a published name
+//     is shown the device's self-signed leaf on that key;
 //   - keys: the T3World's FakeGkm, whose deliveries reach each device, and the config repo's heads in memory; gkm's
 //     block runs and answers. sidecart3's T3WorldSettings.RealKeys gives each device its real key client at gkm's
-//     block and the config heads on evs, as ur daemon composes them (world_keys.go), but a joining device never takes
-//     the config repo's key there yet, so the world runs FakeGkm by default (world_keys_test.go has the evidence).
+//     block and the config heads on evs, as ur daemon composes them (world_keys.go); there a joining device takes the
+//     config repo's key by a late delivery that gkm's hints by sidecar id ask for, but a repo's creation is refused
+//     by gkm's cached 404 of its placement, so the world runs FakeGkm by default until gkm-repo-create-race lands
+//     (world_keys_test.go has the evidence, and TestE2eWorldSmokeRealKeys runs the smoke's gkm step on real keys).
+//
+// The dns edge's lb probes are real: the dns API's lb inventory is the world's one interface, whose tlsedge ports and
+// TCP 25 reach tlsedge and mxedge's router behind the lb's PROXY header (world_lb_test.go), and a mail host's address
+// is answered only once its router interface's banner probe passed, which the mail step's resolution reads; api's
+// sequencer and rev/ store spend on api's own write budget; and gkm's hint writer resolves sidecar ids through api's
+// internal route on the block's gkm bearer, as production's block does (WorldSettings.GkmHintResolver). A device's
+// §16.6 approval gate is the stock one (World.InstallApprovalGate); where it refuses a listen as an action with no
+// effect, a product finding the smoke reports, the TLS step carries on through worldListenGate, which passes a listen
+// alone, and the mail step through worldDeviceGate, which passes it where the device's policy grants the listen.
 //
 // Process-wide state, so one world runs at a time and its Close puts each back: the T3World's (sidecar.yml, pro.yml's
-// limits, oauth's issuer and keys, WARP_DOMAIN, api's installs), evs.yml, mcp's seal secret and McpResource, and the
-// T3Api's internal gate handler. mcp's /status latch is router's global one, so the world runs one mcp.
+// limits, oauth's issuer and keys, WARP_DOMAIN, api's installs), pro.yml's pro: limits, api's dns.yml root, evs.yml,
+// mcp's seal secret and McpResource, api's smtp routes' §8 checks, and the T3Api's internal gate handler. mcp's
+// /status latch is router's global one, so the world runs one mcp.
 
 package sidecare2e
 
@@ -65,6 +108,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/netip"
 	"net/url"
 	"slices"
 	"strings"
@@ -129,9 +173,13 @@ type WorldSettings struct {
 	// M, the networks AddNetworks makes, and N, the sidecars each enrolls.
 	NetworkCount      int
 	ClientsPerNetwork int
-	// The storage format evs's block runs as, which evs.yml names (QD-854): format 1, as T3World's evs and M2's rows
-	// run it.
+	// The storage format evs's block runs as, which evs.yml names (QD-854): format 2, production's from M10's release;
+	// format 1 runs a rollback's block, its guard refusing format-2 pushes.
 	EvsInstanceFormat uint32
+	// sidecar.yml's acl_contract_gate switch (ACL-M4-01): on, connect's CreateContract consults §8.10's contract gate,
+	// which the T3World installs over api's gate cache as api's process does when the switch is on at its start. false,
+	// as production ships the switch.
+	AclContractGate bool
 	// The bytes of each internal gate caller's bearer: the format's (server.DefaultInternalGateSettings).
 	InternalGateBearerByteCount int
 	// How long a block may take to stop, its Run returning, when the world closes or chaos stops it.
@@ -145,6 +193,75 @@ type WorldSettings struct {
 	RateLimitWaitTimeout time.Duration
 	// How many of each sidecar's newest log lines the world keeps for a stalled phase's dump (FailProgress).
 	DumpLogLineCount int
+	// sidecar.yml's push switch and the exchange's EnableSidecarPush, as connect's process reads the switch at its
+	// start: each sidecar's client hears its hints from the exchange's resident publisher (§6.8). true.
+	Push bool
+	// Whether gkm's hint writer resolves sidecar ids through api's internal route on the block's gkm bearer, as
+	// production's block does (server.SidecarIdentityClientsResolver), so a hint by sidecar id reaches its sidecar's
+	// client: true. false gives the block no resolver, so it loses every hint by sidecar id.
+	GkmHintResolver bool
+	// Each sidecar's gkm hint resync under RealKeys (T3WorldSettings.KeyResyncInterval): 0, the sidecar's own hourly
+	// one, since the hints reach every sidecar.
+	KeyResyncInterval time.Duration
+	// pro.yml's pro: sidecar: block for the world's life, beside the T3World's tier (§20.4's Community column), so a
+	// network a scenario makes Pro runs under Pro's numbers: §20.4's Pro column. nil leaves the process's, where every
+	// Pro limit reads zero. sidecar_abuse:'s keys are every tier's and the T3World's.
+	ProSidecarLimits map[string]int64
+	// The world's one lb interface (world_lb_test.go): its inventory name and its address, a documentation address, and
+	// the source the dns edge's probes come from as the lb's PROXY header names it.
+	LbName        string
+	LbAddress     netip.Addr
+	LbProbeSource netip.AddrPort
+	// Who reaches mxedge's LAN listener (mxedge.yml's lan_sources), smtpedge's splice to an MX on the router's own lb
+	// interface (D-SMTP-13): the loopback smtpedge's block dials it from.
+	MxLanSources []netip.Prefix
+	// The retry_after smtpedge's gate answers TRY_LATER with while a network's facts load (smtpedge.yml's
+	// gate_retry_timeout, 60 s in production): a gate's facts load at a network's first preamble, so its first send
+	// is always held once, and the world's sidecars run on real time.
+	SmtpGateRetryTimeout time.Duration
+	// How the world signs the DNS path above its root (world_mail_dns_test.go).
+	Dnssec *worldDnssecSettings
+}
+
+// §20.4's Pro column, pro.yml's pro: sidecar: keys: what a network a scenario makes Pro runs under.
+func DefaultWorldProSidecarLimits() map[string]int64 {
+	kib := int64(1024)
+	mib := 1024 * kib
+	gib := 1024 * mib
+	return map[string]int64{
+		"storage":                     20 * gib,
+		"sidecar_clients":             200,
+		"top_level_client_limit":      100,
+		"dns_entries":                 200,
+		"tls_endpoints":               20,
+		"config_admissions":           500,
+		"config_statements_per_min":   60,
+		"config_statements_burst":     600,
+		"config_statements_per_day":   2000,
+		"config_bases_per_min":        1,
+		"config_bases_per_day":        200,
+		"store_weight":                4,
+		"evs_drops_per_day":           100,
+		"acl_rules":                   500,
+		"acl_groups":                  1,
+		"acl_requests":                1,
+		"acl_approvers_two":           0,
+		"acl_network_shares":          1,
+		"smtp_connections_per_day":    200,
+		"smtp_bytes_per_day":          gib,
+		"smtp_recipients_per_message": 50,
+		"smtp_recipients_per_day":     1000,
+		"smtp_message_bytes":          25 * mib,
+		"smtp_burst":                  50,
+		"smtp_burst_window":           int64(10 * time.Minute / time.Millisecond),
+		"smtp_concurrent_connections": 4,
+		"mail_inbound_message_bytes":  50 * mib,
+		"mail_burners_active":         500,
+		"mail_burner_creates_per_day": 50,
+		"tls_endpoint_concurrent":     2048,
+		"tls_endpoint_new_per_s":      200,
+		"tls_endpoint_mbit_per_s":     200,
+	}
 }
 
 // The defaults: every block, two networks of three sidecars.
@@ -155,13 +272,24 @@ func DefaultWorldSettings() *WorldSettings {
 		StartStatus:                 map[string]string{},
 		NetworkCount:                2,
 		ClientsPerNetwork:           3,
-		EvsInstanceFormat:           sidecar.EvsRepoFormat1,
+		EvsInstanceFormat:           sidecar.EvsRepoFormat2,
+		AclContractGate:             false,
 		InternalGateBearerByteCount: server.DefaultInternalGateSettings().BearerByteCount,
 		StopTimeout:                 90 * time.Second,
 		EdgeHost:                    "e2e-edge-1",
 		EdgeEnvironment:             "e2e",
 		RateLimitWaitTimeout:        3 * time.Minute,
 		DumpLogLineCount:            40,
+		Push:                        true,
+		GkmHintResolver:             true,
+		KeyResyncInterval:           0,
+		ProSidecarLimits:            DefaultWorldProSidecarLimits(),
+		LbName:                      "e2e-lb-1",
+		LbAddress:                   netip.MustParseAddr("192.0.2.80"),
+		LbProbeSource:               netip.MustParseAddrPort("203.0.113.53:40053"),
+		MxLanSources:                []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")},
+		SmtpGateRetryTimeout:        2 * time.Second,
+		Dnssec:                      defaultWorldDnssecSettings(),
 	}
 }
 
@@ -172,10 +300,11 @@ const (
 )
 
 // sidecar.yml as a world puts it: preview_networks, every service's gate open to every network, evs's with the env's
-// one block, and urnetwork_edge the edges' clients' network.
-func worldSidecarYaml(urnetworkEdge server.Id) func(previewNetworkIds []string) string {
+// one block, urnetwork_edge the edges' clients' network, the push switch when push is on, and the contract gate's when
+// the world turns it on.
+func worldSidecarYaml(urnetworkEdge server.Id, push bool, aclContractGate bool) func(previewNetworkIds []string) string {
 	return func(previewNetworkIds []string) string {
-		return strings.Join([]string{
+		lines := []string{
 			"sidecar:",
 			"  preview_networks: [" + strings.Join(previewNetworkIds, ", ") + "]",
 			"  evs: {enabled: true, percent: 100, blocks: 1}",
@@ -186,8 +315,14 @@ func worldSidecarYaml(urnetworkEdge server.Id) func(previewNetworkIds []string) 
 			"  smtpedge: {enabled: true, percent: 100}",
 			"  dns: {enabled: true, percent: 100}",
 			"  urnetwork_edge: " + urnetworkEdge.String(),
-			"",
-		}, "\n")
+		}
+		if push {
+			lines = append(lines, "  push: {enabled: true}")
+		}
+		if aclContractGate {
+			lines = append(lines, "  "+server.SidecarSwitchAclContractGate+": {enabled: true}")
+		}
+		return strings.Join(lines, "\n") + "\n"
 	}
 }
 
@@ -207,12 +342,23 @@ type World struct {
 	statusClient *http.Client
 	// the lb's connections to the blocks
 	lbTransport *http.Transport
+	// mxedge's LAN listener's loopback address, fixed for the world's life since smtpedge's config names it
+	// (router_lan), and the DNSSEC path above the world's root (world_mail_dns_test.go)
+	mxLanAddress netip.AddrPort
+	dnssec       *worldDnssec
+	// whether api's process had installed its smtp routes' §8 checks when the world came up, before the world's
+	// stand-in (worldInstallSmtpApiGate)
+	apiSmtpGateInstalled bool
 
 	blocks []*worldBlock
 
 	// each sidecar's newest log lines, by its name, at most DumpLogLineCount
 	logLock         sync.Mutex
 	sidecarLogLines map[string][]string
+
+	// the devices whose socket component runs (StartSockets)
+	socketsLock    sync.Mutex
+	socketsStarted map[*sidecart3.T3Device]bool
 
 	stateLock sync.Mutex
 	networks  []*WorldNetwork
@@ -250,7 +396,21 @@ func NewWorld(t testing.TB, settings *WorldSettings) *World {
 		copied := *t3Settings
 		t3Settings = &copied
 	}
-	t3Settings.SidecarYaml = worldSidecarYaml(self.urnetworkEdge)
+	t3Settings.SidecarYaml = worldSidecarYaml(self.urnetworkEdge, settings.Push, settings.AclContractGate)
+	t3Settings.KeyResyncInterval = settings.KeyResyncInterval
+	// api spends on a budget of its own over the world's Redis, as its process does, never the Net's fake
+	t3Settings.ApiWriteBudget = true
+	exchangeSettings := sidecart3.DefaultExchangeSettings()
+	if t3Settings.Exchange != nil {
+		copied := *t3Settings.Exchange
+		exchangeSettings = &copied
+	}
+	if exchangeSettings.Exchange != nil {
+		copied := *exchangeSettings.Exchange
+		copied.EnableSidecarPush = settings.Push
+		exchangeSettings.Exchange = &copied
+	}
+	t3Settings.Exchange = exchangeSettings
 	sidecarSettings := sidecart3.DefaultT3SidecarSettings()
 	if t3Settings.Sidecar != nil {
 		copied := *t3Settings.Sidecar
@@ -273,10 +433,35 @@ func NewWorld(t testing.TB, settings *WorldSettings) *World {
 	self.closes = append(self.closes, server.Config.PushSimpleResource(evshost.BlockConfigFileName, []byte(fmt.Sprintf("# the e2e world's evs\ninstance_format: %d\n", settings.EvsInstanceFormat))))
 	// urnetwork-edge's row, which api's edge client route mints the edges' clients in
 	worldCreateEdgeNetwork(t.Context(), self.urnetworkEdge)
+	if settings.ProSidecarLimits != nil {
+		self.closes = append(self.closes, worldInstallProLimits(settings.ProSidecarLimits))
+	}
+	// api's root the dns API's, as one dns.yml gives both
+	self.closes = append(self.closes, worldSetDnsUserRoot(hostsSettings.DnsRoot))
 
 	if err := self.installInternalGate(); err != nil {
 		t.Fatalf("api's internal gate: %v", err)
 	}
+	// mxedge's LAN listener on a port of its own for the world's life, which smtpedge's router_lan names before mxedge
+	// starts; the reservation is let go here, and each run of mxedge binds the port again
+	lanPorts, releaseLanPorts, err := server.ReserveTestListenPorts("tcp")
+	if err != nil {
+		t.Fatalf("mxedge's LAN port: %v", err)
+	}
+	releaseLanPorts()
+	self.mxLanAddress = netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), uint16(lanPorts[0]))
+	if self.dnssec, err = newWorldDnssec(self, settings.Dnssec); err != nil {
+		t.Fatalf("the DNSSEC path above the world's root: %v", err)
+	}
+	// api's smtp routes' §8 checks over a gate cache of the world's, in place of the install api's process lacks
+	smtpCache, closeSmtpCache, err := t3.AddGate("api-smtp")
+	if err != nil {
+		t.Fatalf("api's smtp checks: %v", err)
+	}
+	self.closes = append(self.closes, closeSmtpCache)
+	restoreSmtpGate, apiSmtpGateInstalled := worldInstallSmtpApiGate(smtpCache)
+	self.apiSmtpGateInstalled = apiSmtpGateInstalled
+	self.closes = append(self.closes, restoreSmtpGate)
 
 	for _, name := range settings.Blocks {
 		block, err := self.newBlock(name)
@@ -385,6 +570,7 @@ func (self *World) installInternalGate() error {
 			Environment: func() (string, error) { return environment, nil },
 		}).Routes(),
 		handlers.NewInternalGateAbuseNoticeHandlers(&handlers.InternalGateAbuseNoticeDeps{Verifier: verifier}).Routes(),
+		handlers.NewInternalGateIdentityClientsHandlers(&handlers.InternalGateIdentityClientsDeps{Verifier: verifier}).Routes(),
 	)
 	self.t3.Api().ServeInternalGate(router.NewRouter(self.t3.Context(), routes))
 	self.closes = append(self.closes, func() { self.t3.Api().ServeInternalGate(nil) })
@@ -496,6 +682,9 @@ type worldBlock struct {
 	// UDP too
 	directPorts []int
 	directUdp   bool
+	// the loopback address a direct port binds where another block's config names it, every run on the same one; any
+	// other binds a port the OS picks
+	fixedAddresses map[int]netip.AddrPort
 	// one run of the block until ctx ends, on its listeners, which it takes
 	run func(ctx context.Context, listeners *worldBlockListeners) error
 
@@ -583,7 +772,11 @@ func (self *worldBlock) start() error {
 		done:            make(chan struct{}),
 	}
 	for _, port := range self.directPorts {
-		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		address := "127.0.0.1:0"
+		if fixed, ok := self.fixedAddresses[port]; ok {
+			address = fixed.String()
+		}
+		listener, err := net.Listen("tcp", address)
 		if err != nil {
 			closeListeners()
 			return err

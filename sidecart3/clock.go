@@ -21,6 +21,9 @@ package sidecart3
 //     and deletes what the move passed. Every other key keeps the store's time: server's exchange and controller,
 //     which keep real time, write their own.
 //
+// A world a schedule builds with no Net, as server/gkm's FS-keys T3 tests build theirs, takes the LastModified
+// translation alone through NewWorldStoreClock, its runner running a case with it as the catalog flags it.
+//
 // What it cannot move: Postgres now() and a script's Redis TIME, so a clause reading either after an Advance runs on
 // T2 alone; and MinIO's own age behaviour, the settle rule's deadlines and held keys, drive timeouts and the trash
 // sweep, which a wrapper would hide, so FS-114 and §22.9's file-cluster suite never run with it and run on real
@@ -90,13 +93,15 @@ type storeClockWrite struct {
 	etag string
 }
 
-// One T3 Net's store clock: LastModified and Redis ttls on the schedule's clock.
+// One T3 Net's store clock, LastModified and Redis ttls on the schedule's clock, or a world's, LastModified alone
+// (NewWorldStoreClock).
 type StoreClock struct {
 	// The gate's per-test witness, emitted only after translating a recorded timestamp or changing a live ttl.
 	witness    func()
 	translated atomic.Bool
-	net        *sidecartest.Net
-	settings   *StoreClockSettings
+	// the schedule's clock, which every translated time is on: a Net's, or a world's (NewWorldStoreClock)
+	schedule sidecar.Clock
+	settings *StoreClockSettings
 	// the store's own clock, which LastModified and ttls run on
 	store sidecar.Clock
 
@@ -109,19 +114,39 @@ type StoreClock struct {
 	ageErrs []error
 
 	// the aging after each move of the schedule's clock, once a move, which every Redis call after the move waits
-	// for (faults.go)
+	// for (faults.go); nil for a world's, which ages no family
 	aging *clockCatchUp
 }
 
 // hooks nil tells no test anything.
 func newStoreClock(net *sidecartest.Net, settings *StoreClockSettings, store sidecar.Clock, hooks *catchUpHooks) *StoreClock {
 	return &StoreClock{
-		net:       net,
+		schedule:  net.Clock(),
 		settings:  settings,
 		store:     store,
 		keyWrites: map[storeClockKey][]*storeClockWrite{},
 		aging:     newClockCatchUp(net, "store clock aging", net.Clock().Now(), hooks),
 	}
+}
+
+// The store clock of a world a schedule builds on schedule's clock with no T3 Net, as server/gkm's FS-keys T3 tests
+// build theirs on the local stack's clusters, and blobs wrapped by it: every read's LastModified on schedule's clock
+// and a DELETE naming one judged on it, as a Net's store clock does. It ages no Redis family, since that catch-up
+// holds a Net's requests on its barriers, so settings names none. store is the stores' own clock, real time on T3;
+// witness, nil for none, is called once, at the first read it translates. The caller fails its run on what
+// Untranslated lists, as a Net's close does.
+func NewWorldStoreClock(schedule sidecar.Clock, store sidecar.Clock, settings *StoreClockSettings, blobs sidecar.BlobStore, witness func()) (*StoreClock, sidecar.BlobStore, error) {
+	if len(settings.RedisFamilies) != 0 {
+		return nil, nil, errors.New("a world's store clock ages no Redis family: that catch-up holds a T3 Net's requests")
+	}
+	storeClock := &StoreClock{
+		witness:   witness,
+		schedule:  schedule,
+		settings:  settings,
+		store:     store,
+		keyWrites: map[storeClockKey][]*storeClockWrite{},
+	}
+	return storeClock, &storeClockBlobs{blobs: blobs, clock: storeClock}, nil
 }
 
 // What a T3 Net's clocks are: the store's own, and the store clock when its Settings turn it on.
@@ -254,7 +279,7 @@ func (self *StoreClock) translate(clusterId string, info *sidecar.BlobInfo) {
 		return time.Time{}, false
 	}()
 	if !ok {
-		scheduleTime = self.net.Clock().Now().Add(-self.store.Now().Sub(info.LastModified))
+		scheduleTime = self.schedule.Now().Add(-self.store.Now().Sub(info.LastModified))
 	}
 	info.LastModified = scheduleTime
 	if ok {
@@ -291,7 +316,7 @@ func (self *StoreClock) unmodified(ctx context.Context, clusterId string, key st
 	switch {
 	case !recorded:
 		// nothing written through the wrapper: the time named, as its age on the store's clock
-		return sidecar.WithBlobUnmodified(ctx, self.store.Now().Add(-self.net.Clock().Now().Sub(named)))
+		return sidecar.WithBlobUnmodified(ctx, self.store.Now().Add(-self.schedule.Now().Sub(named)))
 	case refuses:
 		// no stored object passes a time this old
 		return sidecar.WithBlobUnmodified(ctx, time.UnixMilli(0))
@@ -522,7 +547,7 @@ func (self *storeClockCluster) SettlePassed() bool {
 }
 
 func (self *storeClockCluster) now() time.Time {
-	return self.clock.net.Clock().Now()
+	return self.clock.schedule.Now()
 }
 
 func (self *storeClockCluster) PutIfNoneMatch(ctx context.Context, key string, body []byte, options *sidecar.BlobPutOptions) (string, error) {

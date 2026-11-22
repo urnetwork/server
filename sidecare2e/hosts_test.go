@@ -95,7 +95,9 @@ type e2eHostsSettings struct {
 	Run *sidecarhost.RunSettings
 	// The issuer the throwaway svc- key set verifies under.
 	ServiceTokenIssuer string
-	// The root names the blocks serve under, each a documentation name.
+	// The root names the blocks serve under, each a documentation name. The networks' root is one, as production's
+	// is: the dns API's zones, tlsedge's names, mxedge's routes and smtpedge's envelopes all sit under DnsRoot's
+	// <label>.<root>, so a name the API gives a network is the one tlsedge and mxedge route by.
 	TlsEdgeRoot    string
 	DnsRoot        string
 	MxRouteRoot    string
@@ -142,13 +144,13 @@ func defaultE2eHostsSettings() *e2eHostsSettings {
 		BudgetPollInterval:         100 * time.Millisecond,
 		Run:                        run,
 		ServiceTokenIssuer:         "https://auth.e2e.example",
-		TlsEdgeRoot:                "edge.e2e.example",
+		TlsEdgeRoot:                "zone.e2e.example",
 		DnsRoot:                    "zone.e2e.example.",
-		MxRouteRoot:                "root.e2e.example",
+		MxRouteRoot:                "zone.e2e.example",
 		MxReportHost:               "rpt.report.e2e.example",
 		MxPlatformRoot:             "platform.e2e.example",
 		MxBannerHost:               "mx.report.e2e.example",
-		SmtpRoot:                   "root.e2e.example",
+		SmtpRoot:                   "zone.e2e.example",
 		SmtpReportHost:             "rpt.report.e2e.example",
 		SmtpHeloDomain:             "out.report.e2e.example",
 		SmtpHeloName:               "o1.out.report.e2e.example",

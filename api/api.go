@@ -63,6 +63,7 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 	internalGateProjection := handlers.NewInternalGateProjectionHandlers(nil)
 	internalGateEdgeClient := handlers.NewInternalGateEdgeClientHandlers(nil)
 	internalGateAbuseNotice := handlers.NewInternalGateAbuseNoticeHandlers(nil)
+	internalGateIdentityClients := handlers.NewInternalGateIdentityClientsHandlers(nil)
 	verifyRequestClosure := handlers.NewVerifyRequestClosureHandlers()
 	providerWorkBody := DefaultRouteSettings().ProviderWorkBody
 	connectControl := handlers.ConnectControl
@@ -590,6 +591,9 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 	// a role mail's notice from the platform listener, its header facts alone, on the platform listener's internal
 	// bearer (QD-1070, owner decision 612)
 	routes = append(routes, internalGateAbuseNotice.Routes()...)
+	// §5.15's sidecar_id to client lookup for the hint writers of hosts with no Postgres, on gkm's and mxedge's internal
+	// bearers (plan-KEYS-hint-addressing, QD-146)
+	routes = append(routes, internalGateIdentityClients.Routes()...)
 	// §7.6's SCIM 2.0 for a team's IdP, on the team's SCIM bearer (TEAM-M6-07), checked against the SHA-256
 	// network_team keeps (QD-828): whatever serves this route set, api and alt alike, installs that source, which holds
 	// no state, so a SCIM request reads the column and answers 503 only while the binary does not link MG6

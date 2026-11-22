@@ -12,28 +12,45 @@
 //   - the group rotated: the owner rotates the repo (`ur keys rotate`), every sidecar reads generation 2, writes again
 //     under it, and reads every other's second write back.
 //
-// It fails today, and stays behind its own tag, sidecar_e2e_realkeys, until it passes, so the world's default run stays
-// a signal: in e2e-world's runs of 2026-11-21 the owner's follower bootstraps the network on real keys (the draft,
-// base 1, the first head, the config repo's group formed at gkm and its generation 1 held by the owner's key client,
-// standing at the admissions), but the first admitted sidecar never stands. Its follower
-// reads "joining: the log applied rows-only to 3 waits for the config repo's key and a full re-read" until the phase's
-// bound, and the dump shows its group client saying "pending: gkm unavailable: no verified state yet" throughout; the
-// owner's log holds "config join: gkm GET /gkm/repos/{repo_id}/forms: no service token: sidecar api POST /oauth/token
-// refused: 503 temporarily_unavailable" and "reader grant: gkm key missing: gkm holds no group for the repo", and the
-// sidecars not yet following "ReaderKey upkeep: gkm: no repo scope to present", and the owner logs nothing of a
-// delivery to the joiner. Why the joiner's join never completes, whether its ReaderKey reaches gkm and whether the
-// owner's group client ever delivers it the config repo's generation, is not found: the cause may be the world's
-// composition (world_keys.go, ported from ur daemon's) or the clients'. Run it through the build's wrapper with -tags
-// 'sidecar_e2e sidecar_pending sidecar_localstack sidecar_e2e_realkeys'; the dump carries each sidecar's newest log.
+// TestE2eWorldSmokeRealKeys runs the whole smoke (world_smoke_test.go) on such a world, its gkm step with it: a group
+// formed at gkm's block by each network's repo creation, held at generation 1 by every sidecar, rotated by the owner and
+// held at generation 2.
+//
+// Both fail today, and stay behind their own tag, sidecar_e2e_realkeys, until they pass, so the world's default run
+// stays a signal. What e2e-world's runs of 2026-11-21 found, each a product finding for a fix track:
+//
+//   - the join, found: in KeyDelivery mode a joining member device takes the config repo's generation only by a LATE
+//     wrap (§10.6's late wraps row, KF2's wrapped row), which a holder writes on gkm's wrap-pending hint; gkm's own hint
+//     writer resolves no sidecar id (plan-KEYS-hint-addressing's api route is not built), so in production that hint is
+//     lost, the holders' hourly resync answers no late ask (GkmGroupClient's KeyDelivery resync runs SyncRepo,
+//     RunPending and RenewDropKey alone), and no admission writes the first wrap either (DeliverFirstWrap has no caller
+//     outside tests), so the joiner stands no sooner than the config group's next rotation, which a schedule makes
+//     every 30 days (GkmSettings.ScheduleInterval). With the world's stand-in resolver and the exchange's push on (the
+//     World's header) the hint reaches the owner, who delivers, and gkm's pending hint wakes the joiner, which stands;
+//   - the join's minute: gkm caches repo/ 5 s (§10.6's checks row), so a gkm that read the config repo as keying at
+//     KF1's group create, just before its activation, refuses 409 a late delivery judged inside those 5 s ("a keying
+//     repo takes only its creation's deliveries"), DeliverLate drops a 409 for the next hint, and the joiner's next late
+//     ask is LateAskInterval, a minute, away. Of five runs, the three whose owner delivered 1.7 s, 4.8 s and 4.8 s after
+//     the activation stalled past the world's 60 s follow bound; the two at 12.3 s and 15.1 s joined at once. Under the
+//     world's join bound (T3WorldSettings.KeyJoinTimeout) a sixth, refused 4.3 s after the activation, joined 124 s
+//     after it, at its follower's retry past that minute: a joiner admitted at its network's start waits two minutes;
+//   - the repo's group, open: CreateSharedRepo fails "evs: the repo's group: gkm refused: 404" in every run that got
+//     that far. When the RepoCreate lands, every reader's group client, the creator's own included, syncs the new repo
+//     (GkmGroupClient.syncNewReaderRepos: GET /gkm/repos/<id>/forms), before the creator's PUT /evs/v1/repos/<id> has
+//     placed it; gkm's placement resolver caches that 404 for 5 s (§11.8's resolve row, EvsRepoPlaceSettings.NotFoundTtl)
+//     and refuses KF1's POST /gkm/groups, sent right after the placement, with it, and EvsClient.CreateRepo does not
+//     retry. The network's bootstrap meets the same 404 on the config repo and recovers only through its follower's 10 s
+//     anchor retry ("config bootstrap: the config repo: evs: the repo's group: gkm refused: 404").
+//
+// Run it through the build's wrapper with -tags 'sidecar_e2e sidecar_pending sidecar_localstack sidecar_e2e_realkeys';
+// the dump carries each sidecar's newest log.
 
 package sidecare2e
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"testing"
-	"time"
 
 	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/protocol"
@@ -41,72 +58,13 @@ import (
 	"github.com/urnetwork/server/sidecart3"
 )
 
-// What the real-keys case runs with (QD-702).
-type worldKeysSettings struct {
-	// The sidecars of the one network.
-	KeysClientCount int
-	// Each phase's bound.
-	PhaseTimeout time.Duration
-	// How long a sidecar may take to hold a generation the owner made, its key client learning of it by gkm's hint or
-	// its resync, and how often it is asked meanwhile, since a key client's learning has no hook a test reads.
-	GenerationTimeout      time.Duration
-	GenerationPollInterval time.Duration
-}
-
-func defaultWorldKeysSettings() *worldKeysSettings {
-	return &worldKeysSettings{
-		KeysClientCount:        3,
-		PhaseTimeout:           4 * time.Minute,
-		GenerationTimeout:      2 * time.Minute,
-		GenerationPollInterval: 200 * time.Millisecond,
-	}
-}
-
-// Writes content at path as device, through its own EvsClient.
-func worldKeysWrite(ctx context.Context, device *sidecart3.T3Device, repoId sidecar.Id, path string, content []byte) error {
-	client, err := device.EvsClient()
-	if err != nil {
-		return err
-	}
-	_, err = client.Repo(repoId).Write(ctx, &sidecar.EvsWriteArgs{Path: path, Content: bytes.NewReader(content), Size: int64(len(content))})
-	return err
-}
-
-// device reads path's head, which must be content.
-func worldKeysRead(ctx context.Context, device *sidecart3.T3Device, repoId sidecar.Id, path string, content []byte) error {
-	client, err := device.EvsClient()
-	if err != nil {
-		return err
-	}
-	var read bytes.Buffer
-	if _, err := client.Repo(repoId).ReadHead(ctx, &sidecar.EvsReadArgs{Path: path, Fresh: true}, &read); err != nil {
-		return fmt.Errorf("%s's read of %s: %w", device.Name, path, err)
-	}
-	if !bytes.Equal(read.Bytes(), content) {
-		return fmt.Errorf("%s reads %s as %q, not %q", device.Name, path, read.String(), content)
-	}
-	return nil
-}
-
-// Waits until device's key client holds repoId's generation at generation or past it, asking every poll interval.
-func worldKeysAwaitGeneration(ctx context.Context, device *sidecart3.T3Device, repoId sidecar.Id, generation uint64, settings *worldKeysSettings) (*sidecar.EvsRepoKey, error) {
-	ctx, cancel := context.WithTimeout(ctx, settings.GenerationTimeout)
-	defer cancel()
-	for {
-		key, err := device.Gkm.CurrentRepoKey(ctx, repoId)
-		if err == nil && generation <= key.Generation() {
-			return key, nil
-		}
-		select {
-		case <-ctx.Done():
-			held := uint64(0)
-			if key != nil {
-				held = key.Generation()
-			}
-			return nil, fmt.Errorf("%s holds generation %d of %s, not %d: %v (%w)", device.Name, held, repoId, generation, err, ctx.Err())
-		case <-time.After(settings.GenerationPollInterval):
-		}
-	}
+// The smoke (world_smoke_test.go) on a world of real keys, its gkm step with it: what TestE2eWorldSmoke runs once
+// RealKeys is the world's default.
+func TestE2eWorldSmokeRealKeys(t *testing.T) {
+	worldSettings := DefaultWorldSettings()
+	worldSettings.T3 = sidecart3.DefaultT3WorldSettings()
+	worldSettings.T3.RealKeys = true
+	runWorldSmoke(t, worldSettings)
 }
 
 // See the file's header.

@@ -14,7 +14,9 @@ package sidecart3
 //	          from that cache (oauth.NewProjectionExchangeScopeSource), so a service token carries exactly what §8's
 //	          table grants at the log's newest state, the approval gate's states, the dns scopes' labels, the edge
 //	          logins' source, rev/'s store on the first cluster and the issuer's worker that claims its tasks, and the
-//	          contract gate when sidecar.yml's acl_contract_gate is on as the world starts
+//	          contract gate when sidecar.yml's acl_contract_gate is on as the world starts; the sequencer and rev/'s store
+//	          spend on the Net's fake write budget, or with ApiWriteBudget on api's own over the world's Redis, which
+//	          reports its spend beside the blocks' as api's process does
 //	limits    §7.9's append limits and §20.4's caps run, on the numbers SidecarLimits gives pro.yml's sidecar keys for
 //	          the world's life (§20.4's Community column by default), since the test stack's pro.yml carries none;
 //	          AdjustConfigLog may still take them off for a test that needs it
@@ -43,8 +45,10 @@ package sidecart3
 //
 // keys with RealKeys: each device's real key client at the gkm origin and its EvsClient over it, the config repo's
 // heads on evs, and each network bootstrapped by its first owner's follower, as ur daemon runs them (world_keys.go).
-// A joining device does not take the config repo's key yet (sidecare2e's world_keys_test.go), so RealKeys is off by
-// default, and a key reaches a device through FakeGkm's deliveries.
+// A joining device takes the config repo's key only by a late delivery that gkm's hint by sidecar id asks for, which
+// gkm's own hint writer cannot address, and a repo's creation is refused by gkm's cached 404 of its placement
+// (sidecare2e's world_keys_test.go has the evidence), so RealKeys is off by default, and a key reaches a device through
+// FakeGkm's deliveries.
 
 import (
 	"context"
@@ -134,10 +138,23 @@ type T3WorldSettings struct {
 	// own (§7.9, QD-824): what a world that serves gkm and evs at their origins runs. false keeps FakeGkm's deliveries
 	// and the config heads in memory.
 	RealKeys bool
-	// With RealKeys, each device's gkm hint resync (SidecarSettings.Gkm.ResyncInterval): gkm's hint writer resolves no
-	// sidecar id yet (plan-KEYS-hint-addressing), so a hint by sidecar id is lost in production too and the hourly
-	// resync covers it, which a world waits seconds for, not an hour. 1 s.
+	// With RealKeys, each device's gkm hint resync (SidecarSettings.Gkm.ResyncInterval), 0 keeping the sidecar's own
+	// hourly one: 1 s, since gkm's hint writer resolves no sidecar id yet (plan-KEYS-hint-addressing) and the world's
+	// exchange publishes no hint unless its settings turn sidecar push on, so a resync stands in for the hints. A world
+	// of hosts whose gkm block resolves sidecar ids and whose exchange publishes hints keeps the sidecar's own
+	// (sidecare2e's World).
 	KeyResyncInterval time.Duration
+	// With RealKeys, how long, in real time, a joining device's follower may take to stand, in place of SyncTimeout: its
+	// join waits on a late delivery of the config repo's generation (§10.6), which a holder makes up to
+	// LateDeliverJitter, 15 s, after gkm's hint, and which gkm refuses while its 5 s repo/ cache still holds the config
+	// repo as keying. The joiner then asks again at its follower's first retry past LateAskInterval, a minute, which
+	// the config client's backoff from 10 s puts 70 s or 150 s after its first follow (e2e-world saw 124 s). 5 min.
+	KeyJoinTimeout time.Duration
+	// Whether api's sequencer and rev/ store spend on a write budget of api's own over the world's Redis
+	// (evsservice.NewWriteBudget on the world's host, as controller.InstallApiAuthorization builds api's), reporting its
+	// spend beside every block's (ApiWriteBudget), rather than on the Net's fake budget: what a world of hosts runs
+	// (sidecare2e's World). false keeps the Net's fake, whose violations a test reads.
+	ApiWriteBudget bool
 }
 
 func DefaultT3WorldSettings() *T3WorldSettings {
@@ -161,6 +178,8 @@ func DefaultT3WorldSettings() *T3WorldSettings {
 		StatementLife:           time.Hour,
 		SyncTimeout:             60 * time.Second,
 		KeyResyncInterval:       time.Second,
+		KeyJoinTimeout:          5 * time.Minute,
+		ApiWriteBudget:          false,
 	}
 }
 
@@ -295,6 +314,8 @@ type T3World struct {
 	api           *T3Api
 	exchange      *T3SidecarExchange
 	gkm           *sidecartest.FakeGkm
+	// api's own write budget with ApiWriteBudget, nil otherwise
+	apiBudget *evsservice.WriteBudgetClient
 
 	stateLock sync.Mutex
 	gates     []*t3WorldGate
@@ -367,6 +388,13 @@ func NewT3World(t testing.TB, settings *T3WorldSettings) (world *T3World, return
 	host.Clock = sidecar.RealClock{}
 	host.Authenticator = sidecarhost.NewAuthenticatorWithVerifier(serviceTokens)
 	self.host = &host
+	// sidecar.yml from the start, before api's installs read its switches (the contract gate's) and so a host the
+	// world serves reads its gates before the first network is added
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.gateNetworksWithLock()
+	}()
 
 	// pro.yml's sidecar limits for the world's life, before api takes a statement
 	if settings.SidecarLimits != nil {
@@ -381,14 +409,25 @@ func NewT3World(t testing.TB, settings *T3WorldSettings) (world *T3World, return
 	if err != nil {
 		return nil, err
 	}
+	// what api's sequencer and rev/ store spend on: its own budget, as api's process builds one, or the Net's fake
+	apiHost := *self.host
+	if settings.ApiWriteBudget {
+		budget, err := evsservice.NewWriteBudget(ctx, &apiHost, nil, nil)
+		if err != nil {
+			return nil, fmt.Errorf("api's write budget: %w", err)
+		}
+		self.closes = append(self.closes, budget.Close)
+		apiHost.Budget = budget
+		self.apiBudget = budget
+	}
 	configLogSettings := model.NewApiConfigLogSettings()
 	if settings.AdjustConfigLog != nil {
 		settings.AdjustConfigLog(configLogSettings)
 	}
-	model.SetConfigLogSequencer(controller.NewHostedConfigLogSequencer(self.host, first, configLogSettings))
+	model.SetConfigLogSequencer(controller.NewHostedConfigLogSequencer(&apiHost, first, configLogSettings))
 	self.closes = append(self.closes, func() { model.SetConfigLogSequencer(nil) })
 	self.closes = append(self.closes, oauth.SetExchangeScopeSource(oauth.NewProjectionExchangeScopeSource(apiGate.cache, &oauth.ExchangeScopeSettings{Clock: host.Clock})))
-	self.closes = append(self.closes, installT3WorldApi(ctx, self.host, first, apiGate.cache))
+	self.closes = append(self.closes, installT3WorldApi(ctx, &apiHost, first, apiGate.cache))
 
 	self.api = NewT3Api(ctx, self.net, sidecarSettings)
 	exchange, err := NewT3SidecarExchange(ctx, t, settings.Exchange)
@@ -398,12 +437,6 @@ func NewT3World(t testing.TB, settings *T3WorldSettings) (world *T3World, return
 	self.exchange = exchange
 	self.closes = append(self.closes, exchange.Close)
 	self.gkm = sidecartest.NewFakeGkm(host.Clock, host.Blobs, nil)
-	// sidecar.yml from the start, so a host the world serves reads its gates before the first network is added
-	func() {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		self.gateNetworksWithLock()
-	}()
 	return self, nil
 }
 
@@ -557,6 +590,12 @@ func (self *T3World) AddGate(name string) (*sidecar.AclGateCache, func(), error)
 		self.removeGate(gate)
 		gate.close()
 	}, nil
+}
+
+// api's own write budget, whose process reports its spend on every metadata cluster beside the blocks': nil unless
+// ApiWriteBudget, when api spends on the Net's fake budget.
+func (self *T3World) ApiWriteBudget() *evsservice.WriteBudgetClient {
+	return self.apiBudget
 }
 
 // The verifier of the world's svc- key, which every host the world serves verifies service tokens and rev/ under.
@@ -847,7 +886,7 @@ func (self *T3Network) enroll(ctx context.Context, name string, settings func(na
 		return nil, err
 	}
 	sidecarSettings := sidecar.DefaultSidecarSettings()
-	if self.world.settings.RealKeys {
+	if self.world.settings.RealKeys && 0 < self.world.settings.KeyResyncInterval {
 		sidecarSettings.Gkm.ResyncInterval = self.world.settings.KeyResyncInterval
 	}
 	if settings != nil {
@@ -1277,7 +1316,11 @@ func (self *T3Device) follow(ctx context.Context, genesis [sha256.Size]byte) err
 	if err != nil {
 		return fmt.Errorf("%s's follower: %w", self.Name, err)
 	}
-	ctx, cancel := context.WithTimeout(ctx, self.Network.world.settings.SyncTimeout)
+	timeout := self.Network.world.settings.SyncTimeout
+	if self.keys != nil && 0 < self.Network.world.settings.KeyJoinTimeout {
+		timeout = self.Network.world.settings.KeyJoinTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if _, err := follower.WaitStanding(ctx); err != nil {
 		status := follower.Status()
