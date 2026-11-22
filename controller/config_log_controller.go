@@ -23,6 +23,10 @@ package controller
 // registered key (config_delegation_check.go; D-TEAM-33; owner decision 197),
 // since no reader holds a client row.
 //
+// Once an append is answered, §12.7's edge address records follow the state
+// it leaves (model.SyncDnsEdgeRecordsAtTip; owner decision 335), best effort,
+// so the answer never fails with the zone's write.
+//
 // Refusals answer {"error", "code", "tip"}: 403 config_refused, 409
 // config_tip_moved and config_unadmitted's 403; an unavailable store or a
 // process with no first metadata cluster answers 503.
@@ -171,6 +175,7 @@ func NetworkConfigDelta(args *NetworkConfigDeltaArgs, clientSession *session.Cli
 	if err != nil {
 		return nil, err
 	}
+	model.SyncDnsEdgeRecordsAtTip(clientSession.Ctx, sequencer, clientSession.ByJwt.NetworkId)
 	return configPinResult(pin), nil
 }
 
@@ -241,6 +246,7 @@ func NetworkConfigProjectionPublish(args *NetworkConfigProjectionPublishArgs, cl
 	if err != nil {
 		return nil, err
 	}
+	model.SyncDnsEdgeRecordsAtTip(clientSession.Ctx, sequencer, clientSession.ByJwt.NetworkId)
 	return configPinResult(pin), nil
 }
 

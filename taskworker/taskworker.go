@@ -273,6 +273,10 @@ func initTaskSchedule(ctx context.Context) {
 		// §12's journal past 7 days, challenges and canaries past their hour,
 		// and zone suspensions past their until; not scheduled without MG5
 		work.ScheduleDnsMaintenance(clientSession, tx)
+		// §12.7's edge records reconciled with each network's edge grants every
+		// hour, what expired removed and what a lost sync missed written; not
+		// scheduled without MG2 and MG5
+		work.ScheduleDnsEdgeRecords(clientSession, tx)
 		// mx-2's hours dropped at 24 h and mx-3's retired host keys at 30
 		// days; not scheduled without MG7
 		work.ScheduleMailRetention(clientSession, tx)
@@ -878,6 +882,11 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.DnsMaintenance,
 			work.DnsMaintenancePost,
+		),
+		// §12.7's hourly pass over the edge grants (model.ReconcileDnsEdgeRecords)
+		task.NewTaskTargetWithPost(
+			work.DnsEdgeRecords,
+			work.DnsEdgeRecordsPost,
 		),
 		// §19.10's labels step (DNS-M5-16), scheduled by the restore's frame
 		task.NewTaskTargetWithPost(
