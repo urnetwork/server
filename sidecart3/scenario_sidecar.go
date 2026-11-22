@@ -599,7 +599,7 @@ func StartT3Sidecar(ctx context.Context, net *sidecartest.Net, name string, t3Ap
 		backend:    sidecar.NewSidecarMemoryBackend(),
 		keyStore:   sidecar.NewSidecarMemoryKeyStore(),
 	}
-	running, instance, cancel, err := started.start()
+	running, instance, cancel, err := started.start(nil)
 	if err != nil {
 		return nil, err
 	}
@@ -607,8 +607,9 @@ func StartT3Sidecar(ctx context.Context, net *sidecartest.Net, name string, t3Ap
 	return started, nil
 }
 
-// One run: an instance on the kept store and key store, unlocked, and a Sidecar on it.
-func (self *T3Sidecar) start() (*sidecar.Sidecar, *sidecar.SidecarInstance, context.CancelFunc, error) {
+// One run: an instance on the kept store and key store, unlocked, and a Sidecar on it, of networkId's network where
+// the sidecar enrolled in one (a restart's), else of none until it enrolls.
+func (self *T3Sidecar) start(networkId *sidecar.Id) (*sidecar.Sidecar, *sidecar.SidecarInstance, context.CancelFunc, error) {
 	runCtx, cancel := context.WithCancel(self.ctx)
 	instance, err := sidecar.NewSidecarInstance(runCtx, &sidecar.SidecarInstanceArgs{
 		Backend:  self.backend,
@@ -624,7 +625,7 @@ func (self *T3Sidecar) start() (*sidecar.Sidecar, *sidecar.SidecarInstance, cont
 		cancel()
 		return nil, nil, nil, err
 	}
-	running, err := sidecar.NewSidecar(runCtx, &t3SidecarHost{store: instance.Store(nil), keyStore: self.keyStore}, nil, self.Settings)
+	running, err := sidecar.NewSidecar(runCtx, &t3SidecarHost{store: instance.Store(networkId), keyStore: self.keyStore}, nil, self.Settings)
 	if err != nil {
 		instance.Close()
 		cancel()
@@ -652,12 +653,18 @@ func (self *T3Sidecar) Restart(ctx context.Context) error {
 	if closed {
 		return fmt.Errorf("%s has closed", self.Name)
 	}
+	// the network the sidecar enrolled in, whose store the new run opens
+	var networkId *sidecar.Id
+	if identity := running.Identity(); identity != nil {
+		id := identity.NetworkId
+		networkId = &id
+	}
 	closeCtx, closeCancel := context.WithTimeout(ctx, self.t3Settings.CloseTimeout)
 	running.CloseAndWait(closeCtx)
 	closeCancel()
 	instance.Close()
 	cancel()
-	nextRunning, nextInstance, nextCancel, err := self.start()
+	nextRunning, nextInstance, nextCancel, err := self.start(networkId)
 	if err != nil {
 		return fmt.Errorf("%s's restart: %w", self.Name, err)
 	}

@@ -191,3 +191,28 @@ func worldSetFreeLimit(limitKey string, value int64) func() {
 func worldConfigAdmissionCount(state *sidecar.ConfigState, now time.Time) int64 {
 	return model.ConfigAdmissionCount(state, now.UnixMilli())
 }
+
+// The memberships userId holds in networkId as api's rows hold them, by member_id: one per join, so a membership made
+// twice shows twice.
+func worldNetworkMembersOfUser(ctx context.Context, networkId server.Id, userId server.Id) (memberIds []server.Id, returnErr error) {
+	server.HandleError(func() {
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`SELECT member_id FROM network_member WHERE network_id = $1 AND user_id = $2`,
+				networkId,
+				userId,
+			)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var memberId server.Id
+					server.Raise(result.Scan(&memberId))
+					memberIds = append(memberIds, memberId)
+				}
+			})
+		})
+	}, func(err error) {
+		returnErr = err
+	})
+	return
+}
