@@ -1,4 +1,4 @@
-//go:build sidecar_localstack
+//go:build sidecar_localstack && sidecar_pending
 
 // S1 on T3 (§22.7; F1, I-6, I-7, D-TRUST-1), its three clauses, each its own test, on server's own routes, which a
 // fake api proves nothing about:
@@ -25,6 +25,10 @@
 // hosts no evs for a sidecar's pushes yet; the projection and publish calls go through this file's shim of the two
 // routes with the device's own token, since a Sidecar's SidecarApi is the core's alone; and the ConfigClient is built
 // here as a daemon's host would build it from the sidecar's anchor, since no host builds one yet.
+//
+// The file builds with sidecar_pending as well, which the registry and the gates name for every clause: enrollment
+// marks a client in MG0's tables and POST /network/auth-keys writes MG1's network_auth_key, so without the pending
+// groups each clause fails at its first request.
 
 package sidecart3
 

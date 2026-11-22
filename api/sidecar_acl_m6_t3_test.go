@@ -8,7 +8,8 @@ package api_test
 // names at the sequencer (model.ConfigLogSettings.TeamTier), and every GrantActivate under §16.6's spend check, which
 // the world installs there as at every reader (model.ConfigLogSettings.AclSpendCheck). The forged clauses run on T2
 // alone, as each schedule says. FS-21's team runs its clients on server's exchange under server's contract gate, so it
-// needs the schema. Each needs the local stack (local/stack.sh up) and fails rather than skips without it.
+// needs the schema, and builds with sidecar_pending in sidecar_acl_m6_fs21_t3_test.go. Each needs the local stack
+// (local/stack.sh up) and fails rather than skips without it.
 
 import (
 	"testing"
@@ -28,13 +29,6 @@ func TestFs19TeamOnT3(t *testing.T) {
 func TestFs19InviteOnT3(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		sidecart3.RunRow(tb, "FS-19", "invite", nil)
-	})
-}
-
-// The fixed schedule, FI-10 after every step; sidecart3's TestT3Rows runs the case under §22.8's rules.
-func TestFs21TeamOnT3(t *testing.T) {
-	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
-		sidecart3.Run(tb, fault.Fs21Team, nil)
 	})
 }
 

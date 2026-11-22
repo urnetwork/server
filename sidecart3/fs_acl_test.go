@@ -4,7 +4,7 @@
 // gate clause, and §22.5's §8 rows on server's sequencer over the local stack's MinIO, so every append is judged by
 // api's real verifier (config_log.go). FS-19's forged base runs on T2 alone, as the schedule says; FS-62's gates read
 // server's Redis and MinIO through AclGateDirectSource, the read cache written by the schedule as api's script writes
-// it, since this package's sequencer installs no EntryCache.
+// it, since this package's sequencer installs no EntryCache. FS-21, which needs the schema, is in fs21_test.go.
 
 package sidecart3
 
@@ -32,16 +32,6 @@ func TestFs19GrantOnT3(t *testing.T) {
 func TestFs19ShareOnT3(t *testing.T) {
 	testEnv().Run(t, func(tb testing.TB) {
 		RunRow(tb, "FS-19", "share", nil)
-	})
-}
-
-// ACL-M4-04's FS-21 (sidecartest/fault/fs21.go): a personal network's devices with no reach to each other, every client
-// on server's exchange under server's contract gate over the network's log on server's sequencer: HeadCheck over
-// control contracts, a data RPC, a stream and IP on them refused, the server partitioning its relays, and a grant's
-// data contract carrying all three. The fixed schedule, FI-10 after every step; TestT3Rows runs it under §22.8's rules.
-func TestFs21OnT3(t *testing.T) {
-	testEnvWithSchema().Run(t, func(tb testing.TB) {
-		Run(tb, fault.Fs21, nil)
 	})
 }
 

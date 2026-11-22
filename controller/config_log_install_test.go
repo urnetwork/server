@@ -114,9 +114,22 @@ func TestIssuerPublishesNormalAndRetriedRevocation(t *testing.T) {
 		makeAuthorizationIssuerTasksDue(t)
 		worker := newAuthorizationIssuerWorker(ctx)
 		defer worker.Close()
-		finished, retry, postRetry, err := worker.EvalTasks(4)
-		if err != nil || len(finished) != 2 || len(retry)+len(postRetry) != 0 {
-			t.Fatalf("issuer claim: %v finished, %v/%v retries, %v", finished, retry, postRetry, err)
+		// WriteRevocations owes each write at TaskPriorityFastest, and a claim takes a task above the default
+		// priority alone (the task worker's isolation of higher-priority work), so each claim finishes one owed
+		// write, as each of the production poller's claims does: the direct removal's, which writes again what
+		// its post-commit published, and the queued one's. A third claim finds nothing owed.
+		finishedTaskIds := map[server.Id]bool{}
+		for _, want := range []int{1, 1, 0} {
+			finished, retry, postRetry, err := worker.EvalTasks(4)
+			if err != nil || len(finished) != want || len(retry)+len(postRetry) != 0 {
+				t.Fatalf("issuer claim, wanted %d: %v finished, %v/%v retries, %v", want, finished, retry, postRetry, err)
+			}
+			for _, taskId := range finished {
+				finishedTaskIds[taskId] = true
+			}
+		}
+		if len(finishedTaskIds) != 2 {
+			t.Fatalf("the issuer finished %d distinct writes, not 2", len(finishedTaskIds))
 		}
 		if read(queued) == nil || read(direct) == nil {
 			t.Fatal("the issuer did not publish the queued revocation and preserve the direct one")

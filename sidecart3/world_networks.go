@@ -66,6 +66,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -299,6 +300,24 @@ func installT3WorldSidecarLimits(limits *T3WorldSidecarLimits) func() {
 
 // The purpose a GroupForm is signed under (signed.proto's registry, §6.11).
 const t3WorldGroupFormPurpose = "group-form"
+
+// Signs a new network's owner credential, the network jwt AddNetwork hands its owner. Only a _test.go file installs
+// one (Testing_SetT3WorldOwnerSigner), since the fixture signer it stands for, session's Testing_Sign, stays out of
+// every non-test file (session's TestProductionSigningCannotUseFixtureBypass). nil: AddNetwork refuses.
+var t3WorldOwnerSigner atomic.Pointer[func(credential *session.ByJwt) string]
+
+// Installs sign as the signer of every new network's owner credential, until the returned pop: what a test binary that
+// runs a T3World calls from a _test.go file (sidecart3's world_owner_sign_test.go, sidecare2e's). nil installs none.
+func Testing_SetT3WorldOwnerSigner(sign func(credential *session.ByJwt) string) func() {
+	var installed *func(credential *session.ByJwt) string
+	if sign != nil {
+		installed = &sign
+	}
+	previous := t3WorldOwnerSigner.Swap(installed)
+	return func() {
+		t3WorldOwnerSigner.Store(previous)
+	}
+}
 
 // One gate cache of the world's, api's or a service's, and how many loads it has finished, which a sync waits on.
 type t3WorldGate struct {
@@ -763,8 +782,13 @@ func (self *T3World) gateNetworksWithLock() {
 }
 
 // A personal network of a new owner, named name: in preview_networks, in every gated service's gate and funded in the
-// Net's quota, with no sidecar yet.
+// Net's quota, with no sidecar yet. Refused, with nothing made, until a _test.go file installs the owner's signer
+// (Testing_SetT3WorldOwnerSigner).
 func (self *T3World) AddNetwork(ctx context.Context, name string) (*T3Network, error) {
+	sign := t3WorldOwnerSigner.Load()
+	if sign == nil {
+		return nil, errors.New("no signer of the owner's credential: a _test.go file installs one with Testing_SetT3WorldOwnerSigner")
+	}
 	network := &T3Network{
 		world:        self,
 		Name:         name,
@@ -774,7 +798,7 @@ func (self *T3World) AddNetwork(ctx context.Context, name string) (*T3Network, e
 	}
 	networkName := fmt.Sprintf("t3%s%s", strings.ReplaceAll(network.NetworkId.String(), "-", "")[:12], strings.ToLower(name))
 	model.Testing_CreateNetwork(ctx, network.NetworkId, networkName, network.OwnerUserId)
-	network.root = "Bearer " + session.NewByJwt(network.NetworkId, network.OwnerUserId, networkName, false, false).Testing_Sign()
+	network.root = "Bearer " + (*sign)(session.NewByJwt(network.NetworkId, network.OwnerUserId, networkName, false, false))
 	network.heads = sidecartest.NewFakeConfigHeads(network.configRepoId)
 	self.net.Fakes().Quota.SetBalance(connect.Id(network.NetworkId), self.settings.NetworkBalanceByteCount)
 	// and in server's balances, which a block's Quota reads through api's internal quota surface
