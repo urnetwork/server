@@ -62,6 +62,12 @@ type SmtpApiSettings struct {
 	ReportsPageSealedByteCount int
 	// Aggregate rows one page reads at most, its reports kept whole. Positive.
 	ReportsPageAggregateRowCount int
+	// The most bytes a ?cursor= decodes to: 2048, several times what a cursor this route gives holds, so a forged one is
+	// refused before its JSON is parsed. Non-positive refuses every cursor.
+	ReportsCursorMaxByteCount int
+	// The longest label a DKIM domain may hold, RFC 1035's 63 octets: a protocol limit, so its default is the
+	// protocol's. Non-positive refuses every domain.
+	DkimDomainLabelMaxByteCount int
 }
 
 func DefaultSmtpApiSettings() *SmtpApiSettings {
@@ -70,6 +76,8 @@ func DefaultSmtpApiSettings() *SmtpApiSettings {
 		ReportsPageCount:             100,
 		ReportsPageSealedByteCount:   8 * 1024 * 1024,
 		ReportsPageAggregateRowCount: 1000,
+		ReportsCursorMaxByteCount:    2048,
+		DkimDomainLabelMaxByteCount:  63,
 	}
 }
 
@@ -170,7 +178,7 @@ func smtpDkimSelectorForm(selector string) bool {
 }
 
 // Whether the name is a lowercase LDH domain of at least two labels that a selector's record name can hold.
-func smtpDkimDomainForm(domain string) bool {
+func smtpDkimDomainForm(domain string, settings *SmtpApiSettings) bool {
 	if domain == "" || smtpDomainMaxByteCount-smtpDkimSelectorLength-len("._domainkey.") < len(domain) || strings.ToLower(domain) != domain {
 		return false
 	}
@@ -179,7 +187,7 @@ func smtpDkimDomainForm(domain string) bool {
 		return false
 	}
 	for _, label := range labels {
-		if label == "" || 63 < len(label) || label[0] == '-' || label[len(label)-1] == '-' {
+		if label == "" || settings.DkimDomainLabelMaxByteCount < len(label) || label[0] == '-' || label[len(label)-1] == '-' {
 			return false
 		}
 		for i := range len(label) {
@@ -226,7 +234,7 @@ func smtpDkimKeysArgsRefusal(args *sidecar.SmtpDkimKeysArgs, settings *SmtpApiSe
 	}
 	selectors := map[string]bool{}
 	for _, publish := range args.Publish {
-		if publish == nil || !smtpDkimSelectorForm(publish.Selector) || !smtpDkimDomainForm(publish.Domain) || !smtpDkimRsaPublicKey(publish.PublicKey) {
+		if publish == nil || !smtpDkimSelectorForm(publish.Selector) || !smtpDkimDomainForm(publish.Domain, settings) || !smtpDkimRsaPublicKey(publish.PublicKey) {
 			return smtpApiRefusal(http.StatusBadRequest, SmtpApiCodeArgs, "A selector to publish needs its 26 characters, a domain and an RSA-2048 public key.")
 		}
 		if selectors[publish.Selector] {
@@ -235,7 +243,7 @@ func smtpDkimKeysArgsRefusal(args *sidecar.SmtpDkimKeysArgs, settings *SmtpApiSe
 		selectors[publish.Selector] = true
 	}
 	for _, retire := range args.Retire {
-		if retire == nil || !smtpDkimSelectorForm(retire.Selector) || !smtpDkimDomainForm(retire.Domain) {
+		if retire == nil || !smtpDkimSelectorForm(retire.Selector) || !smtpDkimDomainForm(retire.Domain, settings) {
 			return smtpApiRefusal(http.StatusBadRequest, SmtpApiCodeArgs, "A selector to retire needs its 26 characters and a domain.")
 		}
 		if selectors[retire.Selector] {
@@ -783,9 +791,9 @@ func encodeSmtpReportsCursor(cursor *smtpReportsCursor) string {
 	return base64.RawURLEncoding.EncodeToString(value)
 }
 
-func decodeSmtpReportsCursor(text string) (*smtpReportsCursor, error) {
+func decodeSmtpReportsCursor(text string, settings *SmtpApiSettings) (*smtpReportsCursor, error) {
 	value, err := base64.RawURLEncoding.DecodeString(text)
-	if err != nil || 2048 < len(value) {
+	if err != nil || settings.ReportsCursorMaxByteCount < len(value) {
 		return nil, smtpApiRefusal(http.StatusBadRequest, SmtpApiCodeCursor, "The cursor is not one this route gave.")
 	}
 	cursor := &smtpReportsCursor{}
@@ -811,7 +819,7 @@ func GetSmtpReportsPage(ctx context.Context, networkId server.Id, since time.Tim
 		AggregateDayUs:  smtpUtcDay(since).UnixMicro(),
 	}
 	if cursorText != "" {
-		decoded, err := decodeSmtpReportsCursor(cursorText)
+		decoded, err := decodeSmtpReportsCursor(cursorText, settings)
 		if err != nil {
 			return nil, err
 		}
