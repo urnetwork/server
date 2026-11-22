@@ -20,9 +20,9 @@
 //	          bursts of concurrent attempts with random pauses between
 //	chaos     mid-run, a subnet's device's bridge restarts on its posture store, the exchange's connect handler restarts,
 //	          and a forward host's bridge restarts
-//	tier      the network subscribes to Pro first (ItBridgeSettings.Pro): server counts every link's window client
-//	          against sidecar_clients, which §20.8's table exempts, so on the World's own tier the case's links all but
-//	          never connect; TestE2eItBridgeLinksPastSidecarClients holds that product finding on that tier
+//	tier      the network runs on the World's own tier, §20.4's Community column, whose sidecar_clients (20) holds the
+//	          case's 18 sidecars, since a sidecar's window clients count against none (§20.8); a share's two networks
+//	          subscribe to Pro, whose acl_network_shares the share needs (ItBridgeSettings.Pro)
 //
 // and the oracle, over every attempt and over every request each destination received:
 //
@@ -38,12 +38,38 @@
 //   - each incarnation is reached in its stable window, outside chaos, and after the churn every subnet and forward,
 //     joined again, is reached by every client its rules grant and by no other (the sweeps);
 //   - no link's own NAT dialed anything locally;
+//   - while the links are up, server counts no more of a network's sidecar clients connected against sidecar_clients
+//     than the network has sidecars (CheckSidecarClients): a link's window clients count none of their own;
 //   - the transfer balance reconciles exactly at the end, as §20.6 bills each contract: every byte drawn from the
 //     network's balances is a debit on a meter or what escrow paid for a share contract the network dialed, which no
 //     meter counts (§20.6's share row: a cross-network share is FriendsAndFamily, escrowed as Public from the dialer's
 //     network, both directions; owner decision 11), the relay meter's debits are exactly each relayed contract's
 //     settled count and each share contract's payout its own, recomputed from its close reports, none overdraws, and
 //     together they cover at least the bytes the clients moved; every network of the case alike.
+//
+// What the case found in the product, and where each stands (2026-11-22):
+//
+//	fixed     an activated route grant compiled into no table entry and no route row (route-grant-compile, sidecar
+//	          eb98e5e4 to a72d7d95), and AclEngine's checks and the save's ip: tests read its sealed detail by one
+//	          reader (acl-engine-route-grants, ae8a1fc8 and e9cf5cd1): TestE2eItBridgeRouteGrants asserts both compiles'
+//	          rows and the save's QD-1164 side
+//	fixed     no share host held FriendsAndFamily, so the platform refused every share link's contracts
+//	          (share-provide-mode, sidecar f7bbf694 to c0a4fe79): the share's reacher must reach each target
+//	fixed     nothing fed a DnsClient its label table (dns-feed-labels-wiring, sidecar a5409d64 to 45f167c2): Y's save
+//	          resolves network:X with no stand-in
+//	fixed     share escrow went unreconciled (share-contract-metering, server 92034416e to 00c10ee3f): the ledgers
+//	          read each share contract as §20.6 bills it
+//	fixed     ActivateShare built its grant's action afresh at every call, so no admin's decision was spent
+//	          (listen-actions-mcp-tls, sidecar c991dd0d to 70452cd9): the share's activation spends its decision into
+//	          the grant it activates, once, where the case activated in ActivateShare's place before
+//	fixed     server counted a sidecar's window clients against sidecar_clients (window-clients-limit, server
+//	          f8b013543): the case runs on the Community column again, where it ran on Pro before, and
+//	          TestE2eItBridgeLinksPastSidecarClients holds the count at a limit one past the sidecars
+//	open      §16.6's stock gate holds an exposure the document's standing rule covers for a person's decision
+//	          (approval-gate-standing-exposures, queued): the World's worldDeviceGate approves it
+//	          (it_bridge_world_test.go's header)
+//	open      no bootstrap draws a network's first bridge block (§17.4; bridge-block-bootstrap, queued): the owner
+//	          sets the block as an admin's act (ItBridgeWorld.setBlock)
 //
 // Run it through the build's wrapper: -tags 'sidecar_e2e sidecar_pending sidecar_localstack' -run TestE2eItBridge.
 
@@ -94,6 +120,7 @@ func TestE2eItBridgeStatic(t *testing.T) {
 		for _, err := range world.Sweep(ctx, "sweep") {
 			t.Errorf("sweep: %v", err)
 		}
+		world.CheckSidecarClients(ctx, t)
 		world.Check(t)
 		world.LogBridges(t)
 		world.Reconcile(ctx, t)
@@ -128,6 +155,7 @@ func TestE2eItBridgeRouteGrants(t *testing.T) {
 		for _, err := range world.Sweep(ctx, "last sweep") {
 			t.Errorf("last sweep: %v", err)
 		}
+		world.CheckSidecarClients(ctx, t)
 		world.Check(t)
 		world.LogBridges(t)
 		world.Reconcile(ctx, t)
@@ -152,6 +180,8 @@ func TestE2eItBridgeShares(t *testing.T) {
 		settings.ClientCount = 1
 		settings.CampusPrefix = netip.Prefix{}
 		settings.ShareTargets = true
+		// both networks on Pro, whose acl_network_shares X's invite and Y's claim each need (§20.4)
+		settings.Pro = true
 		worldSettings := DefaultWorldSettings()
 		worldSettings.AclContractGate = true
 		worldSettings.Hosts.CaseTimeout = 25 * time.Minute
@@ -184,6 +214,7 @@ func TestE2eItBridgeShares(t *testing.T) {
 		ySettings.ClientCount = 2
 		ySettings.CampusPrefix = netip.Prefix{}
 		ySettings.Block = netip.MustParsePrefix("100.90.0.0/16")
+		ySettings.Pro = true
 		ySettings.Seed = settings.Seed + 1
 		y := x.AddPeer(t, ySettings)
 		// Y's first client reaches X: the share's one reacher
@@ -207,9 +238,10 @@ func TestE2eItBridgeShares(t *testing.T) {
 // counts once), and §17's links are capped by nothing but the transfer balance (R-BRIDGE-11, owner decision 66). A
 // small network on the World's own tier, its sidecar_clients one past its sidecars, so every sidecar connects and every
 // link's window client must too: each granted pair is reached in the sweep, and server counts no more connected
-// sidecar clients than the network has sidecars. Today server counts every strict_exp client, window clients included
-// (model/sidecar_client_count_model.go's mark), so all but the first link's window client are closed at the exchange
-// with 4001 client limit exceeded and held off for minutes, and this stays failing until that is fixed.
+// sidecar clients than the network has sidecars (CheckSidecarClients). It failed until window-clients-limit (server
+// f8b013543): server counted every strict_exp client, which a client's children inherit at mint, so all but the first
+// link's window client were closed at the exchange with 4001 client limit exceeded and held off for minutes; the mark
+// is now a sidecar's own client alone.
 func TestE2eItBridgeLinksPastSidecarClients(t *testing.T) {
 	e2eTestEnv().Run(t, func(t testing.TB) {
 		settings := DefaultItBridgeSettings()
@@ -237,24 +269,37 @@ func TestE2eItBridgeLinksPastSidecarClients(t *testing.T) {
 		for _, err := range world.Sweep(ctx, "sweep") {
 			t.Errorf("sweep: %v", err)
 		}
-		windowClientCount := 0
-		for _, client := range world.clients {
-			if wire := client.currentWire(); wire != nil {
-				windowClientCount += wire.links.WindowClientCount()
-			}
-		}
-		connected, err := itBridgeConnectedSidecarClientCount(ctx, world.network.NetworkId)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if int64(sidecarCount) < connected {
-			t.Errorf("server counts %d connected sidecar clients for a network of %d sidecars, whose links opened %d window clients: "+
-				"a sidecar's window clients count against sidecar_clients (limit %d), which §20.8 exempts", connected, sidecarCount, windowClientCount, sidecarCount+1)
-		}
+		world.CheckSidecarClients(ctx, t)
 		world.Check(t)
 		world.LogBridges(t)
 		world.Summarize(t)
 	})
+}
+
+// §20.8's count on the forwarding path, read while the links are up: server counts no more of the network's sidecar
+// clients connected against sidecar_clients than the network has sidecars, its owner's and every bridging device's,
+// since a sidecar's window clients and its forwarding client count none of their own (window-clients-limit, server
+// f8b013543). The count is logged either way, with how many window clients the links opened.
+func (self *ItBridgeWorld) CheckSidecarClients(ctx context.Context, t testing.TB) {
+	t.Helper()
+	sidecarCount := 1 + len(self.devices)
+	windowClientCount := 0
+	for _, device := range self.devices {
+		if wire := device.currentWire(); wire != nil {
+			windowClientCount += wire.links.WindowClientCount()
+		}
+	}
+	connected, err := itBridgeConnectedSidecarClientCount(ctx, self.network.NetworkId)
+	if err != nil {
+		t.Errorf("%s: %v", self.settings.NetworkName, err)
+		return
+	}
+	if int64(sidecarCount) < connected {
+		t.Errorf("server counts %d connected sidecar clients for %s, a network of %d sidecars whose links opened %d window clients: "+
+			"a sidecar's window clients count against sidecar_clients, which §20.8 exempts", connected, self.settings.NetworkName, sidecarCount, windowClientCount)
+	}
+	t.Logf("%s: server counts %d connected sidecar clients for its %d sidecars, whose links opened %d window clients",
+		self.settings.NetworkName, connected, sidecarCount, windowClientCount)
 }
 
 // The case on settings.
@@ -275,6 +320,7 @@ func runItBridge(t testing.TB, settings *ItBridgeSettings) {
 	for _, err := range world.Sweep(ctx, "last sweep") {
 		t.Errorf("last sweep: %v", err)
 	}
+	world.CheckSidecarClients(ctx, t)
 	world.Check(t)
 	world.LogBridges(t)
 	world.Reconcile(ctx, t)
