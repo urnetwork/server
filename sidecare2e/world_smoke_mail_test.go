@@ -21,7 +21,6 @@ package sidecare2e
 
 import (
 	"fmt"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -121,15 +120,15 @@ func TestE2eWorldMail(t *testing.T) {
 			}
 		}
 		cancel()
-		mailbox := worldSmokeMailInbound(t, world, settings, receiving, settings.Mail.AclGrants)
+		mailbox := worldSmokeMailInbound(t, world, settings, receiving)
 		worldSmokeMailOutbound(t, world, settings, sending, mailbox)
 	})
 }
 
 // The smoke's inbound mail (the file's header): network turns mail on and receives a message from the internet
 // through the world's lb and mxedge's router into its member's mailbox. network's document must already hold the
-// step's AclGrants, and grants is the whole of its grants, which a save the step makes keeps.
-func worldSmokeMailInbound(t testing.TB, world *World, settings *worldSmokeSettings, network *WorldNetwork, grants []string) *worldSmokeMailbox {
+// step's AclGrants.
+func worldSmokeMailInbound(t testing.TB, world *World, settings *worldSmokeSettings, network *WorldNetwork) *worldSmokeMailbox {
 	mailSettings := settings.Mail
 	ctx, cancel := world.StepContext(t.Context(), settings.PhaseTimeout)
 	defer cancel()
@@ -142,8 +141,9 @@ func worldSmokeMailInbound(t testing.TB, world *World, settings *worldSmokeSetti
 	if err != nil {
 		t.Fatal(err)
 	}
-	receiverGate, err := world.InstallDeviceGate(ctx, receiver)
-	if err != nil {
+	// the receiver's listen on smtp/25/mx goes through the stock gate alone, which takes it under the step's standing
+	// grant
+	if _, err := world.InstallApprovalGate(ctx, receiver); err != nil {
 		t.Fatal(err)
 	}
 	// the owner's device reads the member's mailbox and runs no receiver; mail on first, then the alias, so the
@@ -182,25 +182,15 @@ func worldSmokeMailInbound(t testing.TB, world *World, settings *worldSmokeSetti
 	if _, err := world.AwaitMailReceiver(ctx, receiver, receiverMail, mailSettings.Mail); err != nil {
 		world.FailProgress(t, network.Name+"'s receiver", err, nil)
 	}
-	if passed := receiverGate.ListenPassedCount(); 0 < passed {
-		// the TLS step's finding, met again by the receiver's own listen, which retries until a gate lets it through
-		t.Errorf("§16.6's approval gate refused %s's receiver listen on smtp/25/mx %d times as an action with no effect: socketListenAction builds the listen's action with no Effect, so no receiver listens behind the stock gate", receiver.Name, passed)
-	}
-	// the receiver deposits each message to the member's mailbox on a repo:<id>:deposit token (evs_deposit.go)
+	// the receiver deposits each message to the member's mailbox on a repo:<id>:deposit token (evs_deposit.go), which
+	// its write there, a consented device of the mailbox's member, implies (QD-1173), as the network's mail_send gives
+	// it too (owner decision 333)
 	mailboxId, ok := worldMemberMailboxId(receiver)
 	if !ok {
 		t.Fatalf("%s's verified state holds no mailbox of its member", receiver.Name)
 	}
 	if access := worldEvsAccess(receiver, mailboxId); !access.Rights.Has(sidecar.AclEvsDeposit) {
-		// a product finding, which the step reports and carries on past through a rule a network's admin can write
-		t.Errorf("%s, a consented device of its member and %s's receiver, holds %b on the member's mailbox and no deposit, so the exchange refuses the repo:<mailbox>:deposit token every deposit asks and the receiver never answers a message's DATA: EvsAccess gives an owner-bound mailbox's consented devices read and write alone (acl_evs.go's addOwnerBoundRights), the exchange holds the deposit scope to the deposit bit (AclExchangeScopes), and §8.5's deposit for every subject the projection marks mail_send (owner decision 333) is not built", receiver.Name, network.Name, access.Rights)
-		deposit := fmt.Sprintf(`{"src": ["autogroup:member"], "dst": ["evs:%s"], "allow": ["deposit"]}`, mailboxId)
-		if _, err := world.SaveAclPolicy(ctx, network, owner, worldAclPolicy(append(slices.Clone(grants), deposit)...)); err != nil {
-			world.FailProgress(t, network.Name+"'s mailbox deposit rule", err, nil)
-		}
-		if access := worldEvsAccess(receiver, mailboxId); !access.Rights.Has(sidecar.AclEvsDeposit) {
-			t.Fatalf("%s holds %b on the mailbox under a rule granting members deposit on it", receiver.Name, access.Rights)
-		}
+		t.Fatalf("%s, a consented device of its member and %s's receiver, holds %b on the member's mailbox and no deposit, so the exchange refuses the repo:<mailbox>:deposit token every deposit asks and the receiver answers each message 451", receiver.Name, network.Name, access.Rights)
 	}
 	key, err := receiver.Sidecar().TlsDeviceKey()
 	if err != nil {
@@ -227,7 +217,7 @@ func worldSmokeMailInbound(t testing.TB, world *World, settings *worldSmokeSetti
 		world.FailProgress(t, network.Name+"'s mailbox", err, nil)
 	}
 	worldSmokeMailCheck(t, owner, got, mailSettings.Sender, messageId, mailSettings.Body, sidecar.MailTrustUntrusted)
-	worldSmokeMailIngestByHint(t, owner, got, "the receiver's first deposit to the mailbox", changes.Count(), mailSettings.Mail)
+	t.Logf("%s's mailbox listed the receiver's first deposit %s after its 250, nothing waking its ingest, the reader's EvsClient raising %d changes of the mailbox", network.Name, got.ListedIn.Round(time.Millisecond), changes.Count())
 	return &worldSmokeMailbox{Network: network, Address: address, Reader: owner, Mail: ownerMail, MailboxId: mailboxId}
 }
 
@@ -241,10 +231,6 @@ func worldSmokeMailOutbound(t testing.TB, world *World, settings *worldSmokeSett
 	mailSettings := settings.Mail
 	ctx, cancel := world.StepContext(t.Context(), settings.PhaseTimeout)
 	defer cancel()
-	if !world.apiSmtpGateInstalled {
-		// a product finding, which the step reports and carries on past through the world's stand-in
-		t.Errorf("api's process installs no §8 check for its smtp routes (model.SetSmtpApiGate is called by its handler tests alone), so POST /smtp/dkim-keys answers every publish 503 and no sending device publishes the DKIM selector it signs with; the world installs worldSmtpApiGate in its place")
-	}
 	owner := network.Owner()
 	ownerGate, err := world.InstallDeviceGate(ctx, owner, sidecar.SidecarActionAliasCreate, sidecar.SidecarActionMail)
 	if err != nil {
@@ -314,20 +300,9 @@ func worldSmokeMailOutbound(t testing.TB, world *World, settings *worldSmokeSett
 	// mail from another network is internet mail at its readers, not a member's, its Message-ID under the sender's
 	// network domain (§14.6)
 	worldSmokeMailCheck(t, mailbox.Reader, got, from, "@"+domain, mailSettings.SendBody, sidecar.MailTrustUntrusted)
-	worldSmokeMailIngestByHint(t, mailbox.Reader, got, "the receiver's second deposit to the mailbox", changes.Count(), mailSettings.Mail)
+	t.Logf("%s's mailbox listed the receiver's second deposit %s after smtpedge's send ended, nothing waking its ingest, the reader's EvsClient raising %d changes of the mailbox", mailbox.Network.Name, got.ListedIn.Round(time.Millisecond), changes.Count())
 	if approvals < 2 {
 		t.Logf("%s's alias and send passed %d stand-in approvals", owner.Name, approvals)
-	}
-}
-
-// Reports the reader's ingest of got as a finding unless the deposit's own hint brought it: the reader's ingestor
-// watches every ref of the mailbox, a deposit ref's among them (mail_ingest_reader.go's Watch), and §19.8's
-// head-to-hint target is 2 s, so a deposit should wake it long before IngestHintTimeout; the wait woke it itself past
-// that, as an app's wake does, and carried on.
-func worldSmokeMailIngestByHint(t testing.TB, reader *sidecart3.T3Device, got *WorldMailMessage, deposit string, changes int64, settings *WorldMailSettings) {
-	t.Helper()
-	if !got.ByHint {
-		t.Errorf("%s ingested %s only on a wake (MailClient.Resync) past %s, never on the deposit's hint: the receiver's deposit push committed, and the ingestor, which watches every ref of the mailbox, ran no pass for it, while the reader's EvsClient raised %d changes of the mailbox before the wake; whether evs's block sent no hint for the receiver's new deposit ref, the hint never reached the reader, or its read raised no change the ingestor took is not located further here", reader.Name, deposit, settings.IngestHintTimeout, changes)
 	}
 }
 

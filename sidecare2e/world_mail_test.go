@@ -49,7 +49,9 @@ type WorldMailSettings struct {
 	CheckInterval         time.Duration
 	UnboundCheckInterval  time.Duration
 	// How often a wait asks again (the component's binding, the receiver's serving, the dns edge's answers, a delivery
-	// refused for now, the message in the mailbox), and the bound on each wait.
+	// refused for now, the message in the mailbox), and the bound on each wait. A message's wait is far inside the
+	// reader's hourly resync, so only the deposit's hint, or the ingest's own retry of a deposit whose pin its state did
+	// not hold yet, brings the message within it.
 	RetryInterval time.Duration
 	Timeout       time.Duration
 	// The internet sender: the address the lb's PROXY header names, a documentation address, its EHLO name, and one
@@ -59,10 +61,6 @@ type WorldMailSettings struct {
 	DeliveryTimeout time.Duration
 	// The most entries one read of the mailbox lists.
 	ListEntryCount int
-	// How long a reader's ingest may take to run on a deposit's hint alone (§11.10's hints; §19.8's head-to-hint
-	// deadline is 2 s), past which a wait wakes the ingest itself, as an app's wake does (MailClient.Resync), and says
-	// the hint did not.
-	IngestHintTimeout time.Duration
 }
 
 func DefaultWorldMailSettings() *WorldMailSettings {
@@ -78,7 +76,6 @@ func DefaultWorldMailSettings() *WorldMailSettings {
 		SenderHelo:            "mta.sender.example",
 		DeliveryTimeout:       30 * time.Second,
 		ListEntryCount:        50,
-		IngestHintTimeout:     20 * time.Second,
 	}
 }
 
@@ -430,33 +427,25 @@ func worldEvsAccess(device *sidecart3.T3Device, repoId sidecar.Id) sidecar.AclEv
 }
 
 // The changes device's EvsClient raises for one repo's subscribed refs: what a hint's read brings (evs_subscribe.go's
-// changes row), which tells a hint that never woke a reader's ingest from one whose read raised a change the ingest did
-// not take. Counted from its making until Freeze, which a wait calls before it wakes the ingest itself.
+// changes row), which tells a deposit whose hint never reached the reader from one whose read raised a change the
+// ingest did not take, when a message's wait stalls.
 type worldRepoChanges struct {
 	count  atomic.Int64
-	frozen atomic.Bool
 	remove func()
 }
 
-// Counts repoId's changes at device's EvsClient until Freeze; Close stops listening.
+// Counts repoId's changes at device's EvsClient until Close.
 func newWorldRepoChanges(device *sidecart3.T3Device, repoId sidecar.Id) *worldRepoChanges {
 	self := &worldRepoChanges{remove: func() {}}
 	client := device.Sidecar().EvsClient()
 	if client == nil {
 		self.count.Store(-1)
-		self.frozen.Store(true)
 		return self
 	}
 	self.remove = client.AddRepoChangeListener(&repoId, func(change *sidecar.EvsRepoChange) {
-		if !self.frozen.Load() {
-			self.count.Add(1)
-		}
+		self.count.Add(1)
 	})
 	return self
-}
-
-func (self *worldRepoChanges) Freeze() {
-	self.frozen.Store(true)
 }
 
 // The changes counted, -1 where the device had no EvsClient.
@@ -468,11 +457,12 @@ func (self *worldRepoChanges) Close() {
 	self.remove()
 }
 
-// A message in a mailbox as a reader reads it back, and whether the deposit's hint alone brought its ingest.
+// A message in a mailbox as a reader reads it back, and how long after its wait began the reader's mailbox first
+// listed it.
 type WorldMailMessage struct {
-	Entry  *sidecar.MailViewEntry
-	Read   *sidecar.MailReadResult
-	ByHint bool
+	Entry    *sidecar.MailViewEntry
+	Read     *sidecar.MailReadResult
+	ListedIn time.Duration
 }
 
 // The header's value in read, "" where it has none.
@@ -486,10 +476,10 @@ func (self *WorldMailMessage) Header(name string) string {
 }
 
 // Waits until client's mailbox lists a message whose subject is subject, ingested by the member's reader, and reads
-// it. The reader's ingest runs at the deposit's hint, or its hourly resync, with no hook a test reads, so the mailbox is
-// listed every RetryInterval within Timeout; past IngestHintTimeout each list wakes the ingest first, as an app's wake
-// does (MailClient.Resync), changes, where given, frozen before the first wake. The message's ByHint says whether the
-// hint alone brought it.
+// it. The reader's ingest runs at the deposit's hint, with no hook a test reads, so the mailbox is listed every
+// RetryInterval within Timeout, and nothing here wakes the ingest: a deposit whose hint never reaches the reader waits
+// for the hourly resync, past Timeout, and fails the wait, which names the changes of the mailbox changes, where given,
+// counted at the reader's EvsClient.
 func (self *World) AwaitMailMessage(ctx context.Context, device *sidecart3.T3Device, client *sidecar.MailClient, subject string, changes *worldRepoChanges, settings *WorldMailSettings) (*WorldMailMessage, error) {
 	if settings == nil {
 		settings = DefaultWorldMailSettings()
@@ -498,16 +488,8 @@ func (self *World) AwaitMailMessage(ctx context.Context, device *sidecart3.T3Dev
 	defer cancel()
 	var lastErr error
 	listed := 0
-	hintEnd := time.Now().Add(settings.IngestHintTimeout)
-	woken := false
+	startedAt := time.Now()
 	for {
-		if !time.Now().Before(hintEnd) {
-			if !woken && changes != nil {
-				changes.Freeze()
-			}
-			client.Resync()
-			woken = true
-		}
 		page, err := client.List(ctx, &sidecar.MailListArgs{Limit: settings.ListEntryCount})
 		if err == nil {
 			listed = len(page.Entries)
@@ -515,6 +497,7 @@ func (self *World) AwaitMailMessage(ctx context.Context, device *sidecart3.T3Dev
 				if entry.Entry.GetSubject() != subject {
 					continue
 				}
+				listedIn := time.Since(startedAt)
 				id, err := sidecar.IdFromBytes(entry.Entry.GetId())
 				if err != nil {
 					return nil, err
@@ -523,48 +506,43 @@ func (self *World) AwaitMailMessage(ctx context.Context, device *sidecart3.T3Dev
 				if err != nil {
 					return nil, fmt.Errorf("%s's read of %q: %w", device.Name, subject, err)
 				}
-				return &WorldMailMessage{Entry: entry, Read: read, ByHint: !woken}, nil
+				return &WorldMailMessage{Entry: entry, Read: read, ListedIn: listedIn}, nil
 			}
 		}
 		lastErr = err
 		select {
 		case <-ctx.Done():
-			return nil, fmt.Errorf("%s's mailbox never listed %q: %d listed, %v (%w)", device.Name, subject, listed, lastErr, ctx.Err())
+			changeCount := "uncounted"
+			if changes != nil {
+				changeCount = fmt.Sprintf("%d", changes.Count())
+			}
+			return nil, fmt.Errorf("%s's mailbox never listed %q: %d listed, the reader's EvsClient raising %s changes of the mailbox, %v (%w)", device.Name, subject, listed, changeCount, lastErr, ctx.Err())
 		case <-time.After(settings.RetryInterval):
 		}
 	}
 }
 
-// §16.6's stock gate on one device with the two stand-ins the world needs in front of it (the World's header), each
-// counted so a step can say what stood in:
-//
-//   - a listen the stock gate refuses as an action with no effect, the product finding that socketListenAction builds
-//     no Effect, passes where the device's verified policy grants the device the listen on the action's socket name
-//     (AclState.MayListen): the stock gate, given an effect, would hold the listen for a person's approval (I-8), since
-//     its action names no subject or allow a standing grant could cover, and the stand-in is that person approving it;
-//   - an action of a kind in approved that the stock gate holds for a person's decision (*ApprovalPendingError) runs
-//     its effect as that decision would let it: the world composes no approver device, whose person signs a decision
-//     on another device (`ur approve`), so the stand-in is that person approving the one use. Such a kind has no
-//     standing-grant form: an alias's creation names no grant fields, so no rule covers it.
-//
-// Every other answer is the stock gate's.
+// §16.6's stock gate on one device with the stand-in the world needs in front of it (the World's header), counted so a
+// step can say what stood in: an action of a kind in approved that the stock gate holds for a person's decision
+// (*ApprovalPendingError) runs its effect as that decision would let it. The world composes no approver device, whose
+// person signs a decision on another device (`ur approve`), so the stand-in is that person approving the one use. Such
+// a kind has no standing-grant form: an alias's creation names no grant fields, so no rule covers it. Every other
+// answer is the stock gate's, a tls/ or smtp/ listen's among them, which it takes under a standing grant.
 type worldDeviceGate struct {
-	device   *sidecart3.T3Device
 	next     sidecar.SidecarGate
 	approved []sidecar.SidecarActionKind
-	// listens the stock gate refused for no effect, passed here, and actions it held for a person, run here
-	listenPassedCount atomic.Int64
-	approvedCount     atomic.Int64
+	// actions the stock gate held for a person, run here
+	approvedCount atomic.Int64
 }
 
-// Installs §16.6's stock gate behind device's Authorize (World.InstallApprovalGate) with the stand-ins of
+// Installs §16.6's stock gate behind device's Authorize (World.InstallApprovalGate) with the stand-in of
 // worldDeviceGate in front of it, approving the kinds in approved as a person would.
 func (self *World) InstallDeviceGate(ctx context.Context, device *sidecart3.T3Device, approved ...sidecar.SidecarActionKind) (*worldDeviceGate, error) {
 	stock, err := self.InstallApprovalGate(ctx, device)
 	if err != nil {
 		return nil, err
 	}
-	gate := &worldDeviceGate{device: device, next: stock, approved: approved}
+	gate := &worldDeviceGate{next: stock, approved: approved}
 	remove := device.Sidecar().InstallGate(gate)
 	self.t3.OnClose(remove)
 	return gate, nil
@@ -576,40 +554,21 @@ func (self *worldDeviceGate) Authorize(ctx context.Context, action *sidecar.Side
 		return err
 	}
 	var pending *sidecar.ApprovalPendingError
-	switch {
-	case action.Kind == sidecar.SidecarActionListen && action.Effect == nil && errors.Is(err, sidecar.ErrSidecarActionInvalid):
-		follower := self.device.Follower()
-		identity := self.device.Sidecar().Identity()
-		if follower == nil || follower.AclEngine() == nil || identity == nil || action.Detail == nil {
-			return err
-		}
-		state := follower.AclEngine().State()
-		socket := sidecar.AclSocketName{PublicName: action.Detail.SocketName}
-		if state == nil || !state.MayListen(sidecar.AclSidecarSubject(identity.SidecarId), socket, time.Now()).Allowed {
-			return fmt.Errorf("%w; and the device's policy grants it no listen on %s", err, action.Detail.SocketName)
-		}
-		self.listenPassedCount.Add(1)
-		return nil
-	case slices.Contains(self.approved, action.Kind) && action.Effect != nil && errors.As(err, &pending):
-		// the one use a person's decision lets through, its effect run as the stock gate's spend runs it
-		effectRef, runErr := action.Effect.Run(ctx, nil)
-		switch {
-		case runErr == nil:
-			action.Outcome = &sidecar.SidecarOutcome{State: sidecar.ApprovalOutcomeDone, EffectRef: bytes.Clone(effectRef)}
-		case errors.Is(runErr, sidecar.ErrSidecarEffectNotDone):
-			action.Outcome = &sidecar.SidecarOutcome{State: sidecar.ApprovalOutcomeNotDone, Err: runErr}
-		default:
-			action.Outcome = &sidecar.SidecarOutcome{State: sidecar.ApprovalOutcomeUncertain, Err: runErr}
-		}
-		self.approvedCount.Add(1)
-		return nil
+	if !slices.Contains(self.approved, action.Kind) || action.Effect == nil || !errors.As(err, &pending) {
+		return err
 	}
-	return err
-}
-
-// How many listens the stock gate refused for no effect and this passed.
-func (self *worldDeviceGate) ListenPassedCount() int64 {
-	return self.listenPassedCount.Load()
+	// the one use a person's decision lets through, its effect run as the stock gate's spend runs it
+	effectRef, runErr := action.Effect.Run(ctx, nil)
+	switch {
+	case runErr == nil:
+		action.Outcome = &sidecar.SidecarOutcome{State: sidecar.ApprovalOutcomeDone, EffectRef: bytes.Clone(effectRef)}
+	case errors.Is(runErr, sidecar.ErrSidecarEffectNotDone):
+		action.Outcome = &sidecar.SidecarOutcome{State: sidecar.ApprovalOutcomeNotDone, Err: runErr}
+	default:
+		action.Outcome = &sidecar.SidecarOutcome{State: sidecar.ApprovalOutcomeUncertain, Err: runErr}
+	}
+	self.approvedCount.Add(1)
+	return nil
 }
 
 // How many actions the stock gate held for a person and this ran as approved.

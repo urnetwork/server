@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"github.com/urnetwork/sidecar"
-	"github.com/urnetwork/sidecar/protocol/bridge"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/sidecart3"
@@ -345,18 +344,6 @@ func (self *World) AwaitTlsVisit(ctx context.Context, serverName string, spkiSha
 		case <-time.After(settings.RetryInterval):
 		}
 	}
-}
-
-// A stand-in for §16.6's gate behind one device's Authorize that passes each listen action alone (the World's
-// header): the stock gate refuses Sidecar.Listen's action on a tls/ or smtp/ name as one with no effect, so the step
-// that meets that refusal reports it and carries on through this one to the servers past it.
-type worldListenGate struct{}
-
-func (worldListenGate) Authorize(ctx context.Context, action *sidecar.SidecarAction, decision *bridge.Signed) error {
-	if action == nil || action.Kind != sidecar.SidecarActionListen {
-		return fmt.Errorf("the world's listen gate passes listens alone: %w", sidecar.ErrSidecarGateDenied)
-	}
-	return nil
 }
 
 // The port tlsedge's visitors reach, as the lb forwards it.

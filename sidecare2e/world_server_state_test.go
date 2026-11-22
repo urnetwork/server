@@ -5,9 +5,8 @@
 // over api's internal quota surface, the quota ledgers a scenario reconciles, read after the debit journal is flushed
 // as taskworker's flush would, the service debits by meter in service_debit_journal and network_service_usage, a
 // network's verification by a paid balance, a device's issued certificate row standing in for the certs worker, the
-// contract gate's install, api's dns.yml root, a network's age and its mail enable's, which no route moves, and api's
-// smtp routes' §8 checks, which api's process does not install; and tlsedge's connection records, which the blogger
-// case's privacy capture reads.
+// contract gate's install, api's dns.yml root, and a network's age and its mail enable's, which no route moves; and
+// tlsedge's connection records, which the blogger case's privacy capture reads.
 
 package sidecare2e
 
@@ -16,7 +15,6 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -226,38 +224,6 @@ func worldAgeMailEnable(ctx context.Context, networkId server.Id, age time.Durat
 		returnErr = fmt.Errorf("the mail enable's age: %w", err)
 	})
 	return
-}
-
-// api's §8 checks for its smtp routes (model.SmtpApiGate, §14.14) over a gate cache of the world's, standing in for the
-// install api's process does not make: nothing but api's handler tests calls model.SetSmtpApiGate, so POST
-// /smtp/dkim-keys answers every publish 503 (the mail step's finding). mail_send is the cache's verified state's send
-// grant (AclState.MaySend) for the sidecar; read on the repo that holds the network mail key, which GET /smtp/reports
-// asks, is not built here and answers unavailable, closed.
-type worldSmtpApiGate struct {
-	cache *sidecar.AclGateCache
-}
-
-var _ model.SmtpApiGate = (*worldSmtpApiGate)(nil)
-
-func (self *worldSmtpApiGate) MaySendMail(ctx context.Context, networkId server.Id, sidecarId server.Id, now time.Time) (bool, error) {
-	snapshot := sidecar.RequestAclGateSnapshot(self.cache, sidecar.Id(networkId))
-	if snapshot == nil || snapshot.Acl == nil {
-		return false, errors.New("the gate cache has not loaded the network")
-	}
-	return snapshot.Acl.MaySend(sidecar.AclSidecarSubject(sidecar.Id(sidecarId)), now).Allowed, nil
-}
-
-func (self *worldSmtpApiGate) MayReadReports(ctx context.Context, networkId server.Id, sidecarId server.Id, now time.Time) (bool, error) {
-	return false, errors.New("the world's stand-in answers no reports check")
-}
-
-// Installs worldSmtpApiGate over cache as api's smtp routes' checks until the returned pop, and answers whether api's
-// process had installed its own: the mail step's finding when it had not.
-func worldInstallSmtpApiGate(cache *sidecar.AclGateCache) (restore func(), apiInstalled bool) {
-	if model.CurrentSmtpApiGate() != nil {
-		return func() {}, true
-	}
-	return model.SetSmtpApiGate(&worldSmtpApiGate{cache: cache}), false
 }
 
 // urnetwork-edge's network row, which api's edge client route mints the edges' clients in.

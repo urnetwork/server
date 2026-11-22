@@ -14,9 +14,9 @@
 //   - setup: two networks, made Pro by a paid balance so verified and able to hold a standing publish (§8.5); in each
 //     a blog repo its owner created on evs, every writer's certificate row (the world's certificate path), socket
 //     component, §16.6 approval gate and evs component, each article's first version, and each writer's subscription
-//     of the article directory; then each network's document publishing tls/443/<host> raw to the public, its label's
-//     serial stamped by a TXT write where it is 0 (the world's stand-in), every writer's webserver listening, and a
-//     visit through tlsedge reaching each blog;
+//     of the article directory; then each network's document publishing tls/443/<host> raw to the public, its label
+//     held at its zone's serial in the label map tlsedge routes by, every writer's webserver listening under the
+//     document's standing publish, and a visit through tlsedge reaching each blog;
 //   - the steady phase: every writer updates its articles while every reader loads each article through tlsedge,
 //     one goroutine a burst, random pauses between, connect's and proxy's style;
 //   - the writer chaos: the same, while one writer of the first network is stopped and started again on a cold cache;
@@ -42,9 +42,9 @@
 //     each network's balances is a debit on a meter, exactly, no balance overdrawn, and tlsedge's meter holds at least
 //     every byte the network's visitors were sent through it.
 //
-// The case meets two product bugs the world carries past with its stand-ins (the World's header) and reports each:
-// §16.6's stock gate refusing a listen as an action with no effect (worldListenGate; fix track listen-approval-effect)
-// and a label drawn outside its zone's serial order (the TXT write; fix track dns-label-serial-order).
+// The case runs on the World's stand-ins alone (the World's header). The two it carried past at first are gone with
+// their fixes: §16.6's stock gate takes each writer's listen under the standing publish (listen-approval-effect), and a
+// label's draw takes its zone's serial (dns-label-serial-order), which the publish checks.
 //
 // Its sub-case, TestE2eBloggerChangeAfterTheReadersOwnRead (blogger_changes_test.go), runs the cache clearing's
 // change path alone: a commit must reach the other writer's change listener whether or not that writer's client read
@@ -126,10 +126,6 @@ type bloggerSettings struct {
 	// The blog's host under each network's zone, and the publish grant's life.
 	Host      string
 	GrantLife time.Duration
-	// The host whose TXT record stamps a label the zone's serial order skipped (the world's stand-in), and its text:
-	// one character-string, so no space.
-	LabelRecordHost string
-	LabelRecordText string
 	// The repo directory the articles live in.
 	ArticleDirectory string
 	// One visit's bound (its dial, handshake, request and answer), the bound on a read's visits while they fail below
@@ -188,8 +184,6 @@ func defaultBloggerSettings() *bloggerSettings {
 		FairShareMaxPercent:          150,
 		Host:                         "blog",
 		GrantLife:                    12 * time.Hour,
-		LabelRecordHost:              "about",
-		LabelRecordText:              "e2e-blogger",
 		ArticleDirectory:             "articles",
 		VisitTimeout:                 15 * time.Second,
 		ReadRetryTimeout:             2 * time.Minute,
@@ -209,12 +203,10 @@ func defaultBloggerSettings() *bloggerSettings {
 }
 
 // A network's document for its blog: its members publish and listen on tls/443/<host> under the public audience in
-// raw mode until expires, a standing publish, which §8.5 holds to a Pro or Team document, and administer the host
-// whose TXT record stamps the label.
+// raw mode until expires, a standing publish, which §8.5 holds to a Pro or Team document.
 func (self *bloggerSettings) aclPolicy(expires time.Time) string {
 	return worldAclPolicy(
 		fmt.Sprintf(`{"src": ["autogroup:member"], "dst": ["dns:%s", "sock:%s"], "allow": ["publish", "listen"], "audience": "public", "app_mode": "raw", "expires": %q}`, self.Host, self.socketName(), expires.UTC().Format(time.RFC3339)),
-		fmt.Sprintf(`{"src": ["autogroup:member"], "dst": ["dns:%s"], "allow": ["admin"]}`, self.LabelRecordHost),
 	)
 }
 
@@ -255,7 +247,6 @@ type bloggerBlog struct {
 	world    *World
 	settings *bloggerSettings
 	network  *WorldNetwork
-	findings *bloggerFindings
 	// the world's sockets origin's registration calls, the evidence a listen that never takes is reported with
 	socketCalls *bloggerSocketCalls
 	repoId      sidecar.Id
@@ -286,64 +277,20 @@ func (self *bloggerBlog) writerOfSpki(spkiSha256 []byte) *bloggerWriter {
 	return nil
 }
 
-// writer's listen on the blog's name, raw, serving the readers' ALPN ids: §16.6's stock gate first, and where it
-// refuses the listen as an action with no effect, the world's stand-in for that bug (worldListenGate), the refusal
-// kept as the case's finding.
+// writer's listen on the blog's name, raw, serving the readers' ALPN ids, which §16.6's stock gate takes under the
+// document's standing publish.
 func (self *bloggerBlog) listen(ctx context.Context, writer *bloggerWriter) (*sidecar.SocketListener, error) {
 	settings := self.settings
 	name := settings.socketName()
 	listenSettings := &sidecar.SocketListenSettings{AppMode: "raw", Alpn: slices.Clone(settings.Alpns)}
 	startedAt := time.Now()
 	listener, err := self.world.Listen(ctx, writer.device, name, listenSettings, settings.Tls)
-	if errors.Is(err, sidecar.ErrSidecarActionInvalid) {
-		self.findings.noteListenRefused(writer.device.Name, err)
-		writer.device.Sidecar().InstallGate(worldListenGate{})
-		listener, err = self.world.Listen(ctx, writer.device, name, listenSettings, settings.Tls)
-	}
 	if err != nil {
 		since := startedAt.Add(-self.settings.SocketCallLookBack)
 		stacks := bloggerGoroutineStacks(settings.SocketCalls.StackMaxByteCount, "socketRegistrar", "socketsservice.(*SocketsService).registrations", "SocketComponent")
 		return nil, fmt.Errorf("%s's listen on %s, begun at %s: %w; its registration calls since %s: %s; every client's calls since: %s; the registrar's and sockets' goroutines:\n%s", writer.device.Name, name, startedAt.Format("15:04:05.000"), err, since.Format("15:04:05.000"), self.socketCalls.describe(writer.device.Sidecar().Identity().ClientId.String(), since), self.socketCalls.summary(since), stacks)
 	}
 	return listener, nil
-}
-
-// What the world's stand-ins carried the case past, each a product finding the case reports once.
-type bloggerFindings struct {
-	stateLock sync.Mutex
-	// listens §16.6's stock gate refused as actions with no effect, and the first refusal
-	listenRefusedNames []string
-	listenRefusal      error
-	// labels whose change serial was 0
-	unstampedLabels []string
-}
-
-func (self *bloggerFindings) noteListenRefused(name string, err error) {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	if self.listenRefusal == nil {
-		self.listenRefusal = err
-	}
-	self.listenRefusedNames = append(self.listenRefusedNames, name)
-}
-
-func (self *bloggerFindings) noteUnstampedLabel(label string) {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	self.unstampedLabels = append(self.unstampedLabels, label)
-}
-
-// Reports each finding met, once.
-func (self *bloggerFindings) report(t testing.TB) {
-	t.Helper()
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	if 0 < len(self.listenRefusedNames) {
-		t.Errorf("§16.6's approval gate refused the listens of %v on the blog's name as actions with no effect (%v): socketListenAction builds the listen's action with no Effect, which ApprovalGate.Authorize refuses before any grant is read; the case carried them on through the world's worldListenGate (fix track listen-approval-effect)", self.listenRefusedNames, self.listenRefusal)
-	}
-	if 0 < len(self.unstampedLabels) {
-		t.Errorf("the labels %v held change serial 0 in their zone's label map, so tlsedge, which follows the map since its last serial (DnsLabelMapSince), never routes their names: each was drawn outside the zone's serial order (model.EnsureNetworkLabelInTx stamps no serial); the case stamped each with a TXT write, the world's stand-in (fix track dns-label-serial-order)", self.unstampedLabels)
-	}
 }
 
 // One commit of an article: its version, the path's and ref's versions evs answered, and when the write began and
@@ -533,7 +480,6 @@ func (self *bloggerChaos) covers(visit *bloggerVisit) bool {
 
 // The case on world: see the file header.
 func runBlogger(t testing.TB, world *World, settings *bloggerSettings) {
-	findings := &bloggerFindings{}
 	startedAt := time.Now()
 	socketCalls, err := installBloggerSocketCalls(world, settings.SocketCalls)
 	if err != nil {
@@ -553,7 +499,7 @@ func runBlogger(t testing.TB, world *World, settings *bloggerSettings) {
 	}
 	blogs := []*bloggerBlog{}
 	for index, readerCount := range []int{settings.ReaderCount, settings.SecondReaderCount} {
-		blog, err := newBloggerBlog(ctx, world, settings, networks[index], index, readerCount, findings, socketCalls)
+		blog, err := newBloggerBlog(ctx, world, settings, networks[index], index, readerCount, socketCalls)
 		if err != nil {
 			cancel()
 			world.FailProgress(t, networks[index].Name+"'s blog", err, nil)
@@ -591,7 +537,6 @@ func runBlogger(t testing.TB, world *World, settings *bloggerSettings) {
 		}
 	}
 	cancel()
-	findings.report(t)
 	t.Logf("the blogs stood %s after the case began: %s at %s, %s at %s", time.Since(startedAt).Round(time.Millisecond), blogs[0].network.Name, blogs[0].serverName, blogs[1].network.Name, blogs[1].serverName)
 
 	for _, blog := range blogs {
@@ -692,12 +637,11 @@ func runBlogger(t testing.TB, world *World, settings *bloggerSettings) {
 // network's blog up to its grants: verified and Pro, its repo, zone and server name, every writer's certificate row,
 // leaf, socket component, approval gate, evs component and articles, each article's first version, main's ref id,
 // every writer's subscription of the article directory, and its readers.
-func newBloggerBlog(ctx context.Context, world *World, settings *bloggerSettings, network *WorldNetwork, index int, readerCount int, findings *bloggerFindings, socketCalls *bloggerSocketCalls) (*bloggerBlog, error) {
+func newBloggerBlog(ctx context.Context, world *World, settings *bloggerSettings, network *WorldNetwork, index int, readerCount int, socketCalls *bloggerSocketCalls) (*bloggerBlog, error) {
 	blog := &bloggerBlog{
 		world:             world,
 		settings:          settings,
 		network:           network,
-		findings:          findings,
 		socketCalls:       socketCalls,
 		articleIdArticles: map[string]*bloggerArticle{},
 		ledger:            newBloggerLedger(),
@@ -800,8 +744,8 @@ func newBloggerBlog(ctx context.Context, world *World, settings *bloggerSettings
 	return blog, nil
 }
 
-// Saves the network's document publishing the blog's name, then stamps its label's serial where it is 0, the world's
-// stand-in for that finding.
+// Saves the network's document publishing the blog's name, and checks that its label holds its zone's serial in the
+// label map, which tlsedge follows since its last serial (DnsLabelMapSince): a label at 0 is never routed.
 func (self *bloggerBlog) publish(ctx context.Context) error {
 	network := self.network
 	if _, err := self.world.SaveAclPolicy(ctx, network, network.Owner(), self.settings.aclPolicy(time.Now().Add(self.settings.GrantLife))); err != nil {
@@ -811,13 +755,10 @@ func (self *bloggerBlog) publish(ctx context.Context) error {
 	if err != nil || !found {
 		return fmt.Errorf("%s's label in the map: found %t, %v", network.Name, found, err)
 	}
-	if serial != 0 {
-		return nil
+	if serial == 0 {
+		return fmt.Errorf("%s's label %s holds change serial 0 in %s's label map, so tlsedge never routes %s", network.Name, self.zone.Label, self.zone.Root, self.serverName)
 	}
-	self.findings.noteUnstampedLabel(self.zone.Label)
-	recordName := self.settings.LabelRecordHost + "." + self.zone.Apex()
-	_, err = self.world.SetDnsRecord(ctx, network.Owner(), &sidecar.DnsRecordUpsert{Name: recordName, Type: "TXT", Values: []string{self.settings.LabelRecordText}}, nil)
-	return err
+	return nil
 }
 
 // Visits the blog's first article until a writer answers it through tlsedge: the registrations reach sockets at their

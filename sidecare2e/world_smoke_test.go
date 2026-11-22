@@ -92,13 +92,9 @@ type worldSmokeSettings struct {
 	// The second network's ACL document, given the time its tls/ grant expires: its members publish and listen on the
 	// tls/ host under the public audience in raw mode, a standing publish, which §8.5 holds to a Pro or Team document,
 	// beside the mail step's grants, since the network sends mail too.
+	TlsAclPolicy func(expires time.Time) string
 	// The tls/ host, the one no grant names that a visitor is refused, the grant's life, the visitor's request line,
 	// and the TLS helpers' bounds.
-	TlsAclPolicy func(expires time.Time) string
-	// The TXT record the second network writes in its zone where its label's map serial is still 0 (the step's
-	// finding), whose write stamps the label into the map's serial order, and its text.
-	TlsRecordHost      string
-	TlsRecordText      string
 	TlsHost            string
 	TlsUnpublishedHost string
 	TlsGrantLife       time.Duration
@@ -129,11 +125,8 @@ func defaultWorldSmokeSettings() *worldSmokeSettings {
 		TlsAclPolicy: func(expires time.Time) string {
 			return worldAclPolicy(append([]string{
 				fmt.Sprintf(`{"src": ["autogroup:member"], "dst": ["dns:web", "sock:tls/443/web"], "allow": ["publish", "listen"], "audience": "public", "app_mode": "raw", "expires": %q}`, expires.UTC().Format(time.RFC3339)),
-				`{"src": ["autogroup:member"], "dst": ["dns:about"], "allow": ["admin"]}`,
 			}, defaultWorldSmokeMailSettings().AclGrants...)...)
 		},
-		TlsRecordHost:      "about",
-		TlsRecordText:      "e2e-world-tls",
 		TlsHost:            "web",
 		TlsUnpublishedHost: "shop",
 		TlsGrantLife:       12 * time.Hour,
@@ -459,7 +452,7 @@ func runWorldSmoke(t *testing.T, worldSettings *WorldSettings) {
 
 		// mail: the first network turns mail on and receives an internet sender's message through mxedge's router, then
 		// the second, verified by its Pro balance, sends to it through smtpedge
-		mailbox := worldSmokeMailInbound(t, world, settings, first, append([]string{settings.DnsAclGrant}, settings.Mail.AclGrants...))
+		mailbox := worldSmokeMailInbound(t, world, settings, first)
 		worldSmokeMailOutbound(t, world, settings, second, mailbox)
 
 		// the ledgers at the end: every block that metered the TLS and mail steps drained by a restart, as a deploy's
@@ -589,15 +582,9 @@ func worldSmokeTls(t testing.TB, world *World, settings *worldSmokeSettings, net
 	if _, err := world.InstallApprovalGate(ctx, device); err != nil {
 		t.Fatal(err)
 	}
+	// the stock gate takes the listen under the document's standing publish, filing nothing
 	name := "tls/443/" + settings.TlsHost
-	listenSettings := &sidecar.SocketListenSettings{AppMode: "raw"}
-	listener, err := world.Listen(ctx, device, name, listenSettings, settings.Tls)
-	if errors.Is(err, sidecar.ErrSidecarActionInvalid) {
-		// a product finding, which the step reports and carries on past to the servers through a stand-in gate
-		t.Errorf("§16.6's approval gate refused %s's Sidecar.Listen on %s: %v; socketListenAction builds the listen's action with no Effect, which ApprovalGate.Authorize refuses before any grant or decision is read", device.Name, name, err)
-		device.Sidecar().InstallGate(worldListenGate{})
-		listener, err = world.Listen(ctx, device, name, listenSettings, settings.Tls)
-	}
+	listener, err := world.Listen(ctx, device, name, &sidecar.SocketListenSettings{AppMode: "raw"}, settings.Tls)
 	if err != nil {
 		world.FailProgress(t, "the tls/ listen", err, nil)
 	}
@@ -618,19 +605,15 @@ func worldSmokeTls(t testing.TB, world *World, settings *worldSmokeSettings, net
 	if err != nil {
 		t.Fatal(err)
 	}
-	// tlsedge routes a server name by the label map it follows since its last serial (DnsLabelMapSince), so a label
-	// whose change serial is still 0 never reaches a running tlsedge
+	// tlsedge routes a server name by the label map it follows since its last serial (DnsLabelMapSince), so the label
+	// must hold its zone's serial, which its draw takes by writing the zone in the draw's transaction: a label at 0
+	// never reaches a running tlsedge
 	serial, found, err := worldDnsLabelChangeSerial(ctx, network.NetworkId, zoneAnswer.Root)
 	if err != nil || !found {
 		t.Fatalf("%s's label in the map: found %t, %v", network.Name, found, err)
 	}
 	if serial == 0 {
-		// a product finding, which the step reports and carries on past: a record written in the zone stamps the label
-		t.Errorf("%s's label %s holds change serial 0 in %s's label map, so DnsLabelMapSince never returns it and tlsedge, which follows the map from its start, never routes %s: the label was drawn outside the zone's serial order (model.EnsureNetworkLabelInTx stamps no serial, and ensureNetworkZoneInTx stamps one only when the zone's system rows change)", network.Name, zoneAnswer.Label, zoneAnswer.Root, worldTlsServerName(settings.TlsHost, zone))
-		recordName := settings.TlsRecordHost + "." + zone
-		if _, err := world.SetDnsRecord(ctx, network.Owner(), &sidecar.DnsRecordUpsert{Name: recordName, Type: "TXT", Values: []string{settings.TlsRecordText}}, nil); err != nil {
-			world.FailProgress(t, "the record that stamps the label", err, nil)
-		}
+		t.Fatalf("%s's label %s holds change serial 0 in %s's label map, so DnsLabelMapSince never returns it and tlsedge, which follows the map from its start, never routes %s", network.Name, zoneAnswer.Label, zoneAnswer.Root, serverName)
 	}
 	request := []byte(settings.TlsRequest)
 	if err := world.AwaitTlsVisit(ctx, serverName, spkiSha256, request, bytes.TrimSuffix(answer(request), []byte("\n")), settings.Tls); err != nil {

@@ -9,11 +9,11 @@
 //	          file clusters in buckets of the world's own on the local stack's MinIO; every block holds those clusters
 //	          and that Redis, as production's blocks share the site's
 //	api       T3Api, server's api and oauth in process, with api's installs over its gate cache (the sequencer, the
-//	          exchange's scopes, approvals, dns scopes, edge logins, rev/'s store, the issuer's worker, and §8.10's
-//	          contract gate when WorldSettings.AclContractGate turns sidecar.yml's switch on), the sequencer and rev/'s
-//	          store spending on api's own write budget over the world's Redis, which reports beside each block's
-//	          (T3WorldSettings.ApiWriteBudget), and api's internal gate surface on the world's throwaway bearers
-//	          (ServeInternalGate), as a block reaches api
+//	          exchange's scopes, approvals, dns scopes, the smtp routes' §8 checks, edge logins, rev/'s store, the
+//	          issuer's worker, and §8.10's contract gate when WorldSettings.AclContractGate turns sidecar.yml's switch
+//	          on), the sequencer and rev/'s store spending on api's own write budget over the world's Redis, which
+//	          reports beside each block's (T3WorldSettings.ApiWriteBudget), and api's internal gate surface on the
+//	          world's throwaway bearers (ServeInternalGate), as a block reaches api
 //	exchange  server's exchange and its connect handler on loopback, which every sidecar's and edge client's connect
 //	          client dials, with sidecar.yml's push switch on, so each sidecar's client hears its hints from the
 //	          exchange's resident publisher as in production (WorldSettings.Push)
@@ -57,18 +57,15 @@
 //     DANE anchor is the world's above, its own DoH, which TL2's and TL3's lookups and DKIM's answers take, asks the
 //     world's dns edge, since public resolvers know no .example name, and its DKIM keys' keychain is a map in the
 //     test, since a Sidecar's keychain is not reachable outside its package;
-//   - a person's approval (worldDeviceGate): §16.6's stock gate holds an alias's creation and a mail send to another
-//     network for a person's decision on another approval-capable device, and the world composes no approver, so a
-//     stand-in in front of the stock gate runs the one use as that decision would, counted;
+//   - a person's approval (worldDeviceGate): §16.6's stock gate holds an alias's creation, a mail send to another
+//     network and a bridge exposure for a person's decision on another approval-capable device, and the world composes
+//     no approver, so a stand-in in front of the stock gate runs the one use as that decision would, counted;
 //   - a receiver's lookups (World.StartMail): its reception-time checks (SPF, DKIM, DMARC, PTR) and mail.strict's
 //     chain ask the world's DNS above through MailReceiveSettings.ResolverFactory, under the same anchor, where
 //     production's receiver asks public resolvers over a DohCache of its own, which a receiver in a test binary refuses
 //     (ErrMailReceiverPublicResolver), so no test queries them from the test host. A name under the world's root is
 //     answered as the dns edge signs it; an internet sender's domain and its documentation address's PTR, which no zone
 //     of the world serves, get no answer, so their checks read temperror, which refuses no mail (§15.5, D-MAIL-14);
-//   - api's smtp routes' §8 checks (worldSmtpApiGate, world_server_state_test.go): api's process installs none
-//     (model.SetSmtpApiGate is called by its handler tests alone, the mail step's finding), so the world installs one
-//     over a gate cache of its own, its mail_send the verified state's send grant;
 //   - smtpedge's proof verifier: sidecartest's FakeSmtpProofVerifier. smtpproof's Groth16 keys come from a production
 //     setup that has not run (smtpproof's SPEC.md section 12), so its real verifier holds no key set and refuses every
 //     part, as its prover does;
@@ -89,13 +86,14 @@
 // is answered only once its router interface's banner probe passed, which the mail step's resolution reads; api's
 // sequencer and rev/ store spend on api's own write budget; and gkm's hint writer resolves sidecar ids through api's
 // internal route on the block's gkm bearer, as production's block does (WorldSettings.GkmHintResolver). A device's
-// §16.6 approval gate is the stock one (World.InstallApprovalGate); where it refuses a listen as an action with no
-// effect, a product finding the smoke reports, the TLS step carries on through worldListenGate, which passes a listen
-// alone, and the mail step through worldDeviceGate, which passes it where the device's policy grants the listen.
+// §16.6 approval gate is the stock one (World.InstallApprovalGate), which takes a tls/ or smtp/ listen under a standing
+// grant with nothing filed; a network's label takes its zone's serial when it is drawn, so tlsedge routes it from the
+// map; a member's consented device deposits in its member's mailbox, which its write there implies (QD-1173); and a
+// mailbox's reader ingests each deposit at the deposit's hint, nothing waking its ingest.
 //
 // Process-wide state, so one world runs at a time and its Close puts each back: the T3World's (sidecar.yml, pro.yml's
-// limits, oauth's issuer and keys, WARP_DOMAIN, api's installs), pro.yml's pro: limits, api's dns.yml root, evs.yml,
-// mcp's seal secret and McpResource, api's smtp routes' §8 checks, and the T3Api's internal gate handler. mcp's
+// limits, oauth's issuer and keys, WARP_DOMAIN, api's installs, the smtp routes' §8 checks among them), pro.yml's pro:
+// limits, api's dns.yml root, evs.yml, mcp's seal secret and McpResource, and the T3Api's internal gate handler. mcp's
 // /status latch is router's global one, so the world runs one mcp.
 
 package sidecare2e
@@ -349,9 +347,6 @@ type World struct {
 	// (router_lan), and the DNSSEC path above the world's root (world_mail_dns_test.go)
 	mxLanAddress netip.AddrPort
 	dnssec       *worldDnssec
-	// whether api's process had installed its smtp routes' §8 checks when the world came up, before the world's
-	// stand-in (worldInstallSmtpApiGate)
-	apiSmtpGateInstalled bool
 
 	blocks []*worldBlock
 
@@ -456,15 +451,6 @@ func NewWorld(t testing.TB, settings *WorldSettings) *World {
 	if self.dnssec, err = newWorldDnssec(self, settings.Dnssec); err != nil {
 		t.Fatalf("the DNSSEC path above the world's root: %v", err)
 	}
-	// api's smtp routes' §8 checks over a gate cache of the world's, in place of the install api's process lacks
-	smtpCache, closeSmtpCache, err := t3.AddGate("api-smtp")
-	if err != nil {
-		t.Fatalf("api's smtp checks: %v", err)
-	}
-	self.closes = append(self.closes, closeSmtpCache)
-	restoreSmtpGate, apiSmtpGateInstalled := worldInstallSmtpApiGate(smtpCache)
-	self.apiSmtpGateInstalled = apiSmtpGateInstalled
-	self.closes = append(self.closes, restoreSmtpGate)
 
 	for _, name := range settings.Blocks {
 		block, err := self.newBlock(name)
