@@ -38,8 +38,8 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// What the tests price an object's create at: a part an object and a part a byte, so a total tells both how many
-// objects were spent and which.
+// What the tests price an object's create at: a fixed part for each object and a part for each byte, so a total
+// tells both how many objects were spent and which.
 func testConfigLogBudgetPrice(objectByteCount int64) int64 {
 	return 1000 + 3*objectByteCount
 }
@@ -52,6 +52,7 @@ type testConfigLogBudgetCluster struct {
 	putKeyCounts map[string]int
 }
 
+// Counts the PUT, then sends it.
 func (self *testConfigLogBudgetCluster) PutIfNoneMatch(ctx context.Context, key string, body []byte, options *sidecar.BlobPutOptions) (string, error) {
 	func() {
 		self.stateLock.Lock()
@@ -124,6 +125,7 @@ type testConfigLogBudgetWorld struct {
 	world   *sidecartest.ConfigLogSuiteWorld
 }
 
+// A fresh network over a fresh counted cluster.
 func newTestConfigLogBudgetWorld(t *testing.T) *testConfigLogBudgetWorld {
 	cluster, faults := newTestConfigLogBudgetCluster(t)
 	return &testConfigLogBudgetWorld{t: t, cluster: cluster, faults: faults, world: sidecartest.NewConfigLogSuiteWorld(t.Context(), cluster)}
@@ -139,6 +141,7 @@ func (self *testConfigLogBudgetWorld) sequencer() (*ConfigLogSequencer, *sidecar
 	return sequencer, budget
 }
 
+// The network's id, as the sequencer takes it.
 func (self *testConfigLogBudgetWorld) networkId() server.Id {
 	return server.Id(self.world.NetworkId())
 }
