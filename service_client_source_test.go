@@ -612,8 +612,8 @@ func TestPlatformClientSourceReservesRangesAcrossSlotRestart(t *testing.T) {
 }
 
 // Each client's identity seed is the same across a restart of its slot on the same bearer, as its id is, so the pool
-// presents the same connect identity (QD tlsedge-restart-contracts-edge-identity); it differs between clients and on
-// another bearer, is the file header's derivation, and is answered only for the client the index's answers named.
+// presents the same connect identity (QD-1174); it differs between clients and on another bearer, is the file header's
+// derivation, and is answered only for the client the index's answers named.
 func TestPlatformClientSourceKeepsEachClientsIdentitySeedAcrossRestarts(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

@@ -42,11 +42,11 @@ package server
 // smtpedge's ur/smtpedge registrations each on its own client's (SocketPlatformRegistrationsArgs). A removed
 // edge client is refused at sockets by its client rev/ object (model's edge client removal effect).
 //
-// Each client also has an identity seed (sidecar.EdgeClientIdentitySource; QD tlsedge-restart-contracts-edge-identity),
-// from which sidecar.EdgeClientPool derives the client's connect identity: its client key, its sequence certificate and
-// its Service provide key. A restart in its slot, or a later process's deploy into it, reuses the client's id, so it
-// must present the same identity, or every listener's contract to the id is the earlier process's and the restarted
-// client refuses them all. The seed needs no state on the edge: it is
+// Each client also has an identity seed (sidecar.EdgeClientIdentitySource; QD-1174), from which sidecar.EdgeClientPool
+// derives the client's connect identity: its client key, its sequence certificate and its Service provide key. A
+// restart in its slot, or a later process's deploy into it, reuses the client's id, so it must present the same
+// identity, or every listener's contract to the id is the earlier process's and the restarted client refuses them all.
+// The seed needs no state on the edge: it is
 //
 //	HKDF-SHA256(secret = the edge bearer, salt = none, info = "urnetwork-edge-client-identity-v1" 0x00 <client id, 16 bytes>)
 //
