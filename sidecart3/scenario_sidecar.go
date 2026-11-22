@@ -392,6 +392,10 @@ func (self *t3SidecarPlatform) OpenClient(ctx context.Context, args *sidecar.Sid
 		},
 		&clientSettings,
 	)
+	if 0 < len(args.ProvideSecretKeys) {
+		// a kept identity's keys, before the transport, the client's only way in, exists
+		client.ContractManager().LoadProvideSecretKeys(args.ProvideSecretKeys)
+	}
 	transportSettings := *args.PlatformTransportSettings
 	// no dns carrier, as the exchange's own clients dial none
 	transportSettings.DnsPort = 0
