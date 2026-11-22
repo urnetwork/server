@@ -35,9 +35,11 @@ import (
 )
 
 // A base folding through the tip whose rows add tagId's atom with ownerMemberId
-// its tag owner, as a saved tagOwners compiles it (§8.4), so the owner's device
-// may admit a sidecar carrying the tag (AclState.CanApplyTag).
-func (self *exchangeScopesWorld) foldWithTagOwner(tagId sidecar.Id, ownerMemberId server.Id) {
+// its tag owner and a rule giving the tag read of readRepoId, as a saved
+// document's tagOwners and grant compile them (§8.4), so the owner's device may
+// admit a sidecar carrying the tag (AclState.CanApplyTag) and the tag's
+// sidecars read the repo.
+func (self *exchangeScopesWorld) foldWithTag(tagId sidecar.Id, ownerMemberId server.Id, readRepoId server.Id) {
 	self.t.Helper()
 	snapshot := self.load()
 	state := snapshot.Config
@@ -50,6 +52,12 @@ func (self *exchangeScopesWorld) foldWithTagOwner(tagId sidecar.Id, ownerMemberI
 	acl.Atoms = append(acl.Atoms, &protocol.AclAtom{Atom: tagId.Bytes(), TagOwnerMemberIds: [][]byte{sidecar.Id(ownerMemberId).Bytes()}})
 	slices.SortFunc(acl.Atoms, func(a *protocol.AclAtom, b *protocol.AclAtom) int {
 		return bytes.Compare(a.GetAtom(), b.GetAtom())
+	})
+	acl.Rules = append(acl.Rules, &protocol.AclRule{
+		RuleId:   sidecar.NewId().Bytes(),
+		SrcAtoms: [][]byte{tagId.Bytes()},
+		Targets:  []*protocol.AclTarget{{RepoId: sidecar.Id(readRepoId).Bytes()}},
+		Actions:  []uint32{uint32(protocol.AclAction_ACL_ACTION_READ)},
 	})
 	aclBytes, err := proto.MarshalOptions{Deterministic: true}.Marshal(acl)
 	if err != nil {
@@ -74,20 +82,21 @@ func (self *exchangeScopesWorld) foldWithTagOwner(tagId sidecar.Id, ownerMemberI
 	})
 	pin, err := self.sequencer.AppendBase(self.ctx, self.networkId, &model.ConfigLogBase{SignedHeader: signedHeader, Rows: rowsBytes})
 	if err != nil {
-		self.t.Fatalf("the base with the tag's owner: %v", err)
+		self.t.Fatalf("the base with the tag: %v", err)
 	}
 	self.world.SetTip(pin)
 	self.tip = pin
 }
 
-// A team's tagged device outlives its sponsor at the exchange (owner decision
-// 83; QD-1194): enrolled from a tagged key the team's Owner made, its token
-// names the team's owner of record with no member_id, whose credential change
-// time lies past every token. Admitted in the team's log carrying its one tag,
-// which the Owner's device applies as the tag's owner, its token and proof buy
-// the config's read, the service token naming its sidecar and no member, and
-// still do once api removes its sponsor, the key's creator. Its own removal at
-// api ends the exchange with invalid_grant.
+// A team's tagged device holds its tag's rights and outlives its sponsor at the
+// exchange (owner decision 83; QD-1194): enrolled from a tagged key the team's
+// Owner made, its token names the team's owner of record with no member_id,
+// whose credential change time lies past every token. Admitted in the team's
+// log carrying its one tag, which the Owner's device applies as the tag's
+// owner, its token and proof buy the config's read and the general repo a rule
+// gives the tag, never another general repo, the service token naming its
+// sidecar and no member, and still do once api removes its sponsor, the key's
+// creator. Its own removal at api ends the exchange with invalid_grant.
 func TestExchangeTakesATeamsTaggedDevicePastItsSponsor(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		installTestSignerKeys(t)
@@ -162,8 +171,12 @@ func TestExchangeTakesATeamsTaggedDevicePastItsSponsor(t *testing.T) {
 			})
 		}
 
-		// admitted carrying its one tag, by the Owner's device as the tag's owner
-		self.foldWithTagOwner(tagId, creator.MemberId)
+		// a document giving the tag read of one general repo of two, then the
+		// sidecar admitted carrying its one tag, by the Owner's device as the
+		// tag's owner
+		taggedRepoId := self.createGeneralRepo()
+		otherRepoId := self.createGeneralRepo()
+		self.foldWithTag(tagId, creator.MemberId, taggedRepoId)
 		self.post(self.world.SignAsOwner(bridge.SignedType_SIGNED_SIDECAR_ADMIT, &protocol.SidecarAdmit{
 			Header:            self.world.Header(),
 			NetworkId:         sidecar.Id(networkId).Bytes(),
@@ -179,27 +192,31 @@ func TestExchangeTakesATeamsTaggedDevicePastItsSponsor(t *testing.T) {
 			t.Fatalf("the tagged sidecar's admission: %+v", admitted)
 		}
 		configRead := repoScope(self.configRepoId(snapshot), "r")
+		taggedRead := repoScope(taggedRepoId, "r")
+		otherRead := repoScope(otherRepoId, "r")
 		verifier := newTestServiceTokenVerifier(t)
-		requireConfigRead := func(name string) {
-			result, err := exchange("evs", configRead)
+		requireTagRights := func(name string) {
+			result, err := exchange("evs", configRead, taggedRead, otherRead)
 			if err != nil {
 				t.Fatalf("%s: %v", name, err)
 			}
-			connect.AssertEqual(t, result.Scope, configRead)
+			connect.AssertEqual(t, strings.Fields(result.Scope), []string{configRead, taggedRead})
 			claims, err := verifier.Verify(result.AccessToken, "evs")
 			connect.AssertEqual(t, err, nil)
 			connect.AssertEqual(t, claims.ClientId, enrolled.ClientId)
 			connect.AssertEqual(t, claims.SidecarId != nil && *claims.SidecarId == taggedSidecarId, true)
 			connect.AssertEqual(t, claims.MemberId == nil, true)
+			_, err = exchange("evs", otherRead)
+			requireExchangeRefused(t, name+", the other repo alone", err, ErrInvalidScope)
 		}
-		requireConfigRead("the admitted tagged device's config read")
+		requireTagRights("the admitted tagged device's tag rights")
 
 		// its sponsor removed at api: the client stays, and so does its exchange
 		server.Tx(ctx, func(tx server.PgTx) {
 			_, err := model.DenyNetworkMemberInTx(ctx, tx, &model.NetworkMemberDenial{NetworkId: networkId, MemberId: creator.MemberId, Time: server.NowUtc()})
 			server.Raise(err)
 		})
-		requireConfigRead("the tagged device's config read past its sponsor's removal")
+		requireTagRights("the tagged device's tag rights past its sponsor's removal")
 
 		// its own removal at api ends it
 		enrolledSession := session.NewLocalClientSession(ctx, "192.0.2.9:1", byJwt)
