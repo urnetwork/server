@@ -155,6 +155,12 @@ type T3WorldSettings struct {
 	// spend beside every block's (ApiWriteBudget), rather than on the Net's fake budget: what a world of hosts runs
 	// (sidecare2e's World). false keeps the Net's fake, whose violations a test reads.
 	ApiWriteBudget bool
+	// Whether each device's follower runs §16.6's spend check on the log's GrantActivates and bridge approvals
+	// (ConfigLogSettings.AclSpendCheck, sidecar.NewSpendCheck) under FakeGkm, as ur daemon's follower does (cli's
+	// daemon_config.go) and RealKeys' followers always do. false keeps FakeGkm's followers on the defaults, which
+	// install none, so each refuses every GrantActivate as unbuilt while api, whose sequencer installs the check,
+	// takes it.
+	FollowerSpendCheck bool
 }
 
 func DefaultT3WorldSettings() *T3WorldSettings {
@@ -1307,10 +1313,13 @@ func (self *T3Device) follow(ctx context.Context, genesis [sha256.Size]byte) err
 		}),
 	}
 	var followerSettings *sidecar.SidecarConfigFollowerSettings
-	if self.keys != nil {
+	switch {
+	case self.keys != nil:
 		// the config repo's heads on evs, read through the device's own EvsClient, as ur daemon's follower reads them
 		heads = self.keys.heads
 		followerSettings = t3WorldKeysFollowerSettings()
+	case self.Network.world.settings.FollowerSpendCheck:
+		followerSettings = t3WorldSpendFollowerSettings()
 	}
 	follower, err := running.FollowConfig(&sidecar.SidecarConfigFollowerArgs{Heads: heads, Gkm: self.Gkm, Settings: followerSettings})
 	if err != nil {

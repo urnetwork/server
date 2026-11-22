@@ -473,6 +473,16 @@ func t3WorldKeysFollowerSettings() *sidecar.SidecarConfigFollowerSettings {
 	return settings
 }
 
+// A FakeGkm device's follower settings with §16.6's spend check (T3WorldSettings.FollowerSpendCheck): the defaults, with
+// the log's check that ur daemon's follower installs.
+func t3WorldSpendFollowerSettings() *sidecar.SidecarConfigFollowerSettings {
+	settings := sidecar.DefaultSidecarConfigFollowerSettings()
+	settings.ConfigClient = sidecar.DefaultConfigClientSettings()
+	settings.ConfigClient.LogSettings = sidecar.DefaultConfigLogSettings()
+	settings.ConfigClient.LogSettings.AclSpendCheck = sidecar.NewSpendCheck(nil)
+	return settings
+}
+
 // The component on the Sidecar: each client generation's gkm hints go to the key client's intake, and the Sidecar's
 // close ends the clients.
 type t3WorldKeysComponent struct {
