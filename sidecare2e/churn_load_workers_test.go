@@ -18,6 +18,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/miekg/dns"
@@ -41,6 +42,7 @@ const (
 	churnLoadKindBlogReader    = "blog reader"
 	churnLoadKindDnsWriter     = "dns writer"
 	churnLoadKindDnsReader     = "dns reader"
+	churnLoadKindCertsRenewal  = "certs renewal"
 	churnLoadKindAclSaver      = "acl saver"
 	churnLoadKindEnrollment    = "enrollment"
 	churnLoadKindDeparture     = "departure"
@@ -67,6 +69,7 @@ func (self *churnLoadCase) kinds() []*churnLoadKind {
 		{name: churnLoadKindBlogReader, settings: mix.BlogReaders, burst: self.blogReaderBurst},
 		{name: churnLoadKindDnsWriter, settings: mix.DnsWriters, burst: self.dnsWriterBurst},
 		{name: churnLoadKindDnsReader, settings: mix.DnsReaders, burst: self.dnsReaderBurst},
+		{name: churnLoadKindCertsRenewal, settings: mix.CertRenewals, burst: self.certsRenewalBurst},
 		{name: churnLoadKindAclSaver, settings: mix.AclSavers, burst: self.aclSaverBurst},
 		{name: churnLoadKindEnrollment, settings: mix.Enrollments, burst: self.enrollmentBurst},
 		{name: churnLoadKindDeparture, settings: mix.Departures, burst: self.departureBurst},
@@ -577,6 +580,110 @@ func (self *churnLoadCase) dnsReaderBurst(round int, random *rand.Rand, picked m
 			return reader.Read(ctx, self.world, self.dnsRecords.Keys, sets, random, settings.Dns)
 		},
 	}
+}
+
+// A certs renewal: a publisher's newest certificate renewed through the certs worker, while the other workers run and
+// chaos may restart the worker under it, at most CertRenewalCount across the case: Pebble answers the certificate's
+// ARI with a window that began RenewalWindowAge ago, the renewal pass kicked until the successor is queued from the
+// stored CSR, the order pass kicked until it ends issued, then the device's pass installs it and a visitor through
+// tlsedge verifies it against Pebble's roots. A round past the cap runs none.
+func (self *churnLoadCase) certsRenewalBurst(round int, random *rand.Rand, picked map[any]bool) *WorldBurst {
+	publisher, ok := churnLoadPick(random, self.publishers)
+	if !ok {
+		return nil
+	}
+	self.stateLock.Lock()
+	if self.settings.CertRenewalCount <= self.renewals || picked[publisher] {
+		self.stateLock.Unlock()
+		return nil
+	}
+	self.renewals += 1
+	self.stateLock.Unlock()
+	picked[publisher] = true
+	steps := []func(ctx context.Context, random *rand.Rand) error{}
+	for range self.settings.Mix.CertRenewals.StepCount {
+		steps = append(steps, func(ctx context.Context, random *rand.Rand) error {
+			return self.renew(ctx, publisher)
+		})
+	}
+	return gkmConcurrencyBurst(fmt.Sprintf("%s's certificate renewal in %s", publisher.Device.Name, churnLoadPhase(round)), steps)
+}
+
+// One renewal of publisher's newest certificate (certsRenewalBurst).
+func (self *churnLoadCase) renew(ctx context.Context, publisher *dnsCertsPublisher) error {
+	settings := self.settings.Dns
+	self.stateLock.Lock()
+	currentId := self.currentCertIds[publisher]
+	self.stateLock.Unlock()
+	rows, err := dnsCertsSidecarCerts(ctx, publisher)
+	if err != nil {
+		return err
+	}
+	current := dnsCertsRow(rows, currentId)
+	if current == nil || len(current.Chain) == 0 {
+		return fmt.Errorf("%s's certificate %s is gone: %s", publisher.Device.Name, currentId, dnsCertsDescribeRows(rows))
+	}
+	start := time.Now().Add(-settings.RenewalWindowAge)
+	if err := self.stack.Pebble.SetRenewalWindow(current.Chain[0], start, start.Add(settings.RenewalWindowLength)); err != nil {
+		return fmt.Errorf("%s's renewal window: %w", publisher.Device.Name, err)
+	}
+	successor := func(rows []*sidecar.TlsCertRecord) *sidecar.TlsCertRecord {
+		row := dnsCertsRow(rows, currentId)
+		if row == nil || row.SuccessorCertId == (sidecar.Id{}) {
+			return nil
+		}
+		return dnsCertsRow(rows, row.SuccessorCertId)
+	}
+	publishers := []*dnsCertsPublisher{publisher}
+	if _, err := dnsCertsKick(ctx, "tls_cert_renewals"); err != nil {
+		return err
+	}
+	if err := dnsCertsAwaitRows(ctx, publishers, settings, func(publisher *dnsCertsPublisher, rows []*sidecar.TlsCertRecord) bool {
+		return successor(rows) != nil
+	}); err != nil {
+		return fmt.Errorf("%s's successor never queued: %w", publisher.Device.Name, err)
+	}
+	if _, err := dnsCertsKick(ctx, "tls_cert_orders"); err != nil {
+		return err
+	}
+	if err := dnsCertsAwaitRows(ctx, publishers, settings, func(publisher *dnsCertsPublisher, rows []*sidecar.TlsCertRecord) bool {
+		renewal := successor(rows)
+		return renewal != nil && (renewal.State == sidecar.TlsCertStateIssued || renewal.State == sidecar.TlsCertStateFailed)
+	}); err != nil {
+		return fmt.Errorf("%s's successor never ended: %w\n%s", publisher.Device.Name, err, self.stack.DescribeCerts())
+	}
+	if rows, err = dnsCertsSidecarCerts(ctx, publisher); err != nil {
+		return err
+	}
+	renewal := successor(rows)
+	if renewal == nil || renewal.State != sidecar.TlsCertStateIssued || len(renewal.Chain) == 0 {
+		return fmt.Errorf("%s's renewal did not issue: %s", publisher.Device.Name, dnsCertsDescribeRows(rows))
+	}
+	leaf, err := dnsCertsVerifyChain(renewal.Chain, self.stack.Pebble.Roots, []string{strings.TrimSuffix(publisher.Network.Apex, "."), publisher.ServerName}, time.Now())
+	if err != nil {
+		return fmt.Errorf("%s's renewal: %w", publisher.Device.Name, err)
+	}
+	if current.Serial == renewal.Serial {
+		return fmt.Errorf("%s's renewal holds the serial of the certificate it renews", publisher.Device.Name)
+	}
+	spkiSha256, err := worldTlsKeySpkiSha256(publisher.Device)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(dnsCertsSpkiSha256(leaf), spkiSha256) {
+		return fmt.Errorf("%s's renewal is on a key not its own", publisher.Device.Name)
+	}
+	self.stateLock.Lock()
+	self.currentCertIds[publisher] = renewal.CertId
+	self.stateLock.Unlock()
+	if err := publisher.Component.CertManager().Sync(ctx); err != nil {
+		return fmt.Errorf("%s's certificate pass: %w", publisher.Device.Name, err)
+	}
+	request := []byte(settings.TlsRequest)
+	if _, err := dnsCertsAwaitVerifiedVisit(ctx, self.world, publisher.ServerName, self.stack.Pebble.Roots, request, bytes.TrimSuffix(publisher.answer(request), []byte("\n")), leaf.Raw, settings.Tls); err != nil {
+		return fmt.Errorf("a visitor to %s after the renewal: %w", publisher.ServerName, err)
+	}
+	return nil
 }
 
 // An ACL saver: a config writer of a personal network or of the team saving its network's document StepCount times,

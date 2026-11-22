@@ -46,6 +46,9 @@
 //	bridge client  not run: see "Not here" below
 //	dns writer     a device writes its own TXT set through dns's api, a value no other write puts
 //	dns reader     a reader asks the dns edge for the written sets between two reads of the root's SOA
+//	certs renewal  Pebble asks a's certificate's renewal now (its ARI window), the certs worker's renewal pass queues
+//	               the successor from its stored CSR and its order pass orders it by DNS-01, at most CertRenewalCount
+//	               across the case; the device installs it and a visitor through tlsedge is shown it
 //	acl saver      a config writer saves its network's document: every grant the network's services need and one
 //	               rule of its own, previewed and saved EXACT_HEAD, previewed again while another save moved the head
 //	enrollment     the team's Owner invites a new person, who accepts and is admitted as a member, or enrolls and
@@ -148,6 +151,7 @@ type churnLoadMixSettings struct {
 	BlogReaders   *churnLoadKindSettings
 	DnsWriters    *churnLoadKindSettings
 	DnsReaders    *churnLoadKindSettings
+	CertRenewals  *churnLoadKindSettings
 	AclSavers     *churnLoadKindSettings
 	Enrollments   *churnLoadKindSettings
 	Departures    *churnLoadKindSettings
@@ -214,8 +218,8 @@ type churnLoadSettings struct {
 	// The devices of each personal network, from its first, that save its documents: one, so no base is signed by a
 	// second device (finding config-replay-base-signer). Every Owner's device of the team saves.
 	PersonalAclSaverCount int
-	// The certs worker's renewals the case runs across its rounds, at most one a round: each order writes its name's
-	// challenge twice, under §12.7's ten an hour.
+	// The certs worker's renewals the case runs across its rounds, the certs renewal kind's bursts past it doing
+	// nothing: each order writes its name's challenge twice, under §12.7's ten an hour (dns_challenges_per_name_hour).
 	CertRenewalCount int
 	// The devices of a, from its first, that order its certificate at setup.
 	CertDeviceCount int
@@ -283,6 +287,7 @@ func defaultChurnLoadSettings() *churnLoadSettings {
 			BlogReaders:   &churnLoadKindSettings{MaxBurstCount: 2, StepCount: 4},
 			DnsWriters:    &churnLoadKindSettings{MaxBurstCount: 4, StepCount: 2},
 			DnsReaders:    &churnLoadKindSettings{MaxBurstCount: 1, StepCount: 6},
+			CertRenewals:  &churnLoadKindSettings{MaxBurstCount: 1, StepCount: 1},
 			AclSavers:     &churnLoadKindSettings{MaxBurstCount: 3, StepCount: 1},
 			Enrollments:   &churnLoadKindSettings{MaxBurstCount: 1, StepCount: 1},
 			Departures:    &churnLoadKindSettings{MaxBurstCount: 1, StepCount: 1},
@@ -563,6 +568,8 @@ type churnLoadCase struct {
 	saveCount  int
 	tokenCount int
 	renewals   int
+	// each publisher's newest issued certificate row, from its first on, which the next renewal renews
+	currentCertIds map[*dnsCertsPublisher]sidecar.Id
 	// the blog's chaos windows of the round under way, which its visit checks read
 	blogChaos *bloggerChaos
 }
@@ -621,18 +628,19 @@ func runChurnLoad(t testing.TB, settings *churnLoadSettings) {
 		t.Fatal(err)
 	}
 	self := &churnLoadCase{
-		t:           t,
-		settings:    settings,
-		stack:       stack,
-		world:       world,
-		origin:      origin,
-		reconciler:  reconciler,
-		sampler:     sampler,
-		worker:      worker,
-		socketCalls: socketCalls,
-		mailLedger:  newMailLedger(),
-		kindCounts:  map[string]int{},
-		retryCounts: map[string]int{},
+		t:              t,
+		settings:       settings,
+		stack:          stack,
+		world:          world,
+		origin:         origin,
+		reconciler:     reconciler,
+		sampler:        sampler,
+		worker:         worker,
+		socketCalls:    socketCalls,
+		mailLedger:     newMailLedger(),
+		kindCounts:     map[string]int{},
+		retryCounts:    map[string]int{},
+		currentCertIds: map[*dnsCertsPublisher]sidecar.Id{},
 	}
 	defer self.release()
 
@@ -796,6 +804,9 @@ func (self *churnLoadCase) setUp(ctx context.Context) error {
 	}
 	// the certificate phase holds its own checks and ends the case where an order fails
 	self.publishers = dnsCertsCertificatesPhase(self.t, self.stack, settings.Dns, self.dnsNetworks[:1])
+	for _, publisher := range self.publishers {
+		self.currentCertIds[publisher] = publisher.firstCertId
+	}
 
 	// mail, after the certificate's publish, so each sender's gate is mail's stand-in over the stock gate
 	for _, network := range self.personal {
