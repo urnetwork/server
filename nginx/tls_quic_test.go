@@ -1,9 +1,9 @@
 package nginx
 
-// QUIC TLS config tests, over real QUIC handshakes on loopback through the
-// vendored quic-go, as connect's public sockets serve them: alt's ALPN rule,
-// which names get a certificate, and session resumption across sockets that
-// share the base config (D6c).
+// QUIC TLS config tests, over real QUIC handshakes on loopback through
+// URnetwork's quic-go, as connect's public sockets serve them: alt's ALPN
+// rule, which names get a certificate, and session resumption across sockets
+// that share the base config (D6c).
 
 import (
 	"crypto/tls"

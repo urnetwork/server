@@ -51,8 +51,8 @@ package nginx
 //
 // Go's servers also rewrite some heads before the handler sees them, which
 // the handler can't refuse as nginx does (LBALT-IMPL.md §4). Go's h1 and h2
-// servers and the vendored http3 merge repeated identical Content-Length
-// values into one (net/http's fixLength, the h2 server's
+// servers and the quic-go fork's http3 merge repeated identical
+// Content-Length values into one (net/http's fixLength, the h2 server's
 // newWriterAndRequest, http3's parseHeaders), where nginx answers a second
 // Content-Length 400 on h1 and h2 alike
 // (ngx_http_process_unique_header_line), and the front forwards the request
@@ -74,7 +74,8 @@ import (
 // (ngx_http_headers_in's ngx_http_process_unique_header_line). Go's servers
 // merge or refuse a repeated Content-Length, and Go's h1 server takes
 // Transfer-Encoding out of the header map, which the h2 server and the
-// vendored http3 refuse, so those two never repeat here. Keys are canonical.
+// quic-go fork's http3 refuse, so those two never repeat here. Keys are
+// canonical.
 var routeRequestUniqueHeaders = []string{
 	"If-Modified-Since",
 	"If-Unmodified-Since",
@@ -206,7 +207,7 @@ func readRouteRequest(r *http.Request, names frontNames, httpSettings *HttpSetti
 	if r.ProtoMajor == 2 {
 		// Go's h2 server reads a Content-Length it can't parse as 0 and keeps
 		// it, where nginx answers 400 (ngx_http_v2_run_request); Go's h1
-		// server and the vendored http3 refuse one before the handler
+		// server and the quic-go fork's http3 refuse one before the handler
 		for _, contentLength := range r.Header.Values("Content-Length") {
 			if _, err := strconv.ParseUint(contentLength, 10, 63); err != nil {
 				return nil, http.StatusBadRequest

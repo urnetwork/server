@@ -30,8 +30,8 @@ package connect
 // goroutines (LBALT.md §3.3), which is why step 2 runs first and step 5 closes
 // the h3 servers before any transport. The accept loop that spun there spins
 // for any connection that closes during a graceful shutdown, a client closing
-// after its GOAWAY included, so the vendored http3 ends it instead, one GOAWAY
-// per connection (quic-go's URNETWORK.md, ../quic-go).
+// after its GOAWAY included, so the quic-go fork's http3 ends it instead, one
+// GOAWAY per connection (quic-go's URNETWORK.md, ../quic-go).
 
 import (
 	"context"

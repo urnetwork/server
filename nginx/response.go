@@ -419,7 +419,7 @@ var errResponseFrontCut = errors.New("lbalt front: closed")
 // reads whole after the answer, then closes at once over a pipelined request
 // still arriving. Only the server's own writer can be marked. h2 and h3 need
 // none: an h2 answer ends its stream and resets the request's side with
-// NO_ERROR while the server reads on, and the vendored http3 stops the
+// NO_ERROR while the server reads on, and the quic-go fork's http3 stops the
 // request's side with H3_NO_ERROR, so neither closes a connection over an
 // unread body.
 func (self *responseState) finish() {

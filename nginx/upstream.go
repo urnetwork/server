@@ -263,7 +263,7 @@ func (self *upstreamGroup) serveHttp(w http.ResponseWriter, r *http.Request, opt
 				prefixBytes:     options.clientBodyBufferSize,
 				readTimeout:     options.clientBodyTimeout,
 				setReadDeadline: setClientReadDeadline,
-				// the vendored http3 gives every request without a
+				// the quic-go fork's http3 gives every request without a
 				// content-length a body of unknown length, an h3 GET's
 				// included. One whose stream ends with no data has none to
 				// frame, as nginx's h3 frames none for a stream it finds
