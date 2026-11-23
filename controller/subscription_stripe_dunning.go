@@ -24,10 +24,21 @@
 //   - invoice.paid, invoice.voided, invoice.marked_uncollectible and
 //     customer.subscription.deleted resolve the row and withdraw the notices it
 //     still has in the outbox, so a reminder never follows the payment.
-//   - an account with no email (a wallet, seedphrase or phone account) gets no
-//     email. The open row is the in-app past-due notice
-//     (SubscriptionBalanceResult.PaymentPastDue) every app shows, with the same
-//     link.
+//   - a personal network's notice goes to its account's email
+//     (model.GetAccountEmailInTx), one message keyed by the invoice and the
+//     notice. A Team's admin is its owner of record, which never signs in
+//     (D-TEAM-2), so a Team's goes to its billing recipients
+//     (model.GetTeamBillingRecipientsInTx, QD-1219): its Owners and Billing
+//     admins, Owners first, up to the security notices'
+//     TeamRecipientMemberMaxCount people (QD-1218), one message per address
+//     keyed by the invoice, the notice and the address. Admins hold no billing
+//     and are not told. A withdrawal reads which addresses an invoice's notices
+//     still wait for, so a member that has left the Team since is withdrawn
+//     too.
+//   - an account with no email (a wallet, seedphrase or phone account), or a
+//     Team none of whose billing members has one, gets no email. The open row
+//     is the in-app past-due notice (SubscriptionBalanceResult.PaymentPastDue)
+//     every app shows, with the same link.
 //
 // The billing portal opens for the caller's own network only
 // (stripeCustomerIdForNetwork): the customer is found from what the server
@@ -345,9 +356,35 @@ func stripeFormatAmount(amount int64, currency string) string {
 	return fmt.Sprintf("%s%s %s", sign, units, strings.ToUpper(currency))
 }
 
-// The outbox key of the invoice's notice.
+// The outbox key of the invoice's notice to a personal network's account.
 func stripePaymentFailedNoticeKey(invoiceId string, notice stripePaymentFailedNotice) string {
 	return fmt.Sprintf("%s/%s", invoiceId, notice)
+}
+
+// The outbox key of the invoice's notice to one of a Team's billing
+// recipients (QD-1219). An invoice id holds no "/", so no key of one address
+// is another's, nor a personal network's.
+func stripePaymentFailedTeamNoticeKey(invoiceId string, notice stripePaymentFailedNotice, userAuth string) string {
+	return fmt.Sprintf("%s/%s/%s", invoiceId, notice, userAuth)
+}
+
+// The email addresses the network's failed-payment notice goes to, read in tx,
+// and whether the network is a Team. A personal network's goes to its
+// account's email alone, as it always did (model.GetAccountEmailInTx). A
+// Team's goes to each of its billing recipients
+// (model.GetTeamBillingRecipientsInTx, QD-1219), the Owners and Billing admins
+// who can pay the invoice or change the payment method, Owners first: its
+// admin is its owner of record, which never signs in (D-TEAM-2), so a Team's
+// notice used to find no address and went to nobody. None when nobody has an
+// email.
+func stripePaymentFailedNoticeEmailsInTx(ctx context.Context, tx server.PgTx, networkId server.Id) (emails []string, team bool) {
+	if teamEmails, ok := model.GetTeamBillingRecipientsInTx(ctx, tx, []server.Id{networkId})[networkId]; ok {
+		return teamEmails, true
+	}
+	if email := model.GetAccountEmailInTx(ctx, tx, networkId); email != "" {
+		return []string{email}, false
+	}
+	return []string{}, false
 }
 
 // What processing one failed renewal decided.
@@ -362,8 +399,12 @@ type stripeDunningOutcome struct {
 	NextAttemptAt  *time.Time
 	// the notice owed now (or, in a dry run, that would be)
 	Notice stripePaymentFailedNotice
-	// the account has an email, so the notice goes to the outbox
+	// the account has an email, or a Team's billing recipients have one, so
+	// the notice goes to the outbox
 	HasEmail bool
+	// the addresses the notice goes to: a personal network's one, or each of
+	// a Team's billing recipients' (stripePaymentFailedNoticeEmailsInTx)
+	EmailCount int
 	// why no notice is owed, when none is
 	Skip string
 	// the invoice is a failing renewal on file: its failure is recorded and open
@@ -455,7 +496,9 @@ func stripeDunningProcessInvoice(
 		recorded := model.GetStripeInvoicePaymentFailure(ctx, invoiceId)
 		outcome.Notice = stripePaymentFailedNoticeDue(invoice, recorded, settings)
 		server.Tx(ctx, func(tx server.PgTx) {
-			outcome.HasEmail = model.GetAccountEmailInTx(ctx, tx, *networkId) != ""
+			emails, _ := stripePaymentFailedNoticeEmailsInTx(ctx, tx, *networkId)
+			outcome.HasEmail = 0 < len(emails)
+			outcome.EmailCount = len(emails)
 		}, server.TxReadCommitted)
 		if outcome.Notice == stripePaymentFailedNoticeNone {
 			outcome.Skip = stripeDunningNoticeSkip(recorded)
@@ -466,6 +509,7 @@ func stripeDunningProcessInvoice(
 	server.Tx(ctx, func(tx server.PgTx) {
 		outcome.Notice = stripePaymentFailedNoticeNone
 		outcome.HasEmail = false
+		outcome.EmailCount = 0
 		outcome.Skip = ""
 		outcome.Failing = false
 		if outcome.Team && server.SidecarMg6Linked() {
@@ -504,24 +548,34 @@ func stripeDunningProcessInvoice(
 		}
 		outcome.Notice = notice
 
-		email := model.GetAccountEmailInTx(ctx, tx, recorded.NetworkId)
-		if email == "" {
-			// a wallet, seedphrase or phone account: the in-app notice only
+		emails, team := stripePaymentFailedNoticeEmailsInTx(ctx, tx, recorded.NetworkId)
+		if len(emails) == 0 {
+			// a wallet, seedphrase or phone account, or a Team none of whose
+			// billing members has an email: the in-app notice only
 			return
 		}
 		outcome.HasEmail = true
-		addAccountMessageInTx(ctx, tx, &accountMessage{
-			key:       stripePaymentFailedNoticeKey(invoiceId, notice),
-			networkId: &recorded.NetworkId,
-			userAuth:  email,
-			template: &SubscriptionPaymentFailedTemplate{
-				Final:            notice == stripePaymentFailedNoticeFinal,
-				HostedInvoiceUrl: failure.HostedInvoiceUrl,
-				AmountDue:        invoice.AmountDue,
-				Currency:         invoice.Currency,
-				NextAttemptTime:  invoice.nextAttemptTime(),
-			},
-		})
+		outcome.EmailCount = len(emails)
+		messages := []*accountMessage{}
+		for _, email := range emails {
+			key := stripePaymentFailedNoticeKey(invoiceId, notice)
+			if team {
+				key = stripePaymentFailedTeamNoticeKey(invoiceId, notice, email)
+			}
+			messages = append(messages, &accountMessage{
+				key:       key,
+				networkId: &recorded.NetworkId,
+				userAuth:  email,
+				template: &SubscriptionPaymentFailedTemplate{
+					Final:            notice == stripePaymentFailedNoticeFinal,
+					HostedInvoiceUrl: failure.HostedInvoiceUrl,
+					AmountDue:        invoice.AmountDue,
+					Currency:         invoice.Currency,
+					NextAttemptTime:  invoice.nextAttemptTime(),
+				},
+			})
+		}
+		addAccountMessagesInTx(ctx, tx, messages)
 	}, server.TxReadCommitted)
 
 	// the past-due notice shows at once
@@ -581,16 +635,33 @@ func stripeResolveSubscriptionPaymentFailures(ctx context.Context, subscriptionI
 	}
 }
 
-// Gives up the invoice's notices that are still unsent.
+// Gives up the invoice's notices that are still unsent: a personal network's,
+// keyed by the invoice and the notice, and each of a Team's, keyed by the
+// address too (stripePaymentFailedTeamNoticeKey). A Team's addresses are the
+// ones its notices still wait for in the network the failure is recorded for
+// (model.GetStripeInvoicePaymentFailureNoticeUserAuthsInTx), not its billing
+// recipients now, so the notice of a member that has left the Team since is
+// withdrawn as well. Called in the transaction that resolves the failure.
 func stripeWithdrawPaymentFailedNoticesInTx(ctx context.Context, tx server.PgTx, invoiceId string, reason string, now time.Time) {
+	templateName := (&SubscriptionPaymentFailedTemplate{}).Name()
+	notices := []stripePaymentFailedNotice{
+		stripePaymentFailedNoticeFirst,
+		stripePaymentFailedNoticeFinal,
+	}
+	keys := []string{}
+	for _, notice := range notices {
+		keys = append(keys, stripePaymentFailedNoticeKey(invoiceId, notice))
+	}
+	for _, userAuth := range model.GetStripeInvoicePaymentFailureNoticeUserAuthsInTx(ctx, tx, invoiceId, templateName) {
+		for _, notice := range notices {
+			keys = append(keys, stripePaymentFailedTeamNoticeKey(invoiceId, notice, userAuth))
+		}
+	}
 	model.WithdrawAccountMessagesInTx(
 		ctx,
 		tx,
-		(&SubscriptionPaymentFailedTemplate{}).Name(),
-		[]string{
-			stripePaymentFailedNoticeKey(invoiceId, stripePaymentFailedNoticeFirst),
-			stripePaymentFailedNoticeKey(invoiceId, stripePaymentFailedNoticeFinal),
-		},
+		templateName,
+		keys,
 		now,
 		"withdrawn: the failed invoice is "+reason,
 	)
@@ -675,8 +746,8 @@ func stripeDunningLogOutcome(outcome *stripeDunningOutcome) {
 		return
 	}
 	glog.Infof(
-		"[stripe]dunning: invoice %s (network %s, attempt %d): %s notice owed, email=%t\n",
-		outcome.InvoiceId, networkId, outcome.AttemptCount, outcome.Notice, outcome.HasEmail,
+		"[stripe]dunning: invoice %s (network %s, attempt %d): %s notice owed, email=%t to %d addresses\n",
+		outcome.InvoiceId, networkId, outcome.AttemptCount, outcome.Notice, outcome.HasEmail, outcome.EmailCount,
 	)
 }
 

@@ -194,18 +194,34 @@ func RequireUsdcPaymentsOn() error {
 }
 
 // One held missing-wallet notice: the wallet-less payment of one network in one
-// plan slice.
+// plan slice, owed to one address.
 type heldMissingWalletNotice struct {
 	messageId server.Id
 	networkId server.Id
+	// the address it is owed to: a personal network's admin's sign-in, or one
+	// of a Team's billing recipients'
+	userAuth  string
 	paymentId server.Id
 	payout    model.NanoCents
 }
 
+// The outbox key of a payment's missing-wallet notice to one of a Team's
+// billing recipients (QD-1219). A personal network's keeps the payment's id
+// alone, as it always did.
+func missingWalletTeamNoticeKey(paymentId server.Id, userAuth string) string {
+	return fmt.Sprintf("%s/%s", paymentId, userAuth)
+}
+
 // Holds a missing-wallet notice in the outbox for each wallet-less payment of
 // the slice, in the slice's own transaction, so the notices commit with the
-// payments they are about. A network whose admin has no email or phone gets
-// none, and while wallet requests are off no network gets one.
+// payments they are about. A personal network's goes to its admin's own
+// sign-in, as it always did, and a network whose admin has no email or phone
+// gets none. A Team's admin is its owner of record, which never signs in
+// (D-TEAM-2), so a Team's goes to each of its billing recipients
+// (model.GetTeamBillingRecipientsInTx, QD-1219), its Owners and Billing admins,
+// who can set the wallet the payout waits for, one notice per address keyed by
+// the payment and the address; a Team none of whose billing members has an
+// email gets none. While wallet requests are off no network gets one.
 func holdMissingWalletNoticesInTx(ctx context.Context, tx server.PgTx, plan *model.PaymentPlan) {
 	if !usdcWalletRequestsOn() {
 		return
@@ -217,55 +233,88 @@ func holdMissingWalletNoticesInTx(ctx context.Context, tx server.PgTx, plan *mod
 		}
 	}
 	networkIdUserAuths := model.GetUserAuthsInTx(ctx, tx, networkIds)
+	teamNetworkIdRecipients := model.GetTeamBillingRecipientsInTx(ctx, tx, networkIds)
 	messages := []*accountMessage{}
 	for _, networkId := range networkIds {
+		payment := plan.NetworkPayments[networkId]
+		message := func(key string, userAuth string) *accountMessage {
+			return &accountMessage{
+				key:       key,
+				networkId: &networkId,
+				userAuth:  userAuth,
+				template: &MissingWalletTemplate{
+					PaymentId: payment.PaymentId,
+					Payout:    payment.Payout,
+				},
+				held: true,
+			}
+		}
+		if recipients, team := teamNetworkIdRecipients[networkId]; team {
+			for _, recipient := range recipients {
+				messages = append(messages, message(missingWalletTeamNoticeKey(payment.PaymentId, recipient), recipient))
+			}
+			continue
+		}
 		userAuth, ok := networkIdUserAuths[networkId]
 		if !ok {
 			continue
 		}
-		payment := plan.NetworkPayments[networkId]
-		messages = append(messages, &accountMessage{
-			key:       payment.PaymentId.String(),
-			networkId: &networkId,
-			userAuth:  userAuth,
-			template: &MissingWalletTemplate{
-				PaymentId: payment.PaymentId,
-				Payout:    payment.Payout,
-			},
-			held: true,
-		})
+		messages = append(messages, message(payment.PaymentId.String(), userAuth))
 	}
 	addAccountMessagesInTx(ctx, tx, messages)
 }
 
 // Coalesces held notices, oldest first, into the notices a release sends: one
-// per network, carried by its oldest held notice with that notice's payment and
-// the payout of all of them, when the total reaches `minPayout`. Every other
-// held notice is removed.
+// for each address a network's notices are owed to, carried by the oldest held
+// notice owed to that address with that notice's payment, and each carrying
+// the network's total withheld, every payment held for the network counted
+// once however many addresses it was owed to; none for a network whose total
+// is below `minPayout`. A personal network's notices are owed to its admin's
+// own sign-in, so it gets one, as it always did; a Team's to each of its
+// billing recipients (QD-1219), each of whom gets one with the Team's total, a
+// member that joined during the run included. Every other held notice is
+// removed.
 func coalesceMissingWalletNotices(
 	heldNotices []*heldMissingWalletNotice,
 	minPayout model.NanoCents,
 ) (releasedNotices []*heldMissingWalletNotice, removedMessageIds []server.Id) {
-	networkIdNotices := map[server.Id]*heldMissingWalletNotice{}
-	networkIds := []server.Id{}
+	type recipient struct {
+		networkId server.Id
+		userAuth  string
+	}
+	networkIdPayouts := map[server.Id]model.NanoCents{}
+	networkIdPaymentIds := map[server.Id]map[server.Id]bool{}
+	recipientNotices := map[recipient]*heldMissingWalletNotice{}
+	recipients := []recipient{}
 	for _, heldNotice := range heldNotices {
-		notice, ok := networkIdNotices[heldNotice.networkId]
+		paymentIds, ok := networkIdPaymentIds[heldNotice.networkId]
 		if !ok {
-			notice = &heldMissingWalletNotice{
-				messageId: heldNotice.messageId,
-				networkId: heldNotice.networkId,
-				paymentId: heldNotice.paymentId,
-				payout:    heldNotice.payout,
-			}
-			networkIdNotices[heldNotice.networkId] = notice
-			networkIds = append(networkIds, heldNotice.networkId)
+			paymentIds = map[server.Id]bool{}
+			networkIdPaymentIds[heldNotice.networkId] = paymentIds
+		}
+		if !paymentIds[heldNotice.paymentId] {
+			paymentIds[heldNotice.paymentId] = true
+			networkIdPayouts[heldNotice.networkId] += heldNotice.payout
+		}
+		heldRecipient := recipient{
+			networkId: heldNotice.networkId,
+			userAuth:  heldNotice.userAuth,
+		}
+		if _, ok := recipientNotices[heldRecipient]; ok {
+			removedMessageIds = append(removedMessageIds, heldNotice.messageId)
 			continue
 		}
-		notice.payout += heldNotice.payout
-		removedMessageIds = append(removedMessageIds, heldNotice.messageId)
+		recipientNotices[heldRecipient] = &heldMissingWalletNotice{
+			messageId: heldNotice.messageId,
+			networkId: heldNotice.networkId,
+			userAuth:  heldNotice.userAuth,
+			paymentId: heldNotice.paymentId,
+		}
+		recipients = append(recipients, heldRecipient)
 	}
-	for _, networkId := range networkIds {
-		notice := networkIdNotices[networkId]
+	for _, heldRecipient := range recipients {
+		notice := recipientNotices[heldRecipient]
+		notice.payout = networkIdPayouts[heldRecipient.networkId]
 		if notice.payout < minPayout {
 			removedMessageIds = append(removedMessageIds, notice.messageId)
 			continue
@@ -276,11 +325,11 @@ func coalesceMissingWalletNotices(
 }
 
 // Releases the missing-wallet notices held at or before `heldBefore`, in one
-// transaction: one notice per network, due now, carrying the total withheld
-// across the held slices (see coalesceMissingWalletNotices). The minimum is
-// read only when something is held. A held notice that cannot be decoded is
-// released as it is. While wallet requests are off, the held notices are
-// removed instead, so none is sent. Returns the number released.
+// transaction: one notice per address of each network, due now, carrying the
+// total withheld across the held slices (see coalesceMissingWalletNotices). The
+// minimum is read only when something is held. A held notice that cannot be
+// decoded is released as it is. While wallet requests are off, the held
+// notices are removed instead, so none is sent. Returns the number released.
 func releaseMissingWalletNotices(
 	ctx context.Context,
 	heldBefore time.Time,
@@ -314,6 +363,7 @@ func releaseMissingWalletNotices(
 			heldNotices = append(heldNotices, &heldMissingWalletNotice{
 				messageId: message.MessageId,
 				networkId: *message.NetworkId,
+				userAuth:  message.UserAuth,
 				paymentId: template.PaymentId,
 				payout:    template.Payout,
 			})

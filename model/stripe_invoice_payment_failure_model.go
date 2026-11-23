@@ -5,6 +5,12 @@
 // is keyed by the invoice, so a webhook that is delivered again, late or out of
 // order decides on the same row: each notice time is set once, and a resolved
 // row owes nothing more.
+//
+// A notice goes to a personal network's account email (GetAccountEmailInTx),
+// and in a Team to each of its billing recipients (GetTeamBillingRecipientsInTx,
+// QD-1219), one message per address, so the network the row records is where
+// a withdrawal finds every address an invoice's notices still wait for
+// (GetStripeInvoicePaymentFailureNoticeUserAuthsInTx).
 package model
 
 import (
@@ -283,12 +289,57 @@ func GetStripeInvoicePaymentFailure(ctx context.Context, invoiceId string) (fail
 	return
 }
 
-// The email address of the network's account, read on the caller's
+// The addresses the unsent messages of the template are owed to in the network
+// the invoice's failure is recorded for, distinct and sorted, read in tx; none
+// for an invoice with no failure on file. A Team's failed-payment notices go
+// one to each billing recipient, each keyed by its address (QD-1219), so their
+// withdrawal reads here which addresses still wait, a member's that has left
+// the Team since included, rather than who the recipients are now. Only rows
+// still due are read (the outbox's due index), so the work is bounded by the
+// messages still waiting.
+func GetStripeInvoicePaymentFailureNoticeUserAuthsInTx(
+	ctx context.Context,
+	tx server.PgTx,
+	invoiceId string,
+	templateName string,
+) []string {
+	userAuths := []string{}
+	result, err := tx.Query(
+		ctx,
+		`
+			SELECT DISTINCT account_message_outbox.user_auth
+			FROM stripe_invoice_payment_failure
+			INNER JOIN account_message_outbox ON
+				account_message_outbox.network_id = stripe_invoice_payment_failure.network_id
+			WHERE
+				stripe_invoice_payment_failure.invoice_id = $1 AND
+				account_message_outbox.template_name = $2 AND
+				account_message_outbox.deliver_time IS NOT NULL AND
+				account_message_outbox.sent_time IS NULL AND
+				account_message_outbox.abandon_time IS NULL
+			ORDER BY account_message_outbox.user_auth
+		`,
+		invoiceId,
+		templateName,
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var userAuth string
+			server.Raise(result.Scan(&userAuth))
+			userAuths = append(userAuths, userAuth)
+		}
+	})
+	return userAuths
+}
+
+// The email address of a personal network's account, read on the caller's
 // transaction, or "" when the account has none (a wallet, seedphrase or phone
 // account) or the network is gone. In order: the admin's own sign-in address
 // (network_user, the address every other account notice goes to) when it is an
 // email, then a verified email-and-password sign-in, then an SSO sign-in
-// address (Google, Apple), newest first within each.
+// address (Google, Apple), newest first within each. A Team's admin is its
+// owner of record, which has no sign-in (D-TEAM-2), so a Team's billing mail
+// goes to its billing recipients instead (GetTeamBillingRecipientsInTx).
 func GetAccountEmailInTx(ctx context.Context, tx server.PgTx, networkId server.Id) string {
 	var adminUserId *server.Id
 	var adminUserAuth *string

@@ -17,7 +17,8 @@
 // its owner's, the admin's (securityNoticeRecipientsInTx). A team's owner of
 // record never signs in (D-TEAM-2), so a team's notices go to members by role:
 // a payout or subnet wallet change to each member whose role holds billing, its
-// Owners and Billing admins (securityNoticeBillingRecipientsInTx, QD-1217), and
+// Owners and Billing admins (GetTeamBillingRecipientsInTx, QD-1217), the rule a
+// team's failed-payment and missing-wallet mail follow too (QD-1219), and
 // the key and authority notices to its Owners and Admins
 // (securityNoticeAuthorityRecipientsInTx). A team's notice reaches every Owner
 // first, at all its addresses, then the other members it tells, person by
@@ -496,45 +497,58 @@ func distinctSecurityNoticeEmails(userAuths []string) []string {
 	return emails
 }
 
-// Whether the network is a team, read in tx: a network_team row, which only
-// team-create writes. False in a binary that does not link MG6, which has no
-// teams.
-func securityNoticeTeamInTx(ctx context.Context, tx server.PgTx, networkId server.Id) (team bool) {
-	if !server.SidecarMg6Linked() {
-		return false
-	}
-	server.Raise(tx.QueryRow(
-		ctx,
-		`SELECT EXISTS (SELECT 1 FROM network_team WHERE network_id = $1)`,
-		networkId,
-	).Scan(&team))
-	return
+// Whether the network is a team, read in tx (securityNoticeTeamNetworkIdsInTx).
+func securityNoticeTeamInTx(ctx context.Context, tx server.PgTx, networkId server.Id) bool {
+	return securityNoticeTeamNetworkIdsInTx(ctx, tx, []server.Id{networkId})[networkId]
 }
 
-// The sign-in user auths of a team's members whose role is one of $2, each with
-// its member and the member's role, read in the caller's transaction as
-// securityNoticeRecipientsSql reads an admin's, for each member's user. A
-// removed member has no row, and a JIT pending one (§7.6) holds no role's
-// reach, so neither is told.
+// The teams among networkIds, read in tx in one query: each network with a
+// network_team row, which only team-create writes. None in a binary that does
+// not link MG6, which has no teams.
+func securityNoticeTeamNetworkIdsInTx(ctx context.Context, tx server.PgTx, networkIds []server.Id) map[server.Id]bool {
+	teamNetworkIds := map[server.Id]bool{}
+	if !server.SidecarMg6Linked() || len(networkIds) == 0 {
+		return teamNetworkIds
+	}
+	result, err := tx.Query(
+		ctx,
+		`SELECT network_id FROM network_team WHERE network_id = ANY($1)`,
+		networkIds,
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var networkId server.Id
+			server.Raise(result.Scan(&networkId))
+			teamNetworkIds[networkId] = true
+		}
+	})
+	return teamNetworkIds
+}
+
+// The sign-in user auths of the members of the teams $1 whose role is one of
+// $2, each with its team, its member and the member's role, read in the
+// caller's transaction as securityNoticeRecipientsSql reads an admin's, for
+// each member's user. A removed member has no row, and a JIT pending one
+// (§7.6) holds no role's reach, so neither is told.
 const securityNoticeMemberRecipientsSql = `
 	WITH members AS (
-		SELECT member_id, user_id, role
+		SELECT network_id, member_id, user_id, role
 		FROM network_member
-		WHERE network_id = $1 AND NOT pending AND role = ANY($2)
+		WHERE network_id = ANY($1) AND NOT pending AND role = ANY($2)
 	)
-	SELECT members.member_id, members.role, network_user.user_auth
+	SELECT members.network_id, members.member_id, members.role, network_user.user_auth
 	FROM members
 	INNER JOIN network_user ON network_user.user_id = members.user_id
 	WHERE network_user.user_auth IS NOT NULL
 	UNION ALL
-	SELECT members.member_id, members.role, network_user_auth_password.user_auth
+	SELECT members.network_id, members.member_id, members.role, network_user_auth_password.user_auth
 	FROM members
 	INNER JOIN network_user_auth_password ON network_user_auth_password.user_id = members.user_id
 	WHERE
 		network_user_auth_password.auth_type = 'email' AND
 		network_user_auth_password.verified
 	UNION ALL
-	SELECT members.member_id, members.role, network_user_auth_sso.user_auth
+	SELECT members.network_id, members.member_id, members.role, network_user_auth_sso.user_auth
 	FROM members
 	INNER JOIN network_user_auth_sso ON network_user_auth_sso.user_id = members.user_id
 `
@@ -549,26 +563,49 @@ type securityNoticeMemberUserAuth struct {
 }
 
 // The security notice recipients among a team's standing, not pending members
-// whose role is one of roles: their member users' sign-in email addresses, each
-// Owner's first, up to the settings' TeamRecipientMemberMaxCount people
-// (securityNoticeMemberEmails).
+// whose role is one of roles (securityNoticeTeamsMemberRecipientsInTx).
 func securityNoticeMemberRecipientsInTx(ctx context.Context, tx server.PgTx, networkId server.Id, roles []NetworkMemberRole) []string {
+	return securityNoticeTeamsMemberRecipientsInTx(ctx, tx, []server.Id{networkId}, roles)[networkId]
+}
+
+// The recipients among the standing, not pending members of each of the teams
+// whose role is one of roles, read in tx in one query: their member users'
+// sign-in email addresses, each Owner's first, up to the settings'
+// TeamRecipientMemberMaxCount people (securityNoticeMemberEmails). A team none
+// of whose such members has an email address has no entry.
+func securityNoticeTeamsMemberRecipientsInTx(
+	ctx context.Context,
+	tx server.PgTx,
+	networkIds []server.Id,
+	roles []NetworkMemberRole,
+) map[server.Id][]string {
+	networkIdRecipients := map[server.Id][]string{}
+	if len(networkIds) == 0 || len(roles) == 0 {
+		return networkIdRecipients
+	}
 	roleNames := []string{}
 	for _, role := range roles {
 		roleNames = append(roleNames, string(role))
 	}
-	memberUserAuths := []*securityNoticeMemberUserAuth{}
-	result, err := tx.Query(ctx, securityNoticeMemberRecipientsSql, networkId, roleNames)
+	networkIdMemberUserAuths := map[server.Id][]*securityNoticeMemberUserAuth{}
+	result, err := tx.Query(ctx, securityNoticeMemberRecipientsSql, networkIds, roleNames)
 	server.WithPgResult(result, err, func() {
 		for result.Next() {
+			var networkId server.Id
 			memberUserAuth := &securityNoticeMemberUserAuth{}
 			var role string
-			server.Raise(result.Scan(&memberUserAuth.memberId, &role, &memberUserAuth.userAuth))
+			server.Raise(result.Scan(&networkId, &memberUserAuth.memberId, &role, &memberUserAuth.userAuth))
 			memberUserAuth.role = NetworkMemberRole(role)
-			memberUserAuths = append(memberUserAuths, memberUserAuth)
+			networkIdMemberUserAuths[networkId] = append(networkIdMemberUserAuths[networkId], memberUserAuth)
 		}
 	})
-	return securityNoticeMemberEmails(memberUserAuths, DefaultSecurityNoticeSettings())
+	settings := DefaultSecurityNoticeSettings()
+	for networkId, memberUserAuths := range networkIdMemberUserAuths {
+		if emails := securityNoticeMemberEmails(memberUserAuths, settings); 0 < len(emails) {
+			networkIdRecipients[networkId] = emails
+		}
+	}
+	return networkIdRecipients
 }
 
 // The email addresses a team's notice reaches among its members' sign-ins
@@ -636,18 +673,44 @@ func securityNoticeMemberEmails(memberUserAuths []*securityNoticeMemberUserAuth,
 
 // The recipients of a notice about where the network's payouts go, read in tx
 // (QD-1217): in a personal network its owner's sign-in email addresses
-// (securityNoticeRecipientsInTx); in a team each standing, not pending
-// member's whose role holds RolePermissionBilling, its Owners and Billing
-// admins, at its member user's sign-in email addresses. Those are the members
-// who can change where the team's payouts go and the only ones the role table
-// lets read it (§7.5), so an Admin, which holds no billing, is not told. Its
-// Owners come first, then its Billing admins, up to the settings'
-// TeamRecipientMemberMaxCount people (securityNoticeMemberEmails, QD-1218). A
-// team with no such member that has an email has none, and its notice is owed
-// to nobody, counted as no_email.
+// (securityNoticeRecipientsInTx); in a team its billing recipients
+// (GetTeamBillingRecipientsInTx), its Owners and Billing admins. A team with
+// no such member that has an email has none, and its notice is owed to
+// nobody, counted as no_email.
 func securityNoticeBillingRecipientsInTx(ctx context.Context, tx server.PgTx, networkId server.Id) []string {
-	if !securityNoticeTeamInTx(ctx, tx, networkId) {
-		return securityNoticeRecipientsInTx(ctx, tx, networkId)
+	if recipients, team := GetTeamBillingRecipientsInTx(ctx, tx, []server.Id{networkId})[networkId]; team {
+		return recipients
+	}
+	return securityNoticeRecipientsInTx(ctx, tx, networkId)
+}
+
+// The billing recipients of each team among networkIds, read in tx (QD-1217,
+// QD-1219): each standing, not pending member whose role holds
+// RolePermissionBilling, its Owners and Billing admins, at its member user's
+// sign-in email addresses. Those are the members who can fix a payment method,
+// set a wallet or change where the team's payouts go, and the only ones the
+// role table lets see billing and payouts (§7.5), so an Admin, which holds no
+// billing, is not told. Its Owners come first, then its Billing admins, up to
+// the security notice settings' TeamRecipientMemberMaxCount people
+// (securityNoticeMemberEmails, QD-1218).
+//
+// A team's owner of record never signs in (D-TEAM-2), so this is who hears of
+// a team's money: its payout and subnet wallet notices, its failed-payment
+// notices (controller/subscription_stripe_dunning.go) and its missing-wallet
+// notice (controller/account_payment_controller.go). Only a team has an entry,
+// so a caller tells a personal network, which it mails by its own rule, from a
+// team with no such member that has an email, whose entry is empty and which
+// is mailed nothing. Two queries however many networks: the teams among them,
+// then their members.
+func GetTeamBillingRecipientsInTx(ctx context.Context, tx server.PgTx, networkIds []server.Id) map[server.Id][]string {
+	networkIdRecipients := map[server.Id][]string{}
+	teamNetworkIds := []server.Id{}
+	for networkId := range securityNoticeTeamNetworkIdsInTx(ctx, tx, networkIds) {
+		teamNetworkIds = append(teamNetworkIds, networkId)
+		networkIdRecipients[networkId] = []string{}
+	}
+	if len(teamNetworkIds) == 0 {
+		return networkIdRecipients
 	}
 	billingRoles := []NetworkMemberRole{}
 	for role := range networkMemberRolePermissions {
@@ -656,7 +719,10 @@ func securityNoticeBillingRecipientsInTx(ctx context.Context, tx server.PgTx, ne
 		}
 	}
 	slices.Sort(billingRoles)
-	return securityNoticeMemberRecipientsInTx(ctx, tx, networkId, billingRoles)
+	for networkId, recipients := range securityNoticeTeamsMemberRecipientsInTx(ctx, tx, teamNetworkIds, billingRoles) {
+		networkIdRecipients[networkId] = recipients
+	}
+	return networkIdRecipients
 }
 
 // The network the user administers, or nil.
