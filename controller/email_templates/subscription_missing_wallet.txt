@@ -1,9 +1,28 @@
-{{define "headline"}}CONNECT A SOLANA WALLET{{end}}
-{{define "why"}}Sent once per pay period while you have new USDC earnings and no
-Solana wallet connected.{{end}}
+{{define "headline"}}{{if .Team}}CONNECT A SOLANA WALLET TO YOUR TEAM{{else}}CONNECT A SOLANA WALLET{{end}}{{end}}
+{{define "why"}}{{if .Team}}Sent to the sign-in email addresses of the owners and billing
+admins of {{.TeamNetwork}} once per pay period while the Team
+has new USDC earnings and no Solana wallet connected.{{else}}Sent once per pay period while you have new USDC earnings and no
+Solana wallet connected.{{end}}{{end}}
 {{define "content"}}
 {{.AmountUsd}} USDC waiting
+{{if .Team}}
+The payout of {{.TeamNetwork}} is withheld: the Team earned
+{{.AmountUsd}} USDC providing on URnetwork, but it has no Solana wallet
+to send it to. USDC is paid to a Solana wallet, not to a Bittensor
+wallet. Connect one to the Team and the payment is retried
+automatically at the next weekly payout.
 
+Connect it signed in to the Team: sign in at ur.io and switch to
+{{.TeamNetwork}} first, since a wallet is connected to the
+network you're signed in to.
+
+Connect a Solana wallet: https://ur.io/app/account/earnings?wallet=solana
+
+This reminder is sent once per pay period while the Team has new
+earnings. The contracts behind this payment are deleted 7 days after it
+is paid, to preserve the anonymity of the network. If something looks
+wrong, contact support@ur.io.
+{{else}}
 You earned {{.AmountUsd}} USDC providing on URnetwork, but there's no
 Solana wallet on your account to send it to. USDC is paid to a Solana
 wallet, not to a Bittensor wallet. Connect one and the payment is
@@ -20,4 +39,4 @@ This reminder is sent once per pay period while you have new earnings.
 The contracts behind this payment are deleted 7 days after it is paid,
 to preserve the anonymity of the network. If something looks wrong,
 contact support@ur.io.
-{{end}}
+{{end}}{{end}}

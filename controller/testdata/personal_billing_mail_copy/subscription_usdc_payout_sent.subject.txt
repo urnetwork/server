@@ -1,0 +1,1 @@
+Your {{.AmountUsdc}} USDC payout was sent

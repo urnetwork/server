@@ -1,1 +1,1 @@
-Connect a Solana wallet to receive {{.AmountUsd}} USDC
+{{if .Team}}Connect a Solana wallet to {{.TeamNetwork}} to receive {{.AmountUsd}} USDC{{else}}Connect a Solana wallet to receive {{.AmountUsd}} USDC{{end}}

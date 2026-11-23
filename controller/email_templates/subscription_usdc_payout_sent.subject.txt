@@ -1,1 +1,1 @@
-Your {{.AmountUsdc}} USDC payout was sent
+{{if .Team}}The {{.AmountUsdc}} USDC payout of {{.TeamNetwork}} was sent{{else}}Your {{.AmountUsdc}} USDC payout was sent{{end}}

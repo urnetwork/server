@@ -1,24 +1,33 @@
-{{define "headline"}}YOUR NETWORK EARNED{{end}}
-{{define "why"}}You received this because your network earned on URnetwork in
-epoch {{.Epoch}}.{{end}}
+{{define "headline"}}{{if .Team}}YOUR TEAM EARNED{{else}}YOUR NETWORK EARNED{{end}}{{end}}
+{{define "why"}}{{if .Team}}Sent to the sign-in email addresses of the owners and billing
+admins of {{.TeamNetwork}} because the Team earned on
+URnetwork in epoch {{.Epoch}}.{{else}}You received this because your network earned on URnetwork in
+epoch {{.Epoch}}.{{end}}{{end}}
 {{define "content"}}
 {{.PointsText}} points
 
-Earnings for providing on URnetwork in epoch {{.Epoch}}, through
-{{.EpochEndText}} UTC.
+{{if .Team}}Earnings of {{.TeamNetwork}} for providing on URnetwork
+in epoch {{.Epoch}}, through {{.EpochEndText}} UTC.{{else}}Earnings for providing on URnetwork in epoch {{.Epoch}}, through
+{{.EpochEndText}} UTC.{{end}}
 
 Points this epoch: {{.PointsText}}
 Share of current block: {{.SharePercent}}
 Leaderboard rank: {{.RankText}}
 {{if .Top200Text}}
 {{.Top200Text}}
-{{if .Top200Bound}}Your network holds a head mining spot on the UR protocol.{{else}}Your network qualifies for a Top 200 head mining spot.
-Claim your head spot: https://ur.io/app/account/top200{{end}}
+{{if .Top200Bound}}{{if .Team}}The Team holds a head mining spot on the UR protocol.{{else}}Your network holds a head mining spot on the UR protocol.{{end}}{{else}}{{if .Team}}The Team qualifies for a Top 200 head mining spot.
+Claim the Team's head spot, signed in to the Team: https://ur.io/app/account/top200{{else}}Your network qualifies for a Top 200 head mining spot.
+Claim your head spot: https://ur.io/app/account/top200{{end}}{{end}}
 {{end}}
 {{if .HasWallet}}{{if .HasUnclaimed}}{{if .AlphaText}}Unclaimed: {{.AlphaText}}{{else}}Unclaimed SN25α{{end}} is ready to claim for
 epoch {{.Epoch}}.
 
-Claim your SN25α: https://ur.io/app/account/claim{{else}}Nothing to claim for epoch {{.Epoch}} yet. Keep providing and your
-next epoch settles as SN25α: https://ur.io/app/account/claim{{end}}{{else}}Connect a Bittensor wallet to settle your points as SN25α:
-https://ur.io/app/account/claim{{end}}
-{{end}}
+{{if .Team}}Claim the Team's SN25α, signed in to the Team: https://ur.io/app/account/claim{{else}}Claim your SN25α: https://ur.io/app/account/claim{{end}}{{else}}{{if .Team}}Nothing to claim for epoch {{.Epoch}} yet. Keep providing and the Team's
+next epoch settles as SN25α: https://ur.io/app/account/claim{{else}}Nothing to claim for epoch {{.Epoch}} yet. Keep providing and your
+next epoch settles as SN25α: https://ur.io/app/account/claim{{end}}{{end}}{{else}}{{if .Team}}Connect a Bittensor wallet to the Team, signed in to it, to settle
+its points as SN25α: https://ur.io/app/account/claim{{else}}Connect a Bittensor wallet to settle your points as SN25α:
+https://ur.io/app/account/claim{{end}}{{end}}
+{{if .Team}}
+These pages act on the network you're signed in to: sign in at ur.io
+and switch to {{.TeamNetwork}} first.
+{{end}}{{end}}

@@ -1,1 +1,1 @@
-{{if .Final}}Final notice: your URnetwork payment didn't go through{{else}}Your URnetwork payment didn't go through{{end}}
+{{if .Team}}{{if .Final}}Final notice: the payment for {{.TeamNetwork}} didn't go through{{else}}The payment for {{.TeamNetwork}} didn't go through{{end}}{{else}}{{if .Final}}Final notice: your URnetwork payment didn't go through{{else}}Your URnetwork payment didn't go through{{end}}{{end}}

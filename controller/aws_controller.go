@@ -268,6 +268,11 @@ func (self *SubscriptionEndedTemplate) Name() string {
 // Subscription, whose "Update payment method" opens Stripe's billing portal. The
 // hosted link is sent only when it is on Stripe's invoice domain
 // (stripeHostedInvoiceUrlAllowed); otherwise the email offers the update alone.
+// A Team's renewal is of the Team's subscription, and its notice, which goes to
+// the Team's Owners and Billing admins (QD-1219), names the Team and tells the
+// reader to switch to it before updating the payment method, since Manage
+// Subscription opens the billing of the network the reader is signed in to
+// (QD-1223, named at delivery).
 type SubscriptionPaymentFailedTemplate struct {
 	// the final notice rather than the first
 	Final bool
@@ -279,6 +284,7 @@ type SubscriptionPaymentFailedTemplate struct {
 	// Stripe's next automatic attempt; nil when it will not retry again
 	NextAttemptTime *time.Time
 	BaseTemplate
+	billingMailNetwork
 }
 
 func (self *SubscriptionPaymentFailedTemplate) Name() string {
@@ -308,11 +314,16 @@ func (self *SubscriptionPaymentFailedTemplate) NextAttemptDate() string {
 
 // The notice that a network's USDC payout is withheld for want of a Solana
 // wallet. Payout is the withheld total, which the account message outbox sums
-// over the slices of one payout run.
+// over the slices of one payout run. A Team's notice, which goes to the Team's
+// Owners and Billing admins (QD-1219), names the Team, says the Team's payout
+// is withheld and tells the reader to connect the wallet signed in to the
+// Team, since a wallet is connected to the network the reader is signed in to
+// (QD-1223, named at delivery).
 type MissingWalletTemplate struct {
 	PaymentId server.Id
 	Payout    model.NanoCents
 	BaseTemplate
+	billingMailNetwork
 }
 
 func (self *MissingWalletTemplate) Name() string {
