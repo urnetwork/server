@@ -42,9 +42,9 @@ func newOriginDeliveryTestOwner(ctx context.Context, broker *redisshardtest.Brok
 		})
 }
 
-// Which channels of an origin's pipeline a publisher sends: the bucket
-// channel only (a publisher from before Build A), the pair channel only (a
-// Build B publisher), or both (Build A).
+// Which channels a publisher sends: Build A's bucket channel only (a publisher
+// from before Build A), the pair channel only (Build B), or both (Build A). No
+// Build B socket subscribes the bucket channel.
 type originDeliveryTestPublisher int
 
 const (
@@ -65,11 +65,14 @@ func (self originDeliveryTestPublisher) String() string {
 }
 
 func publishOriginDeliveryTestEdge(broker *redisshardtest.Broker, publisher originDeliveryTestPublisher, sourceId server.Id, destinationId server.Id) {
-	for i, channelPayload := range model.Testing_ContractOriginPublications(sourceId, destinationId) {
-		if (i == 0 && publisher == originDeliveryTestPairChannel) || (i == 1 && publisher == originDeliveryTestBucketChannel) {
-			continue
-		}
-		broker.Publish(channelPayload[0], channelPayload[1])
+	pairChannel := model.Testing_ContractOriginPublications(sourceId, destinationId)[0][0]
+	if publisher != originDeliveryTestPairChannel {
+		// Build A's bucket channel: the pair's hash tag, and its digest as the payload
+		tag := pairChannel[strings.Index(pairChannel, "{") : strings.Index(pairChannel, "}:")+1]
+		broker.Publish("contract-origin:v1:"+tag, pairChannel[strings.Index(pairChannel, "}:")+2:])
+	}
+	if publisher != originDeliveryTestBucketChannel {
+		broker.Publish(pairChannel, "")
 	}
 }
 
@@ -217,7 +220,8 @@ func warmOriginDeliveryTestBucket(owner *model.ContractOriginNotifications, late
 
 // §4.3 test 3. Every order of the read snapshot, the subscription applying
 // (a), its acknowledgement (a′), the commit (c) and its edge (p), with the
-// acknowledgement before and after the 100ms read, for each publisher kind.
+// acknowledgement before and after the 100ms read, for Build A and Build B
+// publishers.
 // The broker's latency is both a′ and each edge's delivery delay; the pair's
 // subscription applies when the first read misses, so a commit during that
 // read publishes before a. While a′ comes before the 100ms read the reads are
@@ -240,7 +244,8 @@ func TestContractOriginSubscribeAfterMissOrderings(t *testing.T) {
 		{never: true},
 	}
 	publishDelays := []time.Duration{0, 37 * time.Millisecond}
-	publishers := []originDeliveryTestPublisher{originDeliveryTestBucketChannel, originDeliveryTestPairChannel, originDeliveryTestBothChannels}
+	// after Build B's gate every publisher runs A or B
+	publishers := []originDeliveryTestPublisher{originDeliveryTestPairChannel, originDeliveryTestBothChannels}
 	for _, latency := range latencies {
 		for _, commit := range commits {
 			for _, publishDelay := range publishDelays {

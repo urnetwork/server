@@ -159,7 +159,7 @@ func (self *contractRouteRejections) get(key contractRouteRejectionKey) (rejecti
 
 // A closed fence means an origin edge for the pair arrived after the verdict's
 // read began, so the verdict may already be stale and is not stored. Origin
-// edges close the fence before they remove entries (see `notifyBucket`), and
+// edges close the fence before they remove entries (see `notifyPair`), and
 // the fence is checked under the same lock as the insert, so a verdict is
 // either refused here or removed by that edge. A nil fence never closes.
 // The caller holds the pair for the new entry. released lists the pairs of
@@ -256,20 +256,6 @@ func (self *contractRouteRejections) invalidate(originPair [32]byte) (removed bo
 		}
 	}
 	return removed, released
-}
-
-// Removes every route in a bucket whose subscription may have missed edges,
-// returning their pairs to release.
-func (self *contractRouteRejections) invalidateBucket(index int) (released [][32]byte) {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	for key := range self.entries {
-		if contractOriginBucketIndex(key.originPair) == index {
-			delete(self.entries, key)
-			released = append(released, key.originPair)
-		}
-	}
-	return released
 }
 
 // After close no edge can remove an entry, so none is stored or replayed.

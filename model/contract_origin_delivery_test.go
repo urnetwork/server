@@ -1,17 +1,19 @@
 package model
 
-// Build A of CPUOPT7-ORIGIN-DELIVERY.md through the in-memory shard broker
+// Build B of CPUOPT7-ORIGIN-DELIVERY.md through the in-memory shard broker
 // (internal/redisshardtest): which owners an origin's edges reach, how held
 // pairs follow their sockets, what replaces a socket, the fence of a stored
 // refusal, the balance of holds and subscriptions, mixed publisher and owner
-// versions, the shadow counters, and idle buckets. Every test runs in a
-// testing/synctest bubble: the broker's deliveries, the sockets' timeouts and
-// the owners' timers all use its clock, and synctest.Wait is the barrier. No
-// Redis, PostgreSQL or wall-clock wait is involved, except in the benchmark.
+// versions, and idle buckets. Every test runs in a testing/synctest bubble:
+// the broker's deliveries, the sockets' timeouts and the owners' timers all
+// use its clock, and synctest.Wait is the barrier. No Redis, PostgreSQL or
+// wall-clock wait is involved, except in the benchmark.
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"math/rand/v2"
 	"sync"
 	"testing"
@@ -97,16 +99,32 @@ func testDeliveryOwner(
 	return owner, sockets
 }
 
+// The bucket channel of Build A and of the builds before it, which Build B
+// neither publishes nor subscribes: every edge of the bucket, as the pair's
+// digest in hex. Build B's bucket channel (`contractOriginChannel`) is its
+// sockets' anchor, which nobody publishes to.
+func testDeliveryBuildAChannel(bucket int) string {
+	return fmt.Sprintf("contract-origin:v1:{%02x}", bucket)
+}
+
 // Publishes an origin committed source → destination as each version's
-// publisher does: before Build A ("old") the bucket channel's digest only,
-// Build A both in one pipeline, Build B the pair channel only.
+// publisher does: before Build A ("old") the Build A bucket channel's digest
+// only, Build A that and the pair channel in one pipeline, and Build B the
+// pair channel only (`contractOriginPublications`).
 func testDeliveryPublishOrigin(broker *redisshardtest.Broker, version string, sourceId server.Id, destinationId server.Id) {
-	publications := contractOriginPublications(contractOriginPairHash(sourceId, destinationId))
+	key := contractOriginPairHash(sourceId, destinationId)
+	bucketChannelPublication := contractOriginPublication{
+		channel: testDeliveryBuildAChannel(contractOriginBucketIndex(key)),
+		payload: hex.EncodeToString(key[:]),
+	}
+	var publications []contractOriginPublication
 	switch version {
 	case "old":
-		publications = publications[:1]
-	case "B":
-		publications = publications[1:]
+		publications = []contractOriginPublication{bucketChannelPublication}
+	case "A":
+		publications = append([]contractOriginPublication{bucketChannelPublication}, contractOriginPublications(key)...)
+	default:
+		publications = contractOriginPublications(key)
 	}
 	testDeliveryPublish(broker, publications)
 }
@@ -154,10 +172,11 @@ func testDeliveryMissingOrigin() ContractRouteRejection {
 // Root cause of the broadcast (§1.3): every owner that ever waited in a bucket
 // received every origin of that bucket. Three owners share one broker; one
 // waits on P past a miss and holds it, the other two waited once in P's bucket
-// and in another and stopped. Once their sockets idle out, 1,000 origins for P
-// and for other pairs reach only the holder on a pair channel, only for P, and
-// nothing at all reaches the other two. Before Build A their buckets stayed
-// subscribed for the owner's life and each received every one.
+// and in another and stopped. Once their sockets idle out, of 1,000 origins
+// for P and for other pairs only P's reach the holder, on P's channel, and
+// nothing else reaches anyone: Build B publishes on pair channels alone, and
+// nobody publishes to a socket's anchor. Before Build A every started bucket
+// stayed subscribed for the owner's life and received every one.
 func TestContractOriginEdgeReachesOnlyHoldingOwners(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		broker := redisshardtest.NewBroker()
@@ -208,26 +227,21 @@ func TestContractOriginEdgeReachesOnlyHoldingOwners(t *testing.T) {
 		idleDeliveries := firstSockets.deliveryCount() + secondSockets.deliveryCount()
 		heldPairChannel := contractOriginPairChannel(heldKey)
 		heldBefore := holderSocket.ChannelDeliveryCount(heldPairChannel)
-		bucketBefore := holderSocket.ChannelDeliveryCount(contractOriginChannel(heldBucket))
+		holderBefore := holderSockets.deliveryCount()
 		heldPublishCount := 0
-		heldBucketPublishCount := 0
 		var otherPairChannels []string
 		for i := range 1000 {
 			if i%10 == 0 {
-				testDeliveryPublishOrigin(broker, "A", heldSourceId, heldDestinationId)
+				testDeliveryPublishOrigin(broker, "B", heldSourceId, heldDestinationId)
 				heldPublishCount += 1
-				heldBucketPublishCount += 1
 				continue
 			}
 			bucket := heldBucket
 			if i%2 == 1 {
 				bucket = i % contractOriginBucketCount
 			}
-			if bucket == heldBucket {
-				heldBucketPublishCount += 1
-			}
 			sourceId, destinationId := testContractOriginPairInBucket(bucket)
-			testDeliveryPublishOrigin(broker, "A", sourceId, destinationId)
+			testDeliveryPublishOrigin(broker, "B", sourceId, destinationId)
 			otherPairChannels = append(otherPairChannels, contractOriginPairChannel(contractOriginPairHash(sourceId, destinationId)))
 		}
 		synctest.Wait()
@@ -249,10 +263,12 @@ func TestContractOriginEdgeReachesOnlyHoldingOwners(t *testing.T) {
 		if after := firstSockets.deliveryCount() + secondSockets.deliveryCount(); after != idleDeliveries {
 			t.Fatalf("owners with no watch and no held pair received %d edges", after-idleDeliveries)
 		}
-		// Build A still carries the bucket channel to an owner with a socket
-		// in the bucket; Build B drops it
-		if delivered := holderSocket.ChannelDeliveryCount(contractOriginChannel(heldBucket)) - bucketBefore; delivered != heldBucketPublishCount {
-			t.Fatalf("the holder's bucket channel delivered %d of the bucket's %d edges", delivered, heldBucketPublishCount)
+		// nothing reaches the holder beyond P's channel, its anchor included
+		if delivered := holderSockets.deliveryCount() - holderBefore; delivered != heldPublishCount {
+			t.Fatalf("the holder received %d edges, want only P's %d", delivered, heldPublishCount)
+		}
+		if delivered := holderSocket.ChannelDeliveryCount(contractOriginChannel(heldBucket)); delivered != 0 {
+			t.Fatalf("the holder's anchor delivered %d edges; nobody publishes to it", delivered)
 		}
 		if !testDeliveryClosed(update) {
 			t.Fatal("the held pair's edges did not wake its waiter")
@@ -261,12 +277,12 @@ func TestContractOriginEdgeReachesOnlyHoldingOwners(t *testing.T) {
 }
 
 // A lost socket's replacement subscribes every pair still held, in one
-// command, and leaves alone a pair that is only watched. In Build A the bucket
-// channel's own acknowledgement resyncs the whole bucket first, as before
-// Build A: every waiter wakes and every refusal of the bucket goes, so a pair
-// held only by a refusal is held no longer. Then a pair's own
-// acknowledgement, which Build B relies on alone, resyncs that pair: it wakes
-// its waiters and removes its refusals.
+// command, and leaves alone a pair that is only watched. Build B has no resync
+// of the whole bucket: nothing is published to the anchor, so the anchor's
+// acknowledgement changes nothing, and each pair acknowledged on the lost
+// socket resyncs at its own acknowledgement on the replacement, waking its
+// waiters and removing its refusals. A pair held only by a refusal therefore
+// resubscribes, resyncs, and, its refusal gone, is released.
 func TestContractOriginSocketReplacementResubscribesHeldPairs(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		broker := redisshardtest.NewBroker()
@@ -306,6 +322,9 @@ func TestContractOriginSocketReplacementResubscribesHeldPairs(t *testing.T) {
 		firstUpdate, _ := firstWatch.Update()
 		secondUpdate, _ := secondWatch.Update()
 		subscribeCommandsBefore := broker.SubscribeCommandCount()
+		unsubscribeCommandsBefore := broker.UnsubscribeCommandCount()
+		subscribedPairsBefore := testutil.ToFloat64(contractOriginNotificationCounter.WithLabelValues("subscribed_pair"))
+		releasedPairsBefore := testutil.ToFloat64(contractOriginNotificationCounter.WithLabelValues("pair_released"))
 		broker.Inject(lostSocket, errors.New("synthetic connection lost"))
 		synctest.Wait()
 		if !lostSocket.Closed() {
@@ -322,19 +341,29 @@ func TestContractOriginSocketReplacementResubscribesHeldPairs(t *testing.T) {
 			t.Fatal("the lost socket was never replaced")
 		}
 		if !testDeliveryClosed(firstUpdate) || !testDeliveryClosed(secondUpdate) {
-			t.Fatal("the replacement did not wake the held pairs' waiters")
+			t.Fatal("the held pairs' acknowledgements did not wake their waiters")
 		}
 		if _, ok := owner.RouteRejection(refusedRouteSourceId, refusedOriginId, true); ok {
-			t.Fatal("a refusal that may have missed an edge survived the replacement")
+			t.Fatal("a refusal that may have missed an edge survived its pair's resubscription")
 		}
-		// the open plus one SSUBSCRIBE of both held pairs
+		// the open plus one SSUBSCRIBE of the three held pairs
 		if commands := broker.SubscribeCommandCount() - subscribeCommandsBefore; commands != 2 {
 			t.Fatalf("the replacement sent %d subscribe commands, want the open and one for the held pairs", commands)
+		}
+		if subscribed := testutil.ToFloat64(contractOriginNotificationCounter.WithLabelValues("subscribed_pair")) - subscribedPairsBefore; subscribed != 3 {
+			t.Fatalf("the replacement subscribed %v pairs, want the three held", subscribed)
 		}
 		for _, key := range [][32]byte{firstKey, secondKey} {
 			if !replacement.Subscribed(contractOriginPairChannel(key)) {
 				t.Fatal("a held pair did not resubscribe on the replacement")
 			}
+		}
+		// the refusal's pair, released once its resync removed the refusal
+		if released := testutil.ToFloat64(contractOriginNotificationCounter.WithLabelValues("pair_released")) - releasedPairsBefore; released != 1 {
+			t.Fatalf("%v pairs were released after the replacement, want the refusal's", released)
+		}
+		if commands := broker.UnsubscribeCommandCount() - unsubscribeCommandsBefore; commands != 1 {
+			t.Fatalf("the replacement sent %d unsubscribe commands, want one for the refusal's pair", commands)
 		}
 		for _, key := range [][32]byte{refusedKey, watchedKey} {
 			if replacement.Subscribed(contractOriginPairChannel(key)) {
@@ -346,8 +375,8 @@ func TestContractOriginSocketReplacementResubscribesHeldPairs(t *testing.T) {
 		}
 
 		// The pair's own acknowledgement: withheld until a refusal is stored
-		// for it after the bucket's resync, then delivered. It is the only
-		// held pair, so no other acknowledgement's count includes it first.
+		// for it on the replacement, then delivered. It is the only held
+		// pair, so no other acknowledgement's count includes it first.
 		secondWatch.Close()
 		firstPairChannel := contractOriginPairChannel(firstKey)
 		broker.SetWithholdAcknowledgement(func(channel string) bool { return channel == firstPairChannel })
@@ -417,7 +446,7 @@ func testDeliveryRequireReplaced(
 }
 
 // A slot move can drop a pair channel with a sunsubscribe notice that nothing
-// asked for, while the bucket channel stays: the socket is replaced.
+// asked for, while the socket's anchor stays: the socket is replaced.
 func TestContractOriginUnrequestedSunsubscribeReplacesSocket(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		broker := redisshardtest.NewBroker()
@@ -487,7 +516,7 @@ func TestContractOriginErrorReplyReplacesSocket(t *testing.T) {
 }
 
 // A pair subscription whose acknowledgement does not come within the
-// acknowledgement timeout replaces the socket, as the bucket channel's would;
+// acknowledgement timeout replaces the socket, as the anchor's would;
 // the held pair resubscribes on the replacement.
 func TestContractOriginOverduePairAcknowledgementReplacesSocket(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
@@ -537,10 +566,12 @@ func TestContractOriginOverduePairAcknowledgementReplacesSocket(t *testing.T) {
 // in every order of the read's arm, the origin's commit and publication, a
 // lost socket and its replacement, and the verdict's put, no refusal stays
 // stored once its origin committed after the read. The put refuses (the
-// edge or the replacement's resync closed the fence) or the edge, or the
-// resync, removes what it stored. Each publisher version's edge alone
-// suffices. A read armed before the pair's acknowledgement is not fenced, and
-// the controller stores no missing-origin verdict from it.
+// edge, or the pair's resync at its acknowledgement on the replacement,
+// closed the fence) or the edge, or that resync, removes what it stored.
+// Build A's and Build B's publishers each suffice; one from before Build A
+// reaches no Build B owner, which is why Build B runs only once none is left.
+// A read armed before the pair's acknowledgement is not fenced, and the
+// controller stores no missing-origin verdict from it.
 func TestContractRouteRejectionFenceArmedAfterAcknowledgement(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		broker := redisshardtest.NewBroker()
@@ -556,7 +587,7 @@ func TestContractRouteRejectionFenceArmedAfterAcknowledgement(t *testing.T) {
 			{"arm", "lose", "edge", "resubscribe", "put"},
 		}
 		caseIndex := 0
-		for _, version := range []string{"old", "A", "B"} {
+		for _, version := range []string{"A", "B"} {
 			for _, order := range orders {
 				bucket := caseIndex % contractOriginBucketCount
 				caseIndex += 1
@@ -694,7 +725,7 @@ func testDeliveryCheckHolds(t *testing.T, owner *ContractOriginNotifications, wa
 	}
 }
 
-// Once quiet, each live socket carries its bucket channel and the channels
+// Once quiet, each live socket carries its anchor and the channels
 // of the bucket's held pairs, and no other.
 func testDeliveryCheckSubscriptions(t *testing.T, owner *ContractOriginNotifications) {
 	t.Helper()
@@ -729,9 +760,9 @@ func testDeliveryCheckSubscriptions(t *testing.T, owner *ContractOriginNotificat
 
 // Holds balance under a random mix of everything that takes or releases one:
 // refusals of both causes and shapes stored, replayed, replaced, evicted by a
-// small bound, expired, removed by an edge or a local commit, and dropped by a
-// lost socket's resync; watches opened, missing, reading fenced and closed;
-// time passing the ring's timeout and the idle timeout. After every step the
+// small bound, expired, removed by an edge or a local commit, and removed by
+// their pair's resync after a lost socket; watches opened, missing, reading
+// fenced and closed; time passing the ring's timeout and the idle timeout. After every step the
 // holds equal their holders, and the subscriptions their held pairs. At the
 // end every hold is released, every pair channel unsubscribed, and every idle
 // socket closed.
@@ -795,7 +826,7 @@ func TestContractRouteRejectionHoldsBalance(t *testing.T) {
 					watches = append(watches[:i], watches[i+1:]...)
 				}
 			case operation < 72:
-				testDeliveryPublishOrigin(broker, "A", route.destinationId, route.sourceId)
+				testDeliveryPublishOrigin(broker, "B", route.destinationId, route.sourceId)
 			case operation < 76:
 				notifyCommittedContractOrigin(ownerCtx, route.destinationId, route.sourceId)
 			case operation < 80:
@@ -847,57 +878,34 @@ func TestContractRouteRejectionHoldsBalance(t *testing.T) {
 	})
 }
 
-// A Build B owner, emulated by a Build A owner whose sockets drop the bucket
-// channel's edges: Build B neither publishes nor reads the bucket channel's
-// digests (it subscribes a channel nobody publishes to as its anchor). The
-// emulation keeps Build A's resync of the whole bucket at the anchor's
-// acknowledgement, which Build B replaces by each pair's own; delivery is what
-// the test checks.
-type testBucketChannelDroppingSocket struct {
-	*redisshardtest.Socket
-}
-
-func (self testBucketChannelDroppingSocket) ReceiveTimeout(ctx context.Context, timeout time.Duration) (any, error) {
-	deadline := time.Now().Add(timeout)
-	for {
-		event, err := self.Socket.ReceiveTimeout(ctx, time.Until(deadline))
-		if err != nil {
-			return event, err
-		}
-		if message, ok := event.(*redis.Message); ok && message.Channel == self.AnchorChannel() {
-			if !time.Now().Before(deadline) {
-				return nil, context.DeadlineExceeded
-			}
-			continue
-		}
-		return event, nil
-	}
-}
-
-// Every pair of publisher and owner a roll or a rollback can run together.
-// An owner from before Build A is emulated by a bare socket on the bucket
-// channel, which is all it subscribes: it is woken exactly when that socket
-// receives the edge. A Build B owner is emulated as above. Each allowed pair
-// wakes the held pair's waiter and removes its refusal (or, for the old
-// owner, delivers the edge). The two pairs the roll rule keeps apart show the
-// regression: a Build B publisher reaches no owner from before Build A, and an
-// old publisher reaches no Build B owner.
+// Every pair of publisher and owner a roll or a rollback can run together with
+// Build B. An owner from before Build A is emulated by a bare socket on the
+// Build A bucket channel, which is all it subscribes: it is woken exactly when
+// that socket receives the edge. A Build A owner is emulated by a Build B
+// owner, which subscribes a pair's channel after a miss as Build A does, plus
+// Build A's reading of its bucket channel: the test reads a bare socket on
+// that channel and hands each of its edges to the owner as the pair's edge,
+// which is what Build A does with it. Build A's publisher is emulated by its
+// pipeline of both channels; Build B's is real. Each allowed pair wakes the
+// held pair's waiter and removes its refusal (or, for the old owner, delivers
+// the edge). The two pairs the roll rule keeps apart show the regression: an
+// old publisher reaches no Build B owner, and a Build B publisher reaches no
+// owner from before Build A.
 func TestContractOriginMixedVersions(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		broker := redisshardtest.NewBroker()
 		settings := DefaultContractOriginNotificationSettings()
-		aOwner, _ := testDeliveryOwner(t.Context(), broker, settings, nil)
-		defer aOwner.Close()
-		bOwner, _ := testDeliveryOwner(t.Context(), broker, settings, func(socket *redisshardtest.Socket) contractOriginSubscription {
-			return testBucketChannelDroppingSocket{Socket: socket}
-		})
+		bOwner, bSockets := testDeliveryOwner(t.Context(), broker, settings, nil)
 		defer bOwner.Close()
-		// a Build A process committing origins through its own owner
+		// the Build A emulation (see above)
+		aOwner, aSockets := testDeliveryOwner(t.Context(), broker, settings, nil)
+		defer aOwner.Close()
+		// a Build B process committing origins through its own owner
 		publisher, _ := testDeliveryOwner(t.Context(), broker, settings, nil)
 		defer publisher.Close()
 		publisherCtx := WithContractOriginNotifications(t.Context(), publisher)
 		publish := func(version string, sourceId server.Id, destinationId server.Id) {
-			if version == "A" {
+			if version == "B" {
 				notifyCommittedContractOrigin(publisherCtx, sourceId, destinationId)
 			} else {
 				testDeliveryPublishOrigin(broker, version, sourceId, destinationId)
@@ -911,22 +919,30 @@ func TestContractOriginMixedVersions(t *testing.T) {
 				bucket := caseIndex % contractOriginBucketCount
 				caseIndex += 1
 				originSourceId, originDestinationId := testContractOriginPairInBucket(bucket)
+				key := contractOriginPairHash(originSourceId, originDestinationId)
+				bucketChannel := testDeliveryBuildAChannel(bucket)
 				if ownerVersion == "old" {
-					socket, err := broker.Open(t.Context(), contractOriginChannel(bucket))
+					socket, err := broker.Open(t.Context(), bucketChannel)
 					if err != nil {
 						t.Fatal(err)
 					}
 					publish(publisherVersion, originSourceId, originDestinationId)
-					delivered := 0 < socket.ChannelDeliveryCount(contractOriginChannel(bucket))
+					delivered := 0 < socket.ChannelDeliveryCount(bucketChannel)
 					if delivered != allowed {
 						t.Fatalf("%s publisher, owner from before Build A: delivered=%t, want %t", publisherVersion, delivered, allowed)
 					}
 					_ = socket.Close()
 					continue
 				}
-				owner := aOwner
-				if ownerVersion == "B" {
-					owner = bOwner
+				owner, sockets := bOwner, bSockets
+				var bucketChannelSocket *redisshardtest.Socket
+				if ownerVersion == "A" {
+					owner, sockets = aOwner, aSockets
+					var err error
+					bucketChannelSocket, err = broker.Open(t.Context(), bucketChannel)
+					if err != nil {
+						t.Fatal(err)
+					}
 				}
 				watch := testDeliveryHoldByMiss(t, owner, originSourceId, originDestinationId)
 				// the route a companion would ride this origin back on
@@ -935,6 +951,15 @@ func TestContractOriginMixedVersions(t *testing.T) {
 				}
 				update, _ := watch.Update()
 				publish(publisherVersion, originSourceId, originDestinationId)
+				if bucketChannelSocket != nil {
+					// Build A acts on a bucket channel edge for its pair as on
+					// the pair's own edge
+					for range bucketChannelSocket.ChannelDeliveryCount(bucketChannel) {
+						broker.Inject(sockets.live(bucket), &redis.Message{Channel: contractOriginPairChannel(key), Payload: ""})
+					}
+					synctest.Wait()
+					_ = bucketChannelSocket.Close()
+				}
 				woken := testDeliveryClosed(update)
 				_, kept := owner.RouteRejection(originDestinationId, originSourceId, true)
 				if woken != allowed || kept == allowed {
@@ -946,56 +971,13 @@ func TestContractOriginMixedVersions(t *testing.T) {
 	})
 }
 
-// With every publisher on Build A, an owner holding pairs receives each of
-// their origins on both channels, so the bucket channel's edges for its
-// acknowledged pairs equal its pair channel edges. The bucket channel's edges
-// for pairs it does not hold count toward neither.
-func TestContractOriginShadowCountsMatch(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		broker := redisshardtest.NewBroker()
-		settings := DefaultContractOriginNotificationSettings()
-		owner, _ := testDeliveryOwner(t.Context(), broker, settings, nil)
-		defer owner.Close()
-		type testPair struct {
-			sourceId      server.Id
-			destinationId server.Id
-		}
-		var heldPairs []testPair
-		for i := range 8 {
-			sourceId, destinationId := testContractOriginPairInBucket(i % 4)
-			watch := testDeliveryHoldByMiss(t, owner, sourceId, destinationId)
-			defer watch.Close()
-			heldPairs = append(heldPairs, testPair{sourceId: sourceId, destinationId: destinationId})
-		}
-		v1Before := testutil.ToFloat64(contractOriginNotificationCounter.WithLabelValues("v1_for_acknowledged_pair"))
-		v2Before := testutil.ToFloat64(contractOriginNotificationCounter.WithLabelValues("v2_received"))
-		// a fixed seed makes the sequence, and any failure, reproducible
-		random := rand.New(rand.NewPCG(20261123, 12))
-		heldPublishCount := 0
-		for range 500 {
-			if random.IntN(2) == 0 {
-				pair := heldPairs[random.IntN(len(heldPairs))]
-				testDeliveryPublishOrigin(broker, "A", pair.sourceId, pair.destinationId)
-				heldPublishCount += 1
-			} else {
-				// a pair nobody holds, in a bucket the owner has a socket in
-				sourceId, destinationId := testContractOriginPairInBucket(random.IntN(4))
-				testDeliveryPublishOrigin(broker, "A", sourceId, destinationId)
-			}
-		}
-		synctest.Wait()
-		v1 := testutil.ToFloat64(contractOriginNotificationCounter.WithLabelValues("v1_for_acknowledged_pair")) - v1Before
-		v2 := testutil.ToFloat64(contractOriginNotificationCounter.WithLabelValues("v2_received")) - v2Before
-		if v1 != v2 || v2 != float64(heldPublishCount) {
-			t.Fatalf("v1_for_acknowledged_pair=%v v2_received=%v, want both %d", v1, v2, heldPublishCount)
-		}
-	})
-}
-
 // B1: a bucket with no watch and no held pair closes its socket after the
-// idle timeout, and no sooner. The next hold or watch reopens it, and the new
-// subscription's acknowledgement resyncs the bucket, as a cold start does: a
-// refusal stored before it goes, and a waiter armed before it wakes.
+// idle timeout, and no sooner. The next hold or watch reopens it. In Build B
+// the reopened anchor's acknowledgement resyncs nothing: nothing is published
+// to the anchor, and the held pairs had no subscription on the closed socket
+// to miss edges on. Each held pair subscribes on the new socket, its
+// acknowledgement registers a waiter that missed before it, and its edges then
+// remove its refusals. A waiter that has not missed is not woken.
 func TestContractOriginIdleBucketClosesAndReopens(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		broker := redisshardtest.NewBroker()
@@ -1030,12 +1012,23 @@ func TestContractOriginIdleBucketClosesAndReopens(t *testing.T) {
 			t.Fatalf("the closed bucket's channel keeps %d subscribers", subscribers)
 		}
 
-		// A refusal reopens it, with a waiter armed before the acknowledgement:
-		// the broker's latency holds the acknowledgement back until both are in.
+		// A refusal reopens it, with two waiters armed before the
+		// acknowledgements, one past a miss: the broker's latency holds the
+		// acknowledgements back until all three are in.
 		broker.SetLatency(time.Millisecond)
 		refusedOriginId, refusedRouteSourceId := testContractOriginPairInBucket(bucket)
+		refusedKey := contractOriginPairHash(refusedOriginId, refusedRouteSourceId)
 		if !owner.RecordRouteRejection(refusedRouteSourceId, refusedOriginId, true, testDeliveryMissingOrigin(), nil) {
 			t.Fatal("refusal was not stored")
+		}
+		missedSourceId, missedDestinationId := testContractOriginPairInBucket(bucket)
+		missedKey := contractOriginPairHash(missedSourceId, missedDestinationId)
+		missing := owner.Watch(missedSourceId, missedDestinationId)
+		defer missing.Close()
+		missingUpdate, _ := missing.Update()
+		registration, held := missing.Missed()
+		if !held {
+			t.Fatal("the miss was not held")
 		}
 		waiting := owner.Watch(testContractOriginPairInBucket(bucket))
 		defer waiting.Close()
@@ -1047,14 +1040,29 @@ func TestContractOriginIdleBucketClosesAndReopens(t *testing.T) {
 		if reopened == nil || reopened == socket {
 			t.Fatal("a held pair did not reopen its bucket's socket")
 		}
-		if !testDeliveryClosed(update) {
-			t.Fatal("the reopened bucket's acknowledgement did not wake its waiter")
+		for _, key := range [][32]byte{refusedKey, missedKey} {
+			if !reopened.Subscribed(contractOriginPairChannel(key)) {
+				t.Fatal("a held pair did not subscribe on the reopened socket")
+			}
 		}
+		if !testDeliveryClosed(registration) {
+			t.Fatal("the pair's acknowledgement did not register the waiter that missed")
+		}
+		if testDeliveryClosed(update) || testDeliveryClosed(missingUpdate) {
+			t.Fatal("the reopened anchor's acknowledgement woke a waiter")
+		}
+		if _, ok := owner.RouteRejection(refusedRouteSourceId, refusedOriginId, true); !ok {
+			t.Fatal("a refusal was removed with no edge and no lost subscription")
+		}
+		// the refusal's pair is subscribed: its origin's edge removes it
+		testDeliveryPublishOrigin(broker, "B", refusedOriginId, refusedRouteSourceId)
+		synctest.Wait()
 		if _, ok := owner.RouteRejection(refusedRouteSourceId, refusedOriginId, true); ok {
-			t.Fatal("the reopened bucket's acknowledgement kept a refusal stored before it")
+			t.Fatal("the refusal's origin edge did not remove it")
 		}
 
 		// with neither again it closes again, and a watch alone reopens it
+		missing.Close()
 		waiting.Close()
 		synctest.Wait()
 		time.Sleep(settings.IdleBucketTimeout)
@@ -1071,19 +1079,20 @@ func TestContractOriginIdleBucketClosesAndReopens(t *testing.T) {
 	})
 }
 
-// The cost of a published origin, with 40 owners subscribed to one bucket and
-// one of them holding the pair: on the bucket channel every owner reads every
-// edge, on the pair channel only the holder does. The edges are published
-// back to back and the time runs until every owner they reach has handled
-// them all; the owners' readers run in parallel, so the time understates the
-// CPU the bucket channel's 40 deliveries an edge take.
+// The cost of a published origin, with 40 owners each with a socket in one
+// bucket: when one holds the pair only that owner reads its edge, as Build B
+// delivers; when all 40 hold it every owner reads every edge, which is what
+// the bucket channel cost every owner with a socket in the bucket before
+// Build B. The edges are published back to back and the time runs until every
+// owner they reach has handled them all; the owners' readers run in parallel,
+// so the time understates the CPU of 40 deliveries an edge.
 func BenchmarkContractOriginDelivery(b *testing.B) {
 	for _, delivery := range []struct {
 		name        string
-		pairChannel bool
+		holderCount int
 	}{
-		{name: "bucket_channel", pairChannel: false},
-		{name: "pair_channel", pairChannel: true},
+		{name: "one_holder", holderCount: 1},
+		{name: "all_holding", holderCount: 40},
 	} {
 		b.Run(delivery.name, func(b *testing.B) {
 			ctx, cancel := context.WithCancel(context.Background())
@@ -1100,7 +1109,7 @@ func BenchmarkContractOriginDelivery(b *testing.B) {
 				owner, _ := testDeliveryOwner(ctx, broker, settings, nil)
 				owners = append(owners, owner)
 				var watch *ContractOriginWatch
-				if i == 0 {
+				if i < delivery.holderCount {
 					watch = owner.Watch(heldSourceId, heldDestinationId)
 					_, _ = watch.Update()
 					watch.Missed()
@@ -1126,30 +1135,23 @@ func BenchmarkContractOriginDelivery(b *testing.B) {
 					time.Sleep(100 * time.Microsecond)
 				}
 			}
+			channel := contractOriginPairChannel(heldKey)
 			waitFor(func() bool {
-				return broker.Subscribers(contractOriginChannel(bucket)) == ownerCount && broker.Subscribers(contractOriginPairChannel(heldKey)) == 1
+				return broker.Subscribers(contractOriginChannel(bucket)) == ownerCount && broker.Subscribers(channel) == delivery.holderCount
 			})
 			received := func() float64 {
 				return testutil.ToFloat64(contractOriginNotificationCounter.WithLabelValues("received"))
 			}
-			channel, payload := contractOriginChannel(bucket), ""
-			readers := ownerCount
-			if delivery.pairChannel {
-				channel, readers = contractOriginPairChannel(heldKey), 1
-			} else {
-				publications := contractOriginPublications(heldKey)
-				payload = publications[0].payload
-			}
 			b.ResetTimer()
 			before := received()
 			for range b.N {
-				if broker.Publish(channel, payload) != readers {
+				if broker.Publish(channel, "") != delivery.holderCount {
 					b.Fatal("the edge reached the wrong number of owners")
 				}
 			}
-			waitFor(func() bool { return before+float64(readers*b.N) <= received() })
+			waitFor(func() bool { return before+float64(delivery.holderCount*b.N) <= received() })
 			b.StopTimer()
-			b.ReportMetric(float64(readers), "deliveries/op")
+			b.ReportMetric(float64(delivery.holderCount), "deliveries/op")
 		})
 	}
 }

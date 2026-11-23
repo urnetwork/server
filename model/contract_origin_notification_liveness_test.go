@@ -5,7 +5,6 @@ package model
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 	"sync/atomic"
 	"testing"
@@ -72,7 +71,11 @@ func TestContractOriginNotificationsRejoinAfterShardUnsubscribe(t *testing.T) {
 		watch := owner.Watch(server.NewId(), server.NewId())
 		defer watch.Close()
 		first := <-opened
-		first.subscription.events <- &redis.Subscription{Kind: "ssubscribe", Channel: first.channel}
+		first.subscription.events <- &redis.Subscription{Kind: "ssubscribe", Channel: first.channel, Count: 1}
+		synctest.Wait()
+		// the watch missed, so its pair is held and subscribed
+		watch.Update()
+		watch.Missed()
 		synctest.Wait()
 		update, _ := watch.Update()
 		first.subscription.events <- &redis.Subscription{Kind: "sunsubscribe", Channel: first.channel}
@@ -90,12 +93,12 @@ func TestContractOriginNotificationsRejoinAfterShardUnsubscribe(t *testing.T) {
 		default:
 			t.Fatal("slot migration did not establish a replacement subscription")
 		}
-		second.subscription.events <- &redis.Subscription{Kind: "ssubscribe", Channel: second.channel}
+		second.subscription.events <- &redis.Subscription{Kind: "ssubscribe", Channel: second.channel, Count: 1}
 		synctest.Wait()
 		select {
 		case <-update:
 		default:
-			t.Fatal("replacement acknowledgement did not recheck possibly missed commits")
+			t.Fatal("the held pair's resubscription did not recheck possibly missed commits")
 		}
 	})
 }
@@ -208,7 +211,7 @@ func TestContractOriginNotificationsIncomingMessagesProveLiveness(t *testing.T) 
 		key := contractOriginPairHash(sourceId, destinationId)
 		opened := make(chan testTimedContractOriginOpen, 16)
 		owner := testTimedContractOriginOwner(t.Context(), opened, func(channel string) any {
-			return &redis.Message{Channel: channel, Payload: hex.EncodeToString(key[:])}
+			return testContractOriginEdge(key)
 		})
 		defer owner.Close()
 		watch := owner.Watch(sourceId, destinationId)

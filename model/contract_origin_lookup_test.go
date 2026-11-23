@@ -306,12 +306,17 @@ func TestContractOriginLookupRestartAcknowledgementInvalidatesMissing(t *testing
 		watch := owner.Watch(sourceId, destinationId)
 		defer watch.Close()
 		first := <-opened
-		first.subscription.events <- &redis.Subscription{Kind: "ssubscribe", Channel: first.channel}
+		first.subscription.events <- &redis.Subscription{Kind: "ssubscribe", Channel: first.channel, Count: 1}
+		synctest.Wait()
+		// the watch missed, so its pair is held and subscribed
+		watch.Update()
+		watch.Missed()
 		synctest.Wait()
 		first.subscription.events <- errors.New("synthetic Redis restart")
 		second := <-opened
 		_, _ = watch.Lookup(t.Context(), false, func() (*TransferEscrow, error) { return nil, ErrMissingCompanionOrigin })
-		second.subscription.events <- &redis.Subscription{Kind: "ssubscribe", Channel: second.channel}
+		// the held pair resubscribes, and its acknowledgement resyncs it
+		second.subscription.events <- &redis.Subscription{Kind: "ssubscribe", Channel: second.channel, Count: 1}
 		synctest.Wait()
 		want := &TransferEscrow{}
 		got, err := watch.Lookup(t.Context(), false, func() (*TransferEscrow, error) { return want, nil })

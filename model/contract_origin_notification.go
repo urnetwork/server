@@ -8,13 +8,11 @@ package model
 // dropped or mixed-version event costs only the optimization, and the
 // requests' timed rechecks remain.
 //
-// Build A of CPUOPT7-ORIGIN-DELIVERY.md. A committed origin is published, in
-// one pipeline to one node, on two channels of its pair's bucket: the bucket's
-// own channel (v1), which every owner with a watch or a held pair in the
-// bucket receives, and the pair's channel (v2), which only an owner holding the
-// pair receives. Either alone wakes every waiter and removes every refusal, so
-// owners and publishers from before Build A (v1 only) and from Build B (v2
-// only) may run beside these.
+// Build B of CPUOPT7-ORIGIN-DELIVERY.md. A committed origin is published on its
+// pair's own channel (v2), which only an owner holding the pair receives. The
+// bucket channel of Build A (v1) is gone: every process that publishes or
+// waits must run Build A or B, and no process from before Build A may run
+// beside these (the deploy version guard states it).
 //
 // An owner holds a pair past a miss: a watch after a read that found no origin,
 // a watch whose read was fenced, and each stored ring refusal. A held pair's
@@ -27,8 +25,11 @@ package model
 // Each bucket has one manager goroutine. It opens the bucket's socket while a
 // watch or a held pair needs it, writes the pair subscriptions on it (no
 // request writes to Redis), replaces the socket when a pair's acknowledgement
-// is overdue, and closes it after IdleBucketTimeout with neither. A bounded
-// publisher queue keeps Redis latency out of committed contract responses.
+// is overdue, and closes it after IdleBucketTimeout with neither. The socket
+// keeps an anchor channel nobody publishes to, for its liveness rules; a watch
+// opens it so that the subscription of a pair the watch then misses goes out
+// on a live socket. A bounded publisher queue keeps Redis latency out of
+// committed contract responses.
 
 import (
 	"context"
@@ -51,13 +52,9 @@ const contractOriginBucketCount = 16
 // A received edge also counts what it found: matched_waiter when its pair has a
 // watch here, matched_refusal when it removed a recorded route refusal, and
 // unmatched when it found neither. An edge that finds both counts both.
-// v2_received counts the edges read on a pair channel, and
-// v1_for_acknowledged_pair the bucket channel's edges for a pair whose own
-// channel was subscribed at that point of the stream: once every publisher
-// runs Build A the two are equal.
 var contractOriginNotificationCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "urnetwork_contract_origin_notifications_total",
-	Help: "Advisory contract-origin notification operations by a fixed event class; drops require authoritative timed rechecks. A received edge also counts matched_waiter (its pair has a watch), matched_refusal (it removed a route refusal) or unmatched (neither). Pair channels: subscribed_pair, pair_acknowledged, pair_released, subscribe_failed (a failed write or an overdue acknowledgement replaced the socket), pair_cap (a hold declined at the owner's bound), bucket_closed (an idle socket closed), and the shadow pair v1_for_acknowledged_pair and v2_received.",
+	Help: "Advisory contract-origin notification operations by a fixed event class; drops require authoritative timed rechecks. A received edge also counts matched_waiter (its pair has a watch), matched_refusal (it removed a route refusal) or unmatched (neither). Pair channels: subscribed_pair, pair_acknowledged, pair_released, subscribe_failed (a failed write or an overdue acknowledgement replaced the socket), pair_cap (a hold declined at the owner's bound), bucket_closed (an idle socket closed).",
 }, []string{"event"})
 
 var contractOriginHeldPairsGauge = prometheus.NewGauge(prometheus.GaugeOpts{
@@ -71,7 +68,6 @@ func init() {
 		"subscribed", "reconnected", "subscription_failed", "received", "invalid_message", "registration_declined",
 		"matched_waiter", "matched_refusal", "unmatched",
 		"subscribed_pair", "pair_acknowledged", "pair_released", "subscribe_failed", "pair_cap", "bucket_closed",
-		"v1_for_acknowledged_pair", "v2_received",
 	} {
 		contractOriginNotificationCounter.WithLabelValues(event)
 	}
@@ -383,10 +379,11 @@ func contractOriginBucketIndex(key [32]byte) int {
 	return int(key[0]) % contractOriginBucketCount
 }
 
-// The bucket's channel: every edge of the bucket, as the pair's digest in hex.
-// It is also the socket's anchor, the channel its liveness rules keep.
+// The bucket socket's anchor, the channel its liveness rules keep (the
+// acknowledgement, the pings, the re-assertion, slot moves). Nobody publishes
+// to it.
 func contractOriginChannel(bucket int) string {
-	return fmt.Sprintf("contract-origin:v1:{%02x}", bucket)
+	return fmt.Sprintf("contract-origin:v2:{%02x}", bucket)
 }
 
 // A pair's channel carries the bucket's hash tag, so it shares the bucket
@@ -413,28 +410,9 @@ func contractOriginPairChannelKey(bucket int, prefix string, channel string) ([3
 	return key, true
 }
 
-// The bucket channel's edge, or a pair channel's of the same bucket. pairChannel
-// is whether it came on a pair channel.
-func contractOriginMessageKey(bucket int, channel string, prefix string, message server.RedisMessage) (key [32]byte, pairChannel bool, ok bool) {
-	if message.Channel != channel {
-		key, ok = contractOriginPairChannelKey(bucket, prefix, message.Channel)
-		return key, true, ok
-	}
-	if len(message.Payload) != 64 {
-		return key, false, false
-	}
-	if _, err := hex.Decode(key[:], []byte(message.Payload)); err != nil || contractOriginBucketIndex(key) != bucket {
-		return key, false, false
-	}
-	return key, false, true
-}
-
-// The bucket channel carries the digest, for owners from before Build A and
-// every owner with a socket in the bucket. The pair channel names the pair,
-// so its edge carries nothing.
+// The pair channel names the pair, so its edge carries nothing.
 func contractOriginPublications(key [32]byte) []contractOriginPublication {
 	return []contractOriginPublication{
-		{channel: contractOriginChannel(contractOriginBucketIndex(key)), payload: hex.EncodeToString(key[:])},
 		{channel: contractOriginPairChannel(key), payload: ""},
 	}
 }
@@ -765,7 +743,7 @@ func notifyCommittedContractOrigin(ctx context.Context, sourceId server.Id, dest
 	}
 	key := contractOriginPairHash(sourceId, destinationId)
 	// A route refused here for this origin's pair is open now. Other owners
-	// learn it from the published edge (see `notifyBucket`).
+	// learn it from the published edge (see `notifyPair`).
 	_, released := notifications.routeRejections.invalidate(key)
 	notifications.releaseRefusalHolds(released)
 	event := "owner_closed"
@@ -1021,7 +999,6 @@ func (self *ContractOriginNotifications) resetBucketSocketWithLock(bucket *contr
 
 func (self *ContractOriginNotifications) bucketHandler(index int) *server.RedisShardSubscriptionHandler {
 	bucket := &self.buckets[index]
-	channel := contractOriginChannel(index)
 	pairChannelPrefix := contractOriginPairChannelPrefix(index)
 	return &server.RedisShardSubscriptionHandler{
 		Socket: func(subscription server.RedisShardSubscription) {
@@ -1048,10 +1025,9 @@ func (self *ContractOriginNotifications) bucketHandler(index int) *server.RedisS
 				label = "reconnected"
 			}
 			contractOriginNotificationCounter.WithLabelValues(label).Inc()
-			// the bucket channel's edges published while no subscription
-			// existed are gone
-			self.notifyBucket(index, nil, false)
-			// then every pair still held subscribes on the socket
+			// Nothing is published to the anchor, so nothing of the bucket was
+			// missed: every pair still held subscribes on the socket, and a
+			// pair acknowledged on a lost socket resyncs at its acknowledgement.
 			self.stateLock.Lock()
 			defer self.stateLock.Unlock()
 			if bucket.socket == nil {
@@ -1065,16 +1041,13 @@ func (self *ContractOriginNotifications) bucketHandler(index int) *server.RedisS
 			wakeContractOriginBucket(bucket)
 		},
 		Message: func(message server.RedisMessage) bool {
-			key, pairChannel, ok := contractOriginMessageKey(index, channel, pairChannelPrefix, message)
+			key, ok := contractOriginPairChannelKey(index, pairChannelPrefix, message.Channel)
 			if !ok {
 				contractOriginNotificationCounter.WithLabelValues("invalid_message").Inc()
 				return false
 			}
 			contractOriginNotificationCounter.WithLabelValues("received").Inc()
-			if pairChannel {
-				contractOriginNotificationCounter.WithLabelValues("v2_received").Inc()
-			}
-			self.notifyBucket(index, &key, !pairChannel)
+			self.notifyPair(index, key)
 			return true
 		},
 		Notice: func(notice server.RedisSubscriptionNotice) error {
@@ -1195,46 +1168,27 @@ func (self *ContractOriginNotifications) subscriptionSettings() *server.RedisSha
 	return settings
 }
 
-// Snapshot under the registry lock, then notify outside it: monitor operations
-// never nest an external lock inside the registry's state lock. An edge (a
-// non-nil key) counts what it found; a resync counts nothing. A bucket channel
-// edge for a pair whose own channel is subscribed counts toward the shadow
-// comparison with the pair channel's edges.
-func (self *ContractOriginNotifications) notifyBucket(index int, key *[32]byte, bucketChannel bool) {
-	var pairs []*contractOriginPair
+// An origin edge for the pair. Snapshot under the registry lock, then notify
+// outside it: monitor operations never nest an external lock inside the
+// registry's state lock. The edge counts what it found.
+func (self *ContractOriginNotifications) notifyPair(index int, key [32]byte) {
+	var pair *contractOriginPair
 	waiter := false
-	shadow := false
 	func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
-		if key != nil {
-			if pair := self.buckets[index].pairs[*key]; pair != nil {
-				pairs = append(pairs, pair)
-				waiter = 0 < pair.refs
-				shadow = bucketChannel && pair.acked
-			}
-		} else {
-			for _, pair := range self.buckets[index].pairs {
-				pairs = append(pairs, pair)
-			}
-		}
+		pair = self.buckets[index].pairs[key]
+		waiter = pair != nil && 0 < pair.refs
 	}()
-	for _, pair := range pairs {
+	if pair != nil {
 		pair.lookup.invalidate()
 		pair.version.Update(func(version uint64) uint64 { return version + 1 })
 	}
-	// Remove route rejections only after the version edges: a verdict whose
-	// fence is one of those channels is then either refused by its closed
-	// fence or recorded before this removal (see `contractRouteRejections.put`).
-	if key == nil {
-		self.releaseRefusalHolds(self.routeRejections.invalidateBucket(index))
-		return
-	}
-	removed, released := self.routeRejections.invalidate(*key)
+	// Remove route rejections only after the version edge: a verdict whose
+	// fence is that channel is then either refused by its closed fence or
+	// recorded before this removal (see `contractRouteRejections.put`).
+	removed, released := self.routeRejections.invalidate(key)
 	self.releaseRefusalHolds(released)
-	if shadow {
-		contractOriginNotificationCounter.WithLabelValues("v1_for_acknowledged_pair").Inc()
-	}
 	if waiter {
 		contractOriginNotificationCounter.WithLabelValues("matched_waiter").Inc()
 	}

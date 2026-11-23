@@ -6,7 +6,6 @@ package model
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -86,6 +85,11 @@ func (self *testContractOriginSubscription) Close() error {
 	return nil
 }
 
+// An origin edge for the pair, as it arrives on the pair's channel.
+func testContractOriginEdge(key [32]byte) *redis.Message {
+	return &redis.Message{Channel: contractOriginPairChannel(key), Payload: ""}
+}
+
 type testContractOriginOpen struct {
 	channel      string
 	subscription *testContractOriginSubscription
@@ -112,23 +116,26 @@ func TestContractOriginNotificationsFanOutAndRefcount(t *testing.T) {
 		sourceId, destinationId := server.NewId(), server.NewId()
 		first, second := owner.Watch(sourceId, destinationId), owner.Watch(sourceId, destinationId)
 		defer second.Close()
-		firstUpdate, _ := first.Update()
-		secondUpdate, _ := second.Update()
+		// both read and missed before the pair's subscription was acknowledged
+		first.Update()
+		second.Update()
+		firstRegistration, _ := first.Missed()
+		secondRegistration, _ := second.Missed()
 		synctest.Wait()
 		connection := <-opened
-		connection.subscription.events <- &redis.Subscription{Kind: "ssubscribe", Channel: connection.channel}
+		connection.subscription.events <- &redis.Subscription{Kind: "ssubscribe", Channel: connection.channel, Count: 1}
 		synctest.Wait()
-		for _, update := range []<-chan struct{}{firstUpdate, secondUpdate} {
+		for _, registration := range []<-chan struct{}{firstRegistration, secondRegistration} {
 			select {
-			case <-update:
+			case <-registration:
 			default:
-				t.Fatal("subscription acknowledgement did not force authoritative recheck")
+				t.Fatal("the pair's acknowledgement did not force an authoritative recheck")
 			}
 		}
 		first.Close()
-		secondUpdate, _ = second.Update()
+		secondUpdate, _ := second.Update()
 		key := contractOriginPairHash(sourceId, destinationId)
-		connection.subscription.events <- &redis.Message{Channel: connection.channel, Payload: hex.EncodeToString(key[:])}
+		connection.subscription.events <- testContractOriginEdge(key)
 		synctest.Wait()
 		select {
 		case <-secondUpdate:
@@ -136,6 +143,8 @@ func TestContractOriginNotificationsFanOutAndRefcount(t *testing.T) {
 			t.Fatal("closing one waiter removed another")
 		}
 		second.Close()
+		// the released pair's unsubscribe is answered
+		synctest.Wait()
 		owner.stateLock.Lock()
 		remaining := owner.waiters
 		pairs := len(owner.buckets[int(key[0])%contractOriginBucketCount].pairs)
@@ -193,20 +202,27 @@ func TestContractOriginNotificationsRecoverLostEpochOnReconnect(t *testing.T) {
 		defer watch.Close()
 		synctest.Wait()
 		first := <-opened
-		first.subscription.events <- &redis.Subscription{Kind: "ssubscribe", Channel: first.channel}
+		first.subscription.events <- &redis.Subscription{Kind: "ssubscribe", Channel: first.channel, Count: 1}
 		synctest.Wait()
-		update, _ := watch.Update()
+		// the watch missed, so its pair is held and subscribed
+		watch.Update()
+		watch.Missed()
+		synctest.Wait()
+		update, fenced := watch.Update()
+		if !fenced {
+			t.Fatal("the fixture's pair subscription was not acknowledged")
+		}
 		first.subscription.events <- errors.New("synthetic connection lost")
 		synctest.Wait()
 		time.Sleep(time.Second)
 		synctest.Wait()
 		second := <-opened
-		second.subscription.events <- &redis.Subscription{Kind: "ssubscribe", Channel: second.channel}
+		second.subscription.events <- &redis.Subscription{Kind: "ssubscribe", Channel: second.channel, Count: 1}
 		synctest.Wait()
 		select {
 		case <-update:
 		default:
-			t.Fatal("reconnect lost the resync for a possibly missed commit")
+			t.Fatal("the held pair's resubscription lost the resync for a possibly missed commit")
 		}
 	})
 }
@@ -250,8 +266,8 @@ func TestContractOriginNotificationsPublishQueueIsNonblockingAndOwned(t *testing
 			func(context.Context, string) (contractOriginSubscription, error) { return nil, errors.New("unused") },
 			func(ctx context.Context, publications []contractOriginPublication) error {
 				publishes.Add(1)
-				// the bucket channel's hashed digest, and the pair channel's empty edge
-				if len(publications) != 2 || len(publications[0].payload) != 64 || publications[1].payload != "" {
+				// the pair channel names the hashed pair, and its edge is empty
+				if len(publications) != 1 || len(publications[0].channel) != len(contractOriginPairChannelPrefix(0))+64 || publications[0].payload != "" {
 					t.Errorf("unbounded/nonhashed publications %+v", publications)
 				}
 				close(entered)
@@ -291,7 +307,7 @@ func TestContractOriginNotificationsSeparateOwnersAndDirections(t *testing.T) {
 		connectionB := <-openedB
 		update, _ := watchB.Update()
 		first.Close()
-		connectionB.subscription.events <- &redis.Message{Channel: connectionB.channel, Payload: hex.EncodeToString(forward[:])}
+		connectionB.subscription.events <- testContractOriginEdge(forward)
 		synctest.Wait()
 		select {
 		case <-update:
@@ -313,7 +329,7 @@ func TestContractOriginNotificationsRejectUnrelatedAndMalformedPayloads(t *testi
 		update, _ := watch.Update()
 		connection.subscription.events <- &redis.Message{Channel: connection.channel, Payload: "synthetic-invalid-payload"}
 		key := contractOriginPairHash(server.NewId(), server.NewId())
-		connection.subscription.events <- &redis.Message{Channel: connection.channel, Payload: hex.EncodeToString(key[:])}
+		connection.subscription.events <- testContractOriginEdge(key)
 		synctest.Wait()
 		select {
 		case <-update:
@@ -411,7 +427,7 @@ func TestContractOriginNotificationsCountWhatEachEdgeFinds(t *testing.T) {
 		edge := func(sourceId server.Id, destinationId server.Id) testContractOriginMatches {
 			before := testContractOriginMatchCounts()
 			key := contractOriginPairHash(sourceId, destinationId)
-			connection.subscription.events <- &redis.Message{Channel: connection.channel, Payload: hex.EncodeToString(key[:])}
+			connection.subscription.events <- testContractOriginEdge(key)
 			synctest.Wait()
 			after := testContractOriginMatchCounts()
 			return testContractOriginMatches{

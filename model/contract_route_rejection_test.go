@@ -5,7 +5,7 @@ package model
 // or wall-clock wait is involved.
 
 import (
-	"encoding/hex"
+	"errors"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -144,7 +144,7 @@ func TestContractRouteRejectionOriginEdgeRemovesRoute(t *testing.T) {
 		}
 		owner.RecordRouteRejection(otherSourceId, destinationId, true, missing, nil)
 		key := contractOriginPairHash(destinationId, sourceId)
-		connection.subscription.events <- &redis.Message{Channel: connection.channel, Payload: hex.EncodeToString(key[:])}
+		connection.subscription.events <- testContractOriginEdge(key)
 		synctest.Wait()
 		for _, companion := range []bool{false, true} {
 			if _, ok := owner.RouteRejection(sourceId, destinationId, companion); ok {
@@ -157,8 +157,9 @@ func TestContractRouteRejectionOriginEdgeRemovesRoute(t *testing.T) {
 	})
 }
 
-// A fresh acknowledgement can follow missed edges, so it opens its bucket.
-func TestContractRouteRejectionAcknowledgementClearsItsBucket(t *testing.T) {
+// A held pair's resubscription on a new socket can follow missed edges, so it
+// opens the pair's routes, and no other pair's.
+func TestContractRouteRejectionResubscriptionClearsItsPair(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		opened := make(chan testContractOriginOpen, contractOriginBucketCount)
 		owner := testContractOriginOwner(t.Context(), DefaultContractOriginNotificationSettings(), opened)
@@ -168,15 +169,30 @@ func TestContractRouteRejectionAcknowledgementClearsItsBucket(t *testing.T) {
 		defer watch.Close()
 		key := contractOriginPairHash(destinationId, sourceId)
 		otherSourceId, otherDestinationId := testRouteOutsideBucket(int(key[0]) % contractOriginBucketCount)
+		// each refusal holds its pair, whose subscription is acknowledged
 		owner.RecordRouteRejection(sourceId, destinationId, false, testDestinationRejection(), nil)
 		owner.RecordRouteRejection(otherSourceId, otherDestinationId, false, testDestinationRejection(), nil)
-		connection.subscription.events <- &redis.Subscription{Kind: "ssubscribe", Channel: connection.channel}
+		synctest.Wait()
+		connection.subscription.events <- errors.New("synthetic connection lost")
+		synctest.Wait()
+		time.Sleep(time.Second)
+		synctest.Wait()
+		var second testContractOriginOpen
+		for found := false; !found; {
+			select {
+			case second = <-opened:
+				found = second.channel == connection.channel
+			default:
+				t.Fatal("the lost socket was not replaced")
+			}
+		}
+		second.subscription.events <- &redis.Subscription{Kind: "ssubscribe", Channel: second.channel, Count: 1}
 		synctest.Wait()
 		if _, ok := owner.RouteRejection(sourceId, destinationId, false); ok {
-			t.Fatal("a reacknowledged bucket kept a refusal that may have missed an edge")
+			t.Fatal("a resubscribed pair kept a refusal that may have missed an edge")
 		}
 		if _, ok := owner.RouteRejection(otherSourceId, otherDestinationId, false); !ok {
-			t.Fatal("an acknowledgement cleared another bucket")
+			t.Fatal("a resubscription cleared another pair")
 		}
 	})
 }
@@ -195,7 +211,7 @@ func TestContractRouteRejectionClosedFenceRefusesStaleVerdict(t *testing.T) {
 
 		fence, _ := watch.Update()
 		key := contractOriginPairHash(destinationId, sourceId)
-		connection.subscription.events <- &redis.Message{Channel: connection.channel, Payload: hex.EncodeToString(key[:])}
+		connection.subscription.events <- testContractOriginEdge(key)
 		synctest.Wait()
 		if owner.RecordRouteRejection(sourceId, destinationId, true, missing, fence) {
 			t.Fatal("a verdict read across an origin edge was stored")
@@ -324,7 +340,7 @@ func TestContractTerminalRouteRejectionSurvivesOriginEdges(t *testing.T) {
 		defer watch.Close()
 		owner.RecordRouteRejection(sourceId, destinationId, false, testTerminalDestinationRejection(), nil)
 		key := contractOriginPairHash(destinationId, sourceId)
-		connection.subscription.events <- &redis.Message{Channel: connection.channel, Payload: hex.EncodeToString(key[:])}
+		connection.subscription.events <- testContractOriginEdge(key)
 		synctest.Wait()
 		connection.subscription.events <- &redis.Subscription{Kind: "ssubscribe", Channel: connection.channel}
 		synctest.Wait()
@@ -585,7 +601,7 @@ func TestContractRouteRejectionOriginEdgeClearsWithinTheTimeout(t *testing.T) {
 			t.Fatal("a missing-origin refusal expired before the retry another process brings")
 		}
 		key := contractOriginPairHash(destinationId, sourceId)
-		connection.subscription.events <- &redis.Message{Channel: connection.channel, Payload: hex.EncodeToString(key[:])}
+		connection.subscription.events <- testContractOriginEdge(key)
 		synctest.Wait()
 		if _, ok := owner.RouteRejection(sourceId, destinationId, false); ok {
 			t.Fatal("an origin edge left the route refused")
