@@ -463,8 +463,21 @@ const (
 	NetworkEnrollCodeUnavailable = "unavailable"
 )
 
-// The longest device_spec an enrollment takes.
-const networkEnrollDeviceSpecMaxLength = 256
+// Tunables of POST /network/enroll's request at the mint.
+type NetworkEnrollRequestSettings struct {
+	// The longest device_spec an enrollment takes, in bytes: 256, the width of
+	// network_client.device_spec, so a longer one is refused 400 before the
+	// mint rather than failing its insert. Non-positive takes no device_spec,
+	// so every enrollment is refused.
+	DeviceSpecMaxLength int
+}
+
+// The defaults, a fresh value each call.
+func DefaultNetworkEnrollRequestSettings() *NetworkEnrollRequestSettings {
+	return &NetworkEnrollRequestSettings{
+		DeviceSpecMaxLength: 256,
+	}
+}
 
 // What POST /network/enroll takes (§7.8). It has no field for an auth key's
 // #<bundle>, and prints without the key (String).
@@ -728,6 +741,16 @@ var networkEnrollHasGenesis = func(ctx context.Context, networkId server.Id) (bo
 // *NetworkEnrollRefusal or a *QuotaRefusalError, and none holds the key's
 // text; any other error is internal.
 func EnrollNetworkClient(ctx context.Context, enroll *NetworkEnrollArgs, clientAddress string) (*NetworkEnrollResult, error) {
+	return enrollNetworkClientWithSettings(ctx, enroll, clientAddress, DefaultNetworkEnrollRequestSettings())
+}
+
+// As EnrollNetworkClient, its request bounded by settings.
+func enrollNetworkClientWithSettings(
+	ctx context.Context,
+	enroll *NetworkEnrollArgs,
+	clientAddress string,
+	settings *NetworkEnrollRequestSettings,
+) (*NetworkEnrollResult, error) {
 	if !server.SidecarMg1Linked() {
 		return nil, newNetworkEnrollRefusal(http.StatusServiceUnavailable, NetworkEnrollCodeUnavailable, "Enrollment is not available yet.")
 	}
@@ -738,7 +761,7 @@ func EnrollNetworkClient(ctx context.Context, enroll *NetworkEnrollArgs, clientA
 	case err != nil:
 		return nil, newNetworkEnrollRefusal(http.StatusUnauthorized, NetworkEnrollCodeAuthKeyInvalid, networkEnrollAuthKeyInvalidMessage)
 	}
-	if len(enroll.ClientPublicKey) != ed25519.PublicKeySize || enroll.DeviceSpec == "" || networkEnrollDeviceSpecMaxLength < len(enroll.DeviceSpec) {
+	if len(enroll.ClientPublicKey) != ed25519.PublicKeySize || enroll.DeviceSpec == "" || settings.DeviceSpecMaxLength < len(enroll.DeviceSpec) {
 		return nil, newNetworkEnrollRefusal(http.StatusBadRequest, NetworkEnrollCodeBadRequest, "The client key or device is missing.")
 	}
 	var admission *networkEnrollAdmission
