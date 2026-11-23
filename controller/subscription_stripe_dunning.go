@@ -40,6 +40,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -97,6 +98,10 @@ type stripeDunningSettings struct {
 	PastDueNoticeMaxAge time.Duration
 	// Bounds each Stripe API read the dunning makes.
 	StripeReadTimeout time.Duration
+	// The subscriptions one page of the backfill's status listing asks Stripe
+	// for: 100, the most Stripe returns. Non-positive asks for Stripe's own
+	// default page.
+	ListPageSize int
 	// Where the billing portal returns the customer.
 	PortalReturnUrl string
 }
@@ -108,6 +113,7 @@ func defaultStripeDunningSettings() *stripeDunningSettings {
 		FinalNoticeLead:     4 * 24 * time.Hour,
 		PastDueNoticeMaxAge: 7 * 24 * time.Hour,
 		StripeReadTimeout:   15 * time.Second,
+		ListPageSize:        100,
 		PortalReturnUrl:     StripeUpdatePaymentMethodUrl,
 	}
 }
@@ -846,7 +852,9 @@ func stripeListSubscriptionsByStatus(ctx context.Context, status string, setting
 	for {
 		query := url.Values{
 			"status": []string{status},
-			"limit":  []string{"100"},
+		}
+		if 0 < settings.ListPageSize {
+			query.Set("limit", strconv.Itoa(settings.ListPageSize))
 		}
 		if startingAfter != "" {
 			query.Set("starting_after", startingAfter)

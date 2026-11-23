@@ -71,18 +71,59 @@ func SchedulePendingPayments(clientSession *session.ClientSession) {
 	}
 }
 
-// PaymentPlanSliceDuration is the preferred bound for each committed payout
-// transaction. It must remain longer than the configured minimum subsidy
-// duration: a shorter slice can commit pass-through revenue without recording a
-// subsidy epoch, leaving the bounded payout frontier unable to advance.
-const PaymentPlanSliceDuration = 4 * 24 * time.Hour
+// Tunables of the payout run, the scheduling of its payments and its
+// missing-wallet notice (QD-702). Each is read where it applies, from
+// defaultAccountPaymentSettings.
+type accountPaymentSettings struct {
+	// The preferred bound for each committed payout transaction: 4 days. A
+	// slice must stay longer than the configured minimum subsidy duration: a
+	// shorter one can commit pass-through revenue without recording a subsidy
+	// epoch, leaving the bounded payout frontier unable to advance
+	// (boundedPaymentPlanSliceDuration).
+	planSliceDuration time.Duration
+	// How far past the minimum subsidy duration a slice reaches when that
+	// minimum is the longer bound: 1 day.
+	planSliceSafetyMargin time.Duration
+	// The shortest wait before a payment is advanced again: 5 minutes.
+	advancePaymentMinDelay time.Duration
+	// The spread of the random wait added to advancePaymentMinDelay: 25
+	// minutes, so the checks of many payments do not reach Circle and Coinbase
+	// at once and run into their rate limits. Non-positive adds none.
+	advancePaymentDelaySpread time.Duration
+	// The shortest time between two reports of a usdc_payout.yml that cannot
+	// be read: 1 minute. Each report counts the ones suppressed since the last.
+	usdcPayoutPolicyErrorReportInterval time.Duration
+	// How long a payout run holds a missing-wallet notice in the outbox before
+	// any delivery run releases it: 12 hours, longer than the payout task's
+	// max time (work.SchedulePayout), so a live run is never split, and a run
+	// that stopped before its own release still notifies.
+	missingWalletNoticeHoldTimeout time.Duration
+	// The least withheld total a missing-wallet notice is sent for, whatever
+	// the wallet payout minimum: one cent, so a notice never reads "0.00 USDC".
+	missingWalletNoticePayoutFloor model.NanoCents
+}
 
-const paymentPlanSliceSafetyMargin = 24 * time.Hour
+// The production settings.
+func defaultAccountPaymentSettings() *accountPaymentSettings {
+	return &accountPaymentSettings{
+		planSliceDuration:                   4 * 24 * time.Hour,
+		planSliceSafetyMargin:               24 * time.Hour,
+		advancePaymentMinDelay:              5 * time.Minute,
+		advancePaymentDelaySpread:           25 * time.Minute,
+		usdcPayoutPolicyErrorReportInterval: 1 * time.Minute,
+		missingWalletNoticeHoldTimeout:      12 * time.Hour,
+		missingWalletNoticePayoutFloor:      model.UsdToNanoCents(0.01),
+	}
+}
 
+// The bound of each committed payout transaction: the settings'
+// planSliceDuration, or the minimum subsidy duration and the safety margin
+// when that is longer.
 func boundedPaymentPlanSliceDuration(minSubsidyDuration time.Duration) time.Duration {
+	settings := defaultAccountPaymentSettings()
 	return max(
-		PaymentPlanSliceDuration,
-		minSubsidyDuration+paymentPlanSliceSafetyMargin,
+		settings.planSliceDuration,
+		minSubsidyDuration+settings.planSliceSafetyMargin,
 	)
 }
 
@@ -95,11 +136,11 @@ type paymentPlanLoop func(
 	func(*model.PaymentPlan),
 ) ([]*model.PaymentPlan, error)
 
-// missingWalletNoticeMinPayout is the smallest withheld total that earns a
-// missing-wallet notice. It is the wallet payout minimum, and never less than
-// one cent, so a notice never reads "0.00 USDC".
+// The smallest withheld total that earns a missing-wallet notice: the wallet
+// payout minimum, and never less than the settings'
+// missingWalletNoticePayoutFloor, so a notice never reads "0.00 USDC".
 func missingWalletNoticeMinPayout(minWalletPayoutUsd float64) model.NanoCents {
-	return max(model.UsdToNanoCents(minWalletPayoutUsd), model.UsdToNanoCents(0.01))
+	return max(model.UsdToNanoCents(minWalletPayoutUsd), defaultAccountPaymentSettings().missingWalletNoticePayoutFloor)
 }
 
 // The configured missing-wallet notice minimum.
@@ -113,8 +154,9 @@ const usdcPaymentsOffReason = "usdc payments are off (usdc_payout.yml)"
 // The refusal of a USDC send while payments are off.
 var ErrUsdcPaymentsOff = errors.New("usdc payments are off (usdc_payout.yml); turn payments on to send")
 
-// Reports an unreadable usdc_payout.yml at most once a minute.
-var usdcPayoutPolicyErrorReports = newBoundedReport(time.Minute)
+// Reports an unreadable usdc_payout.yml at most once each
+// usdcPayoutPolicyErrorReportInterval of the settings.
+var usdcPayoutPolicyErrorReports = newBoundedReport(defaultAccountPaymentSettings().usdcPayoutPolicyErrorReportInterval)
 
 // The usdc_payout.yml switches. A file that cannot be read or parsed asks no
 // network to connect a wallet and sends nothing; the error is reported and
@@ -150,12 +192,6 @@ func RequireUsdcPaymentsOn() error {
 	}
 	return nil
 }
-
-// A payout run holds a missing-wallet notice in the outbox at most this long
-// before any delivery run releases it. Longer than the payout task's max time
-// (work.SchedulePayout), so a live run is never split; a run that stopped before
-// its own release still notifies.
-const missingWalletNoticeHoldTimeout = 12 * time.Hour
 
 // One held missing-wallet notice: the wallet-less payment of one network in one
 // plan slice.
@@ -420,11 +456,12 @@ func ScheduleAdvancePayment(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) {
-	// Randomly schedule between 5 and 30 minutes from now.
-	minDelay := 5 * time.Minute
-	delay := 25 * time.Minute
-	// this avoid circle and coinbase rate limiting
-	timeout := minDelay + time.Duration(mathrand.Float64()*float64(delay/time.Second))*time.Second
+	// Randomly schedule between the settings' advancePaymentMinDelay and that
+	// plus advancePaymentDelaySpread from now, 5 to 30 minutes, so the checks
+	// avoid Circle's and Coinbase's rate limits.
+	settings := defaultAccountPaymentSettings()
+	delaySpread := max(settings.advancePaymentDelaySpread, 0)
+	timeout := settings.advancePaymentMinDelay + time.Duration(mathrand.Float64()*float64(delaySpread/time.Second))*time.Second
 	runAt := server.NowUtc().Add(timeout)
 
 	task.ScheduleTaskInTx(

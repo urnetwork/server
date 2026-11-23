@@ -498,7 +498,7 @@ func DeliverAccountMessages(
 	// a payout run that stopped before its release leaves its notices held
 	releaseMissingWalletNotices(
 		clientSession.Ctx,
-		server.NowUtc().Add(-missingWalletNoticeHoldTimeout),
+		server.NowUtc().Add(-defaultAccountPaymentSettings().missingWalletNoticeHoldTimeout),
 		configuredMissingWalletNoticeMinPayout,
 	)
 	settings := defaultAccountMessageDeliverySettings()
