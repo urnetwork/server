@@ -2,8 +2,9 @@
 
 On 2026-11-22 at about 07:40Z the owner decided on two of CPUOPT7's larger levers
 (CPUOPT7 §6, items 3 and 4): "Build now, ship after CPUOPT7". This round implements and tests them.
-Nothing is merged or deployed. Shipping waits for CPUOPT7's canary results and the
-owner's go (§5, §6).
+Both were merged on 2026-11-22 (server `7675df569`, sdk `c82b7831`) and deployed on 2026-11-23 with
+the owner's go to accelerate every deployment. §9 records the build, the rolls, the flag and the
+measured result.
 
 **Owner rule (binding, as in CPUOPT4–7):** "We can't sacrifice correctness of performance
 timings for the cpu savings." Both changes keep every answer:
@@ -36,12 +37,10 @@ timings for the cpu savings." Both changes keep every answer:
 - **Rollout** (§5): readers first. Every reader (api, alt, proxy, mcp, taskworker) runs
   this build with the flag off; then the flag goes on with a config release and a
   taskworker restart. Turning it off is the rollback, effective at the next export pass.
-- **Branches**, not merged:
-  - server `perf/cpuopt8-score-codec-1122` on main `45a8de9c6`;
-  - sdk `perf/cpuopt8-contract-stats-1122` (`0d4dbff6`) on CPUOPT7's sdk merge
-    `bced97ce`.
-
-  Both apply cleanly to CPUOPT7's hotfix pins (§5).
+- **Merged** (§9.1):
+  - server `perf/cpuopt8-score-codec-1122` as main `7675df569`, on `45a8de9c6`;
+  - sdk `perf/cpuopt8-contract-stats-1122` (`0d4dbff6`) as main `c82b7831`, on CPUOPT7's
+    sdk merge `bced97ce`.
 
 ## 1. Who reads and writes score pages
 
@@ -431,10 +430,12 @@ and validator-deploy-gate).
   - server on this branch;
   - sdk on its branch;
   - connect at CPUOPT7's merge `0709a55a`;
-  - sn pinned at `ed921902`.
+  - sn at `ed921902`, since sn's 09:18Z `golang.org/x` bump needed a server go.mod bump of
+    its own.
 
-  sn's 09:18Z `golang.org/x` bump needs a server go.mod bump of its own, which is not part
-  of this round.
+  That bump has since landed: server `7c12354fd` (go mod tidy, 11-22) raises the
+  `golang.org/x` modules to the minimums sn `9a2dbc10` requires. The deployed build compiled
+  sn main `71b515b1`, so nothing is pinned at `ed921902` any more (§9.2).
 - **DB tests** ran through test-env.sh, after confirming that local-pg and local-redis
   resolve to 10.213.0.1 and both containers are healthy. No `./monitor/` tests were run
   (planetoid runs the monitor).
@@ -496,3 +497,194 @@ and validator-deploy-gate).
    item 2).
 4. **A typed format for the counts, filter and partition documents and the manifests:**
    they are small, and a typed format would not pay for a second migration.
+
+## 9. Merge, deploy and the flag (owner, about 01:25Z 11-23: accelerate every deployment)
+
+### 9.1 Merges
+
+- **server main `7675df569`** (11-22, 15:43Z): the `--no-ff` merge of `perf/cpuopt8-score-codec-1122`.
+- **sdk main `c82b7831`** (11-22, 15:42Z): the `--no-ff` merge of `perf/cpuopt8-contract-stats-1122` (`0d4dbff6`) on
+  `bced97ce`.
+- **What shipped with them:** server main `b896cf6d9` (11-23 01:54Z) adds the stuck provider bake-in, and `7c12354fd`
+  (go mod tidy) raises the `golang.org/x` modules to sn's minimums (§7). The connect build in these binaries is
+  connect main `1ee839f8`, whose extender dialer changes are inert in server processes.
+
+### 9.2 The images
+
+- **Source:** server `b896cf6d9`, with every sibling at its origin head: connect `1ee839f8`, sdk `c82b7831`, sn
+  `71b515b1`, proxy `e46247dc`, quic-go `83a1e6f8`, glog, goidenticons, userwireguard and gvisor unchanged. Built
+  02:01–02:21Z 11-23.
+
+  | Service | Version | Digest |
+  |---|---|---|
+  | api | `2026.11.22-outerwerld-1105990880` | `sha256:13d91e74…` |
+  | taskworker | `2026.11.22-outerwerld-1105994420` | `sha256:64f1bc3d…` |
+  | proxy | `2026.11.22-outerwerld-1105997020` | `sha256:310ede9d…` |
+  | mcp | `2026.11.22-outerwerld-1105998450` | `sha256:b16232e5…` |
+
+- **Gates:**
+  - a private warpctl and an empty version home; the registry guard (each tag absent before its push);
+  - govulncheck on amd64 and arm64: 0 affecting;
+  - the pushed digests equal the registry's;
+  - the stamps: `b896cf6d9`, `vcs.modified=false`, go1.27.4;
+  - the `-trimpath` audit rebuild: MATCH for all four services on both arches;
+  - the migration head: 1008 in the code and on Main, `db_migrations.go` unchanged.
+- **Replaced:** the builder's `2026.11.22-1105365180`, which every block ran since a fleet-wide deploy on 11-22. It was
+  built from server `ff9c9f996`, a release commit on `45a8de9c6` (CPUOPT7). Its digests were the rollback targets, and
+  each was unchanged before and after the builds.
+- **Readers:** alt was retired on 11-20, so the score page readers are the api, the proxy, mcp and the taskworker.
+
+### 9.3 The rolls
+
+Every roll ran under the validator-idle gate (no bypass), the health gates, the version guard (each block on the
+builder's 1105365180, the target newer) and the services lock, with Main reads through a 20 s statement timeout. The
+readers rolled first and the flag stayed off.
+
+**api, 02:29–02:50Z, four waves** (beta and g1, then g2, g3 and g4).
+- Two waves held at their gate first: 65 s for a PgBouncer waiting spike (115) before the first wave, and 131 s for a
+  117 s transaction on Main before the second. Both cleared on their own; nothing had been deployed into either.
+- Each wave drained in about 60 s and passed readiness, `/sn/head` per block, the rotate-exit smoke (8 of 8) and the
+  OAuth regression probe (8 of 8).
+- After the last wave: `/sn/head` through the front 20 of 20, and the 10-minute 5xx watch passed (503s at 0, api mean
+  12.7 ms). Over the 40 minutes the api returned 4 server errors in all.
+- Score pages: all 20 processes decode, gob only, about 130 a second at 0 errors; the stuck provider signal reports
+  from every process with no runtime control.
+
+**taskworker, g1 at 03:03Z, g2 at 03:40Z** (the payout gate: nothing claimed, no account payment pending, the award
+not due within the block's 25 minutes).
+- g1 drained in about 105 s and its four processes were ready at once. Over its 10-minute watch, execution errors
+  stayed at or under 0.04 a second, from `SyncProductUpdatesForUser` on the old g2, as in the two hours before; edge-2
+  rose to 0.68 with the new processes' start, under its 0.85 limit.
+- The score export on the new build wrote gob pages, as the flag off requires: about 170 page encodes a second over
+  the pass, `gob_fallback` 0, and the pass lines read "client score pages are gob".
+- A taskworker start seeds the operator block points award to run 15 minutes later
+  (`operatorBlockPointsStartupDelay`), so g2 waited at the payout gate until that run ended at 03:18:30Z. It found no
+  block due and rescheduled itself to 12:00Z.
+- g2 drained in about 135 s, and its watch was clean.
+
+**mcp, 03:53–04:07Z, four waves** (beta and g1, then g2, g3 and g4). Each wave drained in 45–60 s with its four processes
+ready and no readiness lines; the 5-minute watch after the last passed, with no mcp server errors.
+
+With those three, every score page reader but the proxy reported the decode counter: the api 20 of 20 processes, mcp
+20 of 20 and the taskworker 8 of 8, gob only and no errors.
+
+**proxy: the g3 canary passed (deploy 04:54:57Z, hold to 05:30:28Z, verdict at 05:30:58Z).** It ran under the
+validator gate (intent 26510 finalized, 3,696 s to the boundary), the health, payout and memory gates and the proxy
+lane lock. The verdict is CPUOPT7's regression check, unchanged:
+
+| Per process, g3 against its 18 peers | 30 min before the deploy | Last 10 min of the hold (36 min after) |
+|---|---|---|
+| cores | 2.36 (peers 2.24) | 2.05 (peers 2.30) |
+| GC a minute | 7.99 (peers 7.78) | 4.27 (peers 8.54) |
+| heap+stacks | 7.05 GB (peers 7.04) | 6.81 GB (peers 7.10) |
+| session-check unchecked share | 0.045% (peers 0.038%) | 0.012% (peers 0.042%) |
+
+- As in CPUOPT7, a restarted process holds fewer devices for about an hour, so part of this is restart relief.
+- The safety rules passed: WireGuard 75 → 147 packets a second with sessions 12 → 13; active devices against the
+  other blocks 0.95 (stop below 0.8); user bytes 0.93 (stop below 0.6); edge-2's 15-minute busy CPU without iowait
+  0.466 → 0.497 (limit +0.05).
+- The per-host comparison, crisp g3 against its peers: 0.23 mint refusals a second against 4.40, 2.03 cores against
+  2.28 and 3.0 collections a minute against 6.2.
+
+**The g6 WireGuard canary passed (deploy 06:07:00Z, hold to 06:31:56Z).**
+- Active devices against the other blocks 1.02, user bytes 1.20; per process 2.21 cores against 2.32 and 7.9
+  collections a minute against 9.4. edge-2's 15-minute average: 0.506 → 0.543.
+- WireGuard: g6 kept its 11 sessions, but its packets fell from about 125 to 2 a second after the restart. The rule
+  reverts only when the sessions fall too. The fleet's total held at about 1,740 packets a second through 06:15Z, with
+  g2, g7 and g8 gaining, so the traffic moved to other blocks. g3, on the same build, gained WireGuard traffic.
+
+**Three stops on edge-2, all judged shared load; each resumed with a fresh baseline and every other guard unchanged.**
+1. **Before g1, 06:32:30Z:** the health gate read edge-2's 5-minute busy CPU at 0.551 against a limit of 0.509, set from
+   the 0.459 read when the roll started at 04:13Z. Main carried load the roll didn't cause: a zero-byte contract cleanup
+   (1,000 rows a second from 01:43Z, 2,000 from 06:43Z), a large export and autovacuum. A connect roll by another
+   lane came next (06:50–06:56Z), so the proxy roll waited for it, then resumed at 07:02Z with a fresh baseline (0.588,
+   limit 0.638).
+2. **After g4, 08:04:26Z (0.494 → 0.635):** g4's state load came at 07:51–07:55 (74–83 acquired connections) and was over
+   by 07:57, but edge-2 kept reading 0.62–0.72 through 08:03. The rise matched the end of the connect drain: the old
+   connect processes exited at 07:49–07:55Z, api requests rose from 6.9k to 7.7k a second, and edge-2's user CPU from
+   0.33–0.37 to 0.46–0.53. g1 and g2 on the same build read 0.557 → 0.471 and 0.453 → 0.469. Resumed at 08:09Z with a
+   fresh baseline (0.593, limit 0.643).
+3. **After g5, 08:45:55Z (0.507 → 0.641):** g5's state load came at 08:34–08:38 (62–79 acquired connections), with edge-2
+   at 0.56–0.60, below the 0.63 it read at 08:20 before g5. The rise to 0.70 came at 08:40–08:44, after the load, with
+   bot sweeps rising from 436 to 489 a second; edge-2 read 0.40 at 08:46. Resumed at 08:46Z (baseline 0.636, limit
+   0.686).
+
+**The half-fleet check after g4** was read by hand, the stop having come first: proxy-test setup p50 8.11 s against
+8.55 s before g6 (revert above 12.8 s), the success share 0.733 against 0.813 (revert below 0.563), and the rolled
+blocks' active devices against the old blocks' 1.034, against 0.973 before g6.
+
+**The other blocks.** Each passed the validator, health and payout gates and the version guard, then settled 600 s.
+Per process about 15 minutes after its deploy, so the readings include restart relief:
+
+| Block | Deployed | Cores (other blocks) | GC a minute (other blocks) | Heap+stacks GB (other blocks) | edge-2 5m before → after | WireGuard median packets/s, sessions |
+|---|---|---|---|---|---|---|
+| g1 | 07:19:23Z | 2.06 (2.33) | 6.1 (9.7) | 6.98 (7.14) | 0.557 → 0.471 | 53 → 25, 8 → 8 |
+| g2 | 07:34:32Z | 1.99 (2.22) | 7.4 (8.8) | 7.06 (7.16) | 0.453 → 0.469 | 379 → 195, 17 → 16 |
+| g4 | 07:49:52Z | 2.33 (2.30) | 9.8 (8.9) | 7.04 (7.08) | 0.494 → 0.635 (stop 2) | 145 → 28, 14 → 19 (read at 08:05) |
+| g5 | 08:31:22Z | 2.27 (2.30) | 8.9 (8.8) | 7.16 (7.11) | 0.507 → 0.641 (stop 3) | 194 → 135, 11 → 13 (read at 08:47) |
+| g7 | 08:46:51Z | 2.35 (2.30) | 7.4 (9.0) | 7.11 (7.13) | 0.622 → 0.536 | 370 → 81, 13 → 9 |
+| g8 | 09:01:57Z | 2.34 (2.30) | 8.2 (9.6) | 6.99 (7.18) | 0.539 → 0.486 | 343 → 124, 18 → 14 |
+| g9 | 09:17:03Z | 2.22 (2.32) | 7.9 (8.7) | 6.84 (7.08) | 0.499 → 0.543 | 128 → 87, 15 → 19 |
+| g10 | 09:43:04Z | 2.25 (2.30) | 8.6 (9.5) | 7.10 (7.15) | 0.628 → 0.475 | 135 → 33, 17 → 12 |
+
+- Every block's WireGuard resumed above the rule's 10% of its median, with sessions above half. g6's traffic, which had
+  moved to other blocks after its restart, was back at 154 packets a second and 14 sessions by 08:05Z.
+- The roll ended at 09:58Z with the fleet's unchecked share at 0.0014 (the alert warns above 0.05). Both proxy hosts stayed
+  at 99% busy throughout, so the collector runs whatever CPU it is given: per-process cores barely move, and GC a
+  minute and allocation are the readings that show the saving.
+
+### 9.4 The flag
+
+The step began once every reader ran its D71 build (warpctl: api 5 of 5 blocks, proxy 10 of 10, mcp 5 of 5, taskworker
+2 of 2), every process reported the decode counter (api, proxy and mcp 20 of 20, the taskworker 8 of 8), and no reader
+had a decode error.
+
+- **Config:** `typed_score_pages: true` added to the `egress_index` line of `main/provider.yml` and nothing else, merged
+  with `--no-ff` and pushed at 09:59Z. The config-updater built from it, `2026.11.23-outerwerld-1106279920`, kept
+  the running release's warp, so only that line changed. The server's config and egress-index settings tests passed on
+  it (15). It was deployed at 10:13:31Z under the validator gate, and all six hosts published it within 85 s, every file
+  hash as built.
+- **The writer:** in place of a plain restart, the taskworker rolled to `2026.11.23-outerwerld-1106178960`
+  (`sha256:097f9452…`). It is built from server `81287a91a` with every D71 gate and audit, and adds one change, the
+  contract horizon reaper's rate cap raised from 2,000 to 5,000 rows a second. The new containers mount the new config.
+  g1 rolled at 10:15:55Z.
+- **The first typed pass** ran at 10:22:11Z on a new g1 process. Within the next pass every page was written typed: 446
+  page encodes a second over the pass, no gob fallback. Readers decoded typed pages at once (the api 115 a second, the
+  proxy 70) with no decode error in either format. Gob decodes fell as cached gob pages expired.
+- **A stop in g1's watch, judged shared.** At 10:21:22Z the roll's watch read the api's mean latency over 25 ms three
+  times in a row (35 ms on the 2-minute rate). Main stalled for a minute at 10:14 and at 10:20, on all four api hosts at
+  once and on database-heavy routes (`GET /subscription/balance` 541 and 290 ms), with the hosts' CPU flat. The first
+  stall came before the roll, as the config hosts published, and the second before the first typed pass. The latency was
+  back to 13.9 ms by 10:25Z, and the roll resumed with its gates unchanged. g2 rolled at 10:52:58Z, after the validator
+  window and the award run that g1's start had seeded, and its watch passed.
+- **Fully typed from 10:56Z.** Over the ten minutes to 11:06Z every export pass wrote typed pages (360 page encodes a
+  second, no gob and no gob fallback), and every reader decoded only typed pages (the api 113 a second, the proxy 63,
+  the taskworker 0.7) with no decode error. Page decodes fell against the gob passes (the api 130–260 a second, the
+  proxy 150–240), as the larger effective page cache misses less.
+- **Rollback:** `typed_score_pages: false`, a config release and a taskworker restart; readers keep reading both formats.
+
+### 9.5 Measured
+
+Both proxy hosts were CPU-bound throughout, 98.5–99.8% busy, so each runs about 23 proxy cores whatever the build: the
+collector takes whatever CPU it is given, so a saving shows as less allocation and more work per core, not as fewer
+cores. Per host, 30-minute windows:
+
+| | before the roll (03:43–04:13Z) | after the roll (09:51–10:21Z) | after the flag (10:23–10:53Z) |
+|---|---|---|---|
+| crisp: allocation MB/s per process | 78.7 | 83.6 | 75.6 |
+| crisp: active devices | 7,543 | 8,568 | 8,278 |
+| crisp: allocation per 1k active devices, MB/s | 104 | 98 | 91 |
+| crisp: proxy cores per 1k active devices | 3.00 | 2.68 | 2.79 |
+| fireside: allocation MB/s per process | 66.6 | 69.1 | 62.0 |
+| fireside: active devices | 6,689 | 7,758 | 7,286 |
+| fireside: allocation per 1k active devices, MB/s | 100 | 89 | 85 |
+| fireside: proxy cores per 1k active devices | 3.43 | 2.98 | 3.18 |
+
+- **The roll** (the contract stats change, and every process restarted): allocation per active device fell 6% on crisp
+  and 11% on fireside, at 14–16% more active devices.
+- **The flag** (typed pages): allocation fell 8.0 MB/s per process on crisp and 7.1 on fireside, against §5's
+  expectation of 3–5. Per active device the fall is 7% and 5%. The flag's window still held part of one gob pass.
+- **Cores:** cores per active device read lower after the roll and the flag than before, but on saturated hosts that
+  figure follows the load more than the build. It does not measure §4's 0.7–1.1 and 1.0–1.6 cores. A perf capture
+  of `decodeClientScorePageBytes` and the tracker's emit against CPUOPT7's stacks, or a reading once the new hosts end
+  the saturation, would.
