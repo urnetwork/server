@@ -78,7 +78,7 @@ const itBridgeShareKeyDirectory = "itb-share-key"
 // One target of a share: an X destination, and the alias Y's accept gave it.
 type itBridgeShareTarget struct {
 	target *itBridgeTarget
-	// in Y's block; invalid before the accept
+	// in the block Y's bootstrap drew (ItBridgeWorld.readBlock); invalid before the accept
 	alias netip.Prefix
 }
 
@@ -218,7 +218,7 @@ func (self *itBridgeShare) Open(ctx context.Context) error {
 		self.accepted, self.preview = accepted, preview
 		for index, shareTarget := range self.targets {
 			alias := accepted.Aliases[index]
-			shareTarget.alias = netip.PrefixFrom(itBridgeAddr(itBridgeIpv4(y.settings.Block.Masked().Addr())|alias.GetAliasHostBits()), int(alias.GetLength()))
+			shareTarget.alias = netip.PrefixFrom(itBridgeAddr(itBridgeIpv4(y.block.Masked().Addr())|alias.GetAliasHostBits()), int(alias.GetLength()))
 		}
 	}()
 	grantId, err := self.activate(ctx, preview)

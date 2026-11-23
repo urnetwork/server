@@ -4,10 +4,11 @@
 // its bridge (it_bridge_wire_test.go), the destinations they forward to (it_bridge_targets_test.go), the network's block
 // and ACL document, the filings that join and leave subnets and set up and remove forwards, each on a timeline the
 // oracle reads, and the clients' attempts. A second network of the case on the same World (AddPeer) is built alike,
-// with its own name, device names, block and document, for a share between the two (it_bridge_shares_test.go).
+// with its own name, device names, document and the block its own bootstrap drew, for a share between the two
+// (it_bridge_shares_test.go).
 //
-//	owner    the network's first device: it bootstraps the network, sets its block in a config head (`ur bridge block`)
-//	         and saves the ACL document (`ur acl push`), and files a share's acts as the network's admin; it runs no
+//	owner    the network's first device: it bootstraps the network, whose first head carries the block the bootstrap
+//	         drew, saves the ACL document (`ur acl push`), and files a share's acts as the network's admin; it runs no
 //	         bridge
 //	subnets  S devices, each in front of one subnet, a prefix carved from SubnetPrefixes: its route (`ur bridge expose`)
 //	         joins the subnet to the network and its BridgeWithdraw, reset, takes it out (§17.8's revocation row, so
@@ -32,15 +33,18 @@
 // port its rule leaves out still enters the link and is the forwarding role's to refuse (§17.6's rule 6).
 //
 // The filings go through each device's BridgeFiler, the path `ur bridge` and MCP's bridge tools take, through §16.6's
-// stock approval gate over the device's follower, whose standing grants are the document's, behind the World's
-// worldDeviceGate approving exposures as a person would: the stock gate holds every exposure, route or map, for a
-// person's decision, even one the document's standing route or dial rule covers, since its standing check is
-// AclEngine.ActiveGrant, which covers only an action with grant fields, and an exposure's CanonicalAction carries none
-// (a product finding of the case's, approval-gate-standing-exposures, queued; each device's summary line counts the
-// exposures it held). The filer then files the rule with no approval, which every reader holds in force only while the
-// document covers it (§17.7; AclLocalPolicy.StandingCovers), so the stand-in opens nothing the document does not. A
-// network has no block until its owner sets one (setBlock), since no bootstrap draws the first (§17.4; a finding of the
-// case's, bridge-block-bootstrap, queued).
+// stock approval gate over the device's follower (World.InstallApprovalGate), whose standing grants are the
+// document's: a route or map the document's standing route or dial rule covers passes it with nothing filed, the gate
+// asking the engine whether the rule it files stands (AclEngine.StandingRule, the predicate every reader holds a rule
+// filed with no approval in force by, AclLocalPolicy.StandingCovers; §17.7, §17.8's approval row). Nothing stands in
+// for a person here, so an exposure the gate held for one fails its join. The case found the gate holding every
+// exposure, its standing check covering only an action with grant fields, and approved them through the World's
+// worldDeviceGate until approval-gate-standing-exposures (sidecar 99d7f101 to e1c83b88) landed.
+//
+// A network's block is the one its bootstrap drew into its first head (§17.4's first block row; the case set it as an
+// admin's act until bridge-block-bootstrap, sidecar 58fd1846 to a49e3bff, landed): the case reads it as a filer reads
+// the block in force (readBlock), and holds every host's claimed address to it and every device's compile to holding
+// it (checkCompiledBlock). A share's aliases are host bits of the accepting network's block, so its own drawn block too.
 //
 // The case keeps its World on FakeGkm (WorldSettings.FakeGkm), where a World runs real keys by default since
 // keys-late-delivery and gkm-repo-create-race landed: a filing seals its body under the config repo's key, which each
@@ -117,8 +121,11 @@ type ItBridgeSettings struct {
 	// second, maps UDP and the others TCP: 8000 and 2.
 	ForwardPortBase uint16
 	ForwardUdpEvery int
-	// The network's block, which the owner sets (§17.4): a /16 of 100.64/10 outside 100.64/16 and 100.100/16.
-	Block netip.Prefix
+	// The prefixes a network's bootstrap draws its first block from (§17.4's first block row), which the case holds each
+	// network's block to (readBlock): the /16s of 100.64.0.0/10 but 100.64.0.0/16 and 100.100.0.0/16, 62 of them.
+	BlockBits       int
+	BlockRange      netip.Prefix
+	BlockExclusions []netip.Prefix
 	// The grant matrix (the file's header).
 	SubnetGrantModulus   int
 	SubnetDeniedResidue  int
@@ -224,7 +231,9 @@ func DefaultItBridgeSettings() *ItBridgeSettings {
 		SubnetServicePort:          7000,
 		ForwardPortBase:            8000,
 		ForwardUdpEvery:            2,
-		Block:                      netip.MustParsePrefix("100.88.0.0/16"),
+		BlockBits:                  16,
+		BlockRange:                 netip.MustParsePrefix("100.64.0.0/10"),
+		BlockExclusions:            []netip.Prefix{netip.MustParsePrefix("100.64.0.0/16"), netip.MustParsePrefix("100.100.0.0/16")},
 		SubnetGrantModulus:         4,
 		SubnetDeniedResidue:        3,
 		SubnetTcpOnlyResidue:       2,
@@ -487,6 +496,8 @@ type ItBridgeWorld struct {
 	clients  []*itBridgeDevice
 	// every device that runs a bridge
 	devices []*itBridgeDevice
+	// the network's block, as its bootstrap drew it into the first head (readBlock)
+	block netip.Prefix
 	// each host's overlay address, by the host's index
 	hostAddresses []netip.Addr
 	// the route grants the clients ask (it_bridge_grants_test.go); none unless RouteGrants
@@ -517,8 +528,8 @@ type itBridgeChaos struct {
 }
 
 // The case's world, made inside a TestEnv that applies the migrations: the World, its network of 1+S+H+C devices, the
-// destinations, the block and the document, and every device's bridge adopted at the tip. Closed at t's end, or by
-// Close. settings nil takes the defaults.
+// destinations, the block its bootstrap drew and the document, and every device's bridge adopted at the tip. Closed at
+// t's end, or by Close. settings nil takes the defaults.
 func NewItBridgeWorld(t testing.TB, settings *ItBridgeSettings) *ItBridgeWorld {
 	t.Helper()
 	if settings == nil {
@@ -556,8 +567,8 @@ func NewItBridgeWorld(t testing.TB, settings *ItBridgeSettings) *ItBridgeWorld {
 	return newItBridgeNetwork(t, world, settings, &exchangeSettings)
 }
 
-// Another network of the case on the World of self, with its own devices, destinations, block and document, built as
-// NewItBridgeWorld builds the first (it_bridge_shares_test.go's accepting network). Its settings' World and
+// Another network of the case on the World of self, with its own devices, destinations, drawn block and document, built
+// as NewItBridgeWorld builds the first (it_bridge_shares_test.go's accepting network). Its settings' World and
 // ExchangeConnectionMaxCount are the first network's; its NetworkName and DeviceNamePrefix should differ from the
 // first's, so its devices' names are its own. Closed at t's end, before the first.
 func (self *ItBridgeWorld) AddPeer(t testing.TB, settings *ItBridgeSettings) *ItBridgeWorld {
@@ -701,6 +712,10 @@ func (self *ItBridgeWorld) build(ctx context.Context) error {
 	if err := self.formConfigGroup(ctx); err != nil {
 		return err
 	}
+	// the block the bootstrap drew into the first head (the file's header), which no admin sets here
+	if self.block, err = self.readBlock(ctx); err != nil {
+		return fmt.Errorf("%s's block: %w", settings.NetworkName, err)
+	}
 	// the config repo's keys in each Sidecar, which a filing seals its body under: a follower installs its own only
 	// over a key client with forwarding setup's key parts (bridge_setup_sources.go), which the World's FakeGkm client
 	// has none of, so the case installs the follower's as that would
@@ -708,31 +723,28 @@ func (self *ItBridgeWorld) build(ctx context.Context) error {
 		remove := device.t3.Sidecar().InstallConfigKeys(&itBridgeConfigKeys{follower: device.t3.Follower()})
 		self.world.T3().OnClose(remove)
 	}
-	// filings go through §16.6's stock gate over each filer's follower, its standing grants the document's, behind the
-	// World's stand-in approving the exposures it holds for a person (the file's header)
+	// filings go through §16.6's stock gate over each filer's follower, its standing grants the document's (the file's
+	// header)
 	for _, filer := range slices.Concat([]*itBridgeDevice{self.owner}, self.routerDevices(), self.hosts) {
-		var err error
-		if filer.gate, err = self.world.InstallDeviceGate(ctx, filer.t3, sidecar.SidecarActionExpose); err != nil {
+		if _, err := self.world.InstallApprovalGate(ctx, filer.t3); err != nil {
 			return err
 		}
+		var err error
 		if filer == self.owner {
 			// the owner, an admin's device, also files the shares' acts (it_bridge_shares_test.go)
 			filer.filer, err = self.newShareFiler(filer)
 		} else {
-			filer.filer, err = self.newFiler(filer, nil)
+			filer.filer, err = self.newFiler(filer)
 		}
 		if err != nil {
 			return err
 		}
 	}
-	if err := self.setBlock(ctx); err != nil {
-		return err
-	}
 	self.policy, err = self.policySource()
 	if err != nil {
 		return err
 	}
-	// the document's save waits out the base the block took (one a minute, §7.9) while the bridges start
+	// the document's save waits out any base of the network's last minute (one a minute, §7.9) while the bridges start
 	saved := make(chan error, 1)
 	go func() {
 		saved <- self.saveDocument(ctx, self.policy, nil)
@@ -749,6 +761,11 @@ func (self *ItBridgeWorld) build(ctx context.Context) error {
 			<-saved
 			return fmt.Errorf("%s's address: %w", host.name, err)
 		}
+		// §17.6's address plan draws a device's overlay address from the network's block
+		if !self.block.Contains(filing.Address) {
+			<-saved
+			return fmt.Errorf("%s claimed %s, outside the network's block %s", host.name, filing.Address, self.block)
+		}
 		self.hostAddresses = append(self.hostAddresses, filing.Address)
 		self.echoes[index].prefix = netip.PrefixFrom(filing.Address, 32)
 	}
@@ -761,7 +778,68 @@ func (self *ItBridgeWorld) build(ctx context.Context) error {
 	if err := self.installGrantGates(ctx); err != nil {
 		return err
 	}
-	return self.AwaitAdopted(ctx, self.tip())
+	if err := self.AwaitAdopted(ctx, self.tip()); err != nil {
+		return err
+	}
+	return self.checkCompiledBlock()
+}
+
+// The network's block as its bootstrap drew it into the first head (§17.4's first block row), read as a filer reads
+// the block in force: the head the owner's newest verified base names, its record judged at that state
+// (sidecar.ReadBridgeBlock). Refused for a head that holds none, a record the state refuses, a prefix outside the draw
+// (ItBridgeSettings.BlockRange), and a block that drains another, where a first block replaces none.
+func (self *ItBridgeWorld) readBlock(ctx context.Context) (netip.Prefix, error) {
+	follower := self.owner.t3.Follower()
+	client := follower.Client()
+	if client == nil || client.State() == nil || client.State().Base() == nil {
+		return netip.Prefix{}, fmt.Errorf("%s's follower holds no base", self.owner.name)
+	}
+	state := client.State()
+	base := state.Base()
+	head, err := follower.Heads().ReadConfigHead(ctx, base.GetConfigVersion(), base.GetConfigHeadSha256())
+	if err != nil {
+		return netip.Prefix{}, fmt.Errorf("the head base %d names: %w", base.GetVersion(), err)
+	}
+	block, err := sidecar.ReadBridgeBlock(head, state, nil)
+	if err != nil {
+		return netip.Prefix{}, fmt.Errorf("the head base %d names: %w", base.GetVersion(), err)
+	}
+	if block == nil {
+		return netip.Prefix{}, fmt.Errorf("the head base %d names holds no block, where the bootstrap draws the first (§17.4)", base.GetVersion())
+	}
+	settings := self.settings
+	prefix := bridgeWirePrefix(block.GetIpv4Prefix())
+	if prefix.Bits() != settings.BlockBits || !settings.BlockRange.Contains(prefix.Addr()) || slices.Contains(settings.BlockExclusions, prefix) {
+		return netip.Prefix{}, fmt.Errorf("the head base %d names holds the block %v, none of the /%d of %s but %v that the bootstrap draws from", base.GetVersion(),
+			block.GetIpv4Prefix(), settings.BlockBits, settings.BlockRange, settings.BlockExclusions)
+	}
+	if block.GetPreviousPrefix() != nil {
+		return netip.Prefix{}, fmt.Errorf("the head base %d names holds the block %s draining %v, where a first block replaces none", base.GetVersion(), prefix,
+			block.GetPreviousPrefix())
+	}
+	return prefix, nil
+}
+
+// Whether every device's bridge compiled the network's block (readBlock), as every reader of the heads takes it: an
+// error naming each that holds another or none.
+func (self *ItBridgeWorld) checkCompiledBlock() error {
+	errs := []error{}
+	for _, device := range self.devices {
+		wire := device.currentWire()
+		if wire == nil {
+			errs = append(errs, fmt.Errorf("%s's bridge is down", device.name))
+			continue
+		}
+		compiled := wire.component.Compiled()
+		if compiled == nil || compiled.Block == nil {
+			errs = append(errs, fmt.Errorf("%s's bridge compiled no block, where the network's is %s: %s", device.name, self.block, self.compileWaits(device)))
+			continue
+		}
+		if held := bridgeWirePrefix(compiled.Block.GetIpv4Prefix()); held != self.block {
+			errs = append(errs, fmt.Errorf("%s's bridge compiled the block %s, where the network's is %s", device.name, held, self.block))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // A follower's config repo keys as its Sidecar holds them (sidecar.SidecarConfigKeys), as the follower installs its own
@@ -857,41 +935,23 @@ func (self *ItBridgeWorld) answerer(clientIndex int, target *itBridgeTarget) *it
 	return target
 }
 
-// A filer for device over its follower, as ur daemon's composition builds one (cli's bridge_filing_config.go);
-// headWriter its config writer for SetBlock, nil for none.
-func (self *ItBridgeWorld) newFiler(device *itBridgeDevice, headWriter sidecar.BridgeHeadWriter) (*sidecar.BridgeFiler, error) {
+// A filer for device over its follower, as ur daemon's composition builds one (cli's bridge_filing_config.go), with no
+// config writer: a router's and a host's filings are statements, which save no head.
+func (self *ItBridgeWorld) newFiler(device *itBridgeDevice) (*sidecar.BridgeFiler, error) {
 	follower := device.t3.Follower()
-	args := &sidecar.BridgeFilerArgs{
+	return sidecar.NewBridgeFiler(&sidecar.BridgeFilerArgs{
 		Sidecar:  device.t3.Sidecar(),
 		Config:   follower.Client(),
 		Heads:    follower.Heads(),
 		AclLocal: follower.AclLocal,
-	}
-	if headWriter != nil {
-		args.HeadWriter = func() sidecar.BridgeHeadWriter { return headWriter }
-	}
-	return sidecar.NewBridgeFiler(args)
-}
-
-// The owner sets the network's block in a config head, as `ur bridge block <cidr>` does on an admin's device
-// (BridgeFiler.SetBlock), through its config writer (itBridgeHeadWriter). §17.4 has the bootstrap draw the first block
-// into the first head, and no bootstrap does, so a network has none until an admin sets one (bridge-block-bootstrap,
-// queued).
-func (self *ItBridgeWorld) setBlock(ctx context.Context) error {
-	filer, err := self.newFiler(self.owner, &itBridgeHeadWriter{world: self, device: self.owner})
-	if err != nil {
-		return err
-	}
-	if _, err := filer.SetBlock(ctx, &sidecar.BridgeFileOrigin{Act: sidecar.SidecarActConfirmed}, &sidecar.BridgeBlockRequest{Prefix: self.settings.Block}); err != nil {
-		return fmt.Errorf("the block: %w", err)
-	}
-	return nil
+	})
 }
 
 // device's config writer as a daemon's filer saves heads through it (sidecar.BridgeHeadWriter): each SaveHead makes a
-// writer over the ref device's follower holds for confirmed saves, saves through it and closes it, its base published
-// through the device's own api, and then syncs the network at the base. A base api refuses 429, past §7.9's
-// config_bases_per_min, is saved again once its retry_after has passed, within the World's RateLimitWaitTimeout.
+// writer over the ref device's follower holds for confirmed saves, which keeps the network's block as the follower's
+// writers do (sidecar.WithBridgeBlock), saves through it and closes it, its base published through the device's own
+// api, and then syncs the network at the base. A base api refuses 429, past §7.9's config_bases_per_min, is saved
+// again once its retry_after has passed, within the World's RateLimitWaitTimeout.
 type itBridgeHeadWriter struct {
 	world  *ItBridgeWorld
 	device *itBridgeDevice
@@ -919,6 +979,9 @@ func (self *itBridgeHeadWriter) SaveHead(ctx context.Context, edit func(head *si
 		Client:    follower.Client(),
 		Heads:     provider.ConfirmedAclConfigRef(),
 		Publisher: api,
+		// §17.4 and QD-1205, as the follower's writers take it: a head that holds no block gets one, and a block whose
+		// signer no longer stands is signed again
+		BridgeBlock: sidecar.WithBridgeBlock,
 	})
 	if err != nil {
 		return nil, err
