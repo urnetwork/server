@@ -250,3 +250,8 @@ replace github.com/jackc/pgx/v5 => ./third_party/pgx
 // within a window, SkipConnCheckWithin, which the pools with command retries
 // set (third_party/go-redis/URNETWORK.md; LBALTOPT2 R19).
 replace github.com/redis/go-redis/v9 => ./third_party/go-redis
+
+// UConn.Write releases its interlock with Close after its compare-and-swap
+// loop, so a write allocates no defer record (third_party/utls/URNETWORK.md;
+// CPUOPT7 P3).
+replace github.com/refraction-networking/utls => ./third_party/utls

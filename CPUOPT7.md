@@ -1173,6 +1173,8 @@ a tenth of the fleet.
 
 #### X1. Contract-origin edges only to their waiters (rank 2)
 
+- **Design for review (11-23, not built):** CPUOPT7-ORIGIN-DELIVERY.md. The owner held this item for a design review
+  when choosing "Top 5 minus #2".
 - **Where:** server `model/contract_origin_notification.go`.
   - `runPublisher` SPUBLISHes every committed origin to one of 16 bucket channels.
   - `runBucket` and `RunRedisShardSubscription` deliver every message to every subscribing process.
