@@ -26,13 +26,16 @@ const (
 	contractOriginIncomingLimit        = 2 * time.Second
 )
 
+// A received edge also counts what it found: matched_waiter when its pair has a
+// watch here, matched_refusal when it removed a recorded route refusal, and
+// unmatched when it found neither. An edge that finds both counts both.
 var contractOriginNotificationCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "urnetwork_contract_origin_notifications_total",
-	Help: "Advisory contract-origin notification operations by a fixed event class; drops require authoritative timed rechecks",
+	Help: "Advisory contract-origin notification operations by a fixed event class; drops require authoritative timed rechecks. A received edge also counts matched_waiter (its pair has a watch), matched_refusal (it removed a route refusal) or unmatched (neither).",
 }, []string{"event"})
 
 func init() {
-	for _, event := range []string{"enqueued", "published", "publish_failed", "queue_full", "owner_closed", "unowned", "subscribed", "reconnected", "subscription_failed", "received", "invalid_message", "registration_declined"} {
+	for _, event := range []string{"enqueued", "published", "publish_failed", "queue_full", "owner_closed", "unowned", "subscribed", "reconnected", "subscription_failed", "received", "invalid_message", "registration_declined", "matched_waiter", "matched_refusal", "unmatched"} {
 		contractOriginNotificationCounter.WithLabelValues(event)
 	}
 	prometheus.MustRegister(contractOriginNotificationCounter)
@@ -375,7 +378,8 @@ func contractOriginSubscriptionSettings() *server.RedisShardSubscriptionSettings
 }
 
 // Snapshot under the registry lock, then notify outside it: monitor operations
-// never nest an external lock inside the registry's state lock.
+// never nest an external lock inside the registry's state lock. An edge (a
+// non-nil key) counts what it found; a resync counts nothing.
 func (self *ContractOriginNotifications) notifyBucket(index int, key *[32]byte) {
 	var pairs []*contractOriginPair
 	func() {
@@ -399,7 +403,16 @@ func (self *ContractOriginNotifications) notifyBucket(index int, key *[32]byte) 
 	// fence is one of those channels is then either refused by its closed
 	// fence or recorded before this removal (see `contractRouteRejections.put`).
 	if key != nil {
-		self.routeRejections.invalidate(*key)
+		removed := self.routeRejections.invalidate(*key)
+		if 0 < len(pairs) {
+			contractOriginNotificationCounter.WithLabelValues("matched_waiter").Inc()
+		}
+		if removed {
+			contractOriginNotificationCounter.WithLabelValues("matched_refusal").Inc()
+		}
+		if len(pairs) == 0 && !removed {
+			contractOriginNotificationCounter.WithLabelValues("unmatched").Inc()
+		}
 	} else {
 		self.routeRejections.invalidateBucket(index)
 	}

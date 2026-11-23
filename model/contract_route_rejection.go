@@ -204,11 +204,24 @@ func (self *contractRouteRejections) expireWithLock(now time.Time) {
 }
 
 // Removes both request shapes of a route whose reverse pair had an origin edge.
-func (self *contractRouteRejections) invalidate(originPair [32]byte) {
+// Returns whether a refusal still within its timeout was removed.
+func (self *contractRouteRejections) invalidate(originPair [32]byte) bool {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
-	delete(self.entries, contractRouteRejectionKey{originPair: originPair, companion: false})
-	delete(self.entries, contractRouteRejectionKey{originPair: originPair, companion: true})
+	removed := false
+	for _, companion := range [2]bool{false, true} {
+		key := contractRouteRejectionKey{originPair: originPair, companion: companion}
+		entry, ok := self.entries[key]
+		if !ok {
+			continue
+		}
+		delete(self.entries, key)
+		// an expired entry waits for its slot to reach the head
+		if !removed && time.Now().Before(entry.validUntil) {
+			removed = true
+		}
+	}
+	return removed
 }
 
 // Removes every route in a bucket whose subscription may have missed edges.

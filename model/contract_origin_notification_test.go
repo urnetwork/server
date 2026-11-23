@@ -14,6 +14,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/redis/go-redis/v9"
 	"github.com/urnetwork/server"
 )
@@ -308,6 +309,119 @@ func TestContractOriginNotificationsCommitOutlivesRequestCancellation(t *testing
 		notifyCommittedContractOrigin(ctx, server.NewId(), server.NewId())
 		if err := <-published; err != nil {
 			t.Fatalf("committed origin inherited caller cancellation: %v", err)
+		}
+	})
+}
+
+// Returns a pair in the bucket.
+func testContractOriginPairInBucket(bucket int) (sourceId server.Id, destinationId server.Id) {
+	for {
+		sourceId, destinationId = server.NewId(), server.NewId()
+		key := contractOriginPairHash(sourceId, destinationId)
+		if int(key[0])%contractOriginBucketCount == bucket {
+			return
+		}
+	}
+}
+
+// The deltas of what received edges found, for one test.
+type testContractOriginMatches struct {
+	matchedWaiter  float64
+	matchedRefusal float64
+	unmatched      float64
+}
+
+func testContractOriginMatchCounts() testContractOriginMatches {
+	return testContractOriginMatches{
+		matchedWaiter:  testutil.ToFloat64(contractOriginNotificationCounter.WithLabelValues("matched_waiter")),
+		matchedRefusal: testutil.ToFloat64(contractOriginNotificationCounter.WithLabelValues("matched_refusal")),
+		unmatched:      testutil.ToFloat64(contractOriginNotificationCounter.WithLabelValues("unmatched")),
+	}
+}
+
+// Stage 0 of CPUOPT7-ORIGIN-DELIVERY: each received edge counts what it found
+// here, exactly once per class. A watched pair is matched_waiter, a removed
+// refusal matched_refusal, both count both, and an edge that finds neither,
+// including one whose refusal is already gone or expired, is unmatched. A
+// resync is not an edge and counts nothing.
+func TestContractOriginNotificationsCountWhatEachEdgeFinds(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		opened := make(chan testContractOriginOpen, contractOriginBucketCount)
+		settings := DefaultContractOriginNotificationSettings()
+		owner := testContractOriginOwner(t.Context(), settings, opened)
+		defer owner.Close()
+		watchedSourceId, watchedDestinationId := testContractOriginPairInBucket(3)
+		watch := owner.Watch(watchedSourceId, watchedDestinationId)
+		defer watch.Close()
+		synctest.Wait()
+		connection := <-opened
+		connection.subscription.events <- &redis.Subscription{Kind: "ssubscribe", Channel: connection.channel}
+		synctest.Wait()
+
+		// a route refused here, whose reverse pair is in the same bucket
+		refusedOriginId, refusedRouteSourceId := testContractOriginPairInBucket(3)
+		missing := ContractRouteRejection{Cause: ContractRouteMissingOrigin, ResolutionPath: "stream_fallback"}
+		// a watched pair whose reverse route is refused too
+		bothSourceId, bothDestinationId := testContractOriginPairInBucket(3)
+		bothWatch := owner.Watch(bothSourceId, bothDestinationId)
+		defer bothWatch.Close()
+		unwatchedSourceId, unwatchedDestinationId := testContractOriginPairInBucket(3)
+		for _, route := range [][2]server.Id{
+			{refusedRouteSourceId, refusedOriginId},
+			{bothDestinationId, bothSourceId},
+		} {
+			if !owner.RecordRouteRejection(route[0], route[1], true, missing, nil) {
+				t.Fatal("refusal was not stored")
+			}
+		}
+		edge := func(sourceId server.Id, destinationId server.Id) testContractOriginMatches {
+			before := testContractOriginMatchCounts()
+			key := contractOriginPairHash(sourceId, destinationId)
+			connection.subscription.events <- &redis.Message{Channel: connection.channel, Payload: hex.EncodeToString(key[:])}
+			synctest.Wait()
+			after := testContractOriginMatchCounts()
+			return testContractOriginMatches{
+				matchedWaiter:  after.matchedWaiter - before.matchedWaiter,
+				matchedRefusal: after.matchedRefusal - before.matchedRefusal,
+				unmatched:      after.unmatched - before.unmatched,
+			}
+		}
+		for _, check := range []struct {
+			name          string
+			sourceId      server.Id
+			destinationId server.Id
+			want          testContractOriginMatches
+		}{
+			{name: "watched pair", sourceId: watchedSourceId, destinationId: watchedDestinationId, want: testContractOriginMatches{matchedWaiter: 1}},
+			{name: "refused route", sourceId: refusedOriginId, destinationId: refusedRouteSourceId, want: testContractOriginMatches{matchedRefusal: 1}},
+			{name: "refused route again", sourceId: refusedOriginId, destinationId: refusedRouteSourceId, want: testContractOriginMatches{unmatched: 1}},
+			{name: "watched and refused", sourceId: bothSourceId, destinationId: bothDestinationId, want: testContractOriginMatches{matchedWaiter: 1, matchedRefusal: 1}},
+			{name: "unwatched pair", sourceId: unwatchedSourceId, destinationId: unwatchedDestinationId, want: testContractOriginMatches{unmatched: 1}},
+		} {
+			if got := edge(check.sourceId, check.destinationId); got != check.want {
+				t.Fatalf("%s: counted %+v, want %+v", check.name, got, check.want)
+			}
+		}
+		// an acknowledgement nothing asked for resyncs the bucket
+		resubscribedBefore := testutil.ToFloat64(contractOriginNotificationCounter.WithLabelValues("reconnected"))
+		before := testContractOriginMatchCounts()
+		connection.subscription.events <- &redis.Subscription{Kind: "ssubscribe", Channel: connection.channel}
+		synctest.Wait()
+		if testutil.ToFloat64(contractOriginNotificationCounter.WithLabelValues("reconnected")) != resubscribedBefore+1 {
+			t.Fatal("the fixture's acknowledgement did not resync the bucket")
+		}
+		if after := testContractOriginMatchCounts(); after != before {
+			t.Fatalf("a resync counted %+v, then %+v", before, after)
+		}
+
+		// a refusal that expires before its edge arrives
+		expiredOriginId, expiredRouteSourceId := testContractOriginPairInBucket(3)
+		if !owner.RecordRouteRejection(expiredRouteSourceId, expiredOriginId, true, missing, nil) {
+			t.Fatal("refusal was not stored")
+		}
+		time.Sleep(settings.RouteRejectionTimeout)
+		if got := edge(expiredOriginId, expiredRouteSourceId); got != (testContractOriginMatches{unmatched: 1}) {
+			t.Fatalf("expired refusal: counted %+v, want unmatched only", got)
 		}
 	})
 }
