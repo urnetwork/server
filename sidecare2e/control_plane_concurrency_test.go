@@ -85,7 +85,11 @@
 //     by the same path
 //
 // e2e-headers-final's run passed all four cases (2026-11-23, server 9d7022daa on sidecar c88a64af): this one in 59 s,
-// the race not meeting it, the chaos in 31 s, the cold gate in 30 s and the quotas in 223 s.
+// the race not meeting it, the chaos in 31 s, the cold gate in 30 s and the quotas in 223 s. With the race fixed,
+// e2e-flakes-final ran the four six times through the wrapper (2026-11-23), three on server a7e5f4b1f with sidecar
+// c68f00ad and three once merged with the tip (server 85b9b530c, sidecar a9d686d6): all passed every time, this one
+// in 46 s to 74 s, its setup member removed beside the other bursts in each, the chaos in 22 s to 40 s, the cold gate
+// in 12 s to 30 s and the quotas in 200 s to 224 s.
 //
 // Three parts are cases of their own: the chaos, api and a member device restarted mid-save, mid-invite, mid-removal
 // and mid-statement on their stores (TestE2eControlPlaneConcurrencyChaos), a reader starting cold at a base a later

@@ -108,6 +108,11 @@
 //     device is back, and an ask counts once it reached gkm, whatever time the recorder stamped on it before its cut
 //     check
 //
+// e2e-flakes-final then ran the case ten times through the wrapper (2026-11-23, server a7e5f4b1f on sidecar c68f00ad,
+// its first run on 2841e9131, the same code): all ten passed, in 28 s to 74 s. In each the late device asked once
+// back and a-2, a writer that is not its granting device, answered 0.6 s to 2.9 s after it was back, and every gkm
+// refusal was a revoked caller's or one whose grant had ended.
+//
 // Each phase has PhaseTimeout and dumps the world's progress when it stalls; the case has the conventions' 10 minutes.
 // Run it through the build's wrapper: -tags 'sidecar_e2e sidecar_pending sidecar_localstack'.
 
