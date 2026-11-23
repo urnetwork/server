@@ -25,11 +25,20 @@ package model
 //
 // Who makes which key (§7.5's roles, authKeyReachOf): a personal network's
 // owner and a team member whose role, cut by its credential's scopes, holds
-// the keys permission make any key; every other member, a Member above all,
-// only a key for its own devices, untagged and not pre-approved, so the device
-// it enrolls is one that member owns (network_client_owner_model.go's
-// ownerRow). The route's gate asks own devices of every caller first
-// (api/route_permission.go).
+// the keys permission make any key; a member whose role holds keys for owned
+// tags (a Network admin) a key for its own devices or a tagged key, pre-approved
+// or not, whose every tag the network's tagOwners name its member an owner of at
+// the newest verified state of the network's log (authKeyTagsOwnedBy), which
+// enrollment asks again (network_client_owner_model.go); every other member, a
+// Member above all, only a key for its own devices, untagged and not
+// pre-approved, so the device it enrolls is one that member owns
+// (network_client_owner_model.go's ownerRow).
+//
+// Who lists and revokes which key: a personal network's owner and a team
+// member whose role, cut by its scopes, holds the keys permission the
+// network's every key; every other member only the keys its own user created,
+// another's key answering as no key at all. The three routes' gate asks own
+// devices of every caller first (api/route_permission.go).
 //
 // Creating and revoking a key owe the auth key security notice
 // (security_notice_auth_key.go) and an admin event (§7.11), in the change's
@@ -56,6 +65,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/urnetwork/sidecar"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
@@ -231,36 +242,50 @@ func init() {
 // The scope an admin token needs to create a key (§7.8's OAuth client scopes).
 const authKeysAdminScope = "auth_keys"
 
-// What a caller's credential may create at POST /network/auth-keys (§7.5).
+// What a caller's credential may create at POST /network/auth-keys, and list
+// and revoke at GET /network/auth-keys and POST /network/auth-key-revoke
+// (§7.5).
 type authKeyReach int
 
 const (
 	// no key: a member whose role cannot be read, or a role and scopes that
 	// reach neither permission
 	authKeyReachNone authKeyReach = iota
-	// a key for the caller's own devices alone: untagged and not pre-approved
+	// a key for the caller's own devices alone: untagged and not pre-approved;
+	// and to list and revoke, the keys the caller created
 	authKeyReachOwnDevices
-	// any key the route takes
+	// beside a key for the caller's own devices, a tagged key, pre-approved or
+	// not, for tags the caller's member owns (authKeyTagsOwnedBy); and to list
+	// and revoke, the keys the caller created
+	authKeyReachOwnedTags
+	// any key the route takes, and the network's every key to list and revoke
 	authKeyReachAny
 )
 
-// The refusals of a caller's role, each a 403 as the route's role gate answers.
+// The refusals of a caller's role, each a 403 as the route's role gate
+// answers, and the 503 of a log that cannot say who owns a tag.
 const (
-	authKeyRoleRefusedMessage       = "Your role in this network does not permit auth keys."
-	authKeyOwnDevicesRefusedMessage = "Your role in this network makes auth keys for your own devices only: untagged and not pre-approved."
+	authKeyRoleRefusedMessage          = "Your role in this network does not permit auth keys."
+	authKeyOwnDevicesRefusedMessage    = "Your role in this network makes auth keys for your own devices only: untagged and not pre-approved."
+	authKeyOwnedTagsRefusedMessage     = "Your role in this network makes auth keys for your own devices, untagged and not pre-approved, or tagged keys only for tags you own under the network's tagOwners."
+	authKeyTagOwnersUnavailableMessage = "The network's log cannot say who owns its tags now."
 )
 
 // What the session's credential may create (§7.5's roles): a personal
 // network's owner, who carries no member_id, whatever its credential's scopes
 // reach; a team member whose role, cut by those scopes, holds
-// RolePermissionKeys, any key; one whose role holds only
-// RolePermissionOwnDevices, a key for its own devices. Such a key is untagged,
-// so the device it enrolls is owned by the member (ownerRow), never tagged; and
-// not pre-approved, since a pre-approved key's enrollment lands whatever
-// admission its bundle's Delegation signed, which may name another member or a
-// tag, and a Delegation is signed only by an owner, an admin or a tag-owning
-// network admin (§7.9's Delegation row). A member whose role cannot be read
-// creates none.
+// RolePermissionKeys, any key; one whose role holds RolePermissionOwnedTagKeys
+// (a Network admin's keys for owned tags), beside a key for its own devices, a
+// tagged key for tags it owns, which createAuthKeyAt asks the log; one whose
+// role holds only RolePermissionOwnDevices, a key for its own devices. Such a
+// key is untagged, so the device it enrolls is owned by the member (ownerRow),
+// never tagged; and not pre-approved, since a pre-approved key's enrollment
+// lands whatever admission its bundle's Delegation signed, which may name
+// another member or a tag, and a Delegation is signed only by an owner, an
+// admin or a tag-owning network admin (§7.9's Delegation row), so only the
+// first two reach one. A member whose role cannot be read creates none. Each
+// reach but none also lists and revokes keys: the network's every key for the
+// first, only the caller's own for the others (authKeyCreatorFilterOf).
 func authKeyReachOf(clientSession *session.ClientSession) authKeyReach {
 	scopes := clientSession.CredentialScopes()
 	byJwt := clientSession.ByJwt
@@ -279,20 +304,93 @@ func authKeyReachOf(clientSession *session.ClientSession) authKeyReach {
 	switch {
 	case permits(RolePermissionKeys):
 		return authKeyReachAny
+	case byJwt.MemberId != nil && permits(RolePermissionOwnedTagKeys):
+		return authKeyReachOwnedTags
 	case permits(RolePermissionOwnDevices):
 		return authKeyReachOwnDevices
 	}
 	return authKeyReachNone
 }
 
+// The network's verified state at the log's tip, nil before base 1: what a
+// tagged key for owned tags is judged by, at its creation and at each
+// enrollment. A test replaces it.
+var authKeyTagOwnerState = configTipState
+
+// Whether the network's tagOwners name memberId an owner of every tag in
+// tagIds at the newest verified state of the network's log (§7.5's keys for
+// owned tags), read without a Postgres connection held; an error when the log
+// cannot be read, which every caller refuses on (configStateOwnsTags).
+func authKeyTagsOwnedBy(ctx context.Context, networkId server.Id, memberId server.Id, tagIds [][]byte) (bool, error) {
+	state, err := authKeyTagOwnerState(ctx, networkId)
+	if err != nil {
+		return false, err
+	}
+	return configStateOwnsTags(state, memberId, tagIds), nil
+}
+
+// Whether state's tagOwners name memberId an owner of every tag in tagIds:
+// each tag's atom row in the state's AclRows lists the member among its
+// tag_owner_member_ids, the document's tagOwners expanded to member_ids at
+// compile (§8.8's atoms), and the state holds the member. A tag no row holds
+// has no owner. A nil state, before base 1, and an empty tagIds own nothing,
+// so no caller passes an untagged key through it.
+func configStateOwnsTags(state *sidecar.ConfigState, memberId server.Id, tagIds [][]byte) bool {
+	if state == nil || len(tagIds) == 0 || state.Member(sidecar.Id(memberId)) == nil {
+		return false
+	}
+	acl, err := state.Acl()
+	if err != nil {
+		return false
+	}
+	memberIdBytes := sidecar.Id(memberId).Bytes()
+	ownedTagIds := map[string]bool{}
+	for _, atom := range acl.Rows().GetAtoms() {
+		ownedBy := slices.ContainsFunc(atom.GetTagOwnerMemberIds(), func(ownerId []byte) bool {
+			return bytes.Equal(ownerId, memberIdBytes)
+		})
+		if ownedBy {
+			ownedTagIds[string(atom.GetAtom())] = true
+		}
+	}
+	for _, tagId := range tagIds {
+		if !ownedTagIds[string(tagId)] {
+			return false
+		}
+	}
+	return true
+}
+
+// The creator a listing or a revoke is held to (§7.5): nil, every key, for a
+// reach of any key; the session's own user for one that reaches only its own
+// devices or owned tags, so a member lists and revokes the keys it created and
+// no one else's; false for a reach of none, which is refused.
+func authKeyCreatorFilterOf(clientSession *session.ClientSession) (creatorUserId *server.Id, ok bool) {
+	switch authKeyReachOf(clientSession) {
+	case authKeyReachAny:
+		return nil, true
+	case authKeyReachOwnedTags, authKeyReachOwnDevices:
+		userId := clientSession.ByJwt.UserId
+		return &userId, true
+	}
+	return nil, false
+}
+
 // Creates an auth key for the session's network, its creator the session's
 // user, and owes the notice and the admin event in the same transaction. A
 // caller whose role reaches only its own devices creates only an untagged key
-// that is not pre-approved, and one whose role reaches no key none, each
+// that is not pre-approved; one whose role reaches owned tags that, or a
+// tagged key whose every tag the network's tagOwners name its member an owner
+// of at the log's newest verified state, read before the transaction, the
+// read failing closed with a 503; and one whose role reaches no key none, each
 // refusal a 403 (authKeyReachOf). A session an admin token authenticated
 // spends the token's use in that same transaction, and a replay of the token
 // answers the first use's result and creates nothing
 // (admin_token_use_model.go).
+//
+// The owners are read once, so a save that takes the caller off a tag's
+// tagOwners just after the read leaves the key made; it never enrolls, since
+// each enrollment asks the owners again (network_client_owner_model.go).
 func CreateAuthKey(createAuthKey *CreateAuthKeyArgs, clientSession *session.ClientSession) (*CreateAuthKeyResult, error) {
 	return createAuthKeyAt(createAuthKey, clientSession, DefaultNetworkAuthKeySettings(), server.NowUtc())
 }
@@ -310,12 +408,19 @@ func createAuthKeyAt(
 	if adminCommand != nil && !slices.Contains(adminCommand.Scopes, authKeysAdminScope) {
 		return nil, fmt.Errorf("%d %s", http.StatusForbidden, "The admin token does not carry the auth_keys scope.")
 	}
-	switch authKeyReachOf(clientSession) {
+	reach := authKeyReachOf(clientSession)
+	switch reach {
 	case authKeyReachNone:
 		return nil, fmt.Errorf("%d %s", http.StatusForbidden, authKeyRoleRefusedMessage)
 	case authKeyReachOwnDevices:
 		if 0 < len(createAuthKey.Tags) || createAuthKey.PreApproved {
 			return nil, fmt.Errorf("%d %s", http.StatusForbidden, authKeyOwnDevicesRefusedMessage)
+		}
+	case authKeyReachOwnedTags:
+		// an untagged key is for the caller's own devices, which is never
+		// pre-approved; its tags are asked of the log below
+		if len(createAuthKey.Tags) == 0 && createAuthKey.PreApproved {
+			return nil, fmt.Errorf("%d %s", http.StatusForbidden, authKeyOwnedTagsRefusedMessage)
 		}
 	}
 	refuse := func(message string) (*CreateAuthKeyResult, error) {
@@ -345,6 +450,19 @@ func createAuthKeyAt(
 	tagIds, err := parseAuthKeyTagIds(createAuthKey.Tags, settings.MaxTagCount)
 	if err != nil {
 		return refuse(err.Error())
+	}
+	if reach == authKeyReachOwnedTags && 0 < len(tagIds) {
+		memberId := clientSession.ByJwt.MemberId
+		if memberId == nil {
+			return nil, fmt.Errorf("%d %s", http.StatusForbidden, authKeyOwnedTagsRefusedMessage)
+		}
+		owned, err := authKeyTagsOwnedBy(clientSession.Ctx, clientSession.ByJwt.NetworkId, *memberId, tagIds)
+		if err != nil {
+			return nil, fmt.Errorf("%d %s", http.StatusServiceUnavailable, authKeyTagOwnersUnavailableMessage)
+		}
+		if !owned {
+			return nil, fmt.Errorf("%d %s", http.StatusForbidden, authKeyOwnedTagsRefusedMessage)
+		}
 	}
 
 	secret := make([]byte, authKeySecretByteCount)
@@ -456,13 +574,24 @@ type GetNetworkAuthKeysResult struct {
 }
 
 // The session's network's keys that have not expired, oldest first, without
-// their secrets.
+// their secrets: every key for a credential whose reach is any key, and only
+// the keys the session's user created for every other member (§7.5;
+// authKeyCreatorFilterOf), a member whose role cannot be read refused 403.
 func GetNetworkAuthKeys(clientSession *session.ClientSession) (*GetNetworkAuthKeysResult, error) {
 	if !server.SidecarMg1Linked() {
 		return nil, fmt.Errorf("%d %s", http.StatusServiceUnavailable, authKeysUnavailableMessage)
 	}
+	creatorUserId, ok := authKeyCreatorFilterOf(clientSession)
+	if !ok {
+		return nil, fmt.Errorf("%d %s", http.StatusForbidden, authKeyRoleRefusedMessage)
+	}
+	creatorClause := ""
+	queryArgs := []any{clientSession.ByJwt.NetworkId, server.NowUtc()}
+	if creatorUserId != nil {
+		creatorClause = "AND creator_user_id = $3"
+		queryArgs = append(queryArgs, *creatorUserId)
+	}
 	authKeys := []*PublicNetworkAuthKey{}
-	now := server.NowUtc()
 	server.Db(clientSession.Ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			clientSession.Ctx,
@@ -478,11 +607,10 @@ func GetNetworkAuthKeys(clientSession *session.ClientSession) (*GetNetworkAuthKe
 					ephemeral,
 					pre_approved
 				FROM network_auth_key
-				WHERE network_id = $1 AND $2 < expire_time
+				WHERE network_id = $1 AND $2 < expire_time `+creatorClause+`
 				ORDER BY auth_key_id
 			`,
-			clientSession.ByJwt.NetworkId,
-			now,
+			queryArgs...,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
@@ -534,10 +662,24 @@ const revokeAuthKeyBundleNote = "Revoking stops this key's bearer only. A copy o
 
 // Revokes one of the session's network's keys: its row goes, so its bearer
 // enrolls nothing more. Owes the notice and the admin event in the same
-// transaction.
+// transaction. A credential whose reach is any key revokes any of the
+// network's keys; every other member only one its user created, another's
+// answering as no such key, so the answer tells nothing of whose keys exist
+// (§7.5; authKeyCreatorFilterOf). A member whose role cannot be read is
+// refused 403.
 func RevokeAuthKey(revokeAuthKey *RevokeAuthKeyArgs, clientSession *session.ClientSession) (*RevokeAuthKeyResult, error) {
 	if !server.SidecarMg1Linked() {
 		return nil, fmt.Errorf("%d %s", http.StatusServiceUnavailable, authKeysUnavailableMessage)
+	}
+	creatorUserId, ok := authKeyCreatorFilterOf(clientSession)
+	if !ok {
+		return nil, fmt.Errorf("%d %s", http.StatusForbidden, authKeyRoleRefusedMessage)
+	}
+	creatorClause := ""
+	queryArgs := []any{revokeAuthKey.AuthKeyId, clientSession.ByJwt.NetworkId}
+	if creatorUserId != nil {
+		creatorClause = "AND creator_user_id = $3"
+		queryArgs = append(queryArgs, *creatorUserId)
 	}
 	var revoked *NetworkAuthKey
 	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
@@ -547,7 +689,7 @@ func RevokeAuthKey(revokeAuthKey *RevokeAuthKeyArgs, clientSession *session.Clie
 			clientSession.Ctx,
 			`
 				DELETE FROM network_auth_key
-				WHERE auth_key_id = $1 AND network_id = $2
+				WHERE auth_key_id = $1 AND network_id = $2 `+creatorClause+`
 				RETURNING
 					auth_key_id,
 					network_id,
@@ -560,8 +702,7 @@ func RevokeAuthKey(revokeAuthKey *RevokeAuthKeyArgs, clientSession *session.Clie
 					ephemeral,
 					pre_approved
 			`,
-			revokeAuthKey.AuthKeyId,
-			clientSession.ByJwt.NetworkId,
+			queryArgs...,
 		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {

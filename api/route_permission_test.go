@@ -57,14 +57,18 @@ func TestEachRoleAgainstItsPermissions(t *testing.T) {
 	want := map[model.NetworkMemberRole][]model.RolePermission{
 		model.NetworkMemberRoleOwner: {
 			model.RolePermissionOwner, model.RolePermissionMembers, model.RolePermissionAdmin, model.RolePermissionDevices,
-			model.RolePermissionPolicy, model.RolePermissionKeys, model.RolePermissionOwnDevices, model.RolePermissionBilling,
-			model.RolePermissionRead, model.RolePermissionSelf,
+			model.RolePermissionPolicy, model.RolePermissionKeys, model.RolePermissionOwnedTagKeys, model.RolePermissionOwnDevices,
+			model.RolePermissionBilling, model.RolePermissionRead, model.RolePermissionSelf,
 		},
 		model.NetworkMemberRoleAdmin: {
 			model.RolePermissionMembers, model.RolePermissionAdmin, model.RolePermissionDevices, model.RolePermissionPolicy,
-			model.RolePermissionKeys, model.RolePermissionOwnDevices, model.RolePermissionRead, model.RolePermissionSelf,
+			model.RolePermissionKeys, model.RolePermissionOwnedTagKeys, model.RolePermissionOwnDevices, model.RolePermissionRead,
+			model.RolePermissionSelf,
 		},
-		model.NetworkMemberRoleNetworkAdmin: {model.RolePermissionPolicy, model.RolePermissionOwnDevices, model.RolePermissionRead, model.RolePermissionSelf},
+		model.NetworkMemberRoleNetworkAdmin: {
+			model.RolePermissionPolicy, model.RolePermissionOwnedTagKeys, model.RolePermissionOwnDevices, model.RolePermissionRead,
+			model.RolePermissionSelf,
+		},
 		model.NetworkMemberRoleItAdmin:      {model.RolePermissionDevices, model.RolePermissionOwnDevices, model.RolePermissionRead, model.RolePermissionSelf},
 		model.NetworkMemberRoleBillingAdmin: {model.RolePermissionBilling, model.RolePermissionOwnDevices, model.RolePermissionRead, model.RolePermissionSelf},
 		model.NetworkMemberRoleAuditor:      {model.RolePermissionOwnDevices, model.RolePermissionRead, model.RolePermissionSelf},
@@ -89,46 +93,54 @@ func TestEachRoleAgainstItsPermissions(t *testing.T) {
 	}
 }
 
-// §7.5's Member: own devices. Creating an auth key asks own devices, which
-// every role holds, so a Member's credential reaches the route and the auth
-// key model narrows it to a key for its own devices; only an Owner and an
-// Admin hold the keys permission a tagged or pre-approved key needs, and
-// listing and revoking the network's keys still ask it.
+// §7.5's Member: own devices. Creating, listing and revoking auth keys ask own
+// devices, which every role holds, so a Member's credential reaches the three
+// routes and the auth key model narrows it to a key for its own devices and the
+// keys it created; only an Owner and an Admin hold the keys permission any
+// tagged or pre-approved key needs, and the network's every key to list and
+// revoke; a Network admin holds keys for owned tags as well, for a tagged key
+// of the tags it owns.
 func TestEveryRoleReachesAnAuthKeyForItsOwnDevices(t *testing.T) {
-	if permission := routePermissionFor("POST /network/auth-keys"); permission != model.RolePermissionOwnDevices {
-		t.Fatalf("POST /network/auth-keys asks %s, not own devices", permission)
-	}
-	for _, routeKey := range []string{"GET /network/auth-keys", "POST /network/auth-key-revoke"} {
-		if permission := routePermissionFor(routeKey); permission != model.RolePermissionKeys {
-			t.Errorf("%s asks %s, not keys", routeKey, permission)
+	for _, routeKey := range []string{"POST /network/auth-keys", "GET /network/auth-keys", "POST /network/auth-key-revoke"} {
+		if permission := routePermissionFor(routeKey); permission != model.RolePermissionOwnDevices {
+			t.Errorf("%s asks %s, not own devices", routeKey, permission)
 		}
 	}
-	holdsKeys := map[model.NetworkMemberRole]bool{
-		model.NetworkMemberRoleOwner:        true,
-		model.NetworkMemberRoleAdmin:        true,
-		model.NetworkMemberRoleNetworkAdmin: false,
-		model.NetworkMemberRoleItAdmin:      false,
-		model.NetworkMemberRoleBillingAdmin: false,
-		model.NetworkMemberRoleAuditor:      false,
-		model.NetworkMemberRoleMember:       false,
+	holds := map[model.NetworkMemberRole]struct {
+		keys      bool
+		ownedTags bool
+	}{
+		model.NetworkMemberRoleOwner:        {keys: true, ownedTags: true},
+		model.NetworkMemberRoleAdmin:        {keys: true, ownedTags: true},
+		model.NetworkMemberRoleNetworkAdmin: {keys: false, ownedTags: true},
+		model.NetworkMemberRoleItAdmin:      {keys: false, ownedTags: false},
+		model.NetworkMemberRoleBillingAdmin: {keys: false, ownedTags: false},
+		model.NetworkMemberRoleAuditor:      {keys: false, ownedTags: false},
+		model.NetworkMemberRoleMember:       {keys: false, ownedTags: false},
 	}
-	for role, keys := range holdsKeys {
+	for role, want := range holds {
 		if !role.Permits(model.RolePermissionOwnDevices) {
 			t.Errorf("%s cannot make a key for its own devices", role)
 		}
-		if role.Permits(model.RolePermissionKeys) != keys {
-			t.Errorf("%s holds keys: %t, want %t", role, role.Permits(model.RolePermissionKeys), keys)
+		if role.Permits(model.RolePermissionKeys) != want.keys {
+			t.Errorf("%s holds keys: %t, want %t", role, role.Permits(model.RolePermissionKeys), want.keys)
+		}
+		if role.Permits(model.RolePermissionOwnedTagKeys) != want.ownedTags {
+			t.Errorf("%s holds keys for owned tags: %t, want %t", role, role.Permits(model.RolePermissionOwnedTagKeys), want.ownedTags)
 		}
 	}
-	if model.NetworkMemberRole("superuser").Permits(model.RolePermissionOwnDevices) {
-		t.Fatal("a role this build does not know makes keys")
+	for _, permission := range []model.RolePermission{model.RolePermissionOwnDevices, model.RolePermissionOwnedTagKeys} {
+		if model.NetworkMemberRole("superuser").Permits(permission) {
+			t.Fatalf("a role this build does not know holds %s", permission)
+		}
 	}
 }
 
-// A scope reaches own devices exactly where it reaches the keys, so moving the
-// key route from the keys to own devices changed no scoped credential's reach
-// there, a personal network's API key and admin token among them: auth_keys
-// and all reach both, devices:core, policy:read and logs:read neither.
+// A scope reaches own devices and keys for owned tags exactly where it reaches
+// the keys, so moving the key routes from the keys to own devices changed no
+// scoped credential's reach there, a personal network's API key and admin
+// token among them: auth_keys and all reach all three, devices:core,
+// policy:read and logs:read none.
 func TestScopesReachOwnDevicesWhereTheyReachTheKeys(t *testing.T) {
 	scopeSets := [][]string{
 		nil,
@@ -144,9 +156,10 @@ func TestScopesReachOwnDevicesWhereTheyReachTheKeys(t *testing.T) {
 	}
 	for _, scopes := range scopeSets {
 		ownDevices := model.ScopesPermit(scopes, model.RolePermissionOwnDevices)
+		ownedTags := model.ScopesPermit(scopes, model.RolePermissionOwnedTagKeys)
 		keys := model.ScopesPermit(scopes, model.RolePermissionKeys)
-		if ownDevices != keys {
-			t.Errorf("scopes %v reach own devices: %t, the keys: %t", scopes, ownDevices, keys)
+		if ownDevices != keys || ownedTags != keys {
+			t.Errorf("scopes %v reach own devices: %t, keys for owned tags: %t, the keys: %t", scopes, ownDevices, ownedTags, keys)
 		}
 	}
 	if !model.ScopesPermit([]string{model.ApiKeyScopeAuthKeys}, model.RolePermissionOwnDevices) {

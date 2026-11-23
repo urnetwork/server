@@ -11,10 +11,14 @@ package api
 // A route the table does not map asks RolePermissionOwner: owner-only, failing
 // closed (D-TEAM-3), and TestEveryAdminRouteHasAPermission fails until it is
 // mapped. Where what a route may do depends on its request, the gate asks the
-// least the route serves and the route's model asks the rest: POST
-// /network/auth-keys asks RolePermissionOwnDevices, which every role holds,
-// and its model takes a tagged or pre-approved key only from a role holding
-// RolePermissionKeys. A personal network's owner carries no member_id and
+// least the route serves and the route's model asks the rest: the three auth
+// key routes ask RolePermissionOwnDevices, which every role holds, and their
+// model takes a tagged key only from a role holding RolePermissionKeys or,
+// for tags the caller owns under the network's tagOwners,
+// RolePermissionOwnedTagKeys, a pre-approved one alike, and lists and revokes
+// the network's every key only for a role holding RolePermissionKeys, every
+// other member only the keys it created (network_auth_key_model.go's
+// authKeyReachOf). A personal network's owner carries no member_id and
 // passes, as do a personal network's API keys within their scopes; the
 // strict_exp allowlist still refuses a sidecar's token on every route here,
 // and the client token gate every client token on a Network route.
@@ -118,17 +122,20 @@ var routePermissionByRoute = map[string]model.RolePermission{
 	"POST /network/dns/custom-host-remove": model.RolePermissionPolicy,
 
 	// a key for the caller's own devices, which every role makes (§7.5's
-	// Member: own devices); the auth key model takes a tagged or pre-approved
-	// key only from a caller whose role holds RolePermissionKeys
-	// (network_auth_key_model.go's authKeyReachOf)
-	"POST /network/auth-keys": model.RolePermissionOwnDevices,
+	// Member: own devices), and the keys the caller created, which every role
+	// lists and revokes; the auth key model takes a tagged or pre-approved key
+	// only from a caller whose role holds RolePermissionKeys, or keys for owned
+	// tags for its own tags, and shows and revokes another's key only to a
+	// caller whose role holds RolePermissionKeys (network_auth_key_model.go's
+	// authKeyReachOf)
+	"POST /network/auth-keys":       model.RolePermissionOwnDevices,
+	"GET /network/auth-keys":        model.RolePermissionOwnDevices,
+	"POST /network/auth-key-revoke": model.RolePermissionOwnDevices,
 
 	// keys and OAuth clients
 	"GET /account/api-keys":             model.RolePermissionKeys,
 	"POST /account/api-key":             model.RolePermissionKeys,
 	"POST /account/api-key/remove":      model.RolePermissionKeys,
-	"GET /network/auth-keys":            model.RolePermissionKeys,
-	"POST /network/auth-key-revoke":     model.RolePermissionKeys,
 	"GET /network/oauth-clients":        model.RolePermissionKeys,
 	"POST /network/oauth-clients":       model.RolePermissionKeys,
 	"POST /network/oauth-client-revoke": model.RolePermissionKeys,

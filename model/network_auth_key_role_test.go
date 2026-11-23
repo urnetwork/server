@@ -3,8 +3,9 @@
 package model
 
 // §7.5's roles at auth key creation (authKeyReachOf; R-TEAM-2, D-TEAM-3), on Postgres with MG1 and MG6: every role
-// makes a key for its own devices, untagged and not pre-approved, and only a role holding the keys permission makes a
-// tagged or pre-approved one, each credential's scopes cutting its role.
+// makes a key for its own devices, untagged and not pre-approved, and only a role holding the keys permission makes
+// any tagged or pre-approved one, a Network admin's keys for owned tags reaching only its own tags
+// (network_auth_key_reach_test.go), each credential's scopes cutting its role.
 
 import (
 	"context"
@@ -13,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/urnetwork/sidecar"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
@@ -44,14 +47,22 @@ func authKeyRoleRefusal(err error, message string) bool {
 }
 
 // Each of §7.5's seven roles makes a key for its own devices, untagged and not pre-approved, an ephemeral reusable one
-// included, its creator the member's user. Only an Owner and an Admin make a tagged or a pre-approved key: every other
-// role, a Member among them, is refused 403 for its own devices alone, and the refusal creates nothing.
+// included, its creator the member's user. Only an Owner and an Admin make any tagged or pre-approved key: a Network
+// admin makes a tagged one only for a tag it owns, and none here, where the network's log names no tag's owner, so it
+// is refused 403 for owned tags; every other role, a Member among them, is refused 403 for its own devices alone; and a
+// refusal creates nothing.
 func TestEachRoleMakesAuthKeysForItsOwnDevices(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		teamId, _ := newTestSignInTeam(t, ctx, false)
 		now := server.NowUtc()
 		tagId := strings.Repeat("cd", 16)
+		// the network's log has no base yet, so no tag has an owner
+		previousTagOwnerState := authKeyTagOwnerState
+		t.Cleanup(func() { authKeyTagOwnerState = previousTagOwnerState })
+		authKeyTagOwnerState = func(ctx context.Context, networkId server.Id) (*sidecar.ConfigState, error) {
+			return nil, nil
+		}
 		holdsKeys := map[NetworkMemberRole]bool{
 			NetworkMemberRoleOwner:        true,
 			NetworkMemberRoleAdmin:        true,
@@ -64,8 +75,13 @@ func TestEachRoleMakesAuthKeysForItsOwnDevices(t *testing.T) {
 		for role, keys := range holdsKeys {
 			member := addTestSignInMember(t, ctx, teamId, server.NewId(), role, false)
 			clientSession := testAuthKeyMemberSession(ctx, teamId, member)
-			if reach := authKeyReachOf(clientSession); (reach == authKeyReachAny) != keys || reach == authKeyReachNone {
+			reach := authKeyReachOf(clientSession)
+			if (reach == authKeyReachAny) != keys || reach == authKeyReachNone || (reach == authKeyReachOwnedTags) != (role == NetworkMemberRoleNetworkAdmin) {
 				t.Errorf("a %s's reach is %d", role, reach)
+			}
+			refusedMessage := authKeyOwnDevicesRefusedMessage
+			if role == NetworkMemberRoleNetworkAdmin {
+				refusedMessage = authKeyOwnedTagsRefusedMessage
 			}
 
 			own := createTestAuthKey(t, clientSession, &CreateAuthKeyArgs{DurationSeconds: 3600, MaxUses: 1}, now)
@@ -87,8 +103,8 @@ func TestEachRoleMakesAuthKeysForItsOwnDevices(t *testing.T) {
 					}
 					continue
 				}
-				if !authKeyRoleRefusal(err, authKeyOwnDevicesRefusedMessage) || result != nil {
-					t.Errorf("a %s's key %+v answered %v %+v, not the own devices refusal", role, args, err, result)
+				if !authKeyRoleRefusal(err, refusedMessage) || result != nil {
+					t.Errorf("a %s's key %+v answered %v %+v, not %q", role, args, err, result, refusedMessage)
 				}
 			}
 			want := 2
