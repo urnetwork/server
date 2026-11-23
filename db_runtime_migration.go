@@ -16,6 +16,10 @@ package server
 //     binary with 926 runs against head 925. The operator creates the object
 //     when transfer_contract's vacuum allows its lock (the migration's runbook),
 //     and db migrate then records 926.
+//   - 1009: the close evidence window guard's body
+//     (contractCloseReportEvidenceWindowGuardSql), a function body only. The
+//     retention task reads the guard's body and keeps 35 days until it applies
+//     (closeEvidenceGuardFloorOf), so a binary with 1009 runs against head 1008.
 func MinimumRuntimeMigrationVersion() int {
 	return minimumRuntimeMigrationVersion(MigrationCount(), MigrationIdentity)
 }
@@ -41,6 +45,12 @@ func minimumRuntimeMigrationVersion(count int, identity func(int) (string, error
 			return count
 		}
 		return 925
+	case 1009:
+		actual, err := identity(1008)
+		if err != nil || actual != "52f11cc37e7f0512ee22e9dba89eeaddde4afa8614a96b2de9e8f74f4bccc5bf" {
+			return count
+		}
+		return 1008
 	}
 	return count
 }
