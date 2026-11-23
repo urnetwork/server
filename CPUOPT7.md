@@ -1175,8 +1175,8 @@ a tenth of the fleet.
 
 - **Status (11-23):** approved "as designed" at about 14:55Z and built (CPUOPT7-ORIGIN-DELIVERY.md §Status). The §1.7
   fix (2a3984171) and the Stage 0 counters (5c4091fe8) are merged and ride the next deploy. Build A (878cf20b8) is merged
-  and needs its own roll: api, alt, proxy, taskworker, connect. Build B (branch `perf/cpuopt7-x1-build-b-1123`, tip
-  e5e8d744f) is not merged: it waits until Build A has run 24 hours on every api, alt, proxy, connect and taskworker
+  and needs its own roll: api, proxy, taskworker, connect. Build B (branch `perf/cpuopt7-x1-build-b-1123`, tip
+  9901f03ba) is not merged: it waits until Build A has run 24 hours on every api, proxy, connect and taskworker
   process, with none older left.
 - **Where:** server `model/contract_origin_notification.go`.
   - `runPublisher` SPUBLISHes every committed origin to one of 16 bucket channels.
