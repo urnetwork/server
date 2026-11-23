@@ -43,8 +43,8 @@ func TestPasswordChangedNoticeIsDeliveredAfterAFailedSend(t *testing.T) {
 		sender.failNext(1)
 		now := server.NowUtc()
 		deliverAccountMessagesAt(ctx, sender, now)
-		deliverAccountMessagesAt(ctx, sender, now.Add(accountMessageRetryBaseDelay))
-		deliverAccountMessagesAt(ctx, sender, now.Add(accountMessageRetryMaxDelay))
+		deliverAccountMessagesAt(ctx, sender, now.Add(defaultAccountMessageDeliverySettings().retryBaseDelay))
+		deliverAccountMessagesAt(ctx, sender, now.Add(defaultAccountMessageDeliverySettings().retryMaxDelay))
 		sends := sender.sent()
 		if len(sends) != 1 || sends[0].userAuth != userAuth {
 			t.Fatalf("delivered %d notices (%+v), want one to %s", len(sends), sends, userAuth)
@@ -85,8 +85,8 @@ func TestWelcomeIsDeliveredAfterAFailedSend(t *testing.T) {
 		sender.failNext(1)
 		now := server.NowUtc()
 		deliverAccountMessagesAt(ctx, sender, now)
-		deliverAccountMessagesAt(ctx, sender, now.Add(accountMessageRetryBaseDelay))
-		deliverAccountMessagesAt(ctx, sender, now.Add(accountMessageRetryMaxDelay))
+		deliverAccountMessagesAt(ctx, sender, now.Add(defaultAccountMessageDeliverySettings().retryBaseDelay))
+		deliverAccountMessagesAt(ctx, sender, now.Add(defaultAccountMessageDeliverySettings().retryMaxDelay))
 		sends := sender.sent()
 		if len(sends) != 1 || sends[0].userAuth != userAuth {
 			t.Fatalf("delivered %d welcomes (%+v), want one to %s", len(sends), sends, userAuth)

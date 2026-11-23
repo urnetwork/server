@@ -11,10 +11,10 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-// A payout wallet change (owner decision 2026-10-29).
+// Payout wallet changes (owner decision 2026-10-29), in the sample network.
 func securityWalletNoticeSample() *SecurityPayoutWalletChangedTemplate {
 	changeTime := time.Date(2026, 10, 29, 14, 3, 7, 0, time.FixedZone("UTC-5", -5*60*60))
-	return &SecurityPayoutWalletChangedTemplate{
+	notice := &SecurityPayoutWalletChangedTemplate{
 		SecurityWalletNotice: model.SecurityWalletNotice{
 			Changes: []*model.SecurityWalletChange{
 				{
@@ -51,6 +51,8 @@ func securityWalletNoticeSample() *SecurityPayoutWalletChangedTemplate {
 			},
 		},
 	}
+	notice.nameNetwork(securityNoticeSampleNetworkName)
+	return notice
 }
 
 // A sign-in method change of each action.
@@ -79,17 +81,19 @@ func securityNoticeText(t *testing.T, template Template) (subject string, bodyHt
 	return subject, bodyHtml, bodyText
 }
 
-// The payout wallet notice names the time in UTC, each wallet masked with its
-// chain, how the change was made when known, and the security line, and it
-// carries no IP address.
+// The payout wallet notice names the network, the time in UTC, each wallet
+// masked with its chain, how the change was made when known, and the security
+// line, and it carries no IP address.
 func TestSecurityPayoutWalletNoticeSaysWhatChanged(t *testing.T) {
 	subject, bodyHtml, bodyText := securityNoticeText(t, securityWalletNoticeSample())
-	if subject != "Your URnetwork payout wallet was changed" {
+	if subject != "The payout wallet of your URnetwork network synthetic-sample-network was changed" {
 		t.Fatalf("subject = %q", subject)
 	}
 	for _, want := range []string{
 		securityNoticeContactLine,
-		"The wallets your URnetwork payouts go to were changed.",
+		"The wallets that the payouts of your URnetwork network synthetic-sample-network go to were changed.",
+		// the footer says whose addresses it reached, and for which network
+		"Sent to the sign-in email addresses of the owners and billing\nadmins of your URnetwork network synthetic-sample-network whenever a wallet its payouts go to\nchanges.",
 		"When: October 29, 2026, 19:03:07 UTC",
 		"Wallet: USDC payout wallet",
 		"Before: None",
@@ -118,6 +122,8 @@ func TestSecurityPayoutWalletNoticeSaysWhatChanged(t *testing.T) {
 		"Polygon 0x52…9EE7",
 		"12 to 20",
 		`href="` + securityNoticePayoutWalletsUrl + `"`,
+		"The wallets that the payouts of your URnetwork network synthetic-sample-network go to were changed.",
+		"Sent to the sign-in email addresses of the owners and billing admins of your URnetwork network synthetic-sample-network whenever a wallet its payouts go to changes.",
 	} {
 		if !strings.Contains(bodyHtml, want) {
 			t.Errorf("html part missing %q", want)
@@ -148,12 +154,11 @@ func TestSecurityPayoutWalletNoticeSaysWhatChanged(t *testing.T) {
 	}
 
 	// one change reads as one
-	single := &SecurityPayoutWalletChangedTemplate{SecurityWalletNotice: model.SecurityWalletNotice{
-		Changes: securityWalletNoticeSample().Changes[:1],
-	}}
-	_, _, singleText := securityNoticeText(t, single)
-	if !strings.Contains(singleText, "The wallet your URnetwork payouts go to was changed.") {
-		t.Errorf("a single change reads as several:\n%s", singleText)
+	single := securityWalletNoticeSample()
+	single.Changes = single.Changes[:1]
+	singleSubject, _, singleText := securityNoticeText(t, single)
+	if singleSubject != subject || !strings.Contains(singleText, "The wallet that the payouts of your URnetwork network synthetic-sample-network go to was changed.") {
+		t.Errorf("a single change reads as several: %q\n%s", singleSubject, singleText)
 	}
 	// changes past the listed ones are counted
 	more := securityWalletNoticeSample()

@@ -34,17 +34,31 @@ import (
 // this controller is for account messages only
 // marketing messages are sent via a separate channel
 
-// Bounds every SES and SMS call when email.yml sets no send timeout. SES and
-// Pinpoint answer in well under a second; the bound only has to outlast a slow
-// network and the SDK's own retries, and keeps a hung call from holding an API
-// request or the task worker that sends.
-const DefaultAccountMessageSendTimeout = 15 * time.Second
+// Tunables of the account message sender.
+type accountMessageSendSettings struct {
+	// Bounds every SES and SMS call when email.yml sets no send timeout. SES
+	// and Pinpoint answer in well under a second; the bound only has to
+	// outlast a slow network and the SDK's own retries, and keeps a hung call
+	// from holding an API request or the task worker that sends.
+	defaultSendTimeout time.Duration
+	// The largest send timeout email.yml can set; larger values are clamped. A
+	// call that needs longer will not succeed, whatever waits on a send (an
+	// API request, a task) should not wait longer, and an outbox claim must
+	// outlast two sends (accountMessageDeliverySettings.claimLease).
+	maxSendTimeout time.Duration
+	// The minimum time between two default-level reports of failed account
+	// message calls.
+	failureReportInterval time.Duration
+}
 
-// The largest send timeout email.yml can set; larger values are clamped. A call
-// that needs longer will not succeed, whatever waits on a send (an API request,
-// a task) should not wait longer, and an outbox claim must outlast a send
-// (accountMessageClaimLease).
-const maxAccountMessageSendTimeout = 2 * time.Minute
+// The production settings.
+func defaultAccountMessageSendSettings() *accountMessageSendSettings {
+	return &accountMessageSendSettings{
+		defaultSendTimeout:    15 * time.Second,
+		maxSendTimeout:        2 * time.Minute,
+		failureReportInterval: 1 * time.Minute,
+	}
+}
 
 type EmailConfig struct {
 	CompanySenderEmail string `yaml:"company_sender_email"`
@@ -57,17 +71,18 @@ type EmailConfig struct {
 	ConfigurationSet string `yaml:"configuration_set"`
 	// SendTimeoutSeconds bounds each SES email and Pinpoint SMS call: the call's
 	// context and its session's http client both stop there, and a call that
-	// runs out is a failed send. 0 uses DefaultAccountMessageSendTimeout; more
-	// than two minutes is clamped to two minutes.
+	// runs out is a failed send. 0 uses the sender settings' defaultSendTimeout;
+	// more than their maxSendTimeout, two minutes, is clamped to it.
 	SendTimeoutSeconds int `yaml:"send_timeout_seconds"`
 }
 
 // The bound on one SES or SMS call.
 func (self *EmailConfig) SendTimeout() time.Duration {
+	settings := defaultAccountMessageSendSettings()
 	if self.SendTimeoutSeconds <= 0 {
-		return DefaultAccountMessageSendTimeout
+		return settings.defaultSendTimeout
 	}
-	return min(time.Duration(self.SendTimeoutSeconds)*time.Second, maxAccountMessageSendTimeout)
+	return min(time.Duration(self.SendTimeoutSeconds)*time.Second, settings.maxSendTimeout)
 }
 
 var EnvEmailConfig = sync.OnceValue(func() *EmailConfig {
@@ -347,14 +362,10 @@ func init() {
 	prometheus.MustRegister(accountMessageSendCounter)
 }
 
-// The minimum time between two default-level reports of failed account
-// message calls.
-const accountMessageSendReportInterval = 1 * time.Minute
-
 // The default-level report of failed SES and SMS calls. A client can make the
 // server send (a verification code), so a line per failed call would let an
 // outage, or a client during one, fill the logs.
-var accountMessageSendFailures = newBoundedReport(accountMessageSendReportInterval)
+var accountMessageSendFailures = newBoundedReport(defaultAccountMessageSendSettings().failureReportInterval)
 
 // Sends account messages through SES (email) and Pinpoint SMS (phone). Every
 // AWS call runs under the send timeout: the call's context and its session's

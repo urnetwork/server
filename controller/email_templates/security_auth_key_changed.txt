@@ -1,6 +1,7 @@
 {{define "headline"}}{{.TextHeadline}}{{end}}
-{{define "why"}}Sent to the sign-in email addresses of your URnetwork account
-whenever an auth key is created for your network or revoked from it.{{end}}
+{{define "why"}}Sent to the sign-in email addresses of the owners and admins
+of {{.Network}} whenever an auth key is created for it or revoked
+from it.{{end}}
 {{define "content"}}
 {{.Subject}}.
 {{range .Rows}}

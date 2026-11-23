@@ -1,6 +1,7 @@
 {{define "headline"}}{{.TextHeadline}}{{end}}
-{{define "why"}}Sent to the sign-in email addresses of your URnetwork account
-whenever an API key is created for it or deleted from it.{{end}}
+{{define "why"}}Sent to the sign-in email addresses of the owners and admins
+of {{.Network}} whenever an API key is created for it or deleted
+from it.{{end}}
 {{define "content"}}
 {{.Subject}}.
 {{range .Rows}}
@@ -18,7 +19,7 @@ Made with: {{.Via}}
 {{.MoreChangesText}}
 {{end}}
 {{- if .AnyCreated}}
-Anyone with an API key can use your URnetwork account until the key is deleted.
+Anyone with an API key can use {{.Network}} until the key is deleted.
 {{end}}
 If you didn't make this change, contact security@ur.io right away.
 

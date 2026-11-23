@@ -241,10 +241,10 @@ func TestEmailConfigSendTimeout(t *testing.T) {
 		sendTimeoutSeconds int
 		sendTimeout        time.Duration
 	}{
-		{sendTimeoutSeconds: 0, sendTimeout: DefaultAccountMessageSendTimeout},
-		{sendTimeoutSeconds: -1, sendTimeout: DefaultAccountMessageSendTimeout},
+		{sendTimeoutSeconds: 0, sendTimeout: defaultAccountMessageSendSettings().defaultSendTimeout},
+		{sendTimeoutSeconds: -1, sendTimeout: defaultAccountMessageSendSettings().defaultSendTimeout},
 		{sendTimeoutSeconds: 30, sendTimeout: 30 * time.Second},
-		{sendTimeoutSeconds: 3600, sendTimeout: maxAccountMessageSendTimeout},
+		{sendTimeoutSeconds: 3600, sendTimeout: defaultAccountMessageSendSettings().maxSendTimeout},
 	}
 	for _, c := range cases {
 		emailConfig := &EmailConfig{SendTimeoutSeconds: c.sendTimeoutSeconds}

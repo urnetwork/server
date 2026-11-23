@@ -3,9 +3,9 @@
 {{define "eyebrow"}}Security{{end}}
 {{define "accent"}}#d6e6f4{{end}}
 {{define "headline"}}Payout wallet changed{{end}}
-{{define "why"}}Sent to the sign-in email addresses of your URnetwork account whenever the wallet its payouts go to changes.{{end}}
+{{define "why"}}Sent to the sign-in email addresses of the owners and billing admins of {{.Network}} whenever a wallet its payouts go to changes.{{end}}
 {{define "content"}}
-<p class="ur-text" style="margin:16px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:16px; line-height:26px; color:#2b3036;">{{if .Several}}The wallets your URnetwork payouts go to were changed.{{else}}The wallet your URnetwork payouts go to was changed.{{end}}</p>
+<p class="ur-text" style="margin:16px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:16px; line-height:26px; color:#2b3036;">{{if .Several}}The wallets that the payouts of {{.Network}} go to were changed.{{else}}The wallet that the payouts of {{.Network}} go to was changed.{{end}}</p>
 {{range .Rows}}
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:24px 0 0;"><tr>
 <td class="ur-rule ur-muted" style="padding:12px 0; border-bottom:1px solid #e1e5e9; border-top:1px solid #e1e5e9; padding-right:16px; font-family:Geist, Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:12px; line-height:18px; letter-spacing:0.08em; text-transform:uppercase; color:#5f6a74; vertical-align:top; white-space:nowrap;">When</td>

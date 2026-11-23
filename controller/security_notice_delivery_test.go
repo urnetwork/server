@@ -137,8 +137,8 @@ func TestSecurityNoticeIsEmailedOnceAfterAFailedSend(t *testing.T) {
 		if !phoneBound() {
 			t.Fatal("a failed send undid the change it reported")
 		}
-		deliverAccountMessagesAt(ctx, sender, dueTime.Add(accountMessageRetryBaseDelay))
-		deliverAccountMessagesAt(ctx, sender, dueTime.Add(accountMessageRetryMaxDelay))
+		deliverAccountMessagesAt(ctx, sender, dueTime.Add(defaultAccountMessageDeliverySettings().retryBaseDelay))
+		deliverAccountMessagesAt(ctx, sender, dueTime.Add(defaultAccountMessageDeliverySettings().retryMaxDelay))
 		sends := sender.sent()
 		if len(sends) != 1 {
 			t.Fatalf("delivered %d notices (%+v), want one", len(sends), sends)

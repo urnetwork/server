@@ -11,22 +11,31 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-// A Delegation, an AdminSet change and an IdP: the notice says what kind of
-// change each was and when, how an IdP was added, with the security lines, and
-// names no key, member or IdP.
-func TestSecurityNetworkAuthorityNoticeSaysWhatChanged(t *testing.T) {
+// A Delegation, an AdminSet change and an IdP, in the sample network.
+func securityNetworkAuthorityNoticeSample() *SecurityNetworkAuthorityChangedTemplate {
 	changeTime := time.Date(2026, 11, 10, 9, 30, 0, 0, time.UTC)
 	notice := &SecurityNetworkAuthorityChangedTemplate{}
+	notice.nameNetwork(securityNoticeSampleNetworkName)
 	notice.Changes = []*model.SecurityNetworkAuthorityChange{
 		{ChangeTime: changeTime, Action: model.SecurityNetworkAuthorityDelegation},
 		{ChangeTime: changeTime.Add(time.Second), Action: model.SecurityNetworkAuthorityAdminSet},
 		{ChangeTime: changeTime.Add(2 * time.Second), Action: model.SecurityNetworkAuthorityIdp, Via: model.SecurityNoticeViaWeb},
 	}
-	subject, bodyHtml, bodyText := securityNoticeText(t, notice)
-	if subject != "Who can admit devices to your URnetwork network changed" {
+	return notice
+}
+
+// A Delegation, an AdminSet change and an IdP: the notice says in which network
+// what kind of change each was and when, how an IdP was added, with the
+// security lines, and names no key, member or IdP.
+func TestSecurityNetworkAuthorityNoticeSaysWhatChanged(t *testing.T) {
+	subject, bodyHtml, bodyText := securityNoticeText(t, securityNetworkAuthorityNoticeSample())
+	if subject != "Who can admit devices to your URnetwork network synthetic-sample-network changed" {
 		t.Fatalf("subject = %q", subject)
 	}
 	for _, want := range []string{
+		subject + ".",
+		// the footer says whose addresses it reached, and for which network
+		"of your URnetwork network synthetic-sample-network whenever who can admit devices to it, or sign\nits members in, changes.",
 		"When: November 10, 2026, 09:30:00 UTC\nChange: A delegation that admits devices was added\n",
 		"When: November 10, 2026, 09:30:01 UTC\nChange: The network's admins changed\n",
 		"Change: A sign-in provider was added\nMade with: The ur.io website\n",
@@ -41,6 +50,7 @@ func TestSecurityNetworkAuthorityNoticeSaysWhatChanged(t *testing.T) {
 		"A delegation that admits devices was added",
 		"A sign-in provider was added",
 		`contact <a class="ur-link" href="mailto:security@ur.io"`,
+		"Sent to the sign-in email addresses of the owners and admins of your URnetwork network synthetic-sample-network whenever who can admit devices to it, or sign its members in, changes.",
 	} {
 		if !strings.Contains(bodyHtml, want) {
 			t.Errorf("html part missing %q", want)

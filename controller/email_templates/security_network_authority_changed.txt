@@ -1,7 +1,7 @@
 {{define "headline"}}{{.TextHeadline}}{{end}}
-{{define "why"}}Sent to the sign-in email addresses of your network's owners
-and admins whenever who can admit devices to it, or sign its members in,
-changes.{{end}}
+{{define "why"}}Sent to the sign-in email addresses of the owners and admins
+of {{.Network}} whenever who can admit devices to it, or sign
+its members in, changes.{{end}}
 {{define "content"}}
 {{.Subject}}.
 {{range .Rows}}

@@ -1,17 +1,31 @@
 package controller
 
 // The security notices (model/security_notice_model.go, owner decision
-// 2026-10-29): the payout wallet notice, the sign-in method notice and the API
-// key notice, owed by the model in the transaction of the change and delivered
-// by the account message outbox. They are email only: none is in
-// smsTemplateNames, and the model owes them to email addresses only. The
-// password-changed notice is AuthPasswordSetTemplate.
+// 2026-10-29): the payout wallet notice, the sign-in method notice, the API key
+// notice, the auth key notice and the network authority notice, owed by the
+// model in the transaction of the change and delivered by the account message
+// outbox. They are email only: none is in smsTemplateNames, and the model owes
+// them to email addresses only. The password-changed notice is
+// AuthPasswordSetTemplate.
+//
+// The notices about a network, the payout wallet, API key, auth key and
+// network authority notices, reach a team's Owners and Admins, or its Owners
+// and Billing admins, at their own sign-in addresses (QD-1215, QD-1217), so
+// each names the network it is about (QD-1216): "your URnetwork network
+// <name>". The delivery reads the name of the outbox row's network as it
+// stands then (nameAccountMessageNetwork), so a renamed network's pending
+// notice shows its current name and the outbox stores nothing new. The sign-in
+// method and password notices are about a person's own account, and name none.
 
 import (
+	"context"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
+	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 )
 
@@ -33,6 +47,92 @@ const (
 	securityNoticeNoWallet          = "None"
 	securityNoticeUnknownWalletName = "Payout wallet"
 )
+
+// The network a notice is about, named at delivery. The name is never stored
+// with the notice: the field is unexported, so the outbox's json neither holds
+// nor reads it.
+type securityNoticeNetwork struct {
+	// as the notice shows it; "" until named, and for a network that is gone
+	networkName string
+}
+
+// Names the network, as it stands at delivery.
+func (self *securityNoticeNetwork) nameNetwork(networkName string) {
+	self.networkName = securityNoticeNetworkName(networkName)
+}
+
+// The network as the notice names it, "your URnetwork network <name>", or
+// "your URnetwork network" when it has no name to show.
+func (self *securityNoticeNetwork) Network() string {
+	if self.networkName == "" {
+		return "your URnetwork network"
+	}
+	return "your URnetwork network " + self.networkName
+}
+
+// A network's name as a notice shows it, on one line in reading order, as an
+// API key's name is (model.SecurityNoticeApiKeyName): control and format
+// characters (line breaks, tabs, direction overrides, zero-width marks) count
+// as space, each run of space is one space, and the ends are trimmed. So no
+// name breaks the subject's one line or reorders the words around it. A name
+// ValidateNetworkName passes shows as it is. The column bounds its length.
+func securityNoticeNetworkName(networkName string) string {
+	builder := strings.Builder{}
+	pendingSpace := false
+	for _, r := range networkName {
+		if unicode.IsSpace(r) || unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			pendingSpace = true
+			continue
+		}
+		if pendingSpace && 0 < builder.Len() {
+			builder.WriteRune(' ')
+		}
+		pendingSpace = false
+		builder.WriteRune(r)
+	}
+	return builder.String()
+}
+
+// A template that names the network its outbox row is about.
+type accountMessageNetworkNamer interface {
+	nameNetwork(networkName string)
+}
+
+// Names the row's network in a template that names one (QD-1216), reading the
+// network's name as it stands. A template that names none, or a row without a
+// network, reads nothing. A network that is gone leaves the template unnamed,
+// so its notice still goes out. A failed read returns its error, and the
+// delivery tries the message again after its backoff rather than send it
+// without the name.
+func nameAccountMessageNetwork(ctx context.Context, networkId *server.Id, template Template) error {
+	namer, ok := template.(accountMessageNetworkNamer)
+	if !ok || networkId == nil {
+		return nil
+	}
+	networkName := ""
+	var readErr error
+	server.HandleError(func() {
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`SELECT network_name FROM network WHERE network_id = $1`,
+				*networkId,
+			)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(&networkName))
+				}
+			})
+		})
+	}, func(err error) {
+		readErr = err
+	})
+	if readErr != nil {
+		return fmt.Errorf("the network's name was not read: %w", readErr)
+	}
+	namer.nameNetwork(networkName)
+	return nil
+}
 
 // The line for changes made between the listed ones and not listed, or "".
 func securityNoticeMoreChanges(moreCount int) string {
@@ -149,16 +249,22 @@ type SecurityWalletChangeRow struct {
 	Via string
 }
 
-// The payout wallet notice: the wallet payouts go to was set, replaced or
-// removed, on any chain: the USDC payout wallet and the subnet's Bittensor
-// wallets.
+// The payout wallet notice: the wallet a network's payouts go to was set,
+// replaced or removed, on any chain: the USDC payout wallet and the subnet's
+// Bittensor wallets. It names the network.
 type SecurityPayoutWalletChangedTemplate struct {
 	model.SecurityWalletNotice
 	BaseTemplate
+	securityNoticeNetwork
 }
 
 func (self *SecurityPayoutWalletChangedTemplate) Name() string {
 	return model.SecurityPayoutWalletTemplateName
+}
+
+// The subject: what changed, and in which network.
+func (self *SecurityPayoutWalletChangedTemplate) Subject() string {
+	return "The payout wallet of " + self.Network() + " was changed"
 }
 
 // The changes, oldest first.
@@ -334,11 +440,13 @@ type SecurityApiKeyChangeRow struct {
 	Via string
 }
 
-// The API key notice: an API key was created for the account or deleted from
-// it. It names each key by its name and creation time, never by the key.
+// The API key notice: an API key was created for a network or deleted from
+// it. It names the network, and each key by its name and creation time, never
+// by the key.
 type SecurityApiKeyChangedTemplate struct {
 	model.SecurityApiKeyNotice
 	BaseTemplate
+	securityNoticeNetwork
 }
 
 func (self *SecurityApiKeyChangedTemplate) Name() string {
@@ -408,21 +516,22 @@ func (self *SecurityApiKeyChangedTemplate) several() bool {
 	return 1 < len(self.Changes) || 0 < self.MoreCount
 }
 
-// The subject: what happened, without the details.
+// The subject: what happened, and in which network, without the details.
 func (self *SecurityApiKeyChangedTemplate) Subject() string {
+	network := self.Network()
 	switch self.onlyAction() {
 	case model.SecurityApiKeyCreated:
 		if self.several() {
-			return "API keys were created for your URnetwork account"
+			return "API keys were created for " + network
 		}
-		return "An API key was created for your URnetwork account"
+		return "An API key was created for " + network
 	case model.SecurityApiKeyDeleted:
 		if self.several() {
-			return "API keys were deleted from your URnetwork account"
+			return "API keys were deleted from " + network
 		}
-		return "An API key was deleted from your URnetwork account"
+		return "An API key was deleted from " + network
 	default:
-		return "Your URnetwork API keys were changed"
+		return "The API keys of " + network + " were changed"
 	}
 }
 
@@ -449,7 +558,7 @@ func (self *SecurityApiKeyChangedTemplate) TextHeadline() string {
 	return strings.ToUpper(self.Headline())
 }
 
-// Whether a listed change created a key, which can then act for the account.
+// Whether a listed change created a key, which can then act in the network.
 func (self *SecurityApiKeyChangedTemplate) AnyCreated() bool {
 	for _, change := range self.Changes {
 		if change != nil && change.Action == model.SecurityApiKeyCreated {
@@ -493,11 +602,13 @@ type SecurityAuthKeyChangeRow struct {
 }
 
 // The auth key notice (model/security_notice_auth_key.go): an auth key, which
-// admits devices to the network, was created or revoked. A key has no name, so
-// the notice describes it, never naming the key or its tags.
+// admits devices to the network, was created or revoked. It names the network.
+// A key has no name, so the notice describes it, never naming the key or its
+// tags.
 type SecurityAuthKeyChangedTemplate struct {
 	model.SecurityAuthKeyNotice
 	BaseTemplate
+	securityNoticeNetwork
 }
 
 func (self *SecurityAuthKeyChangedTemplate) Name() string {
@@ -573,21 +684,22 @@ func (self *SecurityAuthKeyChangedTemplate) several() bool {
 	return 1 < len(self.Changes) || 0 < self.MoreCount
 }
 
-// The subject: what happened, without the details.
+// The subject: what happened, and in which network, without the details.
 func (self *SecurityAuthKeyChangedTemplate) Subject() string {
+	network := self.Network()
 	switch self.onlyAction() {
 	case model.SecurityAuthKeyCreated:
 		if self.several() {
-			return "Auth keys were created for your URnetwork network"
+			return "Auth keys were created for " + network
 		}
-		return "An auth key was created for your URnetwork network"
+		return "An auth key was created for " + network
 	case model.SecurityAuthKeyRevoked:
 		if self.several() {
-			return "Auth keys were revoked from your URnetwork network"
+			return "Auth keys were revoked from " + network
 		}
-		return "An auth key was revoked from your URnetwork network"
+		return "An auth key was revoked from " + network
 	default:
-		return "Your URnetwork auth keys were changed"
+		return "The auth keys of " + network + " were changed"
 	}
 }
 
@@ -647,11 +759,12 @@ type SecurityNetworkAuthorityChangeRow struct {
 }
 
 // The network authority notice (model/security_notice_authority.go): who may
-// admit devices to the network or sign its members in changed. It names no
-// key, delegation, member or IdP.
+// admit devices to the network or sign its members in changed. It names the
+// network, and no key, delegation, member or IdP.
 type SecurityNetworkAuthorityChangedTemplate struct {
 	model.SecurityNetworkAuthorityNotice
 	BaseTemplate
+	securityNoticeNetwork
 }
 
 func (self *SecurityNetworkAuthorityChangedTemplate) Name() string {
@@ -700,9 +813,9 @@ func (self *SecurityNetworkAuthorityChangedTemplate) Rows() []*SecurityNetworkAu
 	return rows
 }
 
-// The subject: what happened, without the details.
+// The subject: what happened, and in which network, without the details.
 func (self *SecurityNetworkAuthorityChangedTemplate) Subject() string {
-	return "Who can admit devices to your URnetwork network changed"
+	return "Who can admit devices to " + self.Network() + " changed"
 }
 
 // The headline: what happened, in a few words.

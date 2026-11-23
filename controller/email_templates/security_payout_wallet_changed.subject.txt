@@ -1,1 +1,1 @@
-Your URnetwork payout wallet was changed
+{{.Subject}}

@@ -259,25 +259,25 @@ func TestAccountMessageOutboxRetriesAFailedSend(t *testing.T) {
 		delivery := deliverAccountMessagesAt(ctx, sender, firstTime)
 		message := outboxTestMessage(t, ctx, "synthetic-retry")
 		if delivery.retryCount != 1 || message.SentTime != nil || message.AttemptCount != 1 ||
-			message.DeliverTime == nil || !message.DeliverTime.Equal(firstTime.Add(accountMessageRetryBaseDelay)) ||
+			message.DeliverTime == nil || !message.DeliverTime.Equal(firstTime.Add(defaultAccountMessageDeliverySettings().retryBaseDelay)) ||
 			!strings.Contains(message.LastError, "synthetic send failure") || message.ClaimId != nil {
-			t.Fatalf("after one failed send: %+v (retried %d), want due again in %s with the error", message, delivery.retryCount, accountMessageRetryBaseDelay)
+			t.Fatalf("after one failed send: %+v (retried %d), want due again in %s with the error", message, delivery.retryCount, defaultAccountMessageDeliverySettings().retryBaseDelay)
 		}
 
 		// not due before its backoff ends
-		deliverAccountMessagesAt(ctx, sender, firstTime.Add(accountMessageRetryBaseDelay-time.Second))
+		deliverAccountMessagesAt(ctx, sender, firstTime.Add(defaultAccountMessageDeliverySettings().retryBaseDelay-time.Second))
 		if failed := sender.failed(); failed != 1 {
 			t.Fatalf("attempted %d sends before the backoff ended, want 1", failed)
 		}
 
-		secondTime := firstTime.Add(accountMessageRetryBaseDelay)
+		secondTime := firstTime.Add(defaultAccountMessageDeliverySettings().retryBaseDelay)
 		deliverAccountMessagesAt(ctx, sender, secondTime)
 		message = outboxTestMessage(t, ctx, "synthetic-retry")
-		if message.AttemptCount != 2 || message.DeliverTime == nil || !message.DeliverTime.Equal(secondTime.Add(2*accountMessageRetryBaseDelay)) {
-			t.Fatalf("after two failed sends: %+v, want due again in %s", message, 2*accountMessageRetryBaseDelay)
+		if message.AttemptCount != 2 || message.DeliverTime == nil || !message.DeliverTime.Equal(secondTime.Add(2*defaultAccountMessageDeliverySettings().retryBaseDelay)) {
+			t.Fatalf("after two failed sends: %+v, want due again in %s", message, 2*defaultAccountMessageDeliverySettings().retryBaseDelay)
 		}
 
-		deliverAccountMessagesAt(ctx, sender, secondTime.Add(2*accountMessageRetryBaseDelay))
+		deliverAccountMessagesAt(ctx, sender, secondTime.Add(2*defaultAccountMessageDeliverySettings().retryBaseDelay))
 		message = outboxTestMessage(t, ctx, "synthetic-retry")
 		if sends := sender.sent(); len(sends) != 1 || message.SentTime == nil || message.AttemptCount != 3 || message.LastError != "" {
 			t.Fatalf("after the retry: sent %d, message %+v, want sent once on the third attempt", len(sends), message)
@@ -303,7 +303,7 @@ func TestAccountMessageOutboxConcurrentDeliveriesSendOnce(t *testing.T) {
 
 		secondSender := newOutboxTestSender()
 		deliverAccountMessagesAt(ctx, secondSender, now)
-		deliverAccountMessagesAt(ctx, secondSender, now.Add(accountMessageClaimLease-time.Second))
+		deliverAccountMessagesAt(ctx, secondSender, now.Add(defaultAccountMessageDeliverySettings().claimLease-time.Second))
 		if sends := secondSender.sent(); len(sends) != 0 {
 			t.Fatalf("a delivery sent %d messages while another held the claim", len(sends))
 		}
@@ -313,7 +313,7 @@ func TestAccountMessageOutboxConcurrentDeliveriesSendOnce(t *testing.T) {
 		if sends := holdingSender.sent(); len(sends) != 1 || first.sentCount != 1 {
 			t.Fatalf("the claiming delivery sent %d messages, want 1", len(sends))
 		}
-		deliverAccountMessagesAt(ctx, secondSender, now.Add(2*accountMessageClaimLease))
+		deliverAccountMessagesAt(ctx, secondSender, now.Add(2*defaultAccountMessageDeliverySettings().claimLease))
 		if sends := secondSender.sent(); len(sends) != 0 {
 			t.Fatalf("a delivered message was sent again (%d)", len(sends))
 		}
@@ -338,7 +338,7 @@ func TestAccountMessageOutboxClaimEndsAfterItsLease(t *testing.T) {
 		<-holdingSender.entered
 
 		secondSender := newOutboxTestSender()
-		second := deliverAccountMessagesAt(ctx, secondSender, now.Add(accountMessageClaimLease))
+		second := deliverAccountMessagesAt(ctx, secondSender, now.Add(defaultAccountMessageDeliverySettings().claimLease))
 		if sends := secondSender.sent(); len(sends) != 1 || second.sentCount != 1 {
 			t.Fatalf("after the lease ended a delivery sent %d messages, want 1", len(sends))
 		}
@@ -372,13 +372,13 @@ func TestAccountMessageOutboxAbandonsAfterTheMostAttempts(t *testing.T) {
 		now := server.NowUtc()
 		for range 3 {
 			deliverAccountMessagesWithSettings(ctx, sender, now, settings)
-			now = now.Add(accountMessageRetryMaxDelay)
+			now = now.Add(defaultAccountMessageDeliverySettings().retryMaxDelay)
 		}
 		message := outboxTestMessage(t, ctx, "synthetic-abandon")
 		if message.AbandonTime == nil || message.SentTime != nil || message.AttemptCount != 3 || message.LastError == "" {
 			t.Fatalf("message = %+v, want abandoned after 3 attempts with the error", message)
 		}
-		deliverAccountMessagesWithSettings(ctx, sender, now.Add(accountMessageRetryMaxDelay), settings)
+		deliverAccountMessagesWithSettings(ctx, sender, now.Add(defaultAccountMessageDeliverySettings().retryMaxDelay), settings)
 		if failed := sender.failed(); failed != 3 {
 			t.Fatalf("attempted %d sends, want 3 (an abandoned message is not claimed)", failed)
 		}
@@ -390,7 +390,7 @@ func TestAccountMessageOutboxAbandonsAfterTheMostAttempts(t *testing.T) {
 func TestAccountMessageOutboxStopsARunAfterFailedSendsInARow(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		for i := range accountMessageMaxConsecutiveFailureCount + 2 {
+		for i := range defaultAccountMessageDeliverySettings().maxConsecutiveFailureCount + 2 {
 			addOutboxTestMessage(ctx, fmt.Sprintf("synthetic-outage-%d", i), fmt.Sprintf("outbox-outage-%d@synthetic.example", i))
 		}
 		sender := newOutboxTestSender()
@@ -401,11 +401,11 @@ func TestAccountMessageOutboxStopsARunAfterFailedSendsInARow(t *testing.T) {
 		if more := delivery.Run(); more {
 			t.Fatal("a run stopped by failed sends asked to run again at once")
 		}
-		if failed := sender.failed(); failed != accountMessageMaxConsecutiveFailureCount {
-			t.Fatalf("attempted %d sends, want %d", failed, accountMessageMaxConsecutiveFailureCount)
+		if failed := sender.failed(); failed != defaultAccountMessageDeliverySettings().maxConsecutiveFailureCount {
+			t.Fatalf("attempted %d sends, want %d", failed, defaultAccountMessageDeliverySettings().maxConsecutiveFailureCount)
 		}
 		untouchedCount := 0
-		for i := range accountMessageMaxConsecutiveFailureCount + 2 {
+		for i := range defaultAccountMessageDeliverySettings().maxConsecutiveFailureCount + 2 {
 			if message := outboxTestMessage(t, ctx, fmt.Sprintf("synthetic-outage-%d", i)); message.AttemptCount == 0 {
 				untouchedCount += 1
 			}
@@ -422,7 +422,7 @@ func TestAccountMessageOutboxKeepsAnUnregisteredTemplateDue(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		server.Tx(ctx, func(tx server.PgTx) {
-			for i := range accountMessageMaxConsecutiveFailureCount {
+			for i := range defaultAccountMessageDeliverySettings().maxConsecutiveFailureCount {
 				model.AddAccountMessageInTx(ctx, tx, &model.AccountMessageArgs{
 					Key:          fmt.Sprintf("synthetic-unregistered-%d", i),
 					UserAuth:     fmt.Sprintf("outbox-unregistered-%d@synthetic.example", i),
@@ -436,12 +436,12 @@ func TestAccountMessageOutboxKeepsAnUnregisteredTemplateDue(t *testing.T) {
 		sender := newOutboxTestSender()
 		now := server.NowUtc()
 		delivery := deliverAccountMessagesAt(ctx, sender, now)
-		if sends := sender.sent(); len(sends) != 1 || delivery.retryCount != accountMessageMaxConsecutiveFailureCount {
+		if sends := sender.sent(); len(sends) != 1 || delivery.retryCount != defaultAccountMessageDeliverySettings().maxConsecutiveFailureCount {
 			t.Fatalf("sent %d and retried %d, want the registered message sent and the others due again", len(sends), delivery.retryCount)
 		}
 		message := model.GetAccountMessageByKey(ctx, "synthetic_future_template", "synthetic-unregistered-0")
 		if message.AbandonTime != nil || message.SentTime != nil || message.DeliverTime == nil ||
-			!message.DeliverTime.Equal(now.Add(accountMessageRetryBaseDelay)) {
+			!message.DeliverTime.Equal(now.Add(defaultAccountMessageDeliverySettings().retryBaseDelay)) {
 			t.Fatalf("unregistered message = %+v, want due again after the backoff", message)
 		}
 	})
@@ -491,10 +491,10 @@ func TestAccountMessageOutboxRemovesFinishedMessagesAfterRetention(t *testing.T)
 		deliverAccountMessagesAt(ctx, newOutboxTestSender(), server.NowUtc())
 		addOutboxTestMessage(ctx, "synthetic-due", "outbox-due@synthetic.example")
 
-		if removedCount := model.RemoveFinishedAccountMessages(ctx, server.NowUtc().Add(-accountMessageRetention), accountMessageRemoveLimit); removedCount != 0 {
+		if removedCount := model.RemoveFinishedAccountMessages(ctx, server.NowUtc().Add(-defaultAccountMessageDeliverySettings().retention), defaultAccountMessageDeliverySettings().removeLimit); removedCount != 0 {
 			t.Fatalf("removed %d messages inside the retention period", removedCount)
 		}
-		if removedCount := model.RemoveFinishedAccountMessages(ctx, server.NowUtc().Add(time.Second), accountMessageRemoveLimit); removedCount != 1 {
+		if removedCount := model.RemoveFinishedAccountMessages(ctx, server.NowUtc().Add(time.Second), defaultAccountMessageDeliverySettings().removeLimit); removedCount != 1 {
 			t.Fatalf("removed %d messages past the retention period, want the delivered one", removedCount)
 		}
 		if message := outboxTestMessage(t, ctx, "synthetic-finished"); message != nil {
@@ -525,8 +525,8 @@ func TestAccountMessageTemplatesDecodeAndRender(t *testing.T) {
 			t.Fatalf("%s: sms: %v", templateName, err)
 		}
 	}
-	if accountMessageClaimLease <= 2*maxAccountMessageSendTimeout {
-		t.Fatalf("claim lease %s does not outlast two of the longest sends (%s)", accountMessageClaimLease, maxAccountMessageSendTimeout)
+	if defaultAccountMessageDeliverySettings().claimLease <= 2*defaultAccountMessageSendSettings().maxSendTimeout {
+		t.Fatalf("claim lease %s does not outlast two of the longest sends (%s)", defaultAccountMessageDeliverySettings().claimLease, defaultAccountMessageSendSettings().maxSendTimeout)
 	}
 }
 
@@ -587,8 +587,8 @@ func TestDeliverAccountMessagesTaskDeliversAndSchedulesTheNextRun(t *testing.T) 
 				task.RunOnce("deliver_account_messages").String(),
 			).Scan(&runAt))
 		})
-		if runAt.Before(beforePost.Add(accountMessageDeliverInterval - time.Second)) {
-			t.Fatalf("next run at %s, want about %s after %s", runAt, accountMessageDeliverInterval, beforePost)
+		if runAt.Before(beforePost.Add(defaultAccountMessageDeliverySettings().deliverInterval - time.Second)) {
+			t.Fatalf("next run at %s, want about %s after %s", runAt, defaultAccountMessageDeliverySettings().deliverInterval, beforePost)
 		}
 
 		// a drain or the max time ends a run before it claims more
@@ -634,7 +634,7 @@ func TestAccountMessageOutboxRecordsASendWhenTheRunIsCanceledDuringIt(t *testing
 		if message.SentTime == nil || message.ClaimId != nil {
 			t.Fatalf("message = %+v, want recorded as sent", message)
 		}
-		deliverAccountMessagesAt(ctx, sender, now.Add(2*accountMessageClaimLease))
+		deliverAccountMessagesAt(ctx, sender, now.Add(2*defaultAccountMessageDeliverySettings().claimLease))
 		if sender.sendCount != 1 {
 			t.Fatalf("sent %d times, want once", sender.sendCount)
 		}
