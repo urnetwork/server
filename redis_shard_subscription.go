@@ -35,6 +35,11 @@ package server
 // Messages published while no subscription existed are gone. The handler hears
 // of every acknowledgement that starts a subscription, so the consumer resyncs
 // from its authoritative source there.
+//
+// A consumer may carry more channels of the same slot on the socket (the
+// handler's Socket and Notice): it subscribes them itself, and judges their
+// notices, any of which can replace the socket. The owned channel alone keeps
+// the rules above.
 
 import (
 	"context"
@@ -75,6 +80,9 @@ type RedisShardSubscription interface {
 	Ping(ctx context.Context, payload ...string) error
 	Close() error
 }
+
+// A subscribe or unsubscribe notice read from a shard subscription socket.
+type RedisSubscriptionNotice = *redis.Subscription
 
 // Opens shard subscriptions and refreshes the routing they are opened with.
 type RedisShardSubscriptionSource struct {
@@ -125,12 +133,21 @@ func DefaultRedisShardSubscriptionSettings() *RedisShardSubscriptionSettings {
 // Receives one subscription's events on its reader goroutine. The functions
 // must not block. nil functions are skipped.
 type RedisShardSubscriptionHandler struct {
+	// the socket an acknowledgement just started a subscription on, before
+	// Subscribed. Other channels of the same slot may be subscribed and
+	// unsubscribed on it from another goroutine (`*redis.PubSub` writes while
+	// its reader is blocked) until Lost, or until the context ends
+	Socket func(subscription RedisShardSubscription)
 	// an acknowledgement started a subscription. resubscribed is true after a
 	// loss, when messages published in the gap are gone
 	Subscribed func(resubscribed bool)
 	// a message was read. Returns whether it is valid evidence that the
 	// subscription is live
 	Message func(message RedisMessage) bool
+	// a subscribe or unsubscribe notice for another channel of the socket,
+	// which is incoming evidence. An error replaces the socket. nil ignores
+	// such notices
+	Notice func(notice RedisSubscriptionNotice) error
 	// a subscription ended, or failed to start, while the context is live
 	Lost func(cause error)
 }
@@ -157,12 +174,15 @@ func RunRedisShardSubscription(
 	}
 
 	subscriptionCount := 0
-	startSubscription := func() {
+	startSubscription := func(subscription RedisShardSubscription) {
 		event := "subscribed"
 		if 0 < subscriptionCount {
 			event = "resubscribed"
 		}
 		redisShardSubscriptionCounter.WithLabelValues(event).Inc()
+		if handler.Socket != nil {
+			handler.Socket(subscription)
+		}
 		if handler.Subscribed != nil {
 			handler.Subscribed(0 < subscriptionCount)
 		}
@@ -235,6 +255,13 @@ func RunRedisShardSubscription(
 			switch event := event.(type) {
 			case *redis.Subscription:
 				if event.Channel != channel {
+					if handler.Notice == nil {
+						continue
+					}
+					if err := handler.Notice(event); err != nil {
+						return acknowledged, err
+					}
+					lastIncomingTime = time.Now()
 					continue
 				}
 				switch event.Kind {
@@ -256,7 +283,7 @@ func RunRedisShardSubscription(
 					// the first acknowledgement on this socket, or one that
 					// nothing asked for. Either can follow a gap.
 					acknowledged = true
-					startSubscription()
+					startSubscription(subscription)
 				}
 			case *redis.Pong:
 				lastIncomingTime = time.Now()
