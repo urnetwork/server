@@ -82,6 +82,15 @@ func TestDefaultSettingsKeepTheLocalTransportCeilingOff(t *testing.T) {
 	}
 }
 
+// Alt's embedded exchange keeps the stuck provider recycle off at its code
+// ceiling, which the connect service turns on: alt subscribes no recycle flags
+// and recycles nothing, whatever the move control holds.
+func TestDefaultSettingsKeepTheStuckProviderRecycleCeilingOff(t *testing.T) {
+	if DefaultSettings().ExchangeSettings.EnableStuckProviderRecycle {
+		t.Fatal("alt's exchange recycles stuck providers")
+	}
+}
+
 // The lb-fronted connect service keeps its own listeners and the proxy
 // protocol nginx prepends, so alt's settings cannot have leaked into it.
 func TestLbFrontedConnectKeepsItsListenersAndProxyProtocol(t *testing.T) {

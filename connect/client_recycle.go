@@ -15,14 +15,9 @@
 //
 // The switch: EnableStuckProviderRecycle is the code ceiling, off by default
 // and on only in the connect service (run.go); alt's exchange keeps it off and
-// subscribes no flags. The Redis move control's `stuckProviderRecycle`
-// (model/connect_move_control.go) chooses connect blocks,
-// StuckProviderRecycleDefault ("off") applies while it sets none, and the
-// exchange reads it every StuckProviderRecycleControlRefreshInterval. A failed
-// read keeps the last value until StuckProviderRecycleControlMaxFailedReads
-// fail in a row, which turn the switch off. A flag while the switch is off
-// for this block does nothing but count, where the client is held, as
-// disabled.
+// subscribes no flags. Every connect exchange with the ceiling on recycles,
+// with no runtime control: the Redis move control's retired
+// `stuckProviderRecycle` field is ignored (model/connect_move_control.go).
 //
 // Pacing: the dispatch only queues a held client, on a bounded queue, and a
 // fixed pool of workers recycles at most StuckProviderRecyclesPerSecond with a
@@ -35,7 +30,6 @@ package connect
 import (
 	"context"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -52,16 +46,15 @@ import (
 // transports here), replaced (a replaced resident here retired, and its
 // transports here closed), transport_only (its transports here closed, with
 // no live resident here), resident_done (its resident here had already ended,
-// and no transport was here), not_held (nothing of the client here), disabled
-// (held here, with the switch off for this block), removed (the client was
-// removed), queue_full (held here, past the queue), error (the removed flag
-// was unreadable, or the recycle failed).
+// and no transport was here), not_held (nothing of the client here), removed
+// (the client was removed), queue_full (held here, past the queue), error (the
+// removed flag was unreadable, or the recycle failed).
 var stuckProviderRecyclesCounter = prometheus.NewCounterVec(
 	prometheus.CounterOpts{
 		Namespace: "urnetwork",
 		Subsystem: "connect",
 		Name:      "stuck_provider_recycles_total",
-		Help:      "Recycle flag events the api set for a stuck provider, handled by this process, by outcome: recycled (its resident here retired and at least one of its transports here closed with the moved close), resident_only (its resident here retired, with no transport here), replaced (a replaced resident here retired), transport_only (only its transports here closed), resident_done (its resident here had already ended), not_held (nothing of the client here), disabled (held here, with the switch off for this block), removed (a removed client, left alone), queue_full (past the recycle queue), error (the removed flag was unreadable, or the recycle failed)",
+		Help:      "Recycle flag events the api set for a stuck provider, handled by this process, by outcome: recycled (its resident here retired and at least one of its transports here closed with the moved close), resident_only (its resident here retired, with no transport here), replaced (a replaced resident here retired), transport_only (only its transports here closed), resident_done (its resident here had already ended), not_held (nothing of the client here), removed (a removed client, left alone), queue_full (past the recycle queue), error (the removed flag was unreadable, or the recycle failed)",
 	},
 	[]string{"outcome"},
 )
@@ -89,7 +82,7 @@ var stuckProviderRecycleEnabledGauge = prometheus.NewGauge(
 		Namespace: "urnetwork",
 		Subsystem: "connect",
 		Name:      "stuck_provider_recycle_enabled",
-		Help:      "Whether this process's exchange recycles stuck providers: EnableStuckProviderRecycle as the Redis control last chose for its block, 1 on, 0 off",
+		Help:      "Whether this process's exchange recycles stuck providers: EnableStuckProviderRecycle, 1 on, 0 off",
 	},
 )
 
@@ -100,7 +93,6 @@ const (
 	stuckProviderRecycleTransportOnly = "transport_only"
 	stuckProviderRecycleResidentDone  = "resident_done"
 	stuckProviderRecycleNotHeld       = "not_held"
-	stuckProviderRecycleDisabled      = "disabled"
 	stuckProviderRecycleRemoved       = "removed"
 	stuckProviderRecycleQueueFull     = "queue_full"
 	stuckProviderRecycleError         = "error"
@@ -114,7 +106,6 @@ func init() {
 		stuckProviderRecycleTransportOnly,
 		stuckProviderRecycleResidentDone,
 		stuckProviderRecycleNotHeld,
-		stuckProviderRecycleDisabled,
 		stuckProviderRecycleRemoved,
 		stuckProviderRecycleQueueFull,
 		stuckProviderRecycleError,
@@ -132,23 +123,10 @@ func init() {
 // The switch and pacing of stuck provider recycles. Embedded in
 // ExchangeSettings.
 type ExchangeStuckProviderRecycleSettings struct {
-	// The code ceiling. False: the exchange subscribes and reads no flags, and
-	// the control is not read. Off by default; the connect service turns it on
-	// (run.go), and embedders such as alt keep it off.
+	// The code ceiling. False: the exchange subscribes and reads no flags. Off
+	// by default; the connect service turns it on (run.go), and embedders such
+	// as alt keep it off.
 	EnableStuckProviderRecycle bool
-	// The blocks that recycle while the Redis control sets no
-	// `stuckProviderRecycle`, in the control's syntax: "off", "all", or blocks
-	// separated by commas or spaces. Not a ceiling: an operator widens it with
-	// the control, up to EnableStuckProviderRecycle. "off" ships the code dark.
-	StuckProviderRecycleDefault string
-	// How often the exchange reads the control's `stuckProviderRecycle`.
-	// Non-positive reads it once, at start.
-	StuckProviderRecycleControlRefreshInterval time.Duration
-	// Bounds one read of the control.
-	StuckProviderRecycleControlReadTimeout time.Duration
-	// This many failed reads in a row turn the switch off. Non-positive keeps
-	// the last value through any number.
-	StuckProviderRecycleControlMaxFailedReads int
 	// The recycle rate of this process, and its burst. Non-positive recycles
 	// none.
 	StuckProviderRecyclesPerSecond float64
@@ -164,103 +142,59 @@ type ExchangeStuckProviderRecycleSettings struct {
 
 func DefaultExchangeStuckProviderRecycleSettings() *ExchangeStuckProviderRecycleSettings {
 	return &ExchangeStuckProviderRecycleSettings{
-		EnableStuckProviderRecycle:                 false,
-		StuckProviderRecycleDefault:                model.ConnectLocalTransportOff,
-		StuckProviderRecycleControlRefreshInterval: 10 * time.Second,
-		StuckProviderRecycleControlReadTimeout:     5 * time.Second,
-		StuckProviderRecycleControlMaxFailedReads:  3,
-		StuckProviderRecyclesPerSecond:             5,
-		StuckProviderRecycleBurst:                  20,
-		StuckProviderRecycleQueueSize:              1024,
-		StuckProviderRecycleWorkerCount:            4,
-		StuckProviderRecycleTimeout:                5 * time.Second,
+		EnableStuckProviderRecycle:      false,
+		StuckProviderRecyclesPerSecond:  5,
+		StuckProviderRecycleBurst:       20,
+		StuckProviderRecycleQueueSize:   1024,
+		StuckProviderRecycleWorkerCount: 4,
+		StuckProviderRecycleTimeout:     5 * time.Second,
 	}
 }
 
-// The recycle switch and pacing of one exchange, as the control last chose it
-// for this block, and the workers Exchange.WaitForIdle joins.
+// The recycle pacing of one exchange, and the workers Exchange.WaitForIdle
+// joins.
 type exchangeStuckProviderRecycle struct {
 	ctx      context.Context
 	settings *ExchangeSettings
-	block    string
-	read     func(ctx context.Context, ceiling model.ConnectMoveControlCeiling) (*model.ConnectMoveControl, error)
 	// recycles one queued client; the exchange's recycleStuckProvider
 	recycle func(clientId server.Id)
 
 	queue  chan server.Id
 	bucket *server.TokenBucket
 
-	// whether this block recycles, as of the last good read of the control,
-	// and before the first as the code default chooses
-	allowed atomic.Bool
-
 	// workerLock closes admission before Exchange.WaitForIdle joins the
-	// control loop and the recycle workers
+	// recycle workers
 	workerLock    sync.Mutex
 	workersClosed bool
 	workers       sync.WaitGroup
-
-	// owned by the control loop: failed reads in a row. The first failure is
-	// logged once until a read succeeds.
-	failedReads int
 }
 
-// The exchange's recycle switch, which reads the control and runs its workers
-// until ctx ends. Nil while EnableStuckProviderRecycle is off: flags are
-// ignored and nothing is read.
-func newExchangeStuckProviderRecycle(ctx context.Context, settings *ExchangeSettings, block string, recycle func(server.Id)) *exchangeStuckProviderRecycle {
+// The exchange's recycles, whose workers run until ctx ends. Nil while
+// EnableStuckProviderRecycle is off: flags are ignored.
+func newExchangeStuckProviderRecycle(ctx context.Context, settings *ExchangeSettings, recycle func(server.Id)) *exchangeStuckProviderRecycle {
 	if !settings.EnableStuckProviderRecycle {
 		return nil
 	}
-	stuckProviderRecycle := newExchangeStuckProviderRecycleWithStore(ctx, settings, block, model.GetConnectMoveControl, recycle)
+	stuckProviderRecycle := newExchangeStuckProviderRecycleWithoutWorkers(ctx, settings, recycle)
 	stuckProviderRecycle.start()
 	return stuckProviderRecycle
 }
 
-// The switch over an explicit store, without its control loop or workers.
-// Tests drive refresh directly, or start them.
-func newExchangeStuckProviderRecycleWithStore(
+// The recycles over an explicit recycle, without their workers. Tests queue
+// clients first, or start them.
+func newExchangeStuckProviderRecycleWithoutWorkers(
 	ctx context.Context,
 	settings *ExchangeSettings,
-	block string,
-	read func(ctx context.Context, ceiling model.ConnectMoveControlCeiling) (*model.ConnectMoveControl, error),
 	recycle func(server.Id),
 ) *exchangeStuckProviderRecycle {
-	stuckProviderRecycle := &exchangeStuckProviderRecycle{
+	stuckProviderRecycleEnabledGauge.Set(1)
+	return &exchangeStuckProviderRecycle{
 		ctx:      ctx,
 		settings: settings,
-		block:    block,
-		read:     read,
 		recycle:  recycle,
 		queue:    make(chan server.Id, max(0, settings.StuckProviderRecycleQueueSize)),
 		bucket:   server.NewTokenBucket(settings.StuckProviderRecyclesPerSecond, settings.StuckProviderRecycleBurst),
 	}
-	// until the first read, the code default chooses
-	allowed := model.NarrowConnectMoveControl(nil, stuckProviderRecycle.ceiling()).StuckProviderRecycleAllows(block)
-	stuckProviderRecycle.allowed.Store(allowed)
-	setStuckProviderRecycleEnabledGauge(allowed)
-	return stuckProviderRecycle
-}
-
-func setStuckProviderRecycleEnabledGauge(allowed bool) {
-	if allowed {
-		stuckProviderRecycleEnabledGauge.Set(1)
-	} else {
-		stuckProviderRecycleEnabledGauge.Set(0)
-	}
-}
-
-// The code settings the control narrows.
-func (self *exchangeStuckProviderRecycle) ceiling() model.ConnectMoveControlCeiling {
-	return model.ConnectMoveControlCeiling{
-		EnableStuckProviderRecycle:  self.settings.EnableStuckProviderRecycle,
-		StuckProviderRecycleDefault: self.settings.StuckProviderRecycleDefault,
-	}
-}
-
-// Whether this block recycles, as of the last good read.
-func (self *exchangeStuckProviderRecycle) allows() bool {
-	return self.allowed.Load()
 }
 
 // Admits one worker for Exchange.WaitForIdle unless the exchange has closed.
@@ -286,14 +220,8 @@ func (self *exchangeStuckProviderRecycle) closeWorkers() {
 	self.workersClosed = true
 }
 
-// Starts the control loop and the recycle workers.
+// Starts the recycle workers.
 func (self *exchangeStuckProviderRecycle) start() {
-	if self.beginWorker() {
-		go server.HandleError(func() {
-			defer self.endWorker()
-			self.run()
-		})
-	}
 	for range max(0, self.settings.StuckProviderRecycleWorkerCount) {
 		if !self.beginWorker() {
 			return
@@ -303,68 +231,6 @@ func (self *exchangeStuckProviderRecycle) start() {
 			self.runRecycles()
 		})
 	}
-}
-
-// Reads the control now, then every StuckProviderRecycleControlRefreshInterval
-// until ctx ends, on one reused timer. A non-positive interval reads once.
-func (self *exchangeStuckProviderRecycle) run() {
-	timer := time.NewTimer(0)
-	defer timer.Stop()
-	for {
-		self.refresh()
-		if self.settings.StuckProviderRecycleControlRefreshInterval <= 0 {
-			return
-		}
-		timer.Reset(self.settings.StuckProviderRecycleControlRefreshInterval)
-		select {
-		case <-self.ctx.Done():
-			return
-		case <-timer.C:
-		}
-	}
-}
-
-// Reads the control once. A read that fails or raises keeps the last value
-// until StuckProviderRecycleControlMaxFailedReads fail in a row, which turn
-// the switch off. Called only by the loop; tests call it in the loop's place.
-func (self *exchangeStuckProviderRecycle) refresh() {
-	var control *model.ConnectMoveControl
-	var err error
-	server.HandleError(func() {
-		readCtx, readCancel := context.WithTimeout(self.ctx, self.settings.StuckProviderRecycleControlReadTimeout)
-		defer readCancel()
-		control, err = self.read(readCtx, self.ceiling())
-	}, func(readErr error) {
-		err = readErr
-	})
-	if err != nil {
-		if self.ctx.Err() != nil {
-			// the exchange is closing
-			return
-		}
-		self.failedReads += 1
-		if self.failedReads == 1 {
-			glog.Infof("[exchange]stuck provider recycle control unavailable, keeping recycle=%t (%s)\n", self.allows(), err)
-		} else if glog.V(1) {
-			glog.Infof("[exchange]stuck provider recycle control unavailable (%s)\n", err)
-		}
-		if 0 < self.settings.StuckProviderRecycleControlMaxFailedReads &&
-			self.settings.StuckProviderRecycleControlMaxFailedReads <= self.failedReads {
-			self.setAllowed(false)
-		}
-		return
-	}
-	self.failedReads = 0
-	self.setAllowed(control.StuckProviderRecycleAllows(self.block))
-}
-
-// Publishes the switch for the next flag.
-func (self *exchangeStuckProviderRecycle) setAllowed(allowed bool) {
-	if self.allowed.Swap(allowed) == allowed {
-		return
-	}
-	setStuckProviderRecycleEnabledGauge(allowed)
-	glog.Infof("[exchange]stuck provider recycle control: block %s recycle=%t\n", self.block, allowed)
 }
 
 // Queues a held client for a worker without waiting. False when the queue is
@@ -428,9 +294,7 @@ func (self *Exchange) clientConnectionCount(clientId server.Id) int {
 }
 
 // The key-event dispatch of a client's recycle flag. It must not block: only
-// the client maps and the switch are read here, and a held client is queued
-// for the workers. With the switch off a held client counts as disabled, so a
-// block left off reports the recycles it would have made.
+// the client maps are read here, and a held client is queued for the workers.
 func (self *Exchange) handleClientRecycle(clientId server.Id) {
 	recycle := self.stuckProviderRecycle
 	if recycle == nil {
@@ -438,10 +302,6 @@ func (self *Exchange) handleClientRecycle(clientId server.Id) {
 	}
 	if !self.holdsClient(clientId) {
 		stuckProviderRecyclesCounter.WithLabelValues(stuckProviderRecycleNotHeld).Inc()
-		return
-	}
-	if !recycle.allows() {
-		stuckProviderRecyclesCounter.WithLabelValues(stuckProviderRecycleDisabled).Inc()
 		return
 	}
 	if !recycle.enqueue(clientId) {

@@ -1052,7 +1052,7 @@ func newExchange(
 	exchange.localForward = newExchangeLocalTransport(cancelCtx, settings, block, ExchangeOpForward)
 	// flags arrive only as key events
 	if exchange.keyEventSubscriber != nil {
-		exchange.stuckProviderRecycle = newExchangeStuckProviderRecycle(cancelCtx, settings, block, exchange.recycleStuckProvider)
+		exchange.stuckProviderRecycle = newExchangeStuckProviderRecycle(cancelCtx, settings, exchange.recycleStuckProvider)
 		if exchange.stuckProviderRecycle != nil {
 			exchange.keyEventSubscriber.SetClientRecycle(exchange.handleClientRecycle)
 		}
@@ -2627,8 +2627,8 @@ func (self *Exchange) Close() {
 // WaitForIdle waits until every admitted resident, listener, accepted
 // connection, and in-process transport and forward link has completed
 // teardown, with the local transport's and local forward's control loops and
-// pacers and the stuck provider recycle's control loop and recycles. Close
-// must be called first so no wait group can receive another admission.
+// pacers and the stuck provider recycle's workers. Close must be called first
+// so no wait group can receive another admission.
 func (self *Exchange) WaitForIdle(ctx context.Context) bool {
 	done := make(chan struct{})
 	go func() {

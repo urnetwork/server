@@ -56,13 +56,11 @@ package controller
 // the client kept retrying after its recycle.
 //
 // The switch: EnableStuckProviderSignal is the code ceiling, off by default
-// and on only in the api service (api/run.go). The Redis move control's
-// `stuckProviderSignal` (model/connect_move_control.go) chooses api blocks,
-// StuckProviderSignalDefault ("off") applies while it sets none, and the owner
-// reads it every ControlRefreshInterval. A failed read keeps the last value
-// until ControlMaxFailedReads fail in a row, which turn the switch off, so an
-// unreadable control cannot keep it on. While the switch is off nothing is
-// counted or written, and turning it off forgets every run.
+// and on only in the api service (api/run.go); alt's router keeps it off.
+// Every api process reports, with no runtime control: the Redis move
+// control's retired `stuckProviderSignal` field is ignored
+// (model/connect_move_control.go). With the ceiling off no owner is made, and
+// nothing is counted or written.
 //
 // Bounded: two generations of at most TrackedClientCount clients each, as the
 // terminal refusal registry (model/contract_route_rejection.go), held without
@@ -74,7 +72,6 @@ import (
 	"context"
 	"math/rand/v2"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -108,7 +105,7 @@ var stuckProviderSignalEnabledGauge = prometheus.NewGauge(prometheus.GaugeOpts{
 	Namespace: "urnetwork",
 	Subsystem: "connect",
 	Name:      "stuck_provider_signal_enabled",
-	Help:      "Whether this api process reports stuck providers: EnableStuckProviderSignal as the Redis control last chose for its block, 1 on, 0 off",
+	Help:      "Whether this api process reports stuck providers: EnableStuckProviderSignal, 1 on, 0 off",
 })
 
 const (
@@ -141,22 +138,9 @@ func init() {
 // The switch, thresholds and bounds of stuck provider reports. See the file
 // header for how the thresholds follow from the retry cadence.
 type StuckProviderSignalSettings struct {
-	// The code ceiling. False: no owner is made, nothing is counted, and the
-	// control is not read. The api service turns it on (api/run.go); alt keeps
-	// it off.
+	// The code ceiling. False: no owner is made and nothing is counted. The api
+	// service turns it on (api/run.go); alt keeps it off.
 	EnableStuckProviderSignal bool
-	// The api blocks that report while the Redis control sets no
-	// `stuckProviderSignal`, in the control's syntax. Not a ceiling. "off"
-	// ships the code dark.
-	StuckProviderSignalDefault string
-	// How often the owner reads the control. Non-positive reads it once, at
-	// start.
-	ControlRefreshInterval time.Duration
-	// Bounds one read of the control.
-	ControlReadTimeout time.Duration
-	// This many failed reads in a row turn the switch off. Non-positive keeps
-	// the last value through any number.
-	ControlMaxFailedReads int
 
 	// How long a client's run of terminal answers on this process lasts
 	// before it is reported.
@@ -189,21 +173,17 @@ type StuckProviderSignalSettings struct {
 
 func DefaultStuckProviderSignalSettings() *StuckProviderSignalSettings {
 	return &StuckProviderSignalSettings{
-		EnableStuckProviderSignal:  false,
-		StuckProviderSignalDefault: model.ConnectLocalTransportOff,
-		ControlRefreshInterval:     10 * time.Second,
-		ControlReadTimeout:         5 * time.Second,
-		ControlMaxFailedReads:      3,
-		MinRetryDuration:           20 * time.Minute,
-		MinRetryCount:              6,
-		MaxRetryGap:                5 * time.Minute,
-		TrackedClientCount:         65536,
-		Cooldown:                   1 * time.Hour,
-		StillStuckAge:              10 * time.Minute,
-		SignalsPerSecond:           5,
-		SignalBurst:                20,
-		SignalTimeout:              5 * time.Second,
-		MaxConcurrentSignals:       16,
+		EnableStuckProviderSignal: false,
+		MinRetryDuration:          20 * time.Minute,
+		MinRetryCount:             6,
+		MaxRetryGap:               5 * time.Minute,
+		TrackedClientCount:        65536,
+		Cooldown:                  1 * time.Hour,
+		StillStuckAge:             10 * time.Minute,
+		SignalsPerSecond:          5,
+		SignalBurst:               20,
+		SignalTimeout:             5 * time.Second,
+		MaxConcurrentSignals:      16,
 	}
 }
 
@@ -221,39 +201,28 @@ type StuckProviderSignals struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 	settings *StuckProviderSignalSettings
-	block    string
 
-	readControl func(ctx context.Context, ceiling model.ConnectMoveControlCeiling) (*model.ConnectMoveControl, error)
-	setRecycle  func(ctx context.Context, clientId server.Id, ttl time.Duration) (bool, time.Time, error)
-	now         func() time.Time
+	setRecycle func(ctx context.Context, clientId server.Id, ttl time.Duration) (bool, time.Time, error)
+	now        func() time.Time
 	// the random part of a flag's ttl, in [0, n)
 	randInt64N func(n int64) int64
 
 	signalBucket *server.TokenBucket
 
-	// whether this block reports, as of the last good read of the control,
-	// and before the first as the code default chooses
-	allowed atomic.Bool
-
 	stateLock             sync.Mutex
 	currentClientRetries  map[server.Id]stuckProviderRetry
 	previousClientRetries map[server.Id]stuckProviderRetry
 
-	// workerLock closes admission before Close joins the control loop and
-	// every report in flight
+	// workerLock closes admission before Close joins every report in flight
 	workerLock     sync.Mutex
 	workersClosed  bool
 	signalsRunning int
 	workers        sync.WaitGroup
-
-	// owned by the control loop: failed reads in a row. The first failure is
-	// logged once until a read succeeds.
-	failedReads int
 }
 
-// The owner for the api processes of block, which reads the control until
-// ctx ends or Close. Nil while EnableStuckProviderSignal is off.
-func NewStuckProviderSignals(ctx context.Context, settings *StuckProviderSignalSettings, block string) *StuckProviderSignals {
+// The owner of an api process's reports, whose writes end with ctx or Close.
+// Nil while EnableStuckProviderSignal is off.
+func NewStuckProviderSignals(ctx context.Context, settings *StuckProviderSignalSettings) *StuckProviderSignals {
 	if settings == nil || !settings.EnableStuckProviderSignal {
 		return nil
 	}
@@ -261,18 +230,13 @@ func NewStuckProviderSignals(ctx context.Context, settings *StuckProviderSignalS
 	if now == nil {
 		now = time.Now
 	}
-	signals := newStuckProviderSignalsWithStore(ctx, settings, block, model.GetConnectMoveControl, model.SetClientRecycle, now)
-	signals.start()
-	return signals
+	return newStuckProviderSignalsWithStore(ctx, settings, model.SetClientRecycle, now)
 }
 
-// The owner over an explicit store and clock, without its control loop.
-// Tests drive refresh directly, or start the loop.
+// The owner over an explicit flag store and clock.
 func newStuckProviderSignalsWithStore(
 	ctx context.Context,
 	settings *StuckProviderSignalSettings,
-	block string,
-	readControl func(ctx context.Context, ceiling model.ConnectMoveControlCeiling) (*model.ConnectMoveControl, error),
 	setRecycle func(ctx context.Context, clientId server.Id, ttl time.Duration) (bool, time.Time, error),
 	now func() time.Time,
 ) *StuckProviderSignals {
@@ -281,8 +245,6 @@ func newStuckProviderSignalsWithStore(
 		ctx:                   cancelCtx,
 		cancel:                cancel,
 		settings:              settings,
-		block:                 block,
-		readControl:           readControl,
 		setRecycle:            setRecycle,
 		now:                   now,
 		randInt64N:            rand.Int64N,
@@ -290,42 +252,8 @@ func newStuckProviderSignalsWithStore(
 		currentClientRetries:  map[server.Id]stuckProviderRetry{},
 		previousClientRetries: map[server.Id]stuckProviderRetry{},
 	}
-	// until the first read, the code default chooses
-	allowed := model.NarrowConnectMoveControl(nil, signals.ceiling()).StuckProviderSignalAllows(block)
-	signals.allowed.Store(allowed)
-	stuckProviderSignalEnabledGauge.Set(stuckProviderGaugeValue(allowed))
+	stuckProviderSignalEnabledGauge.Set(1)
 	return signals
-}
-
-func stuckProviderGaugeValue(on bool) float64 {
-	if on {
-		return 1
-	}
-	return 0
-}
-
-// The code settings the control narrows.
-func (self *StuckProviderSignals) ceiling() model.ConnectMoveControlCeiling {
-	return model.ConnectMoveControlCeiling{
-		EnableStuckProviderSignal:  self.settings.EnableStuckProviderSignal,
-		StuckProviderSignalDefault: self.settings.StuckProviderSignalDefault,
-	}
-}
-
-// Whether this block reports, as of the last good read.
-func (self *StuckProviderSignals) allows() bool {
-	return self != nil && self.allowed.Load()
-}
-
-// Admits one worker for Close unless the owner has closed.
-func (self *StuckProviderSignals) beginWorker() bool {
-	self.workerLock.Lock()
-	defer self.workerLock.Unlock()
-	if self.workersClosed {
-		return false
-	}
-	self.workers.Add(1)
-	return true
 }
 
 // Admits one report worker unless the owner has closed or MaxConcurrentSignals
@@ -350,98 +278,11 @@ func (self *StuckProviderSignals) endSignal() {
 	self.workers.Done()
 }
 
-// Starts the control loop.
-func (self *StuckProviderSignals) start() {
-	if !self.beginWorker() {
-		return
-	}
-	go server.HandleError(func() {
-		defer self.workers.Done()
-		self.run()
-	})
-}
-
-// Reads the control now, then every ControlRefreshInterval until the owner
-// ends, on one reused timer. A non-positive interval reads once.
-func (self *StuckProviderSignals) run() {
-	timer := time.NewTimer(0)
-	defer timer.Stop()
-	for {
-		self.refresh()
-		if self.settings.ControlRefreshInterval <= 0 {
-			return
-		}
-		timer.Reset(self.settings.ControlRefreshInterval)
-		select {
-		case <-self.ctx.Done():
-			return
-		case <-timer.C:
-		}
-	}
-}
-
-// Reads the control once. A read that fails or raises keeps the last value
-// until ControlMaxFailedReads fail in a row, which turn the switch off.
-// Called only by the loop; tests call it in the loop's place.
-func (self *StuckProviderSignals) refresh() {
-	var control *model.ConnectMoveControl
-	var err error
-	server.HandleError(func() {
-		readCtx, readCancel := context.WithTimeout(self.ctx, self.settings.ControlReadTimeout)
-		defer readCancel()
-		control, err = self.readControl(readCtx, self.ceiling())
-	}, func(readErr error) {
-		err = readErr
-	})
-	if err != nil {
-		if self.ctx.Err() != nil {
-			// the owner is closing
-			return
-		}
-		self.failedReads += 1
-		if self.failedReads == 1 {
-			glog.Infof("[stuck]stuck provider control unavailable, keeping report=%t (%s)\n", self.allows(), err)
-		} else if glog.V(1) {
-			glog.Infof("[stuck]stuck provider control unavailable (%s)\n", err)
-		}
-		if 0 < self.settings.ControlMaxFailedReads && self.settings.ControlMaxFailedReads <= self.failedReads {
-			self.setAllowed(false)
-		}
-		return
-	}
-	self.failedReads = 0
-	self.setAllowed(control.StuckProviderSignalAllows(self.block))
-}
-
-// Publishes the switch. Turning it off forgets every run, so turning it on
-// again starts each client from zero.
-func (self *StuckProviderSignals) setAllowed(allowed bool) {
-	changed := func() bool {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		if self.allowed.Load() == allowed {
-			return false
-		}
-		self.allowed.Store(allowed)
-		if !allowed {
-			clear(self.currentClientRetries)
-			clear(self.previousClientRetries)
-			stuckProviderTrackedClientsGauge.Set(0)
-		}
-		return true
-	}()
-	if !changed {
-		return
-	}
-	stuckProviderSignalEnabledGauge.Set(stuckProviderGaugeValue(allowed))
-	glog.Infof("[stuck]stuck provider control: block %s report=%t\n", self.block, allowed)
-}
-
 // Counts one replay answered only from terminal refusals of a top-level
 // source for a pack without a sender role, and reports the client once its
 // run crosses the thresholds. Never blocks on I/O.
 func (self *StuckProviderSignals) observeTerminalRetry(clientId server.Id) {
-	if !self.allows() {
+	if self == nil {
 		return
 	}
 	if !self.noteRetry(clientId, self.now().UnixNano()) {
@@ -455,7 +296,7 @@ func (self *StuckProviderSignals) observeTerminalRetry(clientId server.Id) {
 func (self *StuckProviderSignals) noteRetry(clientId server.Id, nowNanos int64) bool {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
-	if self.settings.TrackedClientCount <= 0 || !self.allowed.Load() {
+	if self.settings.TrackedClientCount <= 0 {
 		return false
 	}
 	retry, ok := self.currentClientRetries[clientId]
@@ -547,7 +388,7 @@ func (self *StuckProviderSignals) signal(clientId server.Id) {
 	})
 }
 
-// Ends the control loop, closes admission and joins every report in flight.
+// Cancels the reports in flight, closes admission and joins them.
 func (self *StuckProviderSignals) Close() {
 	if self == nil {
 		return

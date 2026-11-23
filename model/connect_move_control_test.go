@@ -4,7 +4,9 @@
 package model
 
 import (
+	"maps"
 	"math"
+	"reflect"
 	"testing"
 
 	"github.com/urnetwork/server"
@@ -312,92 +314,69 @@ func TestConnectMoveControlNarrowsLocalForward(t *testing.T) {
 	}
 }
 
-// The stuck provider switches choose blocks the way localTransport does, each
-// under its own ceiling and from its own field: the api's signal and the
-// exchanges' recycle never read each other's field, and every other reader
-// ignores both.
-func TestConnectMoveControlNarrowsStuckProviderSwitches(t *testing.T) {
-	type stuckSwitch struct {
-		name    string
-		field   string
-		dark    ConnectMoveControlCeiling
-		shipped ConnectMoveControlCeiling
-		allows  func(*ConnectMoveControl, string) bool
-	}
-	switches := []stuckSwitch{
-		{
-			name:    "signal",
-			field:   ConnectMoveControlFieldStuckProviderSignal,
-			dark:    ConnectMoveControlCeiling{EnableStuckProviderSignal: true, StuckProviderSignalDefault: "off"},
-			shipped: ConnectMoveControlCeiling{EnableStuckProviderSignal: true, StuckProviderSignalDefault: "all"},
-			allows:  (*ConnectMoveControl).StuckProviderSignalAllows,
-		},
-		{
-			name:    "recycle",
-			field:   ConnectMoveControlFieldStuckProviderRecycle,
-			dark:    ConnectMoveControlCeiling{EnableStuckProviderRecycle: true, StuckProviderRecycleDefault: "off"},
-			shipped: ConnectMoveControlCeiling{EnableStuckProviderRecycle: true, StuckProviderRecycleDefault: "all"},
-			allows:  (*ConnectMoveControl).StuckProviderRecycleAllows,
-		},
-	}
-	for i, s := range switches {
-		other := switches[1-i]
-		ceilingOff := s.shipped
-		ceilingOff.EnableStuckProviderSignal = false
-		ceilingOff.EnableStuckProviderRecycle = false
-		cases := []struct {
-			name    string
-			fields  map[string]string
-			ceiling ConnectMoveControlCeiling
-			allowed []string
-			refused []string
-		}{
-			{name: "absent: dark by default", fields: nil, ceiling: s.dark, refused: []string{"beta", "g1", "g2"}},
-			{name: "absent: a default of all", fields: nil, ceiling: s.shipped, allowed: []string{"beta", "g1", "g2"}},
-			{name: "absent: the ceiling off", fields: nil, ceiling: ceilingOff, refused: []string{"beta", "g1"}},
-			{name: "one block for the trial", fields: map[string]string{s.field: "g1"}, ceiling: s.dark, allowed: []string{"g1"}, refused: []string{"beta", "g2", "g3", "g4"}},
-			{name: "a list, padded and mixed separators", fields: map[string]string{s.field: " beta, g1 g2\tg3 "}, ceiling: s.dark, allowed: []string{"beta", "g1", "g2", "g3"}, refused: []string{"g4"}},
-			{name: "all", fields: map[string]string{s.field: "all"}, ceiling: s.dark, allowed: []string{"beta", "g1", "g4"}},
-			{name: "the kill switch", fields: map[string]string{s.field: "off"}, ceiling: s.shipped, refused: []string{"beta", "g1"}},
-			{name: "all cannot widen past the ceiling", fields: map[string]string{s.field: "all"}, ceiling: ceilingOff, refused: []string{"beta", "g1"}},
-			{name: "an empty value names no block", fields: map[string]string{s.field: ""}, ceiling: s.shipped, refused: []string{"beta", "g1"}},
-			{name: "on is not all", fields: map[string]string{s.field: "on"}, ceiling: s.dark, refused: []string{"beta", "g1"}},
-			{name: "the other switch's field", fields: map[string]string{other.field: "all"}, ceiling: s.dark, refused: []string{"beta", "g1"}},
-			{name: "the local transport field", fields: map[string]string{ConnectMoveControlFieldLocalTransport: "all"}, ceiling: s.dark, refused: []string{"beta", "g1"}},
-			{name: "other ceilings ignore it", fields: map[string]string{s.field: "all"}, ceiling: other.dark, refused: []string{"beta", "g1"}},
-			{name: "other ceilings ignore it with moves", fields: map[string]string{s.field: "all"}, ceiling: connectMoveTestCeiling(), refused: []string{"beta", "g1"}},
-		}
-		for _, c := range cases {
-			control := NarrowConnectMoveControl(c.fields, c.ceiling)
-			for _, block := range c.allowed {
-				if !s.allows(control, block) {
-					t.Errorf("%s %s: block %s refused, want allowed", s.name, c.name, block)
-				}
-			}
-			for _, block := range c.refused {
-				if s.allows(control, block) {
-					t.Errorf("%s %s: block %s allowed, want refused", s.name, c.name, block)
-				}
-			}
+// The widest ceiling: the mover's numbers with every switch on, the mode
+// default on and every block default all. Built field by field, so a switch
+// added to the ceiling later is on here too.
+func connectMoveWidestTestCeiling() ConnectMoveControlCeiling {
+	ceiling := connectMoveTestCeiling()
+	value := reflect.ValueOf(&ceiling).Elem()
+	for i := range value.NumField() {
+		switch field := value.Field(i); field.Kind() {
+		case reflect.Bool:
+			field.SetBool(true)
+		case reflect.String:
+			field.SetString(ConnectLocalTransportAll)
 		}
 	}
-	// the switches change nothing else the readers read
-	both := connectMoveTestCeiling()
-	both.EnableLocalTransport = true
-	both.LocalTransportDefault = "all"
-	both.EnableStuckProviderSignal = true
-	both.EnableStuckProviderRecycle = true
-	control := NarrowConnectMoveControl(map[string]string{
-		"mode":                 "on",
-		"stuckProviderSignal":  "g1",
-		"stuckProviderRecycle": "g2",
-	}, both)
-	if control.Mode != ConnectMoveModeOn || control.MaxPerMinute != 120 || !control.DrainMoves || !control.LocalTransportAllows("g3") {
-		t.Errorf("the stuck provider switches changed another control: %+v", control)
+	ceiling.DefaultMode = ConnectMoveModeOn.String()
+	return ceiling
+}
+
+// The retired stuck provider fields narrow nothing while they are still in
+// the hash. Under every reader's ceiling and the widest one, any value of
+// them, alone or beside every live field, leaves the control the hash without
+// them gives: alone, the absent hash's control with the key present.
+func TestConnectMoveControlIgnoresTheRetiredStuckProviderFields(t *testing.T) {
+	ceilings := []ConnectMoveControlCeiling{
+		// the window strict handover's
+		{},
+		// the mover's
+		connectMoveTestCeiling(),
+		// the connect handlers'
+		{EnableTransportDelay: true},
+		// the exchanges' in-process delivery
+		{EnableLocalTransport: true, LocalTransportDefault: "off", EnableLocalForward: true, LocalForwardDefault: "off"},
+		connectMoveWidestTestCeiling(),
 	}
-	if !control.StuckProviderSignalAllows("g1") || control.StuckProviderSignalAllows("g2") ||
-		!control.StuckProviderRecycleAllows("g2") || control.StuckProviderRecycleAllows("g1") {
-		t.Errorf("the stuck provider switches mixed their blocks: %+v", control)
+	live := map[string]string{
+		ConnectMoveControlFieldMode:                 "on",
+		ConnectMoveControlFieldMaxPerMinute:         "60",
+		ConnectMoveControlFieldTolerance:            "0.25",
+		ConnectMoveControlFieldEvacuateHosts:        "edge-a.example",
+		ConnectMoveControlFieldDrainMoves:           "false",
+		ConnectMoveControlFieldPlacement:            "off",
+		ConnectMoveControlFieldTransportDelay:       "on",
+		ConnectMoveControlFieldLocalTransport:       "g1",
+		ConnectMoveControlFieldLocalForward:         "beta g2",
+		ConnectMoveControlFieldWindowStrictHandover: "off",
+	}
+	for _, ceiling := range ceilings {
+		for _, value := range []string{"off", "all", "g1", " beta, g1 ", "on", "", "garbage"} {
+			retired := map[string]string{
+				"stuckProviderSignal":  value,
+				"stuckProviderRecycle": value,
+			}
+			want := NarrowConnectMoveControl(nil, ceiling)
+			want.Present = true
+			if control := NarrowConnectMoveControl(retired, ceiling); !reflect.DeepEqual(control, want) {
+				t.Errorf("ceiling %+v, retired fields %q alone: control = %+v, want %+v", ceiling, value, control, want)
+			}
+			withLive := maps.Clone(live)
+			maps.Copy(withLive, retired)
+			if control, want := NarrowConnectMoveControl(withLive, ceiling), NarrowConnectMoveControl(live, ceiling); !reflect.DeepEqual(control, want) {
+				t.Errorf("ceiling %+v, retired fields %q beside the live ones: control = %+v, want %+v", ceiling, value, control, want)
+			}
+		}
 	}
 }
 
