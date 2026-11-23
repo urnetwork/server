@@ -8,7 +8,10 @@ package model
 // grant ends, its mail standing; a scope's first publish draws the network's zone; a scope label the zone already
 // holds as a host is refused and counted, the others written; api's sync reads the scopes and grants of the state its
 // sequencer holds, at the sequencer's clock; the hourly pass writes and takes away scope addresses from its source;
-// and a certified alias answers the label's and each scope's edge records, and loses them with the grants.
+// a certified alias answers the label's and each scope's edge records, and loses them with the grants; the mail
+// toggle turns each written scope's mail with the zone's, both ways, leaving a withheld scope to the sync after its
+// lift; and POST /mail/enable writes the system publish's * and each scope's mail at once rather than at the hourly
+// pass.
 
 import (
 	"bytes"
@@ -496,6 +499,137 @@ func TestSyncDnsEdgeZonesReachACertifiedAlias(t *testing.T) {
 			requireDnsEdgeAddresses(t, view, healthy, host, false)
 		}
 		requireDnsViewAnswer(t, view, healthy, "eng."+alias, dns.TypeMX, dns.RcodeSuccess, "10 mx.eng."+alias)
+	})
+}
+
+// The mail toggle turns every written scope with its zone, both ways, in its own transaction: mail on gives each
+// scope its mail host, b and _mta-sts, keeping its addresses; mail off takes them back to the null MX.
+func TestDnsSetMailRecordsTurnsEveryWrittenScope(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		root := testDnsRoot(t, ctx)
+		networkId, apex := testDnsNetwork(t, ctx, root)
+		if _, err := SyncDnsEdgeZones(ctx, networkId, root, testDnsEdgeZoneGrants([]string{"eng", "ops"}, "web.eng")); err != nil {
+			t.Fatal(err)
+		}
+		engApex := "eng." + apex
+		opsApex := "ops." + apex
+		view, healthy := testDnsEdgeView(t, ctx, root)
+		requireDnsViewAnswer(t, view, healthy, engApex, dns.TypeMX, dns.RcodeSuccess, "0 .")
+
+		before := testDnsRootSerial(t, ctx, root)
+		on, err := DnsSetMailRecords(ctx, networkId, root, true)
+		if err != nil || on == nil || on.Serial != before+3 {
+			t.Fatalf("mail on wrote %+v, %v", on, err)
+		}
+		view, healthy = testDnsEdgeView(t, ctx, root)
+		for _, scopeApex := range []string{engApex, opsApex} {
+			requireDnsViewAnswer(t, view, healthy, scopeApex, dns.TypeMX, dns.RcodeSuccess, "10 mx."+scopeApex)
+			requireDnsViewAnswer(t, view, healthy, "mx."+scopeApex, dns.TypeA, dns.RcodeSuccess, "192.0.2.2")
+			requireDnsViewAnswer(t, view, healthy, "b."+scopeApex, dns.TypeMX, dns.RcodeSuccess, "10 mx."+scopeApex)
+			requireDnsViewAnswer(t, view, healthy, dnsMtaStsLabel+"."+scopeApex, dns.TypeTXT, dns.RcodeSuccess, testDnsMtaStsValue(scopeApex))
+		}
+		requireDnsEdgeAddresses(t, view, healthy, "web."+engApex, true)
+		// the sync finds the scopes' mail at the zone's, and writes nothing
+		serial := testDnsRootSerial(t, ctx, root)
+		if synced, err := SyncDnsEdgeZones(ctx, networkId, root, testDnsEdgeZoneGrants([]string{"eng", "ops"}, "web.eng")); err != nil || synced.WriteCount != 0 {
+			t.Fatalf("a sync after mail on did %+v, %v", synced, err)
+		}
+		requireDnsSerial(t, ctx, root, serial)
+
+		if _, err := DnsSetMailRecords(ctx, networkId, root, false); err != nil {
+			t.Fatal(err)
+		}
+		view, healthy = testDnsEdgeView(t, ctx, root)
+		for _, scopeApex := range []string{engApex, opsApex} {
+			requireDnsViewAnswer(t, view, healthy, scopeApex, dns.TypeMX, dns.RcodeSuccess, "0 .")
+			requireDnsViewAnswer(t, view, healthy, dnsMtaStsLabel+"."+scopeApex, dns.TypeTXT, dns.RcodeSuccess)
+			// no mail host of its own: mx.<scope> is any name under the scope's *
+			for _, line := range testDnsZoneLinesBelow(t, ctx, root, networkId, scopeApex) {
+				if strings.HasPrefix(line, "mx."+scopeApex+" ") || strings.HasPrefix(line, "b."+scopeApex+" ") {
+					t.Errorf("mail off left %s", line)
+				}
+			}
+		}
+		requireDnsEdgeAddresses(t, view, healthy, "web."+engApex, true)
+	})
+}
+
+// A scope a host suspension withholds takes no write from the mail toggle, which turns every other scope and does not
+// fail for it; once the suspension lifts, the next sync brings the scope's mail to the zone's.
+func TestDnsSetMailRecordsLeavesAWithheldScopeToTheSync(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		root := testDnsRoot(t, ctx)
+		networkId, apex := testDnsNetwork(t, ctx, root)
+		scopes := []string{"eng", "ops"}
+		if _, err := SyncDnsEdgeZones(ctx, networkId, root, testDnsEdgeZoneGrants(scopes)); err != nil {
+			t.Fatal(err)
+		}
+		if err := SuspendHost(ctx, networkId, "eng"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := DnsSetMailRecords(ctx, networkId, root, true); err != nil {
+			t.Fatalf("mail on with a withheld scope: %v", err)
+		}
+		engApex := "eng." + apex
+		opsApex := "ops." + apex
+		view, healthy := testDnsEdgeView(t, ctx, root)
+		requireDnsViewAnswer(t, view, healthy, opsApex, dns.TypeMX, dns.RcodeSuccess, "10 mx."+opsApex)
+		requireDnsViewAnswer(t, view, healthy, engApex, dns.TypeMX, dns.RcodeSuccess)
+		// the sync waits on the suspension as well
+		if synced, err := SyncDnsEdgeZones(ctx, networkId, root, testDnsEdgeZoneGrants(scopes)); err != nil || synced.WriteCount != 0 || synced.WaitingScopeCount != 1 {
+			t.Fatalf("a sync under the suspension did %+v, %v", synced, err)
+		}
+
+		if err := Restore(ctx, networkId, "eng"); err != nil {
+			t.Fatal(err)
+		}
+		view, healthy = testDnsEdgeView(t, ctx, root)
+		requireDnsViewAnswer(t, view, healthy, engApex, dns.TypeMX, dns.RcodeSuccess, "0 .")
+		if synced, err := SyncDnsEdgeZones(ctx, networkId, root, testDnsEdgeZoneGrants(scopes)); err != nil || synced.WriteCount != 1 || synced.WaitingScopeCount != 0 {
+			t.Fatalf("the sync after the lift did %+v, %v", synced, err)
+		}
+		view, healthy = testDnsEdgeView(t, ctx, root)
+		requireDnsViewAnswer(t, view, healthy, engApex, dns.TypeMX, dns.RcodeSuccess, "10 mx."+engApex)
+	})
+}
+
+// POST /mail/enable's write syncs the edge records once it commits: a state whose only grant is the system publish,
+// a receiver's smtp/25/mx listen, gets no zone before mail; the enable draws the zone and, at once, mta-sts.<net>
+// answers the edge through *, _mta-sts stands, and the state's Team scope has its set with mail on.
+func TestEnableMailWritesTheSystemPublishAndScopeMailAtOnce(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		root := testDnsRoot(t, ctx)
+		defer Testing_SetDnsUserRoot(strings.TrimSuffix(root, "."))()
+		world, networkId, sequencer := testDnsEdgeLogWorld(t, ctx)
+		receiverListen := &protocol.AclRule{
+			RuleId:  sidecar.NewId().Bytes(),
+			Targets: []*protocol.AclTarget{{PublicName: "smtp/25/mx"}},
+			Actions: []uint32{uint32(protocol.AclAction_ACL_ACTION_LISTEN)},
+		}
+		if _, err := sequencer.AppendBase(ctx, networkId, testDnsEdgeBaseOne(t, world, []string{"eng"}, receiverListen)); err != nil {
+			t.Fatal(err)
+		}
+		SyncDnsEdgeRecordsAtTip(ctx, sequencer, networkId)
+		if label := GetNetworkLabel(ctx, networkId, root); label != "" {
+			t.Fatalf("the system publish with mail off drew label %q", label)
+		}
+
+		SetConfigLogSequencer(sequencer)
+		defer SetConfigLogSequencer(nil)
+		if _, err := EnableMail(ctx, networkId, root); err != nil {
+			t.Fatal(err)
+		}
+		apex := GetNetworkLabel(ctx, networkId, root) + "." + root
+		view, healthy := testDnsEdgeView(t, ctx, root)
+		requireDnsEdgeAddresses(t, view, healthy, dnsEdgeSystemPublishHost+"."+apex, true)
+		requireDnsViewAnswer(t, view, healthy, dnsMtaStsLabel+"."+apex, dns.TypeTXT, dns.RcodeSuccess, testDnsMtaStsValue(apex))
+		engApex := "eng." + apex
+		requireDnsViewAnswer(t, view, healthy, engApex, dns.TypeMX, dns.RcodeSuccess, "10 mx."+engApex)
+		requireDnsViewAnswer(t, view, healthy, dnsMtaStsLabel+"."+engApex, dns.TypeTXT, dns.RcodeSuccess, testDnsMtaStsValue(engApex))
+		requireDnsEdgeAddresses(t, view, healthy, "web."+engApex, false)
 	})
 }
 

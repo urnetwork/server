@@ -297,14 +297,26 @@ func dnsZoneSystemKeys(apex string) []dnsservice.DnsRecordKey {
 // mail false. A restoring root answers dnsservice.ErrDnsRestoring and a
 // suspended zone ErrDnsZoneSuspended, and the caller rolls back, its own rows
 // with the flag, so mail is never on in one table and off in the other. ttl nil
-// takes dns.yml's. Returns the write, or nil when nothing was written.
+// takes dns.yml's. Returns the write, the last when more than one was made, or
+// nil when nothing was written.
+//
+// Each Team scope set the zone holds turns with it in the same transaction
+// (dnsSetWrittenScopesMailInTx), since a scope's set repeats its network's
+// mail (§12.7). The system publish's * reads the mail_network row the caller
+// adds or drops beside this, which no zone write sees, so once the caller's
+// transaction commits it syncs the edge records (SyncDnsEdgeRecordsInProcess),
+// as POST /mail/enable does (EnableMail).
 func DnsSetMailRecordsInTx(ctx context.Context, tx server.PgTx, networkId server.Id, root string, mail bool, ttl *dnsservice.DnsTtlSettings) (*DnsWriteResult, error) {
 	if !server.SidecarMg2Linked() || !server.SidecarMg5Linked() {
 		return nil, ErrDnsUnlinked
 	}
+	if ttl == nil {
+		ttl = dnsZoneTtl()
+	}
 	root = dnsLabelRoot(root)
 	// the label's lock, then the zone's, as EnsureNetworkZoneInTx takes them; its write places a new label
-	if _, err := ensureNetworkLabelForZoneInTx(ctx, tx, networkId, root); err != nil {
+	label, err := ensureNetworkLabelForZoneInTx(ctx, tx, networkId, root)
+	if err != nil {
 		return nil, err
 	}
 	lockDnsZoneInTx(ctx, tx, root, networkId)
@@ -319,7 +331,18 @@ func DnsSetMailRecordsInTx(ctx context.Context, tx server.PgTx, networkId server
 		server.NowUtc(),
 		mail,
 	))
-	return EnsureNetworkZoneInTx(ctx, tx, networkId, root, ttl)
+	result, err := EnsureNetworkZoneInTx(ctx, tx, networkId, root, ttl)
+	if err != nil {
+		return nil, err
+	}
+	scopeResult, err := dnsSetWrittenScopesMailInTx(ctx, tx, root, networkId, label+"."+root, mail, ttl)
+	if err != nil {
+		return nil, err
+	}
+	if scopeResult != nil {
+		result = scopeResult
+	}
+	return result, nil
 }
 
 // DnsSetMailRecordsInTx in a transaction of its own.

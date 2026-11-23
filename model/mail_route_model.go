@@ -591,6 +591,9 @@ func projectMailRoutesPass(ctx context.Context, root string, cursor *MailRouteCu
 // The M8 MTA-STS publish is in this transaction (MAIL-M8-08): the row §13.9's
 // ValidateListen asks before a receiver serves the policy, and §12.7's
 // _mta-sts among the mail records, the id of the policy the receivers serve.
+// Once it commits, §12.7's edge records follow (SyncDnsEdgeRecordsInProcess,
+// best effort): the system publish's * stands on the mail_network row this
+// wrote, so mta-sts.<net>.<root> answers at once rather than at the hourly pass.
 func EnableMail(ctx context.Context, networkId server.Id, root string) (*MailNetwork, error) {
 	if !mailRouteLinked() {
 		return nil, ErrMailUnlinked
@@ -614,6 +617,8 @@ func EnableMail(ctx context.Context, networkId server.Id, root string) (*MailNet
 	if err != nil {
 		return nil, err
 	}
+	// the system publish's * reads the row just committed; a sync that fails waits for the hourly pass
+	SyncDnsEdgeRecordsInProcess(ctx, networkId, root)
 	if _, err := ProjectMailRoutes(ctx, networkId, root); err != nil {
 		// the pass writes it within its round
 		glog.Warningf("[mail]routes of a network enabled just now wait for the pass: %v\n", err)

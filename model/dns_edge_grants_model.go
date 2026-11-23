@@ -25,7 +25,8 @@ package model
 //	api       after each accepted POST /network/config/delta or /network/config/projection, once its entry's PUT
 //	          has committed, api reads the network's state as its verifier holds it, at or past the entry, and syncs
 //	          (SyncDnsEdgeRecordsAtTip), best effort: the entry stands whatever the sync does, a failure is logged,
-//	          and the pass mends it
+//	          and the pass mends it. POST /mail/enable syncs so once its write commits
+//	          (SyncDnsEdgeRecordsInProcess), its mail_network row being the system publish's other half
 //	pass      every hour taskworker walks the networks with a log in id order, each one's published names and
 //	          scope labels from the process's DnsEdgePublishedSource (taskworker's gate cache, whose states QD-770's
 //	          published names read), and syncs each (ReconcileDnsEdgeRecords): a grant that expired, which no entry
@@ -392,6 +393,14 @@ func syncDnsEdgeRecordsAtTip(ctx context.Context, sequencer *ConfigLogSequencer,
 	}); r != nil {
 		glog.Warningf("[dns]%s edge records wait for the pass: %v\n", networkId, r)
 	}
+}
+
+// SyncDnsEdgeRecordsAtTip in root on this process's sequencer (SetConfigLogSequencer), for a write outside the log
+// that changes what the grants read: mail turned on or off, whose mail_network row is the system publish's other
+// half (POST /mail/enable's EnableMail). A process that holds no sequencer, any but api, syncs nothing, and the
+// hourly pass mends the zone.
+func SyncDnsEdgeRecordsInProcess(ctx context.Context, networkId server.Id, root string) {
+	syncDnsEdgeRecordsAtTip(ctx, configLogSequencer.Load(), networkId, root)
 }
 
 // Where the hourly pass reads each network's DnsEdgePublished: its newest verified state, which taskworker reads
