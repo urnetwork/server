@@ -22,7 +22,7 @@ It was built in four steps, each on its own branch cut from server main:
 | §1.7, the watch outlives the record | `fix/cpuopt7-x1-watch-until-recorded-1123` | 2a3984171 | merged; ships with the next deploy |
 | Stage 0, the edge counters | `perf/cpuopt7-x1-stage0-counters-1123` | 5c4091fe8 | merged; ships with the next deploy |
 | Build A, both paths | `perf/cpuopt7-x1-build-a-1123` | 878cf20b8 | merged; needs its own roll (§4.4) |
-| Build B, the pair channels only | `perf/cpuopt7-x1-build-b-1123` | not merged (tip e5e8d744f) | waits for its gate (below) |
+| Build B, the pair channels only | `perf/cpuopt7-x1-build-b-1123` | not merged (tip 9901f03ba) | waits for its gate (below) |
 
 **The owner's choices (§5), as recorded:**
 1. **E**, a channel per pair, subscribed after a miss.
@@ -90,7 +90,7 @@ TestContractOriginMixedVersions and the publisher kinds of TestContractOriginSub
 
 **Every process that runs origin delivery or the origin wait** (checked 11-23):
 - **api**: one owner per process (api/run.go), bound to `/connect/control`; publishes and waits.
-- **alt**: mounts the api router, so the same owner and paths.
+- **alt**: none. It was retired on 11-20, and its code is gone from main (290ebc028).
 - **proxy**: one owner per device manager, shared with its hosted local authorities (localclient); publishes and waits.
 - **connect**: one owner per exchange (connect/resident.go), for the in-band resident controller, which runs
   `CreateContract`; it can publish and wait.
@@ -98,13 +98,13 @@ TestContractOriginMixedVersions and the publisher kinds of TestContractOriginSub
 - **mcp**: none. It builds no owner and creates no contract.
 
 **Build B may merge only when all of these hold:**
-1. Build A (878cf20b8 or later) has run for at least 24 hours on every api, alt, proxy, connect and taskworker process, and
+1. Build A (878cf20b8 or later) has run for at least 24 hours on every api, proxy, connect and taskworker process, and
    no process of those services runs a pre-A build anywhere: canaries, hotfix images and the builder's own deploys
    included.
 2. Over those 24 hours `v1_for_acknowledged_pair` equals `v2_received` (summed per service), `subscribe_failed` and
    `pair_cap` are near 0, and the §4.4 wait, outcome and timing signals are flat against the days before Build A.
-3. The deploy version guard states that once a B build runs, no pre-A build of api, alt, proxy, connect or taskworker
-   may be deployed (rollback goes to A only).
+3. The deploy version guard states that once a B build runs, no pre-A build of api, proxy, connect or taskworker may
+   be deployed (rollback goes to A only).
 Connect's leg of Build A is a connect roll in its own lane, and connect goes last in A's order (§4.4).
 
 **Expected savings, per step** (24-hour means of §1.6; warm means every proxy bucket started):
@@ -119,7 +119,7 @@ Connect's leg of Build A is a connect roll in its own lane, and connect goes las
 - **§1.7 and Stage 0:** nothing of their own; they ride whichever routine deploy comes next, in any order, because
   nothing on the wire changes. Check `matched_waiter`, `matched_refusal` and `unmatched` appear, with `unmatched` at
   99.9% or more of `received` (else revisit before Build A rolls), and the refusal stored and hit rates flat.
-- **Build A:** a roll of api, then alt if it runs, then proxy, then taskworker, then connect (server-0c's lane), under the
+- **Build A:** a roll of api, then proxy, then taskworker, then connect (server-0c's lane), under the
   usual gates. The order is for observation, not correctness: any order is safe, connect first included (above). The
   gates: the validator-idle gate, and the proxy's canary block and 30-minute hold. No migration. Watch, canary
   against control: the §4.4 wait signals per request (`event`, `deadline`, and `fallback + registration`); the companion
@@ -131,7 +131,7 @@ Connect's leg of Build A is a connect roll in its own lane, and connect goes las
   second, `redis_pubsubshard_channels` at the anchors plus the held pairs. Then the 24-hour soak; read the shadow pair
   only once every publisher runs A.
 - **Build B:** only after its gate. Proxy first; one api block for at least 2 hours against the other blocks on the same
-  hosts; the rest of the api and alt; taskworker; connect. The §4.4 table's signals; stop and roll back to A (never
+  hosts; the rest of the api; taskworker; connect. The §4.4 table's signals; stop and roll back to A (never
   further) on any of its stop conditions.
 
 ## Summary
@@ -714,9 +714,9 @@ at 99.9% or more. If it is not, revisit this design before building it.
 - the watch's close after the record (§1.7);
 - the shadow counters `v1_for_acknowledged_pair` and `v2_received`.
 
-Roll it to every process, in this order: api, alt if it runs, proxy, taskworker, connect. It takes the proxy's
-deliveries at once, because idle buckets close. Then soak it for 24 hours. The shadow counters are read only once
-every publisher runs A, because a pre-A publisher sends v1 alone.
+Roll it to every process, in this order: api, proxy, taskworker, connect (alt, retired on 11-20, runs nothing). It
+takes the proxy's deliveries at once, because idle buckets close. Then soak it for 24 hours. The shadow counters are
+read only once every publisher runs A, because a pre-A publisher sends v1 alone.
 
 **Build B: v2 only.** It starts only when no pre-A process runs anywhere. The order:
 1. the proxy first: it waits least and holds half the deliveries;
@@ -726,7 +726,7 @@ every publisher runs A, because a pre-A publisher sends v1 alone.
 **Rollback:**
 - B to A at any time: A subscribes and publishes both.
 - A to pre-A only while no B process runs anywhere.
-- Once B starts, pre-A builds of api, alt, proxy, taskworker and connect are off the table, which the deploy version
+- Once B starts, pre-A builds of api, proxy, taskworker and connect are off the table, which the deploy version
   guard should state.
 
 Signals, canary against control:
