@@ -17,9 +17,21 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
-// The account_api_key.name column is varchar(128) (db_migrations.go), and
-// varchar counts characters, not bytes.
-const MaxApiKeyNameLength = 128
+// Tunables of API keys; their lifetime is NetworkAuthKeySettings'
+// ApiKeyMaxLifetime.
+type AccountApiKeySettings struct {
+	// The most characters a key's name holds: 128, the width of the
+	// account_api_key.name column, varchar(128) (db_migrations.go), which
+	// counts characters, not bytes. A longer value lets through a name the
+	// column cannot store; zero takes only an empty name.
+	NameMaxLength int
+}
+
+func DefaultAccountApiKeySettings() *AccountApiKeySettings {
+	return &AccountApiKeySettings{
+		NameMaxLength: 128,
+	}
+}
 
 type CreateApiKeyArgs struct {
 	Name string `json:"name"`
@@ -84,10 +96,11 @@ func apiKeyScopes(scopes []string) ([]string, error) {
 func CreateApiKey(createApiKey *CreateApiKeyArgs, session *session.ClientSession) (result *CreateApiKeyResult, err error) {
 	// the name is client input, so a name the column cannot store is a
 	// refusal, not a failed statement
-	if MaxApiKeyNameLength < utf8.RuneCountInString(createApiKey.Name) {
+	nameMaxLength := DefaultAccountApiKeySettings().NameMaxLength
+	if nameMaxLength < utf8.RuneCountInString(createApiKey.Name) {
 		return &CreateApiKeyResult{
 			Error: &CreateApiKeyError{
-				Message: fmt.Sprintf("Name is too long (limit %d characters).", MaxApiKeyNameLength),
+				Message: fmt.Sprintf("Name is too long (limit %d characters).", nameMaxLength),
 			},
 		}, nil
 	}

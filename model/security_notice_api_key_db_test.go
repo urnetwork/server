@@ -158,7 +158,7 @@ func TestSecurityNoticeOwedOnceForEachApiKeyChange(t *testing.T) {
 		requireNoTestApiKeyNotice(t, ctx, otherNetworkId, "another network's delete of the key")
 
 		// a refused name creates nothing and owes nothing
-		refused, err := CreateApiKey(&CreateApiKeyArgs{Name: strings.Repeat("n", MaxApiKeyNameLength+1)}, clientSession)
+		refused, err := CreateApiKey(&CreateApiKeyArgs{Name: strings.Repeat("n", DefaultAccountApiKeySettings().NameMaxLength+1)}, clientSession)
 		if err != nil || refused == nil || refused.Error == nil {
 			t.Fatalf("a name the column cannot store was not refused: %v %+v", err, refused)
 		}

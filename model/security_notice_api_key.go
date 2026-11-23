@@ -33,8 +33,20 @@ const (
 	SecurityApiKeyDeleted = "deleted"
 )
 
-// The most characters of an API key's name a notice shows.
-const securityNoticeMaxApiKeyNameLength = 64
+// Tunables of the API key notice.
+type SecurityApiKeyNoticeSettings struct {
+	// The most characters of an API key's name a notice shows: 64, half of
+	// what a name holds (AccountApiKeySettings.NameMaxLength), so a change
+	// stays one short line. A longer name is cut short of it and ends in an
+	// ellipsis. Non-positive shows no name.
+	NameMaxLength int
+}
+
+func DefaultSecurityApiKeyNoticeSettings() *SecurityApiKeyNoticeSettings {
+	return &SecurityApiKeyNoticeSettings{
+		NameMaxLength: 64,
+	}
+}
 
 // One change of an API key.
 type SecurityApiKeyChange struct {
@@ -67,10 +79,19 @@ func (self *SecurityApiKeyNotice) add(change *SecurityApiKeyChange) {
 // created the key chose, so a notice keeps it to one line in reading order:
 // control and format characters (line breaks, tabs, direction overrides,
 // zero-width marks) count as space, each run of space is one space, and the
-// ends are trimmed. A name longer than securityNoticeMaxApiKeyNameLength
-// characters is cut short of it and ends in an ellipsis. Applying it again
-// changes nothing.
+// ends are trimmed. A name longer than the settings' NameMaxLength characters
+// is cut short of it and ends in an ellipsis. Applying it again changes
+// nothing.
 func SecurityNoticeApiKeyName(name string) string {
+	return securityNoticeApiKeyName(name, DefaultSecurityApiKeyNoticeSettings())
+}
+
+// SecurityNoticeApiKeyName under the given settings.
+func securityNoticeApiKeyName(name string, settings *SecurityApiKeyNoticeSettings) string {
+	nameMaxLength := settings.NameMaxLength
+	if nameMaxLength <= 0 {
+		return ""
+	}
 	builder := strings.Builder{}
 	pendingSpace := false
 	for _, r := range name {
@@ -85,10 +106,10 @@ func SecurityNoticeApiKeyName(name string) string {
 		builder.WriteRune(r)
 	}
 	runes := []rune(builder.String())
-	if len(runes) <= securityNoticeMaxApiKeyNameLength {
+	if len(runes) <= nameMaxLength {
 		return string(runes)
 	}
-	return strings.TrimRight(string(runes[:securityNoticeMaxApiKeyNameLength-1]), " ") + "…"
+	return strings.TrimRight(string(runes[:nameMaxLength-1]), " ") + "…"
 }
 
 // A change of an API key, made by the request of ctx now. keyCreateTime is the
