@@ -2,7 +2,6 @@ package model
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/urnetwork/glog"
@@ -27,8 +26,10 @@ type NetworkClientResident struct {
 // A `NetworkClientResident` record is gob, which is more compact than json, or
 // the typed format (network_client_resident_codec.go). Readers read both.
 
+// The text of the key without fmt: every resident lookup builds it, and fmt
+// boxed the id and ran its printer for it (CPUOPT7.md §12).
 func residentKey(clientId server.Id) string {
-	return fmt.Sprintf("ncr_%s", clientId)
+	return "ncr_" + clientId.String()
 }
 
 // The resident of a record in either format, nil for an empty one. A record
