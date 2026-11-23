@@ -10,8 +10,13 @@ package model
 //
 //   - Scope labels come from the signed projection (§8; protos-bridge-row-fields #3's TeamScopeRow, which
 //     TEAM defines at M6) through the process's DnsScopeLabelSource. Until a process installs one, no scope
-//     zone is written there (ErrDnsScopeUnknown), user records take no scope owner, and the record API
-//     refuses every name two labels below the zone's apex: the closed direction.
+//     zone is written there through DnsSetScopeRecords (ErrDnsScopeUnknown), user records take no scope
+//     owner, and the record API refuses every name two labels below the zone's apex: the closed direction.
+//   - The edge records' sync writes each scope's set (dns_edge_grants_model.go): at api after each accepted
+//     config entry and in taskworker's hourly pass, each from the scope labels of the verified state it read
+//     (dnsSetScopeRecordsInTx), its * A and AAAA following the grants on the scope's hosts and its mail the
+//     network zone's own flag (MailOfZone). The mail toggle turns every written scope with the zone, in its
+//     transaction (dnsSetWrittenScopesMailInTx), so a scope's set repeats its network's mail as §12.7 reads.
 //   - A new scope's label is held to dnsservice.ValidateDnsScopeLabel: §21.6's screen with §12.5's reserved
 //     block, none of §12.7's system hosts, no host the zone holds and no client name (§7.7), so a scope
 //     never takes over a name the network already uses.
@@ -172,7 +177,13 @@ type DnsScopeArgs struct {
 	EdgeWildcard *bool
 	EdgeApex     *bool
 	Mail         *bool
-	// The network's client names (§7.7), which a new scope's label may not be.
+	// Takes the network zone's own mail flag in place of Mail, read under the zone's lock, so a scope's set
+	// repeats its network's mail (§12.7) and a mail toggle committing meanwhile is never written back over: the
+	// edge records' sync writes a scope so (dns_edge_grants_model.go).
+	MailOfZone bool
+	// The network's client names (§7.7), which a new scope's label may not be. The names file is sealed in the
+	// config repo and never reaches a server, so a server-side caller has none to give: the signers and verifiers
+	// refuse a client name equal to a scope label (sidecar.ValidateConfigClientName).
 	ClientNames []string
 	// nil takes dns.yml's.
 	Ttl *dnsservice.DnsTtlSettings
@@ -187,9 +198,23 @@ func DnsSetScopeRecordsInTx(ctx context.Context, tx server.PgTx, args *DnsScopeA
 	if !server.SidecarMg2Linked() || !server.SidecarMg5Linked() {
 		return nil, ErrDnsUnlinked
 	}
-	root := dnsLabelRoot(args.Root)
 	scopes, ok := dnsNetworkScopeLabels(ctx, args.NetworkId)
-	if !ok || !slices.Contains(scopes, args.Scope) {
+	if !ok {
+		return nil, fmt.Errorf("%w: %q", ErrDnsScopeUnknown, args.Scope)
+	}
+	return dnsSetScopeRecordsInTx(ctx, tx, args, scopes)
+}
+
+// DnsSetScopeRecordsInTx with the network's scope labels as the caller read them from a verified state of its
+// own, in place of the process's source: the edge records' sync, from the state at the log's tip or the pass's
+// (dns_edge_grants_model.go). A scope is still taken only from a verified projection, never a hostname or a
+// grant (§12.5).
+func dnsSetScopeRecordsInTx(ctx context.Context, tx server.PgTx, args *DnsScopeArgs, scopes []string) (*DnsWriteResult, error) {
+	if !server.SidecarMg2Linked() || !server.SidecarMg5Linked() {
+		return nil, ErrDnsUnlinked
+	}
+	root := dnsLabelRoot(args.Root)
+	if !slices.Contains(scopes, args.Scope) {
 		return nil, fmt.Errorf("%w: %q", ErrDnsScopeUnknown, args.Scope)
 	}
 	ttl := args.Ttl
@@ -226,7 +251,12 @@ func DnsSetScopeRecordsInTx(ctx context.Context, tx server.PgTx, args *DnsScopeA
 	if args.EdgeApex != nil {
 		state.EdgeApex = *args.EdgeApex
 	}
-	if args.Mail != nil {
+	switch {
+	case args.MailOfZone:
+		// the zone's row exists once its label does: the label's draw writes the zone
+		zone := getDnsZoneStateInTx(ctx, tx, root, args.NetworkId)
+		state.Mail = zone != nil && zone.Mail
+	case args.Mail != nil:
 		state.Mail = *args.Mail
 	}
 	state.MailPolicy = getDnsZoneMailPolicyInTx(ctx, tx, root, args.NetworkId)
@@ -246,11 +276,25 @@ func DnsSetScopeRecordsInTx(ctx context.Context, tx server.PgTx, args *DnsScopeA
 
 // DnsSetScopeRecordsInTx in a transaction of its own.
 func DnsSetScopeRecords(ctx context.Context, args *DnsScopeArgs) (*DnsWriteResult, error) {
+	return dnsSetScopeRecordsInOwnTx(ctx, func(tx server.PgTx) (*DnsWriteResult, error) {
+		return DnsSetScopeRecordsInTx(ctx, tx, args)
+	})
+}
+
+// dnsSetScopeRecordsInTx in a transaction of its own.
+func dnsSetScopeRecords(ctx context.Context, args *DnsScopeArgs, scopes []string) (*DnsWriteResult, error) {
+	return dnsSetScopeRecordsInOwnTx(ctx, func(tx server.PgTx) (*DnsWriteResult, error) {
+		return dnsSetScopeRecordsInTx(ctx, tx, args, scopes)
+	})
+}
+
+// write in a read committed transaction of its own, which a refusal rolls back.
+func dnsSetScopeRecordsInOwnTx(ctx context.Context, write func(tx server.PgTx) (*DnsWriteResult, error)) (*DnsWriteResult, error) {
 	var result *DnsWriteResult
 	var returnErr error
 	err := dnsCatchRefusal(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
-			result, returnErr = DnsSetScopeRecordsInTx(ctx, tx, args)
+			result, returnErr = write(tx)
 			if returnErr != nil {
 				panic(dnsWriteRefusal{err: returnErr})
 			}
@@ -260,6 +304,56 @@ func DnsSetScopeRecords(ctx context.Context, args *DnsScopeArgs) (*DnsWriteResul
 		return nil, err
 	}
 	return result, returnErr
+}
+
+// Turns each Team scope set the zone's rows hold to mail, in the caller's transaction, which holds the
+// network's label and zone locks: a scope's set repeats its network's mail (§12.7), so the mail toggle
+// (DnsSetMailRecordsInTx) moves every written scope with the zone in its own transaction, and mail is never on
+// in the network and off in its scopes. Each scope's other state is read back from its rows and kept. A scope
+// not written yet is left to the edge records' sync, which takes its label from a verified projection, and a
+// scope a host suspension withholds takes no write until it lifts (§12.9), the sync then bringing its mail to
+// the zone's. Returns the last write, nil when nothing changed.
+func dnsSetWrittenScopesMailInTx(ctx context.Context, tx server.PgTx, root string, networkId server.Id, apex string, mail bool, ttl *dnsservice.DnsTtlSettings) (*DnsWriteResult, error) {
+	stored := getDnsZoneRowsInTx(ctx, tx, root, networkId)
+	var last *DnsWriteResult
+	var policy *DnsZoneMailPolicy
+	for _, scope := range dnsZoneWrittenScopes(apex, stored) {
+		scopeApex := dnsservice.DnsScopeApex(apex, scope)
+		if dnsScopeWithheld(scopeApex, stored) {
+			continue
+		}
+		state := &DnsScopeState{Root: root, Apex: apex, Scope: scope}
+		dnsScopeStateFromRows(state, stored)
+		if state.Mail == mail {
+			continue
+		}
+		state.Mail = mail
+		if policy == nil {
+			policy = getDnsZoneMailPolicyInTx(ctx, tx, root, networkId)
+		}
+		state.MailPolicy = policy
+		desired, err := DnsScopeRecords(state, ttl)
+		if err != nil {
+			return nil, err
+		}
+		result, err := reconcileDnsSystemRowsInTx(ctx, tx, root, networkId, dnsZoneSystemKeys(scopeApex), desired)
+		if err != nil {
+			return nil, err
+		}
+		if result != nil && 0 < result.Serial {
+			touchDnsLabelMapInTx(ctx, tx, root, networkId, result.Serial)
+			last = result
+		}
+	}
+	return last, nil
+}
+
+// Whether a suspension withholds the scope's apex or an owner above it, so a write to its set is refused until
+// the suspension lifts (§12.9).
+func dnsScopeWithheld(scopeApex string, rows []*dnsStoredRow) bool {
+	return slices.ContainsFunc(rows, func(row *dnsStoredRow) bool {
+		return row.set.Kind == dnsservice.DnsRecordKindWithheld && dnsOwnerAtOrBelow(scopeApex, row.set.Owner)
+	})
 }
 
 // Withdraws a Team scope in the caller's transaction, which must be read committed: every row at or below

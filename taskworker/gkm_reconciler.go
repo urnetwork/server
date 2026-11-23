@@ -18,7 +18,8 @@ package taskworker
 // pass a hint wakes reads that state. The cache is this process's one gate cache (C-09): another job here that needs
 // §8.9's state reads this one, never a second, as evs's shred start and reconciler do once it is built
 // (evs_jobs_lifecycle.go's installEvsDeletionSource), and §21.6's published names do (tls_published_names.go's
-// installTlsPublishedNamesSource, QD-770). A host whose Redis takes no such watch gives no state, and the
+// installTlsPublishedNamesSource, QD-770), as §12.7's edge-records pass does (dns_edge_published.go's
+// installDnsEdgePublishedSource). A host whose Redis takes no such watch gives no state, and the
 // runtime starts no reconciler; the sweep's name stays bound, so a run queued anyway fails and waits on server/task's
 // backoff rather than find no function.
 //
@@ -78,6 +79,8 @@ func gkmReconcilerStateFromHost(ctx context.Context, host *sidecar.ServiceHost) 
 	context.AfterFunc(ctx, installEvsDeletionSource(cache))
 	// and the states §21.6's published names are read from (QD-770)
 	context.AfterFunc(ctx, installTlsPublishedNamesSource(cache))
+	// and §12.7's hourly edge-records pass, each network's names and Team scope labels (dns_edge_published.go)
+	context.AfterFunc(ctx, installDnsEdgePublishedSource(cache))
 	// and the lock the drop jobs' start and verify read (evs_drop.go)
 	context.AfterFunc(ctx, installEvsDropLocks(cache))
 	return gkmservice.NewAclGkmReconcilerState(cache), nil

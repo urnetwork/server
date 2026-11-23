@@ -13,6 +13,7 @@ import (
 
 	"github.com/miekg/dns"
 
+	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/dnsservice"
 	"github.com/urnetwork/sidecar/sidecartest"
 
@@ -231,21 +232,20 @@ func TestReconcileDnsEdgeRecordsFollowsEachNetworksGrants(t *testing.T) {
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO mail_network (network_id, create_time) VALUES ($1, $2)`, systemMail, now))
 		})
-		networkIdNames := map[server.Id][]*TlsPublishedName{
+		networkIdNames := map[server.Id][]*sidecar.AclPublishedName{
 			published:   {{Host: "web", Port: 443}, {Host: "web", Port: 8443}},
-			expired:     {{Host: "web", Port: 443, ExpireTime: now}},
+			expired:     {{Host: "web", Port: 443, ExpiresMs: now.UnixMilli()}},
 			systemAlone: {{Host: "mta-sts", Port: 443}},
 			systemMail:  {{Host: "mta-sts", Port: 443}},
-			held:        {{Host: "shop", Port: 443, ExpireTime: now.Add(time.Hour)}},
+			held:        {{Host: "shop", Port: 443, ExpiresMs: now.Add(time.Hour).UnixMilli()}},
 		}
 		var failing server.Id
-		SetTlsPublishedNamesSource(func(ctx context.Context, networkId server.Id, sourceNow time.Time) ([]*TlsPublishedName, error) {
+		defer SetDnsEdgePublishedSource(func(ctx context.Context, networkId server.Id, sourceNow time.Time) (*DnsEdgePublished, error) {
 			if networkId == failing {
 				return nil, errors.New("the gate cache holds no verified state of the network")
 			}
-			return networkIdNames[networkId], nil
-		})
-		defer SetTlsPublishedNamesSource(nil)
+			return &DnsEdgePublished{Names: networkIdNames[networkId]}, nil
+		})()
 
 		// a source that fails at the first network writes nothing
 		networkIds := []server.Id{published, ended, expired, systemAlone, systemMail, held, quiet}
@@ -324,7 +324,7 @@ func TestReconcileDnsEdgeRecordsFollowsEachNetworksGrants(t *testing.T) {
 	})
 }
 
-// With no published-names source the pass reads nothing and writes nothing: it never takes unread grants for none.
+// With no published-state source the pass reads nothing and writes nothing: it never takes unread grants for none.
 func TestReconcileDnsEdgeRecordsNeedsASource(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -334,9 +334,9 @@ func TestReconcileDnsEdgeRecordsNeedsASource(t *testing.T) {
 		if _, err := SyncDnsEdgeRecords(ctx, networkId, root, DnsEdgeGrants{Wildcard: true}); err != nil {
 			t.Fatal(err)
 		}
-		SetTlsPublishedNamesSource(nil)
+		SetDnsEdgePublishedSource(nil)
 		serial := testDnsRootSerial(t, ctx, root)
-		if result, err := ReconcileDnsEdgeRecords(ctx, server.NowUtc(), nil, DefaultDnsEdgeRecordsReconcileSettings()); !errors.Is(err, ErrTlsPublishedNamesUnavailable) {
+		if result, err := ReconcileDnsEdgeRecords(ctx, server.NowUtc(), nil, DefaultDnsEdgeRecordsReconcileSettings()); !errors.Is(err, ErrDnsEdgePublishedUnavailable) {
 			t.Fatalf("a pass with no source answered %+v, %v", result, err)
 		}
 		requireDnsSerial(t, ctx, root, serial)
