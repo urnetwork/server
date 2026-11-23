@@ -19,7 +19,7 @@
 // SMS (AWS approved SMS for verification codes, password resets and the
 // password-changed notice only).
 //
-// Coalescing: a change owes its notice due SecurityNoticeCoalesceWindow later.
+// Coalescing: a change owes its notice due the settings' CoalesceWindow later.
 // Another change of the same kind for the same recipient while that notice is
 // still waiting (not yet due, never attempted) joins it, so a burst of changes is
 // one email that lists them in order. Joining never moves the due time, so the
@@ -60,16 +60,57 @@ const (
 	SecurityApiKeyTemplateName       = "security_api_key_changed"
 )
 
-// How long a notice waits for more changes of its kind to join it before it is
-// due: the coalescing window for repeats.
-const SecurityNoticeCoalesceWindow = 1 * time.Minute
+// Tunables of the account security notices (QD-702). The notices read them
+// where they apply, from DefaultSecurityNoticeSettings.
+type SecurityNoticeSettings struct {
+	// How long a new notice waits before it is due, for more changes of its
+	// kind to join it: 1 minute, so a burst of changes is one email that still
+	// goes out about a minute after the burst's first change. Non-positive
+	// makes each notice due at once, so no change joins another's.
+	CoalesceWindow time.Duration
+	// The most changes one notice lists: 10, a list still read at a glance. A
+	// later change takes the last slot and the one it replaces is counted as
+	// not listed, so the list always ends with the latest state. Below 1, a
+	// notice lists the latest change alone.
+	ChangeMaxCount int
+	// The most sign-in email addresses one change notifies: 8, room for every
+	// address one account signs in with. The addresses kept are the first in
+	// sort order. Non-positive bounds nothing.
+	RecipientMaxCount int
+	// The shortest time between two default-level reports of notices that
+	// could not be owed: 1 minute, so a failing outbox shows in the log
+	// without flooding it; each report counts the ones suppressed since the
+	// last. Non-positive reports every one.
+	FailureReportInterval time.Duration
+	// The characters of a wallet address a notice shows at each end of its
+	// mask: 4, enough for a person to tell its own wallet from another.
+	// Non-positive shows none of any address.
+	WalletMaskEndLength int
+	// The shortest value a wallet mask shows any of: 12 characters, under
+	// which a value is no wallet address. A value no longer than both ends
+	// together shows none either, so a mask never shows a whole address.
+	WalletMaskMinLength int
+	// The digits of a phone number a notice shows at its end: 2. Non-positive
+	// shows none.
+	PhoneMaskEndDigitCount int
+	// The fewest digits a phone number has for a notice to show any: 6. A
+	// number no longer than the end shown shows none either.
+	PhoneMaskMinDigitCount int
+}
 
-// The most changes one notice lists. A later change replaces the last listed one
-// and is counted, so the list always ends with the latest state.
-const securityNoticeMaxChanges = 10
-
-// The most sign-in email addresses one change notifies.
-const securityNoticeMaxRecipients = 8
+// The defaults, a fresh value each call.
+func DefaultSecurityNoticeSettings() *SecurityNoticeSettings {
+	return &SecurityNoticeSettings{
+		CoalesceWindow:         1 * time.Minute,
+		ChangeMaxCount:         10,
+		RecipientMaxCount:      8,
+		FailureReportInterval:  1 * time.Minute,
+		WalletMaskEndLength:    4,
+		WalletMaskMinLength:    12,
+		PhoneMaskEndDigitCount: 2,
+		PhoneMaskMinDigitCount: 6,
+	}
+}
 
 // The notice label of the metric.
 const (
@@ -226,29 +267,39 @@ type PasswordSetNotice struct {
 	Via string `json:"via,omitempty"`
 }
 
-// Appends the change while the list has room. A full list keeps its first
-// changes and its last slot takes the latest change, so the notice always ends
-// with the current state; the change it replaces is counted as not listed.
+// Appends the change while the list has room, the settings' ChangeMaxCount. A
+// full list keeps its first changes and its last slot takes the latest change,
+// so the notice always ends with the current state; the change it replaces is
+// counted as not listed.
 func addSecurityNoticeChange[C any](changes []C, moreCount int, change C) ([]C, int) {
-	if len(changes) < securityNoticeMaxChanges {
+	changeMaxCount := max(DefaultSecurityNoticeSettings().ChangeMaxCount, 1)
+	if len(changes) < changeMaxCount {
 		return append(changes, change), moreCount
 	}
 	changes[len(changes)-1] = change
 	return changes, moreCount + 1
 }
 
-// The wallet address as a notice shows it: its first four and last four
-// characters around an ellipsis ("9WzD…AWWM"). A value under twelve characters
-// is no wallet address, and none of it is shown.
+// The wallet address as a notice shows it: its first and last
+// WalletMaskEndLength characters (4) around an ellipsis ("9WzD…AWWM"). A value
+// under WalletMaskMinLength characters (12) is no wallet address, and none of it
+// is shown.
 func MaskWalletAddress(address string) string {
+	return maskWalletAddress(address, DefaultSecurityNoticeSettings())
+}
+
+// MaskWalletAddress under the given settings. A value no longer than both ends
+// together shows none, so no settings show a whole address.
+func maskWalletAddress(address string, settings *SecurityNoticeSettings) string {
 	runes := []rune(strings.TrimSpace(address))
 	if len(runes) == 0 {
 		return ""
 	}
-	if len(runes) < 12 {
+	endLength := max(settings.WalletMaskEndLength, 0)
+	if len(runes) < settings.WalletMaskMinLength || len(runes) <= 2*endLength {
 		return "…"
 	}
-	return string(runes[:4]) + "…" + string(runes[len(runes)-4:])
+	return string(runes[:endLength]) + "…" + string(runes[len(runes)-endLength:])
 }
 
 // An email address as a notice shows it: the first character of the mailbox, an
@@ -262,19 +313,22 @@ func maskEmailAddress(emailAddress string) string {
 	return first + "…@" + domain
 }
 
-// A phone number as a notice shows it: an ellipsis and its last two digits
-// ("…01").
-func maskPhoneNumber(phoneNumber string) string {
+// A phone number as a notice shows it: an ellipsis and its last
+// PhoneMaskEndDigitCount digits (2, "…01"), none for a number of fewer than
+// PhoneMaskMinDigitCount digits (6), nor for one no longer than the end it
+// would show, so no settings show a whole number.
+func maskPhoneNumber(phoneNumber string, settings *SecurityNoticeSettings) string {
 	digits := []rune{}
 	for _, r := range phoneNumber {
 		if unicode.IsDigit(r) {
 			digits = append(digits, r)
 		}
 	}
-	if len(digits) < 6 {
+	endDigitCount := max(settings.PhoneMaskEndDigitCount, 0)
+	if len(digits) < settings.PhoneMaskMinDigitCount || len(digits) <= endDigitCount {
 		return "…"
 	}
-	return "…" + string(digits[len(digits)-2:])
+	return "…" + string(digits[len(digits)-endDigitCount:])
 }
 
 func firstRune(value string) (string, bool) {
@@ -292,7 +346,7 @@ func maskUserAuth(userAuth string) string {
 	case UserAuthTypeEmail:
 		return maskEmailAddress(normalUserAuth)
 	case UserAuthTypePhone:
-		return maskPhoneNumber(normalUserAuth)
+		return maskPhoneNumber(normalUserAuth, DefaultSecurityNoticeSettings())
 	default:
 		return ""
 	}
@@ -377,9 +431,8 @@ const securityNoticeRecipientsSql = `
 `
 
 // The network's security notice recipients: its admin's sign-in email
-// addresses, normalized, distinct and sorted, at most
-// securityNoticeMaxRecipients. A phone number or a wallet is no email, so an
-// admin who signs in only with those, or a network that is gone, has none.
+// addresses (securityNoticeEmails). A phone number or a wallet is no email, so
+// an admin who signs in only with those, or a network that is gone, has none.
 func securityNoticeRecipientsInTx(ctx context.Context, tx server.PgTx, networkId server.Id) []string {
 	userAuths := []string{}
 	result, err := tx.Query(ctx, securityNoticeRecipientsSql, networkId)
@@ -394,7 +447,7 @@ func securityNoticeRecipientsInTx(ctx context.Context, tx server.PgTx, networkId
 }
 
 // The email addresses among user auths, normalized, distinct and sorted, at
-// most securityNoticeMaxRecipients.
+// most the settings' RecipientMaxCount.
 func securityNoticeEmails(userAuths []string) []string {
 	emails := []string{}
 	for _, userAuth := range userAuths {
@@ -404,8 +457,8 @@ func securityNoticeEmails(userAuths []string) []string {
 		}
 	}
 	slices.Sort(emails)
-	if securityNoticeMaxRecipients < len(emails) {
-		emails = emails[:securityNoticeMaxRecipients]
+	if recipientMaxCount := DefaultSecurityNoticeSettings().RecipientMaxCount; 0 < recipientMaxCount && recipientMaxCount < len(emails) {
+		emails = emails[:recipientMaxCount]
 	}
 	return emails
 }
@@ -488,9 +541,9 @@ func securityNoticeFailureReruns(ctx context.Context, failure any) bool {
 	return errors.As(err, &pgErr) && strings.HasPrefix(pgErr.Code, "40")
 }
 
-// The default-level report of notices that could not be owed, at most once a
-// minute. It names the notice and the failure's kind only: a postgres detail
-// can carry an address.
+// The default-level report of notices that could not be owed, at most once each
+// FailureReportInterval of the settings. It names the notice and the failure's
+// kind only: a postgres detail can carry an address.
 var securityNoticeFailureReport struct {
 	stateLock       sync.Mutex
 	lastReportTime  time.Time
@@ -505,10 +558,11 @@ func reportSecurityNoticeFailure(notice string, failure any) {
 			kind = "postgres " + pgErr.Code
 		}
 	}
+	failureReportInterval := DefaultSecurityNoticeSettings().FailureReportInterval
 	report := &securityNoticeFailureReport
 	report.stateLock.Lock()
 	now := time.Now()
-	if now.Sub(report.lastReportTime) < time.Minute {
+	if now.Sub(report.lastReportTime) < failureReportInterval {
 		report.suppressedCount += 1
 		report.stateLock.Unlock()
 		return
@@ -527,7 +581,7 @@ func reportSecurityNoticeFailure(notice string, failure any) {
 
 // Owes one change's notice of the template to each recipient: it joins the
 // recipient's notice that is still waiting (not yet due and never attempted),
-// or adds a notice due SecurityNoticeCoalesceWindow from now. `apply` takes the
+// or adds a notice due the settings' CoalesceWindow from now. `apply` takes the
 // waiting notice's fields ("" for a new notice) and returns them with the
 // change. Returns the result to count.
 func oweSecurityNoticeInTx(
@@ -541,6 +595,7 @@ func oweSecurityNoticeInTx(
 	if len(recipients) == 0 {
 		return securityNoticeNoEmail
 	}
+	settings := DefaultSecurityNoticeSettings()
 	result := securityNoticeCoalesced
 	now := server.NowUtc()
 	for _, recipient := range recipients {
@@ -601,7 +656,7 @@ func oweSecurityNoticeInTx(
 			UserAuth:     recipient,
 			TemplateName: templateName,
 			TemplateJson: templateJson,
-			DeliverAfter: SecurityNoticeCoalesceWindow,
+			DeliverAfter: settings.CoalesceWindow,
 		})
 		result = securityNoticeQueued
 	}

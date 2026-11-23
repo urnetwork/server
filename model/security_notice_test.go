@@ -55,8 +55,54 @@ func TestMaskUserAuthHidesTheAddress(t *testing.T) {
 			t.Errorf("maskUserAuth(%q) = %q, want %q", c.userAuth, got, c.want)
 		}
 	}
-	if got := maskPhoneNumber("12345"); got != "…" {
+	if got := maskPhoneNumber("12345", DefaultSecurityNoticeSettings()); got != "…" {
 		t.Errorf("a short number = %q, want nothing of it shown", got)
+	}
+}
+
+// The masks follow their settings, and no settings show a whole value: a wallet
+// shows WalletMaskEndLength characters at each end, none of a value shorter
+// than WalletMaskMinLength or no longer than both ends together; a phone number
+// shows its last PhoneMaskEndDigitCount digits, none of a number with fewer than
+// PhoneMaskMinDigitCount digits or no more than the end it would show.
+func TestSecurityNoticeMasksFollowTheirSettings(t *testing.T) {
+	settings := DefaultSecurityNoticeSettings()
+	settings.WalletMaskEndLength = 6
+	settings.WalletMaskMinLength = 4
+	settings.PhoneMaskEndDigitCount = 8
+	settings.PhoneMaskMinDigitCount = 2
+	for _, c := range []struct {
+		address string
+		want    string
+	}{
+		{address: "abcdefghijklm", want: "abcdef…hijklm"},
+		{address: "abcdefghijkl", want: "…"},
+		{address: "abc", want: "…"},
+		{address: "", want: ""},
+	} {
+		if got := maskWalletAddress(c.address, settings); got != c.want {
+			t.Errorf("maskWalletAddress(%q) = %q, want %q", c.address, got, c.want)
+		}
+	}
+	for _, c := range []struct {
+		phoneNumber string
+		want        string
+	}{
+		{phoneNumber: "+1 415-555-0123", want: "…55550123"},
+		{phoneNumber: "555-0123", want: "…"},
+		{phoneNumber: "1", want: "…"},
+	} {
+		if got := maskPhoneNumber(c.phoneNumber, settings); got != c.want {
+			t.Errorf("maskPhoneNumber(%q) = %q, want %q", c.phoneNumber, got, c.want)
+		}
+	}
+	settings.WalletMaskEndLength = 0
+	settings.PhoneMaskEndDigitCount = 0
+	if got := maskWalletAddress("9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM", settings); got != "…" {
+		t.Errorf("a wallet with no end shown = %q, want none of it", got)
+	}
+	if got := maskPhoneNumber("+1 415-555-0123", settings); got != "…" {
+		t.Errorf("a phone number with no end shown = %q, want none of it", got)
 	}
 }
 
@@ -86,18 +132,19 @@ func TestSecurityNoticeViaNamesAppWebsiteOrApiKey(t *testing.T) {
 	}
 }
 
-// A notice lists at most securityNoticeMaxChanges changes; past that the last
-// slot takes the latest change and the rest are counted, so the notice always
-// ends with the current state.
+// A notice lists at most the settings' ChangeMaxCount changes; past that the
+// last slot takes the latest change and the rest are counted, so the notice
+// always ends with the current state.
 func TestSecurityNoticeKeepsTheLatestChangeWhenFull(t *testing.T) {
+	changeMaxCount := DefaultSecurityNoticeSettings().ChangeMaxCount
 	notice := &SecurityWalletNotice{}
 	base := time.Date(2026, 10, 29, 14, 3, 0, 0, time.UTC)
-	total := securityNoticeMaxChanges + 3
+	total := changeMaxCount + 3
 	for i := range total {
 		notice.add(&SecurityWalletChange{ChangeTime: base.Add(time.Duration(i) * time.Second), NewWallet: string(rune('a' + i))})
 	}
-	if len(notice.Changes) != securityNoticeMaxChanges || notice.MoreCount != 3 {
-		t.Fatalf("listed %d with %d more, want %d with 3 more", len(notice.Changes), notice.MoreCount, securityNoticeMaxChanges)
+	if len(notice.Changes) != changeMaxCount || notice.MoreCount != 3 {
+		t.Fatalf("listed %d with %d more, want %d with 3 more", len(notice.Changes), notice.MoreCount, changeMaxCount)
 	}
 	if notice.Changes[0].NewWallet != "a" || notice.Changes[len(notice.Changes)-1].NewWallet != string(rune('a'+total-1)) {
 		t.Fatalf("the list must keep the first change and end with the latest, got %q ... %q", notice.Changes[0].NewWallet, notice.Changes[len(notice.Changes)-1].NewWallet)
@@ -118,11 +165,12 @@ func TestSecurityNoticeRecipientsAreEmailAddressesOnly(t *testing.T) {
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("recipients = %v, want %v", got, want)
 	}
+	recipientMaxCount := DefaultSecurityNoticeSettings().RecipientMaxCount
 	many := []string{}
-	for i := range securityNoticeMaxRecipients + 4 {
+	for i := range recipientMaxCount + 4 {
 		many = append(many, string(rune('a'+i))+"@example.com")
 	}
-	if got := securityNoticeEmails(many); len(got) != securityNoticeMaxRecipients {
-		t.Fatalf("%d recipients, want at most %d", len(got), securityNoticeMaxRecipients)
+	if got := securityNoticeEmails(many); len(got) != recipientMaxCount {
+		t.Fatalf("%d recipients, want at most %d", len(got), recipientMaxCount)
 	}
 }
