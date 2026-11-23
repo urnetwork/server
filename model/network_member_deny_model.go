@@ -36,12 +36,15 @@ package model
 // A key made while its member is being removed is ended too. Its creation
 // reads the creator's membership under a share lock in its own transaction
 // (createAuthKeyAt), so a creation that reaches the row after the denial
-// locked it meets the deleted row and makes nothing. One that commits after
-// the denial's snapshot, which therefore does not show the key to its delete,
-// appended its auth_key.create event to the network's admin event chain, and
-// the denial's own events, which it always appends after the delete, then meet
-// that event as a serialization failure (network_admin_event_model.go), so
-// server.Tx runs the denial again, and the rerun deletes the key.
+// locked it meets the deleted row and makes nothing, and the denial's lock
+// waits for a creation that locked the row first. Under read committed the
+// denial's delete then sees that key. Under repeatable read, server.Tx's
+// default, a creation that commits after the denial's snapshot is not in what
+// the delete sees, but it appended its auth_key.create event to the network's
+// admin event chain, and the denial's own events, which it always appends
+// after the delete, meet that event as a serialization failure
+// (network_admin_event_model.go), so server.Tx runs the denial again, and the
+// rerun deletes the key.
 //
 // It changes no reader. The config repo still admits the member's devices and
 // members still encrypt to them until an admin device, or the indexer

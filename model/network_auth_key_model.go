@@ -396,12 +396,14 @@ func authKeyCreatorFilterOf(clientSession *session.ClientSession) (creatorUserId
 // each enrollment asks the owners again (network_client_owner_model.go).
 //
 // In a team the caller's membership is read again in the key's transaction,
-// under a share lock, before anything is written: a removal of the member that
-// committed after the role was read refuses the creation 403 and spends no
-// admin token's use, and one still running either makes the creation wait for
-// it or, once the creation commits first, meets the key's admin event and runs
-// again, deleting the key (network_member_deny_model.go, QD-1211), so no key
-// outlives its creator's removal to enroll again once the same person re-joins.
+// under a share lock, before anything is written. A removal of the member that
+// committed after the role was read, or that holds the membership's row when
+// the creation reaches it, refuses the creation 403, spending no admin token's
+// use. A creation that commits first, under a removal's snapshot, puts its
+// auth_key.create event in the network's admin event chain, where the
+// removal's own events meet it and run the removal again, which deletes the
+// key (network_member_deny_model.go, QD-1211). So no key outlives its
+// creator's removal to enroll again once the same person re-joins.
 func CreateAuthKey(createAuthKey *CreateAuthKeyArgs, clientSession *session.ClientSession) (*CreateAuthKeyResult, error) {
 	return createAuthKeyAt(createAuthKey, clientSession, DefaultNetworkAuthKeySettings(), server.NowUtc())
 }
