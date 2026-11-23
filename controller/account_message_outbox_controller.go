@@ -202,9 +202,10 @@ type accountMessageDeliverySettings struct {
 	// to the next run. The task may run twice as long, so the last send's
 	// record fits.
 	runBudget time.Duration
-	// A claim's lease. It must outlast one send and its record, so it is
-	// longer than two of the longest sends email.yml allows
-	// (accountMessageSendSettings.maxSendTimeout).
+	// A claim's lease. It must outlast one send and its record, whose
+	// recordTimeout starts after the send: it is longer than the longest send
+	// email.yml allows (accountMessageSendSettings.maxSendTimeout) and
+	// recordTimeout together, and than two such sends.
 	claimLease time.Duration
 	// The backoff after a failed send, which doubles from the base to the cap.
 	retryBaseDelay time.Duration
@@ -223,8 +224,9 @@ type accountMessageDeliverySettings struct {
 	// The minimum time between two default-level reports of each delivery
 	// problem.
 	reportInterval time.Duration
-	// Bounds recording a send's outcome, which outlives the run's
-	// cancellation.
+	// Bounds each record of an attempt's outcome, which outlives the run's
+	// cancellation. It starts when the record does, after the send, so a send
+	// however slow leaves the record all of it (QD-1220).
 	recordTimeout time.Duration
 }
 
@@ -254,6 +256,10 @@ type accountMessageDelivery struct {
 	sender   MessageSender
 	now      func() time.Time
 	settings *accountMessageDeliverySettings
+	// Makes each record's context from its parent and recordTimeout:
+	// context.WithTimeout, which a test replaces with a clock it moves on
+	// during a send, so a send held past the timeout needs no real time.
+	contextWithTimeout func(context.Context, time.Duration) (context.Context, context.CancelFunc)
 
 	sentCount               int
 	retryCount              int
@@ -273,10 +279,11 @@ func newAccountMessageDelivery(
 	settings *accountMessageDeliverySettings,
 ) *accountMessageDelivery {
 	return &accountMessageDelivery{
-		ctx:      ctx,
-		sender:   sender,
-		now:      now,
-		settings: settings,
+		ctx:                ctx,
+		sender:             sender,
+		now:                now,
+		settings:           settings,
+		contextWithTimeout: context.WithTimeout,
 	}
 }
 
@@ -329,17 +336,15 @@ func (self *accountMessageDelivery) retryDelay(attemptCount int) time.Duration {
 
 // Sends one claimed message and records the outcome. A template about a network
 // is given its network's name first (nameAccountMessageNetwork). The record
-// runs on a context detached from the run's cancellation (a drain, the task's
-// max time): a send that went out must be recorded, or it is sent again when
-// its lease ends. A message claimed more often than the most attempts, each
-// without a recorded outcome (a process that keeps stopping in the send), is
-// abandoned unsent.
+// runs on its own context (recordContext), made after the send, or after the
+// withheld check for a message withheld unsent. A message claimed more often
+// than the most attempts, each without a recorded outcome (a process that keeps
+// stopping in the send), is abandoned unsent.
 func (self *accountMessageDelivery) deliver(message *model.AccountMessage) {
-	recordCtx, recordCancel := context.WithTimeout(context.WithoutCancel(self.ctx), self.settings.recordTimeout)
-	defer recordCancel()
-
 	templateLabel := accountMessageTemplateLabel(message.TemplateName)
 	if reason, ok := self.withheldTemplates[message.TemplateName]; ok {
+		recordCtx, recordCancel := self.recordContext()
+		defer recordCancel()
 		if !model.AbandonAccountMessage(recordCtx, message.MessageId, *message.ClaimId, self.now(), reason) {
 			self.reportLeaseLost(message)
 			return
@@ -370,6 +375,10 @@ func (self *accountMessageDelivery) deliver(message *model.AccountMessage) {
 		self.consecutiveFailureCount = 0
 		return nil
 	}()
+
+	// made after the send, so the send's time is not taken from the record's
+	recordCtx, recordCancel := self.recordContext()
+	defer recordCancel()
 	if err == nil {
 		if model.CompleteAccountMessage(recordCtx, message.MessageId, *message.ClaimId, self.now()) {
 			self.sentCount += 1
@@ -422,6 +431,14 @@ func (self *accountMessageDelivery) deliver(message *model.AccountMessage) {
 			suppressedCount,
 		)
 	}
+}
+
+// The context one record of an outcome runs on, made when the record starts so
+// it has the whole recordTimeout whatever the attempt took before it (QD-1220).
+// It is detached from the run's cancellation (a drain, the task's max time): a
+// send that went out must be recorded, or it is sent again when its lease ends.
+func (self *accountMessageDelivery) recordContext() (context.Context, context.CancelFunc) {
+	return self.contextWithTimeout(context.WithoutCancel(self.ctx), self.settings.recordTimeout)
 }
 
 // Counts and reports a claim whose lease ended before its outcome was recorded.
