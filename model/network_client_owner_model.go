@@ -398,6 +398,22 @@ func getEnrolledClientPublicKeyInTx(ctx context.Context, tx server.PgTx, clientI
 //	          removed, JIT pending or past its reauth_deadline, holds no key
 //	          any longer (§7.10), so its key answers auth_key_invalid, and so
 //	          does one whose sign-in ends before the mint's transaction
+//	role      a tagged or pre-approved key reaches what its creator's role
+//	          allows now, not what it allowed when the key was made (QD-1199):
+//	          a team's creator whose role, as network_member mirrors it from
+//	          the log, no longer holds the keys permission authKeyReachOf asked
+//	          at creation, an Admin a signed AdminSet demoted, holds no such
+//	          key any longer, so its key answers auth_key_invalid. It is read
+//	          before an admission posts anything and again under the
+//	          membership's lock in the mint's transaction, which orders the
+//	          spend with the role mirror's write, so a demotion that lands
+//	          between the two refuses the mint and spends nothing. One that
+//	          lands after the first read and before an admission's append
+//	          still lets that admission post, as a removal there would, the
+//	          log taking it on its Delegation's signature alone. An untagged
+//	          key, which every role makes for its own devices, is unaffected
+//	          by the role, and a personal network's owner holds every
+//	          permission
 //	token     names the creator's sign-in, but a team's tagged client's names
 //	          the team's own identity, its owner of record (admin_user_id),
 //	          with no member_id (QD-1194): the client is the network's, not
@@ -546,6 +562,10 @@ type networkClientEnrollment struct {
 	// credential the mint runs on whatever the key is; nil in a personal
 	// network
 	memberId *server.Id
+	// the key is tagged or pre-approved, as read before the mint, so in a team
+	// the membership's role must still hold the keys permission when the key
+	// is spent (QD-1199)
+	needsKeysPermission bool
 	// what the client's token names when it is not the creator's sign-in the
 	// mint runs on: a team's tagged client is minted on the team's owner of
 	// record, with no member_id (QD-1194). nil for every other enrollment
@@ -556,23 +576,53 @@ type networkClientEnrollment struct {
 }
 
 // Spends the key, first ordering a team mint with a removal or
-// reauthentication of the exact membership the creator's credential carries:
-// one that ended refuses the key, as the removal ended the creator's keys
-// (§7.10). creator is the creator's sign-in, never the owner of record a
-// tagged client's token names.
+// reauthentication of the exact membership the creator's credential carries,
+// and with the role mirror's write of its role: one that ended refuses the
+// key, as the removal ended the creator's keys (§7.10), and so does a role
+// that no longer holds the keys permission a tagged or pre-approved key needs
+// (QD-1199), each before the spend, so a refusal writes nothing. creator is
+// the creator's sign-in, never the owner of record a tagged client's token
+// names.
 func (self *networkClientEnrollment) consume(ctx context.Context, tx server.PgTx, creator *session.ByJwt) (*NetworkAuthKey, error) {
 	if self.memberId != nil {
-		rows, err := tx.Query(ctx, `SELECT member_id FROM network_member
+		rows, err := tx.Query(ctx, `SELECT role FROM network_member
 			WHERE network_id = $1 AND user_id = $2 AND member_id = $3 AND NOT pending
 				AND (reauth_deadline IS NULL OR reauth_deadline > $4) FOR SHARE`,
 			creator.NetworkId, creator.UserId, *self.memberId, server.NowUtc())
 		live := false
-		server.WithPgResult(rows, err, func() { live = rows.Next() })
-		if !live {
+		var role NetworkMemberRole
+		server.WithPgResult(rows, err, func() {
+			if rows.Next() {
+				var roleText string
+				server.Raise(rows.Scan(&roleText))
+				live = true
+				role = NetworkMemberRole(roleText)
+			}
+		})
+		if !live || !networkEnrollCreatorRolePermits(self.needsKeysPermission, role) {
 			return nil, ErrAuthKeyRefused
 		}
 	}
-	return ConsumeAuthKeyInTx(ctx, tx, self.bearer)
+	authKey, err := ConsumeAuthKeyInTx(ctx, tx, self.bearer)
+	if err != nil {
+		return nil, err
+	}
+	// the role was checked for the marks read before the mint; a key's tags
+	// and pre-approval never change, so a difference rolls the spend back
+	if (0 < len(authKey.TagIds) || authKey.PreApproved) != self.needsKeysPermission {
+		return nil, errors.New("an auth key changed its tags or pre-approval")
+	}
+	return authKey, nil
+}
+
+// Whether a team's key creator whose role is role, as network_member mirrors
+// it, still holds its key (QD-1199): one that needsKeysPermission, tagged or
+// pre-approved, only while the role holds RolePermissionKeys, which
+// authKeyReachOf asked at the key's creation, so a role this build does not
+// know holds none; an untagged one, which every role makes for its own
+// devices, whatever the role.
+func networkEnrollCreatorRolePermits(needsKeysPermission bool, role NetworkMemberRole) bool {
+	return !needsKeysPermission || role.Permits(RolePermissionKeys)
 }
 
 // The owner row of the client the enrollment mints, from the key it spent.
@@ -625,6 +675,13 @@ type networkEnrollKey struct {
 	tagged              bool
 	ephemeral           bool
 	preApproved         bool
+}
+
+// Whether the key reaches past its creator's own devices, tagged or
+// pre-approved: what only a creator whose role holds RolePermissionKeys
+// makes (authKeyReachOf), and holds while its role still does (QD-1199).
+func (self *networkEnrollKey) needsKeysPermission() bool {
+	return self.tagged || self.preApproved
 }
 
 func readNetworkEnrollKey(ctx context.Context, authKeyId server.Id) (key *networkEnrollKey) {
@@ -718,6 +775,12 @@ func EnrollNetworkClient(ctx context.Context, enroll *NetworkEnrollArgs, clientA
 	if signIn == nil {
 		return nil, newNetworkEnrollRefusal(http.StatusUnauthorized, NetworkEnrollCodeAuthKeyInvalid, networkEnrollAuthKeyInvalidMessage)
 	}
+	// a team's tagged or pre-approved key reaches what its creator's role
+	// allows now (see the header): asked here, before an admission posts
+	// anything, and again in the mint's transaction (consume)
+	if signIn.MemberId != nil && !networkEnrollCreatorRolePermits(key.needsKeysPermission(), signIn.Role) {
+		return nil, newNetworkEnrollRefusal(http.StatusUnauthorized, NetworkEnrollCodeAuthKeyInvalid, networkEnrollAuthKeyInvalidMessage)
+	}
 	creator := NewNetworkSignInByJwt(signIn, false)
 	// a team's tagged client is the network's: its token names the team's
 	// owner of record with no member_id, which only a client credential of a
@@ -745,11 +808,12 @@ func EnrollNetworkClient(ctx context.Context, enroll *NetworkEnrollArgs, clientA
 	)
 	defer creatorSession.Cancel()
 	enrollment := &networkClientEnrollment{
-		bearer:      enroll.AuthKey,
-		authKeyId:   authKeyId,
-		declaresKey: bytes.Clone(enroll.ClientPublicKey),
-		memberId:    creator.MemberId,
-		credential:  credential,
+		bearer:              enroll.AuthKey,
+		authKeyId:           authKeyId,
+		declaresKey:         bytes.Clone(enroll.ClientPublicKey),
+		memberId:            creator.MemberId,
+		needsKeysPermission: key.needsKeysPermission(),
+		credential:          credential,
 	}
 	result, err := authNetworkClientWithParentState(&AuthNetworkClientArgs{
 		DeviceSpec:       enroll.DeviceSpec,
