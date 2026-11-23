@@ -22,11 +22,11 @@ import (
 //   - retire each day at the contract horizon reaper's horizon
 //     (db_contract_day_retirement.go): the reaper alone deletes contract rows,
 //     by its keep rules; retirement compacts a day's leaves down to the rows
-//     the reaper keeps and drops the day once it holds none;
-//   - delete close evidence older than the horizon (migration 857).
+//     the reaper keeps and drops the day once it holds none.
 //
 // Before the cutover it only guards a prepared cutover from outliving its
-// day, and removes evidence.
+// day. The close evidence row deletes it ran until 2026-11-23 are their own
+// task now (RemoveExpiredCloseEvidence, remove_expired_close_evidence).
 
 // The contract tables' family in the partition registry
 // (PARTITION-MAINTENANCE-PLAN.md A7, db_partition_registry.go). This task keeps
@@ -77,12 +77,13 @@ func init() {
 // archive_partition and archive_cursor, the archive step's position; they are
 // read and ignored, since retirement no longer deletes contracts.
 type ContractRetentionCursor struct {
-	// where the close evidence row retention resumes, or starts its next
-	// pass (RemoveExpiredCloseEvidence)
+	// where the close evidence row retention resumed when this task ran it,
+	// before 2026-11-23. Carried through unread, so a build from before then
+	// resumes its pass; the evidence task keeps its own cursor.
 	EvidenceRemoval *CloseEvidenceRemovalCursor `json:"evidence_removal,omitempty"`
 	// the close evidence cursor before 2026-11-02, a pass in progress: the
-	// next contract id to consider and the partition it is in. Read once into
-	// EvidenceRemoval.
+	// next contract id to consider and the partition it is in. Carried
+	// through unread, as EvidenceRemoval.
 	EvidenceCursor *Id    `json:"evidence_cursor,omitempty"`
 	EvidenceLeaf   string `json:"evidence_leaf,omitempty"`
 	// the day whose parents were last analyzed. A cursor from the weekly
@@ -100,13 +101,8 @@ type ContractPartitionReport struct {
 	Compacted []string
 	// expired days that hold only rows the reaper keeps, by their
 	// transfer_contract leaf, with the live rows their leaves hold
-	Kept            map[string]int64
-	Dropped         []string
-	EvidenceRemoved int64
-	// the retention the close evidence row deletes applied, and why they
-	// stopped (CloseEvidenceRemovalReport)
-	EvidenceRetention time.Duration
-	EvidenceStop      string
+	Kept    map[string]int64
+	Dropped []string
 	// expired days or their leaves that stay unretired this run, with the
 	// reason
 	Blocked map[string]string
@@ -126,30 +122,12 @@ func contractPartitionGlogf(format string, args ...any) {
 	glog.Infof("[cp]"+format+"\n", args...)
 }
 
-// Where the close evidence row retention resumes: evidence_removal, or the
-// pass in progress that a cursor from before 2026-11-02 holds in its old fields.
-func (self ContractRetentionCursor) evidenceRemovalCursor() CloseEvidenceRemovalCursor {
-	if self.EvidenceRemoval != nil {
-		return *self.EvidenceRemoval
-	}
-	return CloseEvidenceRemovalCursor{Leaf: self.EvidenceLeaf, ContractId: self.EvidenceCursor}
-}
-
-// This cursor with where the close evidence row retention resumes, in
-// evidence_removal alone.
-func (self ContractRetentionCursor) withEvidenceRemoval(removal CloseEvidenceRemovalCursor) ContractRetentionCursor {
-	self.EvidenceRemoval = &removal
-	self.EvidenceLeaf = ""
-	self.EvidenceCursor = nil
-	return self
-}
-
-// budget bounds the run: two thirds for the partitions and the rest for the
-// close evidence, so neither backlog starves the other. The close evidence's
-// own partitions (db_contract_close_evidence_partition.go) are created and
-// dropped by the partition registry's tasks; this task keeps their row
-// deletes and abandons a close evidence cutover that outlives its week's
-// margin, as it does the contract cutover.
+// budget bounds the run, all of it for the contract partitions since the close
+// evidence row deletes became their own task (2026-11-23), which before took a
+// third of it. The close evidence's own partitions
+// (db_contract_close_evidence_partition.go) are created and dropped by the
+// partition registry's tasks; this task abandons a close evidence cutover that
+// outlives its week's margin, as it does the contract cutover.
 func MaintainContractPartitions(ctx context.Context, now time.Time, cursor ContractRetentionCursor, budget time.Duration) (report *ContractPartitionReport, next ContractRetentionCursor) {
 	return maintainContractPartitions(ctx, now, cursor, budget, DefaultContractDayRetirementSettings())
 }
@@ -157,7 +135,7 @@ func MaintainContractPartitions(ctx context.Context, now time.Time, cursor Contr
 func maintainContractPartitions(ctx context.Context, now time.Time, cursor ContractRetentionCursor, budget time.Duration, settings *ContractDayRetirementSettings) (report *ContractPartitionReport, next ContractRetentionCursor) {
 	report = &ContractPartitionReport{Blocked: map[string]string{}, Kept: map[string]int64{}}
 	next = cursor
-	deadline := time.Now().Add(budget * 2 / 3)
+	deadline := time.Now().Add(budget)
 
 	if IsContractPartitioned(ctx) {
 		report.Partitioned = true
@@ -183,20 +161,6 @@ func maintainContractPartitions(ctx context.Context, now time.Time, cursor Contr
 	}
 
 	report.AbandonedEvidenceCutover = abandonStaleCloseEvidenceCutover(ctx, now, DefaultCloseEvidencePartitionSettings(), contractPartitionGlogf)
-
-	evidenceReport, evidenceNext, more := RemoveExpiredCloseEvidence(
-		ctx,
-		now,
-		cursor.evidenceRemovalCursor(),
-		time.Now().Add(budget/3),
-	)
-	report.EvidenceRemoved = evidenceReport.Removed
-	report.EvidenceRetention = evidenceReport.Retention
-	report.EvidenceStop = evidenceReport.Stop
-	next = next.withEvidenceRemoval(evidenceNext)
-	if more {
-		report.More = true
-	}
 	return
 }
 

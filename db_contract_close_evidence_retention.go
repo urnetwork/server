@@ -17,14 +17,23 @@ import (
 	"github.com/urnetwork/glog"
 )
 
-// The close evidence row retention (RemoveExpiredCloseEvidence): its brake and
-// pace, its batch, and where each pass starts.
+// The close evidence row retention (RemoveExpiredCloseEvidence): its task, its
+// brake and pace, its batch, and where each pass starts.
+//
+// # The task
+//
+// Since 2026-11-23 the deletes run as their own taskworker chain,
+// remove_expired_close_evidence (taskworker/work/close_evidence_retention_work.go;
+// B' of DBDISK-RETENTION-REVIEW.md 4.5). Before, they took a third of each
+// maintain_contract_partitions run, which from the C1 cutover gives the
+// contract days its run first and would have left the evidence about a fifth
+// of what comes due each day.
 //
 // # The brake
 //
-// The deletes follow the contract horizon reaper's horizon while the reaper's
-// mode is on (db_contract_close_evidence_horizon.go), and they have a brake of
-// their own, so they slow or stop without touching the reaper: the Redis hash
+// The deletes keep the evidence's own window, 7 days, while the brake is on
+// (db_contract_close_evidence_horizon.go), and the brake slows or stops them
+// without touching the contract horizon reaper: the Redis hash
 // `{close_evidence_retention}control`, read before every batch, so a change
 // applies from the next batch. Its fields, all optional:
 //   - `mode`: on or off. Off, or any other value, deletes nothing.
@@ -36,12 +45,13 @@ import (
 // Without the hash the deletes run at DefaultRowsPerSecond. A run that cannot
 // read the hash deletes nothing more in that run. `bringyourctl db
 // close-evidence-retention` shows the brake and sets it. The brake is how an
-// operator stops the row deletes. It does not stop the weekly drops: once the
-// evidence is partitioned, the registry drops whole expired weeks without
-// reading it (fenceCloseEvidenceDrop). The reaper's mode off stops those below
-// 91 days, from the next run. Restoring the evidence guard's 91-day body stops
-// both below 91 days (closeEvidenceGuardFloor), but the horizon guard
-// migration's monitor contract then pages migration-schema-drift.
+// operator stops the row deletes. Once the evidence is partitioned, the
+// registry drops whole expired weeks, and its retention task reads the brake
+// once per run for the window (WithCloseEvidenceRetentionControl), so the
+// brake off stops those below 91 days from the next run. Restoring the
+// evidence guard's 91-day body stops both below 91 days
+// (closeEvidenceGuardFloor), but the window guard migration's monitor
+// contract then pages migration-schema-drift.
 //
 // # The batch
 //
@@ -75,13 +85,13 @@ const (
 // Tunables of the row retention.
 type CloseEvidenceRetentionSettings struct {
 	// Rows deleted per second while the brake sets no rate: a cautious start,
-	// so the 35-day horizon's first deletes drain under watch. The deletes
-	// take a third of the contract task's run, and a run that leaves work
-	// continues a minute later, so a rate holds for about three quarters of a
-	// day that has a backlog: 1,000 a second is about 65M rows a day. The
-	// rows that come due at 35 days are about 18-24M a day from about
-	// 2026-11-10, about 60M a day by late November, and 100M a day and more
-	// from about 2026-12-06. The brake raises it.
+	// so a shorter window's first deletes drain under watch. A run of the
+	// evidence's own task takes its whole budget, and a run that leaves work
+	// continues MaxBatchWait later, so a rate holds for about 90% of a day that
+	// has a backlog: 1,000 a second is about 78M rows a day. About 166M rows
+	// a day come due once the backlog of the 7-day window is gone (1,930 a
+	// second accepted, 2026-11-23), and the backlog is about 1.5B rows. The
+	// brake raises it, to MaxRowsPerSecond at most: about 390M a day.
 	DefaultRowsPerSecond float64
 	// The highest rate the brake can set.
 	MaxRowsPerSecond float64
@@ -90,8 +100,8 @@ type CloseEvidenceRetentionSettings struct {
 	// Rows one batch reads at most; it deletes the expired ones among them.
 	BatchSize int
 	// A batch reads at most this long of the brake's rate (batchSizeAt): how
-	// soon after a run stops with work left the contract task's next run
-	// starts its first batch.
+	// soon after a run stops with work left the evidence task's next run
+	// starts its first batch (RemoveExpiredCloseEvidencePost).
 	MaxBatchWait time.Duration
 	// Each batch's statement and lock bounds, the contract horizon reaper's.
 	StatementTimeout time.Duration
@@ -292,7 +302,7 @@ func closeEvidenceFailureStop(ctx context.Context, err error) string {
 // One run of the row retention.
 type CloseEvidenceRemovalReport struct {
 	Removed int64
-	// the retention the run applied: ctx's horizon, never less than the
+	// the retention the run applied: ctx's window, never less than the
 	// installed guard admits (closeEvidenceRetentionIn); zero when the run
 	// stopped before reading it
 	Retention time.Duration
@@ -301,7 +311,8 @@ type CloseEvidenceRemovalReport struct {
 	FullPass bool
 }
 
-// Where the row retention resumes, kept in the contract task's arguments.
+// Where the row retention resumes, kept in the evidence task's arguments (in
+// the contract task's before 2026-11-23).
 type CloseEvidenceRemovalCursor struct {
 	// The pass in progress, when Leaf or ContractId is set: the target it was
 	// deleting from (the table itself while it is plain) and the last key it
@@ -389,7 +400,7 @@ var closeEvidenceRetentionRemovedCounter = prometheus.NewCounter(
 var closeEvidenceRetentionSecondsGauge = prometheus.NewGauge(
 	prometheus.GaugeOpts{
 		Name: "urnetwork_close_evidence_retention_seconds",
-		Help: "The close evidence retention the last row retention run applied: the contract horizon while the reaper's mode is on, never less than the installed guard admits, 35 to 91 days",
+		Help: "The close evidence retention the last row retention run applied: the evidence window (7 days) while the brake is on, never less than the installed guard admits; 91 days otherwise",
 	},
 )
 
@@ -417,10 +428,10 @@ func init() {
 	prometheus.MustRegister(closeEvidenceRetentionRemovedCounter, closeEvidenceRetentionSecondsGauge, closeEvidenceRetentionStopCounter)
 }
 
-// Deletes close evidence accepted longer ago than its retention, ctx's contract
-// horizon bounded by the installed guard (closeEvidenceRetentionIn), whose
-// contract is resolved or gone. A contract the horizon reaper deleted is gone,
-// so its evidence goes once it is as old; so does the evidence of a resolved
+// Deletes close evidence accepted longer ago than its retention, ctx's window
+// bounded by the installed guard (closeEvidenceRetentionIn), whose contract is
+// resolved or gone. A contract the horizon reaper deleted is gone, so its
+// evidence goes once it is as old; so does the evidence of a resolved
 // contract the reaper keeps, since the reaper's keep rules do not apply here.
 // Only a transaction that opts in may delete evidence, and the evidence guard
 // admits only rows older than CloseEvidenceRetentionFloor, the shortest

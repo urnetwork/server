@@ -70,10 +70,15 @@ func TestCloseEvidenceRetentionPace(t *testing.T) {
 	}
 }
 
-// The guard floor is 35 days only for the horizon guard's body. A read that
-// failed, a missing function and any other body keep 91 days, so the retention
-// a horizon of 35 days asks for stays 91.
+// The guard floor is 7 days only for the window guard's body, and 35 days for
+// the horizon guard's, whose migration Main runs until the window guard's
+// applies. A read that failed, a missing function and any other body keep 91
+// days, so the retention a window of 7 days asks for stays 91. Before the
+// window guard, its body read as 91 days too: a release from before it
+// deletes nothing younger than 91 days once the window guard applies.
 func TestCloseEvidenceGuardFloorOf(t *testing.T) {
+	const day = 24 * time.Hour
+	windowBody := ContractCloseEvidenceWindowGuardBodySql()
 	horizonBody := ContractCloseEvidenceHorizonGuardBodySql()
 	for _, test := range []struct {
 		name  string
@@ -81,16 +86,18 @@ func TestCloseEvidenceGuardFloorOf(t *testing.T) {
 		err   error
 		floor time.Duration
 	}{
-		{name: "the horizon guard", body: horizonBody, floor: CloseEvidenceRetentionFloor},
+		{name: "the window guard", body: windowBody, floor: 7 * day},
+		{name: "the horizon guard", body: horizonBody, floor: 35 * day},
 		{name: "the move guard", body: ContractCloseEvidenceMoveGuardBodySql(), floor: ContractRetention},
+		{name: "857's guard", body: ContractCloseEvidenceRetentionGuardBodySql(), floor: ContractRetention},
 		{name: "a missing function", body: "", floor: ContractRetention},
-		{name: "a failed read", body: horizonBody, err: errors.New("canceling statement due to statement timeout"), floor: ContractRetention},
+		{name: "a failed read", body: windowBody, err: errors.New("canceling statement due to statement timeout"), floor: ContractRetention},
 	} {
 		if floor := closeEvidenceGuardFloorOf(test.body, test.err); floor != test.floor {
 			t.Errorf("%s: floor %s, want %s", test.name, floor, test.floor)
 		}
 	}
-	ctx := WithContractHorizon(context.Background(), CloseEvidenceRetentionFloor)
+	ctx := WithCloseEvidenceWindow(context.Background(), CloseEvidenceRetentionWindow)
 	if retention := closeEvidenceRetentionIn(ctx, testFailingQuerier{}); retention != ContractRetention {
 		t.Fatalf("a guard read that fails keeps %s, want %s", retention, ContractRetention)
 	}

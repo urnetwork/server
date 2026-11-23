@@ -1,6 +1,7 @@
-// Close evidence follows the horizon reaper's runtime control: the evidence of
-// a contract the reaper deleted goes with it at the same horizon, and what the
-// readers need stays.
+// Close evidence keeps its own window since 2026-11-23, apart from the horizon
+// reaper's runtime control: the reaper's mode, rate and horizon move the
+// contracts alone, and the evidence of a contract the reaper deleted, or
+// keeps, goes at the evidence's window, while what the readers need stays.
 package model
 
 import (
@@ -11,67 +12,107 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// The control sets the horizon for the reaper and the evidence alike. Without
-// it both keep 91 days, so nothing here is touched; the evidence keeps them
-// too while the reaper's mode is not on. At horizonDays 45, mode on, the
-// reaper deletes a settled contract 60 days old, which leaves its close
-// reports without a contract, and the evidence pass then deletes them; the
-// reports of an open contract of the same age, and of a settled contract 30
-// days old, stay, as does an old contract's report accepted 30 days ago. A
-// control that cannot be read keeps 91 days.
-func TestCloseEvidenceGoesWithTheReapedContract(t *testing.T) {
+func removeCloseEvidenceTestBrake(t testing.TB, ctx context.Context) {
+	t.Helper()
+	controlCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	server.Raise(server.RemoveCloseEvidenceRetentionControl(controlCtx))
+}
+
+// The reaper's control no longer moves the evidence: absent, off, in a dry
+// run, or on at 18 or 14 days, the context it gives keeps the evidence 91
+// days, where on at 18 days it kept 35 before; the evidence tasks' own context
+// keeps the window, 7 days, beside any of them, and 91 days once the evidence
+// brake is off.
+func TestCloseEvidenceIgnoresTheReaperControl(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		defer removeHorizonTestControl(t, ctx)
+		defer removeCloseEvidenceTestBrake(t, ctx)
+		removeCloseEvidenceTestBrake(t, ctx)
+		const day = 24 * time.Hour
+		for _, fields := range []map[string]string{
+			nil,
+			{ContractHorizonControlFieldMode: "off"},
+			{ContractHorizonControlFieldMode: "dry_run", ContractHorizonControlFieldHorizonDays: "18"},
+			{ContractHorizonControlFieldMode: "on", ContractHorizonControlFieldHorizonDays: "18"},
+			{ContractHorizonControlFieldMode: "on", ContractHorizonControlFieldHorizonDays: "14"},
+		} {
+			removeHorizonTestControl(t, ctx)
+			if fields != nil {
+				setHorizonTestControl(t, ctx, fields)
+			}
+			reaperCtx := WithContractHorizonControl(ctx)
+			if retention := server.CloseEvidenceRetention(reaperCtx); retention != server.ContractRetention {
+				t.Fatalf("the reaper's control %v keeps the evidence %s", fields, retention)
+			}
+			if retention := server.CloseEvidenceRetention(server.WithCloseEvidenceRetentionControl(reaperCtx)); retention != 7*day {
+				t.Fatalf("beside the reaper's control %v the evidence task keeps %s", fields, retention)
+			}
+		}
+		controlCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		server.Raise(server.SetCloseEvidenceRetentionControl(controlCtx, map[string]string{server.CloseEvidenceRetentionControlFieldMode: "off"}))
+		if retention := server.CloseEvidenceRetention(server.WithCloseEvidenceRetentionControl(WithContractHorizonControl(ctx))); retention != server.ContractRetention {
+			t.Fatalf("with the brake off the evidence task keeps %s", retention)
+		}
+	})
+}
+
+// With the reaper on at the transition's 18 days, it deletes a settled
+// contract 20 days old and keeps one held by its sweep's pending payment; the
+// evidence task then deletes the close reports of both at its 7-day window,
+// since the reaper's keep rules do not apply to evidence, and the kept
+// contract stays. The reports of an open contract of the same age, and a late
+// report of it accepted 10 days ago, stay, as do the reports of a settled
+// contract 3 days old: admission and the zero-carry check read them. A second
+// pass finds nothing.
+func TestCloseEvidenceGoesAtItsWindow(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		defer removeHorizonTestControl(t, ctx)
+		defer removeCloseEvidenceTestBrake(t, ctx)
+		removeCloseEvidenceTestBrake(t, ctx)
 		f := newNetEscrowOrderingTestFixture(t, ctx)
 		const day = 24 * time.Hour
 		now := server.NowUtc().Truncate(time.Millisecond)
 
 		// credit-bearing and unswept, so nothing but the horizon keeps it
-		reaped := newHorizonTestContract(now.Add(-60*day), "settled")
+		reaped := newHorizonTestContract(now.Add(-20*day), "settled")
 		reaped.unswept = true
-		open := newHorizonTestContract(now.Add(-60*day+time.Minute), "")
+		pendingPaymentId := insertHorizonTestPayment(t, ctx, f.destinationNetworkId, horizonTestPayment{})
+		kept := newHorizonTestContract(now.Add(-20*day+time.Minute), "settled")
+		kept.paymentId = &pendingPaymentId
+		open := newHorizonTestContract(now.Add(-20*day+2*time.Minute), "")
 		open.closeTime = nil
 		open.settled = false
-		young := newHorizonTestContract(now.Add(-30*day), "settled")
-		young.unswept = true
-		insertHorizonTestContracts(t, ctx, f, reaped, open, young)
+		recent := newHorizonTestContract(now.Add(-3*day), "settled")
+		recent.unswept = true
+		insertHorizonTestContracts(t, ctx, f, reaped, kept, open, recent)
 
 		// one report of each party per contract, accepted a minute after its
-		// mint; and a late report of the open contract, 30 days ago
-		type report struct {
-			clientId   server.Id
-			reportId   server.Id
-			contractId server.Id
-			party      string
-			acceptedAt time.Time
-		}
-		reports := map[server.Id][]report{}
-		for _, contract := range []*horizonTestContract{reaped, open, young} {
-			for _, party := range []struct {
-				name     string
-				clientId server.Id
-			}{{"source", f.sourceId}, {"destination", f.destinationId}} {
-				reports[contract.contractId] = append(reports[contract.contractId], report{
-					clientId: party.clientId, reportId: horizonTestContractId(contract.createTime.Add(time.Minute)),
-					contractId: contract.contractId, party: party.name, acceptedAt: contract.createTime.Add(time.Minute),
-				})
-			}
-		}
-		late := report{clientId: f.sourceId, reportId: horizonTestContractId(now.Add(-30 * day)), contractId: open.contractId, party: "source", acceptedAt: now.Add(-30 * day)}
-		server.Tx(ctx, func(tx server.PgTx) {
-			for _, report := range append(append(append(append([]report{}, reports[reaped.contractId]...), reports[open.contractId]...), reports[young.contractId]...), late) {
+		// mint; and a late report of the open contract, 10 days ago
+		insert := func(clientId server.Id, reportId server.Id, contractId server.Id, party string, acceptedAt time.Time) {
+			server.Tx(ctx, func(tx server.PgTx) {
 				server.RaisePgResult(tx.Exec(ctx, `INSERT INTO contract_close_report_evidence
 					(client_id,report_id,contract_id,party,acked_byte_count,unacked_byte_count,checkpoint,accepted_at)
 					VALUES($1,$2,$3,$4,0,0,true,$5)`,
-					report.clientId, report.reportId, report.contractId, report.party, report.acceptedAt.UTC()))
-			}
-		}, server.TxReadCommitted, server.OptNoRetry())
-		evidence := func(contractId server.Id) (count int) {
+					clientId, reportId, contractId, party, acceptedAt.UTC()))
+			}, server.TxReadCommitted, server.OptNoRetry())
+		}
+		for _, contract := range []*horizonTestContract{reaped, kept, open, recent} {
+			acceptedAt := contract.createTime.Add(time.Minute)
+			insert(f.sourceId, horizonTestContractId(acceptedAt), contract.contractId, "source", acceptedAt)
+			insert(f.destinationId, horizonTestContractId(acceptedAt), contract.contractId, "destination", acceptedAt)
+		}
+		insert(f.sourceId, horizonTestContractId(now.Add(-10*day)), open.contractId, "source", now.Add(-10*day))
+		evidence := func(contract *horizonTestContract) (count int) {
 			server.Db(ctx, func(conn server.PgConn) {
-				server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM contract_close_report_evidence WHERE contract_id=$1`, contractId).Scan(&count))
+				server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM contract_close_report_evidence WHERE contract_id=$1`, contract.contractId).Scan(&count))
 			})
 			return
 		}
@@ -80,127 +121,41 @@ func TestCloseEvidenceGoesWithTheReapedContract(t *testing.T) {
 			return rows[0] == 1
 		}
 		removeEvidence := func() int64 {
-			report, _ := server.MaintainContractPartitions(WithContractHorizonControl(ctx), server.NowUtc(), server.ContractRetentionCursor{}, time.Minute)
-			return report.EvidenceRemoved
-		}
-		reap := func() {
-			if _, _, err := RemoveContractsPastHorizon(ctx, now, ContractHorizonCursor{}, horizonTestSettings()); err != nil {
-				t.Fatal(err)
+			taskCtx := server.WithCloseEvidenceRetentionControl(WithContractHorizonControl(ctx))
+			report, _, _ := server.RemoveExpiredCloseEvidence(taskCtx, server.NowUtc(), server.CloseEvidenceRemovalCursor{}, time.Now().Add(time.Minute))
+			if report.Stop != server.CloseEvidenceRemovalStopDone || report.Retention != 7*day {
+				t.Fatalf("the evidence pass stopped %s at a retention of %s", report.Stop, report.Retention)
 			}
+			return report.Removed
 		}
 
-		// the code's 91 days, for both
-		removeHorizonTestControl(t, ctx)
-		if retention := server.CloseEvidenceRetention(WithContractHorizonControl(ctx)); retention != server.ContractRetention {
-			t.Fatalf("without the control the evidence keeps %s", retention)
-		}
-		reap()
-		if removed := removeEvidence(); removed != 0 || !contractPresent(reaped) || evidence(reaped.contractId) != 2 {
-			t.Fatalf("the code's horizon removed %d evidence rows, or the 60-day contract", removed)
-		}
-
-		// the horizon applies only while the reaper's mode is on: without a
-		// mode (the code's default, off), off and in a dry run, 91 days
-		for _, mode := range []string{"", "off", "dry_run"} {
-			removeHorizonTestControl(t, ctx)
-			fields := map[string]string{ContractHorizonControlFieldHorizonDays: "45"}
-			if mode != "" {
-				fields[ContractHorizonControlFieldMode] = mode
-			}
-			setHorizonTestControl(t, ctx, fields)
-			if retention := server.CloseEvidenceRetention(WithContractHorizonControl(ctx)); retention != server.ContractRetention {
-				t.Fatalf("at horizonDays 45 and mode %q the evidence keeps %s", mode, retention)
-			}
-		}
-		setHorizonTestControl(t, ctx, map[string]string{ContractHorizonControlFieldMode: "on", ContractHorizonControlFieldHorizonDays: "45"})
-		if retention := server.CloseEvidenceRetention(WithContractHorizonControl(ctx)); retention != 45*day {
-			t.Fatalf("at horizonDays 45 the evidence keeps %s", retention)
-		}
-		// a control read that fails keeps the code's 91 days
-		canceled, cancel := context.WithCancel(ctx)
-		cancel()
-		if retention := server.CloseEvidenceRetention(WithContractHorizonControl(canceled)); retention != server.ContractRetention {
-			t.Fatalf("an unreadable control keeps the evidence %s", retention)
-		}
-		reap()
-		if contractPresent(reaped) || !contractPresent(open) || !contractPresent(young) {
-			t.Fatal("the reaper did not delete exactly the 60-day settled contract")
-		}
-		// the reaped contract's reports are orphans now
-		if evidence(reaped.contractId) != 2 {
-			t.Fatal("the reaper deleted close evidence")
-		}
-		if removed := removeEvidence(); removed != 2 {
-			t.Fatalf("the evidence pass removed %d rows, want the reaped contract's 2", removed)
-		}
-		if evidence(reaped.contractId) != 0 {
-			t.Fatal("the reaped contract's evidence outlived it")
-		}
-		// an unresolved contract's evidence and every report inside the
-		// horizon stay: admission and the census read them
-		if evidence(open.contractId) != 3 || evidence(young.contractId) != 2 {
-			t.Fatalf("evidence a reader needs was removed: open %d, young %d", evidence(open.contractId), evidence(young.contractId))
-		}
-		// a second pass finds nothing
-		if removed := removeEvidence(); removed != 0 {
-			t.Fatalf("a second pass removed %d rows", removed)
-		}
-	})
-}
-
-// The evidence retention does not apply the reaper's keep rules: a resolved
-// contract the reaper keeps, here for its sweep's pending payment, loses its
-// reports at the horizon all the same, and the contract stays.
-func TestCloseEvidenceGoesFromAContractTheReaperKeeps(t *testing.T) {
-	env := server.DefaultTestEnv()
-	env.RerunCount = 0
-	env.Run(t, func(t testing.TB) {
-		ctx := t.Context()
-		defer removeHorizonTestControl(t, ctx)
-		f := newNetEscrowOrderingTestFixture(t, ctx)
-		const day = 24 * time.Hour
-		now := server.NowUtc().Truncate(time.Millisecond)
-
-		pendingPaymentId := insertHorizonTestPayment(t, ctx, f.destinationNetworkId, horizonTestPayment{})
-		kept := newHorizonTestContract(now.Add(-60*day), "settled")
-		kept.paymentId = &pendingPaymentId
-		insertHorizonTestContracts(t, ctx, f, kept)
-		acceptedAt := kept.createTime.Add(time.Minute)
-		server.Tx(ctx, func(tx server.PgTx) {
-			for _, party := range []struct {
-				name     string
-				clientId server.Id
-			}{{"source", f.sourceId}, {"destination", f.destinationId}} {
-				server.RaisePgResult(tx.Exec(ctx, `INSERT INTO contract_close_report_evidence
-					(client_id,report_id,contract_id,party,acked_byte_count,unacked_byte_count,checkpoint,accepted_at)
-					VALUES($1,$2,$3,$4,0,0,true,$5)`,
-					party.clientId, horizonTestContractId(acceptedAt), kept.contractId, party.name, acceptedAt.UTC()))
-			}
-		}, server.TxReadCommitted, server.OptNoRetry())
-		evidence := func() (count int) {
-			server.Db(ctx, func(conn server.PgConn) {
-				server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM contract_close_report_evidence WHERE contract_id=$1`, kept.contractId).Scan(&count))
-			})
-			return
-		}
-		contractPresent := func() bool {
-			rows, _ := countHorizonTestRows(t, ctx, kept.contractId)
-			return rows[0] == 1
-		}
-
-		setHorizonTestControl(t, ctx, map[string]string{ContractHorizonControlFieldMode: "on", ContractHorizonControlFieldHorizonDays: "45"})
+		setHorizonTestControl(t, ctx, map[string]string{ContractHorizonControlFieldMode: "on", ContractHorizonControlFieldHorizonDays: "18"})
 		if _, _, err := RemoveContractsPastHorizon(ctx, now, ContractHorizonCursor{}, horizonTestSettings()); err != nil {
 			t.Fatal(err)
 		}
-		if !contractPresent() {
-			t.Fatal("the reaper deleted a contract whose sweep's payment is pending")
+		if contractPresent(reaped) || !contractPresent(kept) || !contractPresent(open) || !contractPresent(recent) {
+			t.Fatal("the reaper did not delete exactly the 20-day settled contract")
 		}
-		report, _ := server.MaintainContractPartitions(WithContractHorizonControl(ctx), server.NowUtc(), server.ContractRetentionCursor{}, time.Minute)
-		if report.EvidenceRemoved != 2 || evidence() != 0 {
-			t.Fatalf("the evidence pass removed %d rows and left %d of a kept contract's reports accepted 60 days ago", report.EvidenceRemoved, evidence())
+		if evidence(reaped) != 2 {
+			t.Fatal("the reaper deleted close evidence")
 		}
-		if !contractPresent() {
-			t.Fatal("the evidence pass deleted the contract")
+
+		if removed := removeEvidence(); removed != 4 {
+			t.Fatalf("the evidence pass removed %d rows, want the reaped and the kept contracts' 4", removed)
+		}
+		if evidence(reaped) != 0 || evidence(kept) != 0 {
+			t.Fatalf("evidence past the window stayed: reaped %d, kept %d", evidence(reaped), evidence(kept))
+		}
+		if !contractPresent(kept) {
+			t.Fatal("the evidence pass deleted the contract the reaper keeps")
+		}
+		// an unresolved contract's evidence and every report inside the
+		// window stay
+		if evidence(open) != 3 || evidence(recent) != 2 {
+			t.Fatalf("evidence a reader needs was removed: open %d, recent %d", evidence(open), evidence(recent))
+		}
+		if removed := removeEvidence(); removed != 0 {
+			t.Fatalf("a second pass removed %d rows", removed)
 		}
 	})
 }

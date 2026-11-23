@@ -9,10 +9,11 @@ import (
 	"github.com/urnetwork/connect"
 )
 
-// The evidence guard (857, the move guard, and since the horizon guard at the
-// head, a floor of 35 days) admits a delete only from a transaction that opts
-// in, and only of a row older than the shortest contract horizon, 35 days.
-// Updates and truncates stay refused with or without the opt-in.
+// The evidence guard (857, the move guard, the horizon guard's 35 days, and at
+// the head the window guard's floor of 7 days) admits a delete only from a
+// transaction that opts in, and only of a row older than the evidence's
+// window, 7 days. Updates and truncates stay refused with or without the
+// opt-in. Under the horizon guard a row 8 days old was refused.
 func TestContractCloseEvidenceRetentionGuard(t *testing.T) {
 	DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -70,8 +71,8 @@ func TestContractCloseEvidenceRetentionGuard(t *testing.T) {
 			return err != nil && strings.Contains(err.Error(), "original contract close reports are immutable")
 		}
 
-		expiredClientId, expiredReportId := insert(now.Add(-36 * 24 * time.Hour))
-		retainedClientId, retainedReportId := insert(now.Add(-34 * 24 * time.Hour))
+		expiredClientId, expiredReportId := insert(now.Add(-8 * 24 * time.Hour))
+		retainedClientId, retainedReportId := insert(now.Add(-6 * 24 * time.Hour))
 		// what 857 alone admitted is still admitted
 		agedClientId, agedReportId := insert(now.Add(-92 * 24 * time.Hour))
 		deleteSql := `DELETE FROM contract_close_report_evidence WHERE client_id = $1 AND report_id = $2`
@@ -80,7 +81,7 @@ func TestContractCloseEvidenceRetentionGuard(t *testing.T) {
 		connect.AssertEqual(t, immutable(exec(false, deleteSql, expiredClientId, expiredReportId)), true)
 		connect.AssertEqual(t, exists(expiredClientId, expiredReportId), true)
 
-		// with it, a row inside the horizon is still refused
+		// with it, a row inside the window is still refused
 		connect.AssertEqual(t, immutable(exec(true, deleteSql, retainedClientId, retainedReportId)), true)
 		connect.AssertEqual(t, exists(retainedClientId, retainedReportId), true)
 
@@ -88,7 +89,7 @@ func TestContractCloseEvidenceRetentionGuard(t *testing.T) {
 		connect.AssertEqual(t, immutable(exec(true, `UPDATE contract_close_report_evidence SET checkpoint = true WHERE client_id = $1 AND report_id = $2`, expiredClientId, expiredReportId)), true)
 		connect.AssertEqual(t, immutable(exec(true, `TRUNCATE contract_close_report_evidence`)), true)
 
-		// a row older than the horizon is deleted
+		// a row older than the window is deleted
 		connect.AssertEqual(t, exec(true, deleteSql, expiredClientId, expiredReportId), nil)
 		connect.AssertEqual(t, exists(expiredClientId, expiredReportId), false)
 		connect.AssertEqual(t, exists(retainedClientId, retainedReportId), true)

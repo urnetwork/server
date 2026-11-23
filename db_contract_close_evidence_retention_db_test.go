@@ -40,7 +40,7 @@ func TestCloseEvidenceRetentionBrakeStopsTheDeletes(t *testing.T) {
 		defer testRemoveCloseEvidenceRetentionControl(t)
 		now := NowUtc()
 		const day = 24 * time.Hour
-		horizon := WithContractHorizon(ctx, 45*day)
+		horizon := WithCloseEvidenceWindow(ctx, 45*day)
 		resolvedId := testContractIdAt(now.Add(-50 * day))
 		testInsertContractRows(t, ctx, resolvedId, true)
 		reports := []testCloseEvidenceReport{
@@ -103,7 +103,7 @@ func TestCloseEvidenceRetentionBatchBoundsItsLockWait(t *testing.T) {
 		ctx := context.Background()
 		now := NowUtc()
 		const day = 24 * time.Hour
-		horizon := WithContractHorizon(ctx, 45*day)
+		horizon := WithCloseEvidenceWindow(ctx, 45*day)
 		report := testCloseEvidenceReportAt(now.Add(-50*day), testContractIdAt(now.Add(-50*day)), now.Add(-50*day))
 		connect.AssertEqual(t, testInsertCloseEvidenceReport(ctx, report), true)
 
@@ -200,7 +200,7 @@ func TestCloseEvidenceRetentionStartsAtTheLowWater(t *testing.T) {
 		ctx := context.Background()
 		now := NowUtc()
 		const day = 24 * time.Hour
-		horizon := WithContractHorizon(ctx, 45*day)
+		horizon := WithCloseEvidenceWindow(ctx, 45*day)
 		settings := DefaultCloseEvidenceRetentionSettings()
 		settings.BatchSize = 2
 
@@ -329,7 +329,7 @@ func TestCloseEvidenceRetentionBatchOnAPartitionedParentReadsNothing(t *testing.
 		connect.AssertEqual(t, ctidOf(unresolved), ctidOf(expired))
 
 		settings := DefaultCloseEvidenceRetentionSettings()
-		horizon := WithContractHorizon(ctx, 45*day)
+		horizon := WithCloseEvidenceWindow(ctx, 45*day)
 
 		// a run that read its targets before the cutover ends its pass there,
 		// with nothing deleted
@@ -384,7 +384,7 @@ func TestCloseEvidenceRetentionBatchBoundsItsStatement(t *testing.T) {
 		ctx := context.Background()
 		now := NowUtc()
 		const day = 24 * time.Hour
-		horizon := WithContractHorizon(ctx, 45*day)
+		horizon := WithCloseEvidenceWindow(ctx, 45*day)
 		report := testCloseEvidenceReportAt(now.Add(-50*day), testContractIdAt(now.Add(-50*day)), now.Add(-50*day))
 		connect.AssertEqual(t, testInsertCloseEvidenceReport(ctx, report), true)
 		testCloseEvidenceNoError(t, testCloseEvidenceExec(
@@ -536,8 +536,8 @@ func TestCloseEvidenceRetentionLengthenedMidPass(t *testing.T) {
 		ctx := context.Background()
 		now := NowUtc()
 		const day = 24 * time.Hour
-		short := WithContractHorizon(ctx, 45*day)
-		long := WithContractHorizon(ctx, 60*day)
+		short := WithCloseEvidenceWindow(ctx, 45*day)
+		long := WithCloseEvidenceWindow(ctx, 60*day)
 		settings := DefaultCloseEvidenceRetentionSettings()
 		settings.BatchSize = 1
 		slow := *settings
@@ -574,16 +574,17 @@ func TestCloseEvidenceRetentionLengthenedMidPass(t *testing.T) {
 	})
 }
 
-// The contract task's arguments carry the cursor from run to run, through JSON
-// as the task stores them. Arguments from before 2026-11-02 resume at their
-// contract, above an older row; a run with no time left keeps the pass in the
-// new field; and the next day's first pass takes the older row.
-func TestMaintainContractPartitionsCarriesTheEvidenceCursor(t *testing.T) {
+// The contract task leaves the close evidence to its own chain (2026-11-23):
+// a run deletes no evidence, whatever the window in its context, and carries
+// its arguments' evidence cursor through unread, in its old and its newer
+// field, through JSON as the task stores them, so a build from before then
+// resumes its pass. Before, the run deleted the reports past the window.
+func TestMaintainContractPartitionsLeavesTheEvidence(t *testing.T) {
 	DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		now := NowUtc()
 		const day = 24 * time.Hour
-		horizon := WithContractHorizon(ctx, 45*day)
+		window := WithCloseEvidenceWindow(WithContractHorizon(ctx, 18*day), 45*day)
 		older := testCloseEvidenceReportAt(now.Add(-60*day), testContractIdAt(now.Add(-60*day)), now.Add(-60*day))
 		newer := testCloseEvidenceReportAt(now.Add(-50*day), testContractIdAt(now.Add(-50*day)), now.Add(-50*day))
 		for _, report := range []testCloseEvidenceReport{older, newer} {
@@ -595,84 +596,88 @@ func TestMaintainContractPartitionsCarriesTheEvidenceCursor(t *testing.T) {
 			testCloseEvidenceNoError(t, json.Unmarshal(encoded, &stored))
 			return
 		}
+		encoded := func(cursor ContractRetentionCursor) string {
+			value, err := json.Marshal(cursor)
+			testCloseEvidenceNoError(t, err)
+			return string(value)
+		}
 
-		legacy := ContractRetentionCursor{EvidenceCursor: &newer.contractId}
-		report, next := MaintainContractPartitions(horizon, now, throughTheTask(legacy), 0)
-		connect.AssertEqual(t, report.EvidenceStop, CloseEvidenceRemovalStopBudget)
-		connect.AssertEqual(t, report.EvidenceRemoved, int64(0))
-		connect.AssertEqual(t, report.More, true)
-		connect.AssertEqual(t, next.EvidenceCursor == nil, true)
-		connect.AssertEqual(t, next.EvidenceLeaf, "")
-		connect.AssertEqual(t, next.EvidenceRemoval.InProgress(), true)
-		connect.AssertEqual(t, *next.EvidenceRemoval.ContractId, newer.contractId)
+		lowWater := older.contractId
+		for _, cursor := range []ContractRetentionCursor{
+			{EvidenceCursor: &newer.contractId},
+			{EvidenceRemoval: &CloseEvidenceRemovalCursor{Leaf: closeEvidenceTable, ContractId: &newer.contractId, PassLowWater: &lowWater, FullPassDay: now.Format(time.DateOnly)}},
+			{EvidenceRemoval: &CloseEvidenceRemovalCursor{LowWater: &lowWater, FullPassDay: now.Format(time.DateOnly)}},
+		} {
+			for _, budget := range []time.Duration{0, time.Minute} {
+				_, next := MaintainContractPartitions(window, now, throughTheTask(cursor), budget)
+				connect.AssertEqual(t, encoded(throughTheTask(next)), encoded(throughTheTask(cursor)))
+				connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, older) != "", true)
+				connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, newer) != "", true)
+			}
+		}
 
-		report, next = MaintainContractPartitions(horizon, now, throughTheTask(next), time.Minute)
-		connect.AssertEqual(t, report.EvidenceStop, CloseEvidenceRemovalStopDone)
-		connect.AssertEqual(t, report.EvidenceRemoved, int64(1))
-		connect.AssertEqual(t, next.EvidenceRemoval.InProgress(), false)
-		connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, newer), "")
-		connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, older) != "", true)
-
-		report, _ = MaintainContractPartitions(horizon, now, throughTheTask(next), time.Minute)
-		connect.AssertEqual(t, report.EvidenceRemoved, int64(1))
-		connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, older), "")
+		// its own chain takes them
+		removal, _, _ := RemoveExpiredCloseEvidence(window, now, CloseEvidenceRemovalCursor{}, time.Now().Add(time.Minute))
+		connect.AssertEqual(t, removal.Removed, int64(2))
 	})
 }
 
-// A guard function that cannot be found keeps 91 days, whatever the horizon,
-// and the horizon applies again once it is back.
+// A guard function that cannot be found keeps 91 days, whatever the window,
+// and the window applies again once it is back.
 func TestCloseEvidenceRetentionKeeps91DaysWithoutTheGuard(t *testing.T) {
 	DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		now := NowUtc()
 		const day = 24 * time.Hour
-		horizon := WithContractHorizon(ctx, 35*day)
-		report := testCloseEvidenceReportAt(now.Add(-50*day), testContractIdAt(now.Add(-50*day)), now.Add(-50*day))
+		window := WithCloseEvidenceWindow(ctx, CloseEvidenceRetentionWindow)
+		report := testCloseEvidenceReportAt(now.Add(-10*day), testContractIdAt(now.Add(-10*day)), now.Add(-10*day))
 		connect.AssertEqual(t, testInsertCloseEvidenceReport(ctx, report), true)
 
 		testCloseEvidenceNoError(t, testCloseEvidenceExec(ctx, `ALTER FUNCTION contract_close_report_evidence_guard() RENAME TO contract_close_report_evidence_guard_away`))
-		floor, horizonGuard := GetCloseEvidenceRetentionGuardFloor(ctx)
+		floor, windowGuard := GetCloseEvidenceRetentionGuardFloor(ctx)
 		connect.AssertEqual(t, floor, ContractRetention)
-		connect.AssertEqual(t, horizonGuard, false)
-		removal, _, _ := RemoveExpiredCloseEvidence(horizon, now, CloseEvidenceRemovalCursor{}, time.Now().Add(time.Minute))
+		connect.AssertEqual(t, windowGuard, false)
+		removal, _, _ := RemoveExpiredCloseEvidence(window, now, CloseEvidenceRemovalCursor{}, time.Now().Add(time.Minute))
 		connect.AssertEqual(t, removal.Retention, ContractRetention)
 		connect.AssertEqual(t, removal.Removed, int64(0))
 		connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, report) != "", true)
 
 		testCloseEvidenceNoError(t, testCloseEvidenceExec(ctx, `ALTER FUNCTION contract_close_report_evidence_guard_away() RENAME TO contract_close_report_evidence_guard`))
-		floor, horizonGuard = GetCloseEvidenceRetentionGuardFloor(ctx)
+		floor, windowGuard = GetCloseEvidenceRetentionGuardFloor(ctx)
 		connect.AssertEqual(t, floor, CloseEvidenceRetentionFloor)
-		connect.AssertEqual(t, horizonGuard, true)
-		removal, _, _ = RemoveExpiredCloseEvidence(horizon, now, CloseEvidenceRemovalCursor{}, time.Now().Add(time.Minute))
-		connect.AssertEqual(t, removal.Retention, 35*day)
+		connect.AssertEqual(t, windowGuard, true)
+		removal, _, _ = RemoveExpiredCloseEvidence(window, now, CloseEvidenceRemovalCursor{}, time.Now().Add(time.Minute))
+		connect.AssertEqual(t, removal.Retention, 7*day)
 		connect.AssertEqual(t, removal.Removed, int64(1))
 	})
 }
 
-// The registry's retire pass under the 91-day guard, as before the horizon
-// guard migration or after an operator restored it: a week 49 to 56 days past,
-// expired at a 45-day horizon, stays, blocked by its precondition at the
-// installed guard's 91 days rather than failing in its drop; with the horizon
-// guard back, the same pass drops it.
-func TestCloseEvidenceWeekRetireWaitsForTheHorizonGuard(t *testing.T) {
+// The registry's retire pass under an older guard, as before the window guard
+// migration or after an operator restored one: a week 14 to 21 days past,
+// expired at the 7-day window, stays, blocked by its precondition at the
+// installed guard's 91 or 35 days rather than failing in its drop; with the
+// window guard back, the same pass drops it.
+func TestCloseEvidenceWeekRetireWaitsForTheWindowGuard(t *testing.T) {
 	DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		now := NowUtc()
 		const day = 24 * time.Hour
-		horizon := WithContractHorizon(ctx, 45*day)
+		window := WithCloseEvidenceWindow(ctx, CloseEvidenceRetentionWindow)
 		testCloseEvidencePartitionedInThePast(t, ctx, now)
-		week, leaf := testCloseEvidenceCreateWeek(t, ctx, PartitionGranularityWeekly.RangeStart(now).Add(-8*7*day+day))
+		week, leaf := testCloseEvidenceCreateWeek(t, ctx, PartitionGranularityWeekly.RangeStart(now).Add(-3*7*day+day))
 		// a report of a contract the reaper deleted
 		connect.AssertEqual(t, testInsertCloseEvidenceReport(ctx, testCloseEvidenceReportAt(week.Lower.Add(day), testContractIdAt(week.Lower), week.Lower.Add(day))), true)
 
-		testCloseEvidenceNoError(t, testCloseEvidenceExec(ctx, contractCloseReportEvidenceMoveGuardSql))
-		report, _ := closeEvidencePartitionFamily.Retire(horizon, now, PartitionFamilyState{}, time.Now().Add(time.Minute))
-		connect.AssertEqual(t, len(report.Dropped), 0)
-		connect.AssertEqual(t, report.Blocked[leaf], closeEvidenceBlockerRetentionDay)
-		connect.AssertEqual(t, testCloseEvidenceExists(ctx, leaf), true)
+		for _, guard := range []string{contractCloseReportEvidenceMoveGuardSql, contractCloseReportEvidenceHorizonGuardSql} {
+			testCloseEvidenceNoError(t, testCloseEvidenceExec(ctx, guard))
+			report, _ := closeEvidencePartitionFamily.Retire(window, now, PartitionFamilyState{}, time.Now().Add(time.Minute))
+			connect.AssertEqual(t, len(report.Dropped), 0)
+			connect.AssertEqual(t, report.Blocked[leaf], closeEvidenceBlockerRetentionDay)
+			connect.AssertEqual(t, testCloseEvidenceExists(ctx, leaf), true)
+		}
 
-		testCloseEvidenceNoError(t, testCloseEvidenceExec(ctx, contractCloseReportEvidenceHorizonGuardSql))
-		report, _ = closeEvidencePartitionFamily.Retire(horizon, now, PartitionFamilyState{}, time.Now().Add(time.Minute))
+		testCloseEvidenceNoError(t, testCloseEvidenceExec(ctx, contractCloseReportEvidenceWindowGuardSql))
+		report, _ := closeEvidencePartitionFamily.Retire(window, now, PartitionFamilyState{}, time.Now().Add(time.Minute))
 		connect.AssertEqual(t, report.Dropped, []string{leaf})
 		connect.AssertEqual(t, testCloseEvidenceExists(ctx, leaf), false)
 	})

@@ -210,10 +210,14 @@ func TestContractPartitionMaintenance(t *testing.T) {
 		connect.AssertEqual(t, slices.Contains(report.Analyzed, "transfer_contract"), true)
 		connect.AssertEqual(t, cursor.AnalyzedDay, ContractPartitionDayStart(later).Format(time.DateOnly))
 
+		// the close evidence is its own task's since 2026-11-23: this one
+		// leaves it, and that one deletes the expired report alone
+		connect.AssertEqual(t, evidenceExists(expiredClientId, expiredReportId), true)
+		removal, _, _ := RemoveExpiredCloseEvidence(ctx, later, CloseEvidenceRemovalCursor{}, time.Now().Add(time.Minute))
+		connect.AssertEqual(t, removal.Removed, int64(1))
 		connect.AssertEqual(t, evidenceExists(expiredClientId, expiredReportId), false)
 		connect.AssertEqual(t, evidenceExists(openClientId, openReportId), true)
 		connect.AssertEqual(t, evidenceExists(recentClientId, recentReportId), true)
-		connect.AssertEqual(t, report.EvidenceRemoved, int64(1))
 
 		// a later pass is idempotent: nothing more to create, analyze,
 		// compact or drop

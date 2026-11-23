@@ -41,10 +41,10 @@
 // escrows, sweeps and extender parties. The usage archive trigger copies a
 // credit-bearing contract's proof into st_provider_usage_archive in the same
 // statement, so the subnet usage readers see it either live or archived, never
-// both and never neither. Close evidence is not deleted here: while the mode
-// is on, its own retention (server.RemoveExpiredCloseEvidence) follows this
-// horizon, down to its guard's 35 days, and takes the evidence of a resolved
-// or deleted contract once it is as old, whether or not these keep rules keep
+// both and never neither. Close evidence is not deleted here: its own task
+// (server.RemoveExpiredCloseEvidence) keeps it its own window, 7 days since
+// 2026-11-23, whatever this horizon, and takes the evidence of a resolved or
+// deleted contract once it is as old, whether or not these keep rules keep
 // the contract, at the pace of its own brake.
 //
 // A pass walks transfer_contract's primary key from a cursor toward the
@@ -165,8 +165,8 @@ func (self ContractHorizonMode) String() string {
 //   - what keeps a contract that operator block points, a payment hold or
 //     review, a dispute or an unsettled escrow can still read is the reaper's
 //     row checks, never its horizon, so each holds at any horizon;
-//   - close evidence keeps its own retention, over its guard's floor
-//     (server.CloseEvidenceRetentionFloor), with its own brake;
+//   - close evidence keeps its own window, 7 days
+//     (server.CloseEvidenceRetentionWindow), with its own task and brake;
 //   - the provider work session journal (C4) follows the reaper's horizon
 //     over its own guard's 35-day floor;
 //   - key history retention no longer follows it: a gone client's history
@@ -314,9 +314,9 @@ const contractHorizonControlKey = "{contract_horizon}control"
 //     (ContractHorizonFloor). It moves more than the reaper: while the mode is
 //     on, the contract days retire at it once the contract tables are
 //     partitioned (server.ContractDayRetention), and the provider work session
-//     journal and close evidence follow it, each over its own guard's floor;
-//     the evidence deletes take whatever the reaper's keep rules keep, at the
-//     pace of their own brake (server.RemoveExpiredCloseEvidence);
+//     journal follows it, over its own guard's 35-day floor. Close evidence
+//     keeps its own window instead (server.CloseEvidenceRetention, since
+//     2026-11-23);
 //   - the zero-byte pass's `zeroByteMode`, `zeroByteMaxRowsPerSecond` and
 //     `zeroByteHorizonDays` (contract_horizon_zero_byte.go).
 //

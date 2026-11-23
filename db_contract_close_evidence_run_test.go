@@ -358,8 +358,9 @@ func TestCloseEvidenceRemovalReadsTheBrakeBeforeEveryBatch(t *testing.T) {
 	connect.AssertEqual(t, len(steps.batchArgs), 2)
 }
 
-// The retention lengthens during a pass, when the reaper's mode goes off or
-// its horizon goes up. The resumed pass reads past its new upper bound, which
+// The retention lengthens during a pass, when the brake goes off between runs
+// or an operator restores an older guard. The resumed pass reads past its new
+// upper bound, which
 // is nothing, so it ends without deleting, and its low water falls to the new
 // bound. When the retention shortens again that day, the next pass starts
 // there, below where the first pass stood, so no row is left unread.
@@ -507,10 +508,13 @@ func TestCloseEvidenceRetentionBatchSetsItsBoundsBeforeItsStatement(t *testing.T
 	connect.AssertEqual(t, *batch.lowWater, tx.lowWater)
 }
 
-// The contract task's arguments carry the row retention's cursor. Arguments
-// from before 2026-11-02 resume their pass at its contract, the next arguments
-// hold evidence_removal alone, and every field survives the trip through JSON.
-func TestContractRetentionCursorCarriesTheEvidenceRemoval(t *testing.T) {
+// The evidence task's arguments carry the row retention's cursor, and every
+// field survives the trip through JSON; a pass in progress resumes at its leaf
+// and key. The contract task's arguments, which carried it until 2026-11-23
+// (evidence_removal, and evidence_cursor and evidence_leaf before 2026-11-02),
+// decode and encode those fields unchanged, so a build from before either date
+// resumes its pass.
+func TestCloseEvidenceRemovalCursorSurvivesJson(t *testing.T) {
 	now := NowUtc()
 	contractId := ContractIdFloor(now.Add(-100 * 24 * time.Hour))
 	contractIdJson, err := json.Marshal(contractId)
@@ -518,26 +522,7 @@ func TestContractRetentionCursorCarriesTheEvidenceRemoval(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var legacy ContractRetentionCursor
-	if err := json.Unmarshal([]byte(fmt.Sprintf(`{"evidence_cursor":%s,"evidence_leaf":"contract_close_report_evidence_legacy","analyzed_day":"2026-10-26"}`, contractIdJson)), &legacy); err != nil {
-		t.Fatal(err)
-	}
-	removal := legacy.evidenceRemovalCursor()
-	connect.AssertEqual(t, removal.InProgress(), true)
-	connect.AssertEqual(t, removal.Leaf, "contract_close_report_evidence_legacy")
-	connect.AssertEqual(t, *removal.ContractId, contractId)
-	start, after, _ := removal.startIn([]string{"contract_close_report_evidence_default", "contract_close_report_evidence_legacy"}, now)
-	connect.AssertEqual(t, start, 1)
-	connect.AssertEqual(t, after, closeEvidenceKeyBefore(&contractId))
-
-	// no old pass, no new cursor: a new pass
-	var fresh ContractRetentionCursor
-	if err := json.Unmarshal([]byte(`{}`), &fresh); err != nil {
-		t.Fatal(err)
-	}
-	connect.AssertEqual(t, fresh.evidenceRemovalCursor().InProgress(), false)
-
-	clientId, reportId, floor, passLow, low, other := NewId(), NewId(), NewId(), NewId(), NewId(), NewId()
+	clientId, reportId, floor, passLow, low := NewId(), NewId(), NewId(), NewId(), NewId()
 	full := CloseEvidenceRemovalCursor{
 		Leaf:         "contract_close_report_evidence_legacy",
 		ContractId:   &contractId,
@@ -546,32 +531,43 @@ func TestContractRetentionCursorCarriesTheEvidenceRemoval(t *testing.T) {
 		PassFloor:    &floor,
 		PassLowWater: &passLow,
 		LowWater:     &low,
-		FullPassDay:  "2026-11-02",
+		FullPassDay:  "2026-11-23",
 	}
-	next := legacy.withEvidenceRemoval(full)
-	encoded, err := json.Marshal(next)
+	encoded, err := json.Marshal(full)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{`"evidence_cursor"`, `"evidence_leaf"`} {
-		if strings.Contains(string(encoded), field) {
-			t.Errorf("the next arguments keep %s: %s", field, encoded)
-		}
-	}
-	var decoded ContractRetentionCursor
+	var decoded CloseEvidenceRemovalCursor
 	if err := json.Unmarshal(encoded, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(decoded.evidenceRemovalCursor(), full) {
-		t.Errorf("the cursor came back as %+v, want %+v", decoded.evidenceRemovalCursor(), full)
+	if !reflect.DeepEqual(decoded, full) {
+		t.Errorf("the cursor came back as %+v, want %+v", decoded, full)
 	}
-	// the rest of the task's cursor stays
-	connect.AssertEqual(t, decoded.AnalyzedDay, "2026-10-26")
+	start, after, pass := decoded.startIn([]string{"contract_close_report_evidence_default", "contract_close_report_evidence_legacy"}, now)
+	connect.AssertEqual(t, start, 1)
+	connect.AssertEqual(t, after, closeEvidenceKey{contractId: contractId, clientId: clientId, reportId: reportId})
+	connect.AssertEqual(t, pass.InProgress(), true)
 
-	// evidence_removal wins over old fields beside it
-	both := ContractRetentionCursor{EvidenceCursor: &other, EvidenceLeaf: "another", EvidenceRemoval: &full}
-	if !reflect.DeepEqual(both.evidenceRemovalCursor(), full) {
-		t.Errorf("the old fields won: %+v", both.evidenceRemovalCursor())
+	for _, old := range []string{
+		fmt.Sprintf(`{"evidence_cursor":%s,"evidence_leaf":"contract_close_report_evidence_legacy","analyzed_day":"2026-10-26"}`, contractIdJson),
+		fmt.Sprintf(`{"evidence_removal":%s,"analyzed_day":"2026-11-22"}`, encoded),
+	} {
+		var cursor ContractRetentionCursor
+		if err := json.Unmarshal([]byte(old), &cursor); err != nil {
+			t.Fatal(err)
+		}
+		again, err := json.Marshal(cursor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var back ContractRetentionCursor
+		if err := json.Unmarshal(again, &back); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(back, cursor) {
+			t.Errorf("the contract task's cursor %s came back as %s", old, again)
+		}
 	}
 }
 

@@ -247,9 +247,11 @@ Options:
                    admitted before the cutover that retires later is
                    journaled without its network id.
     --mode=<mode>  With db close-evidence-retention, set the close evidence
-                   row retention's brake: on, or off to stop the row deletes
-                   from their next batch. The weekly drops of partitioned
-                   evidence never read it. With db usage-archive-export, set
+                   retention's brake: on, or off to stop the row deletes
+                   from their next batch, and the weekly drops of
+                   partitioned evidence below 91 days from their next run.
+                   While it is on the evidence keeps its 7-day window. With
+                   db usage-archive-export, set
                    the export control's mode: on drops exported, verified
                    weeks early, dry_run verifies them and keeps them, off
                    drops nothing early from the next retention pass.
@@ -791,14 +793,16 @@ func dbKeyHistoryFloor(opts docopt.Opts) {
 	fmt.Printf("Key history retention floor now: %s (published body: %t)\n", floor, published)
 }
 
-// dbCloseEvidenceRetention prints the close evidence row retention's brake
+// dbCloseEvidenceRetention prints the close evidence retention's brake
 // ({close_evidence_retention}control, server.RemoveExpiredCloseEvidence) and
 // the floor the installed evidence guard admits, after setting the brake's
 // fields with --mode and --max-rows-per-second, or deleting it with --remove.
-// The brake stops or paces the row deletes from their next batch, without
-// touching the contract horizon reaper. It is the way to stop them. It does not
-// stop the weekly drops of partitioned evidence, which never read it. Putting
-// the guard's 91-day body back stops both below 91 days, but pages
+// The brake stops or paces the row deletes of remove_expired_close_evidence
+// from their next batch, without touching the contract horizon reaper. It is
+// the way to stop them. While it is on, the evidence keeps its 7-day window
+// (server.CloseEvidenceRetentionWindow); off, 91 days, which also stops the
+// weekly drops of partitioned evidence below 91 days from their next run.
+// Putting an older guard body back keeps that guard's age, but pages
 // migration-schema-drift.
 func dbCloseEvidenceRetention(opts docopt.Opts) {
 	ctx := context.Background()
@@ -821,8 +825,8 @@ func dbCloseEvidenceRetention(opts docopt.Opts) {
 	server.Raise(err)
 	control := server.NarrowCloseEvidenceRetentionControl(stored, settings)
 	fmt.Printf("Close evidence retention brake: %v, deletes on %t at up to %g rows a second\n", stored, control.On, control.MaxRowsPerSecond)
-	floor, horizonGuard := server.GetCloseEvidenceRetentionGuardFloor(ctx)
-	fmt.Printf("Close evidence guard floor: %s (horizon guard installed: %t)\n", floor, horizonGuard)
+	floor, windowGuard := server.GetCloseEvidenceRetentionGuardFloor(ctx)
+	fmt.Printf("Close evidence guard floor: %s (window guard installed: %t)\n", floor, windowGuard)
 }
 
 // The brake fields and removal the options ask for. A mode other than on or
