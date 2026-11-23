@@ -10,12 +10,15 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // Workers that each hold transfer_contract and contract_close (in either
@@ -29,12 +32,37 @@ type testContractLifecycleWorkload struct {
 	running sync.WaitGroup
 	mutex   sync.Mutex
 	slowest time.Duration
-	failure error
+	// statements that waited past PgLockTimeout: on Main they fail with 55P03
+	overBound  int
+	statements int
+	// transactions that a deadlock check ended (40P01)
+	deadlocks int
+	failure   error
+}
+
+// One application path: its tables in the order it first touches them, the
+// pause after its first statement, and how long it then stays idle in
+// transaction.
+type testContractWorkPath struct {
+	tables           []string
+	gap              time.Duration
+	holdMin, holdMax time.Duration
 }
 
 func startTestContractLifecycleWorkload(ctx context.Context, workers int, readerHold time.Duration) *testContractLifecycleWorkload {
+	paths := []testContractWorkPath{}
+	for i := range workers {
+		tables := []string{"transfer_contract", "contract_close"}
+		if i%2 == 1 {
+			tables = []string{"contract_close", "transfer_contract"}
+		}
+		paths = append(paths, testContractWorkPath{tables: tables, holdMin: 500 * time.Millisecond, holdMax: 2600 * time.Millisecond})
+	}
+	return startTestContractWorkload(ctx, paths, readerHold)
+}
+
+func startTestContractWorkload(ctx context.Context, paths []testContractWorkPath, readerHold time.Duration) *testContractLifecycleWorkload {
 	workload := &testContractLifecycleWorkload{stop: make(chan struct{})}
-	orders := [][]string{{"transfer_contract", "contract_close"}, {"contract_close", "transfer_contract"}}
 	if 0 < readerHold {
 		workload.running.Add(1)
 		go func() {
@@ -47,19 +75,21 @@ func startTestContractLifecycleWorkload(ctx context.Context, workers int, reader
 			}))
 		}()
 	}
-	for i := range workers {
-		order := orders[i%len(orders)]
+	for _, path := range paths {
 		workload.running.Add(1)
 		go func() {
 			defer workload.running.Done()
 			for workload.hold(ctx, rand.N(100*time.Millisecond)) {
 				workload.record(contractPartitionTx(ctx, func(tx PgTx) {
-					for _, table := range order {
+					for i, table := range path.tables {
 						workload.timed(func() {
 							RaisePgResult(tx.Exec(ctx, fmt.Sprintf(`SELECT 1 FROM public.%s LIMIT 1`, quoteIdentifier(table))))
 						})
+						if i == 0 && 0 < path.gap {
+							workload.hold(ctx, path.gap)
+						}
 					}
-					workload.hold(ctx, 500*time.Millisecond+rand.N(2100*time.Millisecond))
+					workload.hold(ctx, path.holdMin+rand.N(path.holdMax-path.holdMin))
 				}))
 			}
 		}()
@@ -81,19 +111,33 @@ func (self *testContractLifecycleWorkload) hold(ctx context.Context, d time.Dura
 
 func (self *testContractLifecycleWorkload) timed(statement func()) {
 	start := time.Now()
+	defer func() {
+		elapsed := time.Since(start)
+		self.mutex.Lock()
+		defer self.mutex.Unlock()
+		self.statements += 1
+		self.slowest = max(self.slowest, elapsed)
+		if PgLockTimeout < elapsed {
+			self.overBound += 1
+		}
+	}()
 	statement()
-	elapsed := time.Since(start)
-	self.mutex.Lock()
-	defer self.mutex.Unlock()
-	self.slowest = max(self.slowest, elapsed)
 }
 
+// A deadlock check that ends a workload transaction (40P01) is counted, as
+// on Main a settlement caught between the swap's locks is: it is not rerun,
+// and completes on the next report or deadline.
 func (self *testContractLifecycleWorkload) record(err error) {
 	if err == nil {
 		return
 	}
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "40P01" || strings.Contains(err.Error(), "SQLSTATE 40P01") {
+		self.deadlocks += 1
+		return
+	}
 	if self.failure == nil {
 		self.failure = err
 	}
@@ -188,5 +232,82 @@ func TestContractPartitionAbandonmentCompletesUnderLifecycleWorkload(t *testing.
 			}
 			return nil
 		})
+	})
+}
+
+// The swap and rollback under a workload of the application's own lock orders
+// (CONTRACT-PARTITION-CUTOVER-NOW.md; the paths' first touches mapped from
+// model/): creation and close reports take transfer_contract first;
+// settlement reads transfer_escrow, then transfer_contract one round trip
+// later. Each transaction then stays idle 0.5 to 2.6 s, as on Main on
+// 2026-11-23. With the default admission and lock bound, and tries a few
+// seconds apart, the swap and then rollback complete, and no workload
+// statement waits past PgLockTimeout, at which a main-pool statement fails
+// with 55P03.
+func TestContractPartitionSwapAndRollbackUnderLifecycleWorkload(t *testing.T) {
+	DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+		defer cancel()
+		if IsContractPartitioned(ctx) {
+			t.Skip("the cutover starts from plain contract tables")
+		}
+		cutoverDay := ContractPartitionDayStart(NowUtc()).AddDate(0, 0, 2)
+		if err := MigrateContractsToPartitions(ctx, ContractPartitionMigrateOptions{CutoverDay: cutoverDay, Logf: testContractPartitionLogf(t)}); err != nil {
+			t.Fatal(err)
+		}
+		idle := func(tables ...string) testContractWorkPath {
+			return testContractWorkPath{tables: tables, holdMin: 500 * time.Millisecond, holdMax: 2600 * time.Millisecond}
+		}
+		paths := []testContractWorkPath{
+			idle("transfer_contract", "transfer_escrow", "contract_extender"),
+			idle("transfer_contract", "transfer_escrow", "contract_extender"),
+			idle("transfer_contract", "contract_close_report", "contract_close"),
+			idle("transfer_contract", "contract_close_report", "contract_close"),
+			{tables: []string{"transfer_escrow", "transfer_contract", "contract_close", "transfer_escrow_sweep"}, gap: 5 * time.Millisecond, holdMin: 200 * time.Millisecond, holdMax: time.Second},
+		}
+
+		for _, step := range []struct {
+			name string
+			run  func(logf func(string, ...any)) error
+			done func() bool
+		}{
+			{"the swap", func(logf func(string, ...any)) error {
+				settings := DefaultContractPartitionCutoverSettings()
+				settings.SwapAttempts = 30
+				settings.SwapRetryInterval = 2 * time.Second
+				return MigrateContractsToPartitions(ctx, ContractPartitionMigrateOptions{Finalize: true, Logf: logf, CutoverSettings: settings})
+			}, func() bool { return IsContractPartitioned(ctx) }},
+			{"rollback", func(logf func(string, ...any)) error {
+				settings := DefaultContractPartitionRollbackSettings()
+				settings.MaxAttempts = 30
+				settings.RetryInterval = 2 * time.Second
+				return MigrateContractsToPartitions(ctx, ContractPartitionMigrateOptions{Rollback: true, Logf: logf, RollbackSettings: settings})
+			}, func() bool { return !IsContractPartitioned(ctx) }},
+		} {
+			workload := startTestContractWorkload(ctx, paths, 0)
+			time.Sleep(3 * time.Second)
+			busyLog := &testContractBusyLog{t: t}
+			start := time.Now()
+			err := step.run(busyLog.logf)
+			elapsed := time.Since(start)
+			time.Sleep(time.Second)
+			slowest, failure := workload.end()
+			if failure != nil {
+				t.Fatalf("%s: the workload failed: %v", step.name, failure)
+			}
+			if err != nil {
+				t.Fatalf("%s did not complete under the workload in %d busy tries (%s): %v", step.name, busyLog.busy, elapsed.Round(time.Second), err)
+			}
+			if !step.done() {
+				t.Fatalf("%s returned, and the layout did not change", step.name)
+			}
+			workload.mutex.Lock()
+			overBound, statements, deadlocks := workload.overBound, workload.statements, workload.deadlocks
+			workload.mutex.Unlock()
+			if 0 < overBound {
+				t.Fatalf("%s: %d of %d workload statements waited past PgLockTimeout (%s; the slowest %s): on Main they would fail with 55P03", step.name, overBound, statements, PgLockTimeout, slowest)
+			}
+			t.Logf("%s: completed after %d busy tries in %s; the slowest of %d workload statements took %s; %d workload transactions ended by a deadlock check", step.name, busyLog.busy, elapsed.Round(time.Second), statements, slowest, deadlocks)
+		}
 	})
 }
