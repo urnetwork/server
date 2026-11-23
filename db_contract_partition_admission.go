@@ -36,7 +36,8 @@ type ContractPartitionCutoverSettings struct {
 	// on the table queues behind the request, and a main-pool statement waits
 	// at most PgLockTimeout (2 s) for a lock before it fails with 55P03, which
 	// is not rerun. A queued statement also waits out the step's own work, so
-	// this stays well below PgLockTimeout. At least a millisecond.
+	// this stays well below PgLockTimeout, and a fifth of a second by default
+	// (contractExclusiveLockTimeout). At least a millisecond.
 	LockTimeout time.Duration
 	// Bounds the legacy bound validation's wait for its SHARE UPDATE EXCLUSIVE
 	// lock. Application statements do not queue behind it, but a waiting
@@ -57,17 +58,34 @@ type ContractPartitionCutoverSettings struct {
 	AbortRetryInterval time.Duration
 }
 
+// The ACCESS EXCLUSIVE steps (the legacy bound, the swap, abort and rollback)
+// wait briefly and try often. Main's busiest contract tables always have
+// transactions in flight, and some stay open for seconds between statements.
+// While an exclusive request waits, every new statement on the table queues
+// behind it. On 2026-11-23 prepare's attempts at the legacy bound waited their
+// full second behind transactions the admission let through (up to 5 s old),
+// three attempts a run: each run stalled contract traffic for seconds and
+// backed PgBouncer up past 500 waiting clients. Now a step requests its lock
+// only while no holder's transaction is older than half a second, waits at
+// most a fifth of a second, and otherwise tries again 1 to 3 s later
+// (contractRetryWait), dozens of times, to meet a quiet moment.
+const (
+	contractExclusiveMaxTransactionAge = 500 * time.Millisecond
+	contractExclusiveLockTimeout       = 200 * time.Millisecond
+	contractExclusiveRetryInterval     = time.Second
+)
+
 func DefaultContractPartitionCutoverSettings() *ContractPartitionCutoverSettings {
 	return &ContractPartitionCutoverSettings{
-		LockSettings:        *DefaultContractPartitionLockSettings(),
-		LockTimeout:         time.Second,
+		LockSettings:        ContractPartitionLockSettings{MaxTransactionAge: contractExclusiveMaxTransactionAge},
+		LockTimeout:         contractExclusiveLockTimeout,
 		ValidateLockTimeout: 5 * time.Second,
-		StepAttempts:        3,
-		StepRetryInterval:   2 * time.Second,
-		SwapAttempts:        60,
-		SwapRetryInterval:   10 * time.Second,
-		AbortAttempts:       24,
-		AbortRetryInterval:  5 * time.Second,
+		StepAttempts:        60,
+		StepRetryInterval:   contractExclusiveRetryInterval,
+		SwapAttempts:        120,
+		SwapRetryInterval:   contractExclusiveRetryInterval,
+		AbortAttempts:       60,
+		AbortRetryInterval:  contractExclusiveRetryInterval,
 	}
 }
 
