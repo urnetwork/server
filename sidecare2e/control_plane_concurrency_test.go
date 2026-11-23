@@ -58,19 +58,36 @@
 //   - ledgers: api's write budget reconciled exactly with the objects api wrote for every statement, base and
 //     removal of the case (control_plane_concurrency_harness_test.go)
 //
-// A failure from a product bug stays failing, and the case runs on so one finding does not hide the next. As the case
-// landed (e2e-control-plane-concurrency, 2026-11-22) it failed on two findings, which kept every team device but the
-// Owner's and the Admin's out of it: a Member's own auth key refused 403 (finding A) and a tagged enrollment in a team
-// answered 500 (finding B). Both fixes have landed, team-member-own-auth-key (server c5579f826 to 927a07e0d) and
-// team-tagged-enroll (server c730a0441 to e9b9598d1, QD-1194), and the case now runs what they blocked;
-// e2e-control-plane-verify (2026-11-22) widened it so, and ran it and the three cases below seven times (server
-// 3a453b5dd to a130c0cf1): each passed in every run but the first, where this case's budget check took a designed raise
-// of a rev/ object for a double spend before it counted raises (control_plane_concurrency_harness_test.go). Three parts
-// are cases of their own: the chaos, api and a member device restarted mid-save, mid-invite, mid-removal and
-// mid-statement on their stores (TestE2eControlPlaneConcurrencyChaos), a reader starting cold at a base a later config
-// writer signed (TestE2eControlPlaneConcurrencyColdGate, finding C), and the other quotas §20 names under concurrent
-// use, evs storage, sidecar_clients and dns_entries (TestE2eControlPlaneConcurrencyQuota). Run through the build's
-// wrapper: -tags 'sidecar_e2e sidecar_pending sidecar_localstack'.
+// A failure from a product bug stays failing, and the case runs on so one finding does not hide the next. The case's
+// findings, with their state as e2e-headers-final refreshed them (2026-11-23):
+//
+//   - fixed: as the case landed (e2e-control-plane-concurrency, 2026-11-22) it failed on two findings, which kept every
+//     team device but the Owner's and the Admin's out of it: a Member's own auth key refused 403 (finding A;
+//     team-member-own-auth-key, server c5579f826 to 927a07e0d) and a tagged enrollment in a team answered 500 (finding
+//     B; team-tagged-enroll, server c730a0441 to e9b9598d1, QD-1194). The case runs what they blocked since
+//     e2e-control-plane-verify (2026-11-22) widened it so, and ran it and the three cases below seven times (server
+//     3a453b5dd to a130c0cf1): each passed in every run but the first, where this case's budget check took a designed
+//     raise of a rev/ object for a double spend before it counted raises (control_plane_concurrency_harness_test.go)
+//   - fixed: a reader starting cold at a base a later config writer signed refused the base as a fork (finding C,
+//     TestE2eControlPlaneConcurrencyColdGate's): config-replay-base-signer (sidecar 9ac79c88 to f5892c63, QD-1192)
+//   - open, in the case itself, with no fix track queued as this refresh was made: the churn's removal of a setup
+//     member races the other bursts' syncs. WorldTeam.RemoveMember denies the member at api first (POST
+//     /network/member-remove), which deactivates its untagged devices' clients at once, and only then retires those
+//     devices from the syncs (RevokeMember), while sidecart3's T3Network.Sync asks whether a device is retired only
+//     before it begins to wait on it. So a statement another burst files in that window, the Admin's last device's
+//     SidecarRevoke or an invite's MemberAdmit, waits on the leaving member's device, which follows nothing more, past
+//     its bound: "revoke the Admin's last device's step 0: team-member-1-0 did not follow team's log to 26: context
+//     deadline exceeded". Of six runs of the case in dns-scope-alias-edge-records' sitting (2026-11-22, with that
+//     track's change and without it), three failed so and on nothing else, one of them at an invite's admission,
+//     which landed while its step failed, so the members check also named that member as one the case did not keep.
+//     The fix is the harness's: retire a member's devices before its denial, and end a sync's wait on a device once
+//     it is retired
+//
+// Three parts are cases of their own: the chaos, api and a member device restarted mid-save, mid-invite, mid-removal
+// and mid-statement on their stores (TestE2eControlPlaneConcurrencyChaos), a reader starting cold at a base a later
+// config writer signed (TestE2eControlPlaneConcurrencyColdGate, finding C's), and the other quotas §20 names under
+// concurrent use, evs storage, sidecar_clients and dns_entries (TestE2eControlPlaneConcurrencyQuota). Run through the
+// build's wrapper: -tags 'sidecar_e2e sidecar_pending sidecar_localstack'.
 
 package sidecare2e
 
