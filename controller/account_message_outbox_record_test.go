@@ -175,8 +175,9 @@ func runOutboxRecordTestDelivery(delivery *accountMessageDelivery) (raised any) 
 	return
 }
 
-// Whether each record context was made at `startTime` with the whole record
-// timeout and released by its record before the clock reached its deadline.
+// Whether the record contexts were made one at each of `startTimes`, in order,
+// each with the whole record timeout and released by its record before the
+// clock reached its deadline.
 func outboxRecordsHadTheirWholeBudget(
 	records []*outboxRecordTestContext,
 	startTimes []time.Time,
