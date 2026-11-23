@@ -10,7 +10,6 @@ package controller
 
 import (
 	"context"
-	"fmt"
 	"slices"
 	"testing"
 
@@ -27,21 +26,17 @@ func TestTeamAuthKeyNoticeNamesTheTeam(t *testing.T) {
 		ctx := context.Background()
 		_, restore := model.Testing_InMemoryNetworkNameSearch(ctx)
 		defer restore()
-		ownerNetworkId, ownerUserId, ownerPersonal := testSwitchPersonalNetwork(t, ctx, "named-owner")
-		adminNetworkId, adminUserId, _ := testSwitchPersonalNetwork(t, ctx, "named-admin")
-		networkNameOf := func(networkId server.Id) (networkName string) {
-			server.Db(ctx, func(conn server.PgConn) {
-				server.Raise(conn.QueryRow(ctx, `SELECT network_name FROM network WHERE network_id = $1`, networkId).Scan(&networkName))
-			})
+		// a person with a network of its own, signing in at the address that network's creation gives it
+		newPerson := func(label string) (networkName string, userId server.Id, address string, personal *session.ClientSession) {
+			networkId := server.NewId()
+			userId = server.NewId()
+			networkName = securityNoticeTestNetworkName(label)
+			address, _ = model.NormalUserAuth(model.Testing_CreateNetwork(ctx, networkId, networkName, userId))
+			personal = session.Testing_CreateClientSession(ctx, &session.ByJwt{NetworkId: networkId, UserId: userId, NetworkName: networkName})
 			return
 		}
-		ownerNetworkName := networkNameOf(ownerNetworkId)
-		adminNetworkName := networkNameOf(adminNetworkId)
-		// the sign-in address Testing_CreateNetwork gives each person
-		addressOf := func(networkId server.Id) string {
-			address, _ := model.NormalUserAuth(fmt.Sprintf("%s@bringyour.com", networkId))
-			return address
-		}
+		ownerNetworkName, ownerUserId, ownerAddress, ownerPersonal := newPerson("named-owner")
+		adminNetworkName, adminUserId, adminAddress, _ := newPerson("named-admin")
 
 		teamName := securityNoticeTestNetworkName("named-team")
 		created, err := model.CreateNetworkTeam(&model.CreateNetworkTeamArgs{NetworkName: teamName}, ownerPersonal)
@@ -84,7 +79,7 @@ func TestTeamAuthKeyNoticeNamesTheTeam(t *testing.T) {
 			}
 		}
 		slices.Sort(recipients)
-		want := []string{addressOf(ownerNetworkId), addressOf(adminNetworkId)}
+		want := []string{ownerAddress, adminAddress}
 		slices.Sort(want)
 		if !slices.Equal(recipients, want) {
 			t.Fatalf("the team's auth key notice went to %v, want the Owner and the Admin, %v", recipients, want)
@@ -96,7 +91,7 @@ func TestTeamAuthKeyNoticeNamesTheTeam(t *testing.T) {
 			t.Fatalf("the Owner's auth key in its own network: %v %+v", err, personalKey)
 		}
 		sends = deliverSecurityNoticesOf(t, ctx, model.SecurityAuthKeyTemplateName)
-		if len(sends) != 1 || sends[0].userAuth != addressOf(ownerNetworkId) {
+		if len(sends) != 1 || sends[0].userAuth != ownerAddress {
 			t.Fatalf("the personal network's auth key notice went to %+v, want its owner alone", sends)
 		}
 		requireSecurityNoticeNamesNetwork(t, sends[0], ownerNetworkName, teamName)
