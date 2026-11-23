@@ -1929,6 +1929,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 				clientId,
 				connectTransportH1,
 				&self.settings.ProviderIntentCheckSettings,
+				self.exchange.timerSweep,
 			)
 			if !providerIntentCheck.Start() {
 				h1Observation.close(connectH1CloseClientLimit)
@@ -2947,6 +2948,7 @@ func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier Resi
 				clientId,
 				connectTransportH3,
 				&self.settings.ProviderIntentCheckSettings,
+				self.exchange.timerSweep,
 			)
 			if !providerIntentCheck.Start() {
 				kickClientLimit(clientLimitKickCauseProviderIntent)

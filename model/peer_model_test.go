@@ -39,6 +39,7 @@ func TestNetworkPeerListenerCloseAndWaitJoinsAdmittedCallback(t *testing.T) {
 		},
 		time.Hour,
 		0,
+		nil,
 	)
 	listener.afterCloseWaitForTest = func() {
 		select {
@@ -305,7 +306,7 @@ func TestNetworkPeerLifecycle(t *testing.T) {
 		// event's arrival: the poll full-reads newer state than the deltas
 		// have applied and legitimately resets — failing this test's no-reset
 		// assertion for a reason production key-event mode does not have.
-		listener := NewNetworkPeerListener(ctx, networkId, c.Event, 5*time.Second, 1000)
+		listener := NewNetworkPeerListener(ctx, networkId, c.Event, 5*time.Second, 1000, nil)
 		defer listener.CloseAndWait()
 
 		// Feed per-peer key events the way the exchange's process-wide
@@ -423,7 +424,7 @@ func TestNetworkPeerLifecycle(t *testing.T) {
 
 		// a new listener syncs to the head state with a reset
 		c2 := newTestNetworkPeerAccumulator()
-		listener2 := NewNetworkPeerListener(ctx, networkId, c2.Event, 200*time.Millisecond, 5)
+		listener2 := NewNetworkPeerListener(ctx, networkId, c2.Event, 200*time.Millisecond, 5, nil)
 		defer listener2.CloseAndWait()
 
 		select {
@@ -468,7 +469,7 @@ func TestNetworkPeerExpiry(t *testing.T) {
 		// another peer's activity prunes the expired entry and publishes
 		// the disconnect marker
 		c := newTestNetworkPeerAccumulator()
-		listener := NewNetworkPeerListener(ctx, networkId, c.Event, 200*time.Millisecond, 5)
+		listener := NewNetworkPeerListener(ctx, networkId, c.Event, 200*time.Millisecond, 5, nil)
 		defer listener.CloseAndWait()
 
 		AddNetworkPeer(ctx, networkId, peer2, residentId2, 60*time.Second)
@@ -515,7 +516,7 @@ func TestNetworkPeerProvideModesUpdate(t *testing.T) {
 		AddNetworkPeer(ctx, networkId, profile, residentId, 60*time.Second)
 
 		c := newTestNetworkPeerAccumulator()
-		listener := NewNetworkPeerListener(ctx, networkId, c.Event, 200*time.Millisecond, 5)
+		listener := NewNetworkPeerListener(ctx, networkId, c.Event, 200*time.Millisecond, 5, nil)
 		defer listener.CloseAndWait()
 
 		// SetProvide publishes a provide modes update for the registered peer
@@ -1481,7 +1482,7 @@ func TestNetworkProxyPeer(t *testing.T) {
 
 		// a listener sees the client peer but never the proxy peer
 		c := newTestNetworkPeerAccumulator()
-		listener := NewNetworkPeerListener(ctx, networkId, c.Event, 200*time.Millisecond, 5)
+		listener := NewNetworkPeerListener(ctx, networkId, c.Event, 200*time.Millisecond, 5, nil)
 		defer listener.CloseAndWait()
 
 		AddNetworkPeer(ctx, networkId, &NetworkPeer{ClientId: clientId}, residentId, ttl)
@@ -1531,7 +1532,7 @@ func TestNetworkPeerEventGapReset(t *testing.T) {
 		ttl := 60 * time.Second
 
 		c := newTestNetworkPeerAccumulator()
-		listener := NewNetworkPeerListener(ctx, networkId, c.Event, 200*time.Millisecond, 5)
+		listener := NewNetworkPeerListener(ctx, networkId, c.Event, 200*time.Millisecond, 5, nil)
 		defer listener.CloseAndWait()
 
 		AddNetworkPeer(ctx, networkId, &NetworkPeer{ClientId: clientId1}, residentId, ttl)
@@ -1593,7 +1594,7 @@ func TestNetworkPeerRegistryFlushRecovery(t *testing.T) {
 		}
 
 		c := newTestNetworkPeerAccumulator()
-		listener := NewNetworkPeerListener(ctx, networkId, c.Event, 200*time.Millisecond, 5)
+		listener := NewNetworkPeerListener(ctx, networkId, c.Event, 200*time.Millisecond, 5, nil)
 		defer listener.CloseAndWait()
 
 		AddNetworkPeer(ctx, networkId, peer, residentId, ttl)
@@ -1649,7 +1650,7 @@ func TestNetworkPeerRegistryFlushRecovery(t *testing.T) {
 
 		// a fresh listener converges too
 		c2 := newTestNetworkPeerAccumulator()
-		listener2 := NewNetworkPeerListener(ctx, networkId, c2.Event, 200*time.Millisecond, 5)
+		listener2 := NewNetworkPeerListener(ctx, networkId, c2.Event, 200*time.Millisecond, 5, nil)
 		defer listener2.CloseAndWait()
 
 		select {
@@ -1724,7 +1725,7 @@ func TestNetworkPeerListenerNoConnectionGrowth(t *testing.T) {
 			AddNetworkPeer(ctx, networkId, &NetworkPeer{ClientId: server.NewId()}, server.NewId(), 60*time.Second)
 			c := newTestNetworkPeerAccumulator()
 			accumulators[i] = c
-			listener := NewNetworkPeerListener(ctx, networkId, c.Event, 200*time.Millisecond, 5)
+			listener := NewNetworkPeerListener(ctx, networkId, c.Event, 200*time.Millisecond, 5, nil)
 			defer listener.CloseAndWait()
 		}
 
@@ -1776,7 +1777,7 @@ func TestNetworkPeerListenerSurvivesRedisError(t *testing.T) {
 		clientId1 := server.NewId()
 
 		c := newTestNetworkPeerAccumulator()
-		listener := NewNetworkPeerListener(ctx, networkId, c.Event, 200*time.Millisecond, 5)
+		listener := NewNetworkPeerListener(ctx, networkId, c.Event, 200*time.Millisecond, 5, nil)
 		defer listener.CloseAndWait()
 
 		AddNetworkPeer(ctx, networkId, &NetworkPeer{ClientId: clientId1}, server.NewId(), 60*time.Second)
@@ -1839,7 +1840,7 @@ func TestNetworkPeerChurn(t *testing.T) {
 		}
 
 		c := newTestNetworkPeerAccumulator()
-		listener := NewNetworkPeerListener(ctx, networkId, c.Event, 200*time.Millisecond, 5)
+		listener := NewNetworkPeerListener(ctx, networkId, c.Event, 200*time.Millisecond, 5, nil)
 		defer listener.CloseAndWait()
 
 		// each peer churns on its own goroutine; half end connected,
@@ -1915,7 +1916,7 @@ func TestNetworkPeerChurn(t *testing.T) {
 
 		// a fresh listener converges to the same state
 		c2 := newTestNetworkPeerAccumulator()
-		listener2 := NewNetworkPeerListener(ctx, networkId, c2.Event, 200*time.Millisecond, 5)
+		listener2 := NewNetworkPeerListener(ctx, networkId, c2.Event, 200*time.Millisecond, 5, nil)
 		defer listener2.CloseAndWait()
 
 		select {

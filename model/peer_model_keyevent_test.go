@@ -53,6 +53,7 @@ func TestNetworkPeerDeltaLoadsOnceAcrossListeners(t *testing.T) {
 			},
 			10*time.Minute,
 			0,
+			nil,
 		)
 		listeners[i].ApplySnapshot(PrepareNetworkPeerSnapshot(41, nil))
 	}
@@ -272,6 +273,7 @@ func TestNetworkPeerCorrectiveReadRepairsMissedExpiry(t *testing.T) {
 			func(event *NetworkPeerEvent) { events <- event },
 			100*time.Millisecond,
 			1, // authoritative corrective read every tick
+			nil,
 		)
 		defer listener.CloseAndWait()
 		listener.Resync()
@@ -326,6 +328,7 @@ func TestNetworkPeerListenerDeltas(t *testing.T) {
 			// below must come from the delta/resync inputs (after first sync)
 			10*time.Minute,
 			0,
+			nil,
 		)
 		defer listener.CloseAndWait()
 

@@ -4977,7 +4977,7 @@ func (self *Resident) Run() {
 			default:
 			}
 		}
-	}, self.exchange.streamHopsPollInterval(), self.exchange.listenerFullReadEvery())
+	}, self.exchange.streamHopsPollInterval(), self.exchange.listenerFullReadEvery(), self.timerSweep())
 
 	if self.afterStreamHopListenerStartForTest != nil {
 		self.afterStreamHopListenerStartForTest(streamHopListener)
@@ -5043,6 +5043,7 @@ func (self *Resident) Run() {
 			self.handleNetworkPeerEvent,
 			self.exchange.networkPeersPollInterval(),
 			self.exchange.listenerFullReadEvery(),
+			self.timerSweep(),
 		)
 		defer networkPeerListener.CloseAndWait()
 		if self.exchange.keyEventSubscriber != nil {

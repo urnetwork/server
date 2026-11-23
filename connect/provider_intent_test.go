@@ -249,6 +249,7 @@ func newTestingProviderIntentCheck(ctx context.Context, store *testingProviderIn
 		connectTransportH1,
 		DefaultProviderIntentCheckSettings(),
 		store,
+		nil,
 	)
 }
 
@@ -373,7 +374,7 @@ func TestProviderIntentCheckRestartsStoppedChain(t *testing.T) {
 // the observation loop.
 func TestProviderIntentCheckDefaultsUnsetSettings(t *testing.T) {
 	for _, settings := range []*ProviderIntentCheckSettings{nil, {}} {
-		check := newProviderIntentCheckWithStore(t.Context(), server.NewId(), server.NewId(), connectTransportH1, settings, &testingProviderIntentStore{})
+		check := newProviderIntentCheckWithStore(t.Context(), server.NewId(), server.NewId(), connectTransportH1, settings, &testingProviderIntentStore{}, nil)
 		connect.AssertEqual(t, *check.settings, *DefaultProviderIntentCheckSettings())
 	}
 }

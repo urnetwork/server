@@ -1,13 +1,14 @@
 // A census of the runtime timers one simulated connection holds on a connect
-// process, by the code that made them (LBALTOPT2.md §8.1). A connection here
-// is a client's resident, nominated on the production path with its idle
-// watcher, registration refresh and stream authorizations; one forward from
-// it with its idle watcher; and the transport's announcement, with verify
-// egress refreshes on, and its authorization lease, with a credential
-// horizon. These are the owners whose waits move to the process's timer
-// sweep, wired as newExchange and NewConnectHandler wire them
-// (timer_census_shim_test.go). It runs on the test DB env, since the
-// announcement registers on the database and the nomination on Redis.
+// process, by the code that made them (LBALTOPT2.md §8.1, CPUOPT7.md §11). A
+// connection here is a client's resident, nominated on the production path
+// with its idle watcher, registration refresh, stream authorizations, and its
+// stream hop and network peer listeners' backstop polls; one forward from it
+// with its idle watcher; and the transport's announcement, with verify egress
+// refreshes on, and its authorization lease, with a credential horizon. These
+// are the owners whose waits move to the process's timer sweep, wired as
+// newExchange and NewConnectHandler wire them (timer_census_shim_test.go). It
+// runs on the test DB env, since the announcement registers on the database
+// and the nomination on Redis.
 //
 // At the census every owner waits in its select, so each live channel timer
 // it holds is in a P's heap. Live timer allocations are counted from the
@@ -50,6 +51,8 @@ var timerCensusOwners = []struct {
 	{"resident registration refresh", []string{"connect.(*Exchange).runResidentRegistrationRefresh", "connect.(*Exchange).nominateLocalResident.func"}},
 	{"resident stream authorizations", []string{"connect.(*Resident).runStreamAuthorizations"}},
 	{"forward idle watch", []string{"connect.(*ResidentForward).runIdleWatcher"}},
+	{"stream hop listener poll", []string{"model.(*StreamHopListener).run"}},
+	{"network peer listener poll", []string{"model.(*NetworkPeerListener).run"}},
 }
 
 // A creator ending in ".func" names a function's closures.
@@ -125,6 +128,9 @@ func TestConnectionTimerCensus(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		exchange := newResidentConstructionExchange(ctx)
+		// every census client is a top-level client whose resident runs a
+		// network peer listener
+		exchange.settings.EnableNetworkPeers = true
 		censusInstallExchangeSweep(exchange)
 		defer func() {
 			exchange.Close()
@@ -287,8 +293,9 @@ func TestConnectionTimerCensus(t *testing.T) {
 			}
 			// rounds, test schedule, verify refresh, passive samples, lease
 			// horizon and rechecks, resident idle watch, refresh and stream
-			// authorizations, forward idle watch
-			if want := 10 * timerCensusConnectionCount; sweepRegistrations != want {
+			// authorizations, forward idle watch, and the resident's stream
+			// hop and network peer listener polls
+			if want := 12 * timerCensusConnectionCount; sweepRegistrations != want {
 				t.Fatalf("%d sweep timers armed for %d connections, want %d", sweepRegistrations, timerCensusConnectionCount, want)
 			}
 		}

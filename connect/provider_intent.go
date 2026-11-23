@@ -34,6 +34,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/internal/timersweep"
 	"github.com/urnetwork/server/model"
 )
 
@@ -250,6 +251,9 @@ type providerIntentCheck struct {
 	transport string
 	settings  *ProviderIntentCheckSettings
 	store     providerIntentStore
+	// the observation timer waits here, off the runtime's timer heaps
+	// (CPUOPT7 §11). Nil gives the timer a sweep of its own.
+	timerSweep *timersweep.Sweep
 
 	// the check chain must be started (or pulled forward) by Run
 	scheduleCheck bool
@@ -260,15 +264,16 @@ type providerIntentCheck struct {
 }
 
 // A check for one connection, on the production store. `ctx` is the
-// connection's lifetime.
+// connection's lifetime, and timerSweep the process's sweep.
 func newProviderIntentCheck(
 	ctx context.Context,
 	networkId server.Id,
 	clientId server.Id,
 	transport string,
 	settings *ProviderIntentCheckSettings,
+	timerSweep *timersweep.Sweep,
 ) *providerIntentCheck {
-	return newProviderIntentCheckWithStore(ctx, networkId, clientId, transport, settings, modelProviderIntentStore{})
+	return newProviderIntentCheckWithStore(ctx, networkId, clientId, transport, settings, modelProviderIntentStore{}, timerSweep)
 }
 
 // A check on a given store, for tests.
@@ -279,18 +284,20 @@ func newProviderIntentCheckWithStore(
 	transport string,
 	settings *ProviderIntentCheckSettings,
 	store providerIntentStore,
+	timerSweep *timersweep.Sweep,
 ) *providerIntentCheck {
 	if settings == nil || settings.ObserveInterval <= 0 {
 		// unset settings would spin the observation loop
 		settings = DefaultProviderIntentCheckSettings()
 	}
 	return &providerIntentCheck{
-		ctx:       ctx,
-		networkId: networkId,
-		clientId:  clientId,
-		transport: transport,
-		settings:  settings,
-		store:     store,
+		ctx:        ctx,
+		networkId:  networkId,
+		clientId:   clientId,
+		transport:  transport,
+		settings:   settings,
+		store:      store,
+		timerSweep: timerSweep,
 	}
 }
 
@@ -385,14 +392,28 @@ func (self *providerIntentCheck) scheduleCheckIfNeeded() {
 
 // The observation loop. Returns false when the client went over the limit with
 // enforcement on (the caller closes with the client limit exceeded signal), and
-// true when the connection ended.
+// true when the connection ended. Each observation waits ObserveInterval from
+// the end of the last pass on the sweep, so it comes at that deadline or at
+// most one sweep tick after it, never before, and the timer leaves the sweep
+// as the loop returns.
 func (self *providerIntentCheck) Run() bool {
+	var observeTimer *timersweep.Timer
+	defer func() {
+		if observeTimer != nil {
+			observeTimer.Stop()
+		}
+	}()
 	for {
 		self.scheduleCheckIfNeeded()
+		if observeTimer == nil {
+			observeTimer = self.timerSweep.NewTimer(self.settings.ObserveInterval)
+		} else {
+			observeTimer.Reset(self.settings.ObserveInterval)
+		}
 		select {
 		case <-self.ctx.Done():
 			return true
-		case <-time.After(self.settings.ObserveInterval):
+		case <-observeTimer.C:
 		}
 		if !self.observe() {
 			return false
