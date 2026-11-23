@@ -158,6 +158,17 @@ func newContractOriginNotifications(
 	return notifications
 }
 
+// An owner whose subscription sockets and publications the caller supplies, for
+// tests in other packages that must order an origin edge against a request.
+func Testing_NewContractOriginNotifications(
+	ctx context.Context,
+	settings ContractOriginNotificationSettings,
+	subscribe func(context.Context, string) (server.RedisShardSubscription, error),
+	publish func(context.Context, string, string) error,
+) *ContractOriginNotifications {
+	return newContractOriginNotifications(ctx, settings, subscribe, publish)
+}
+
 type contractOriginNotificationsContextKey struct{}
 
 // Only an explicit lifecycle owner installs this context value; bare contexts
