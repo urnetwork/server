@@ -42,11 +42,13 @@ func init() {
 
 // Client identifiers, rather than network identifiers, name this unordered pair.
 // Both directions and a self-pair share exactly one count and one membership set.
+// The text is built without fmt: every lease read builds it, and fmt boxed
+// both ids and ran its printer for them (CPUOPT7.md §12).
 func contractHoleKeys(sourceClientId, destinationClientId server.Id) []string {
 	if sourceClientId.Cmp(destinationClientId) > 0 {
 		sourceClientId, destinationClientId = destinationClientId, sourceClientId
 	}
-	prefix := fmt.Sprintf("contract-hole:v2:{%s:%s}:", sourceClientId, destinationClientId)
+	prefix := "contract-hole:v2:{" + sourceClientId.String() + ":" + destinationClientId.String() + "}:"
 	return []string{prefix + "count", prefix + "members", prefix + "closed", prefix + "publication", prefix + "oversized"}
 }
 
