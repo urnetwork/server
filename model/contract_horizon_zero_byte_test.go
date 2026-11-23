@@ -63,7 +63,7 @@ func TestNarrowContractHorizonControlZeroByte(t *testing.T) {
 		{name: "unparsable mode is off", fields: with(map[string]string{"zeroByteMode": "yes"}), mode: ContractHorizonModeOff, rate: 2000, horizon: 8 * day},
 		{name: "own rate", fields: with(map[string]string{"zeroByteMaxRowsPerSecond": "500"}), mode: ContractHorizonModeOn, rate: 500, horizon: 8 * day},
 		{name: "own rate under a slower reaper", fields: with(map[string]string{"maxRowsPerSecond": "100", "zeroByteMaxRowsPerSecond": "1500"}), mode: ContractHorizonModeOn, rate: 1500, horizon: 8 * day},
-		{name: "rate raised to the ceiling", fields: with(map[string]string{"zeroByteMaxRowsPerSecond": "50000"}), mode: ContractHorizonModeOn, rate: 2000, horizon: 8 * day},
+		{name: "rate raised to the ceiling", fields: with(map[string]string{"zeroByteMaxRowsPerSecond": "50000"}), mode: ContractHorizonModeOn, rate: 5000, horizon: 8 * day},
 		{name: "zero rate is off", fields: with(map[string]string{"zeroByteMaxRowsPerSecond": "0"}), mode: ContractHorizonModeOff, rate: 0, horizon: 8 * day},
 		{name: "unparsable rate is off", fields: with(map[string]string{"zeroByteMaxRowsPerSecond": "fast"}), mode: ContractHorizonModeOff, rate: 0, horizon: 8 * day},
 		{name: "NaN rate is off", fields: with(map[string]string{"zeroByteMaxRowsPerSecond": "NaN"}), mode: ContractHorizonModeOff, rate: 0, horizon: 8 * day},
@@ -93,6 +93,59 @@ func TestNarrowContractHorizonControlZeroByte(t *testing.T) {
 		if control.ZeroByteHorizon < ContractHorizonZeroByteFloor || control.Horizon < control.ZeroByteHorizon {
 			t.Errorf("%s: zero-byte horizon %s outside [8 days, %s]", sample.name, control.ZeroByteHorizon, control.Horizon)
 		}
+	}
+}
+
+// Pure: the code's rate cap is 5000 contracts a second (owner, 2026-11-23: the
+// zero-byte pass to 3,000 a second), and it bounds each pass's own control
+// rate. With the horizon's rate at 2000 and the zero-byte pass on at 8 days, a
+// zero-byte rate of 3000 is honored, the horizon's rate stays 2000, and a rate
+// past the cap reads as the cap. Under the cap of 2000 before, a zero-byte rate
+// of 3000 read as 2000, and the pass paced each batch to 2000 a second.
+func TestContractHorizonZeroByteRateHonoredUpToTheCap(t *testing.T) {
+	const day = 24 * time.Hour
+	settings := DefaultContractHorizonSettings()
+	if settings.MaxRowsPerSecond != 5000 || settings.DefaultMaxRowsPerSecond != 200 {
+		t.Errorf("the code's rate cap is %v with default %v, want 5000 and 200", settings.MaxRowsPerSecond, settings.DefaultMaxRowsPerSecond)
+	}
+	control := func(zeroByteRate string) map[string]string {
+		return map[string]string{
+			"mode":                     "on",
+			"maxRowsPerSecond":         "2000",
+			"horizonDays":              "35",
+			"zeroByteMode":             "on",
+			"zeroByteMaxRowsPerSecond": zeroByteRate,
+			"zeroByteHorizonDays":      "8",
+		}
+	}
+	for _, sample := range []struct {
+		zeroByteRate string
+		want         float64
+	}{
+		{zeroByteRate: "2000", want: 2000},
+		{zeroByteRate: "3000", want: 3000},
+		{zeroByteRate: " 3000 ", want: 3000},
+		{zeroByteRate: "4999.5", want: 4999.5},
+		{zeroByteRate: "5000", want: 5000},
+		{zeroByteRate: "5000.5", want: 5000},
+		{zeroByteRate: "6000", want: 5000},
+	} {
+		narrowed := NarrowContractHorizonControl(control(sample.zeroByteRate), settings)
+		if narrowed.ZeroByteMode != ContractHorizonModeOn || narrowed.ZeroByteMaxRowsPerSecond != sample.want || narrowed.ZeroByteHorizon != 8*day {
+			t.Errorf("zero-byte rate %q: mode %s rate %v horizon %s, want on %v 8 days", sample.zeroByteRate,
+				narrowed.ZeroByteMode, narrowed.ZeroByteMaxRowsPerSecond, narrowed.ZeroByteHorizon, sample.want)
+		}
+		// the horizon's rate is its own field's, whatever the zero-byte pass's
+		if narrowed.Mode != ContractHorizonModeOn || narrowed.MaxRowsPerSecond != 2000 {
+			t.Errorf("zero-byte rate %q: the horizon's mode %s rate %v, want on 2000", sample.zeroByteRate, narrowed.Mode, narrowed.MaxRowsPerSecond)
+		}
+	}
+
+	// The wait after a full zero-byte batch is the honored rate's: 2000
+	// contracts at 3000 a second take two thirds of a second, not one.
+	narrowed := NarrowContractHorizonControl(control("3000"), settings)
+	if got, want := contractHorizonPaceDelay(int64(settings.BatchSize), narrowed.ZeroByteMaxRowsPerSecond, 0), 2*time.Second/3; got != want {
+		t.Errorf("a %d-contract zero-byte batch at a control rate of 3000 waits %s, want %s", settings.BatchSize, got, want)
 	}
 }
 
