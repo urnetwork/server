@@ -611,9 +611,10 @@ func TestTeamWithheldPayoutNotifiesItsOwnersAndBillingAdmins(t *testing.T) {
 	})
 }
 
-// A Team none of whose Owners and Billing admins has an email address, its Owner signing in by phone alone and its
-// Admin, which holds no billing, at an address, is emailed neither mail: its failed renewal owes the in-app past-due
-// notice alone, as an account with no email does, and its withheld payout no notice.
+// A Team none of whose Owners and Billing admins has an email address, its two Owners and its Billing admin each
+// signing in by phone alone while its Admin and the rest, which hold no billing, sign in at addresses, is emailed
+// neither mail: its failed renewal owes the in-app past-due notice alone, as an account with no email does, and its
+// withheld payout no notice.
 func TestTeamWithoutABillingEmailGetsNeitherMail(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		missingWalletTestRequestsOn(t)
