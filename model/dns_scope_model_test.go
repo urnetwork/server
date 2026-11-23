@@ -91,9 +91,9 @@ func TestDnsSetScopeRecordsWritesTheScopesSet(t *testing.T) {
 		// the edge rows stood through the mail write: the state is read back from the scope's rows
 		state.EdgeWildcard = true
 		state.Mail = true
-		// _dmarc, b and the verified network's _mta-sts keep *.<scope>'s records through copies; mx's router addresses
-		// are its own
-		copyOwners := []string{"_dmarc." + scopeApex, "b." + scopeApex, dnsMtaStsLabel + "." + scopeApex}
+		// _dmarc and b keep *.<scope>'s records through copies, and the scope holds no _mta-sts to take one, its
+		// network verified though it is (QD-1206); mx's router addresses are its own
+		copyOwners := []string{"_dmarc." + scopeApex, "b." + scopeApex}
 		if want, _ := DnsScopeRecords(state, dnsZoneTtl()); !slices.Equal(lines, testDnsWithCopyLines(dnsSystemRecordLines(want), copyOwners...)) {
 			t.Errorf("after edge and mail:\n%s", strings.Join(lines, "\n"))
 		}

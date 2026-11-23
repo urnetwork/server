@@ -3,9 +3,11 @@ package model
 // §12.7's Team scope zones (DNS-M6-06; R-DNS-2, R-DNS-6, D-DNS-6; owner decisions 40, 58): each Team scope
 // <scope>.<net>.<root> repeats a network zone's system set under its own apex, from the same function
 // (DnsSystemRecords through DnsScopeRecords), with its own mx host and, from M8, its TLSA
-// (_25._tcp.mx.<scope>, POST /dns/key-record's). A scope has no table of its own: its set is the network's
-// rows at owners under the scope's apex, and what the set is a function of, its edge rows and mail, is read
-// back from those rows, as a direct MX's addresses are (dns_direct_mx_model.go), so every reconcile writes
+// (_25._tcp.mx.<scope>, POST /dns/key-record's), but no _mta-sts (QD-1206): no receiver serves a scope's
+// MTA-STS policy, §13.9's system publish being mta-sts.<net>.<root>'s alone, so a scope's mail takes DANE for its
+// TLS, as burner mail does, until a scope publish exists. A scope has no table of its own: its set is the
+// network's rows at owners under the scope's apex, and what the set is a function of, its edge rows and mail, is
+// read back from those rows, as a direct MX's addresses are (dns_direct_mx_model.go), so every reconcile writes
 // them back as they stand.
 //
 //   - Scope labels come from the signed projection (§8; protos-bridge-row-fields #3's TeamScopeRow, which
@@ -27,6 +29,10 @@ package model
 //     the network's.
 //   - A scope's @ takes no CAA canary and no custom host (DNS-M6-05, DNS-M6-02), since its CAA would govern
 //     the scope's device certificates (RFC 8659 §3).
+//   - With no _mta-sts, a scope's set does not follow the network's verification as the zone's does. _mta-sts
+//     stays a key the set manages (dnsZoneSystemKeys), so any write of the set takes away one a scope still
+//     holds from before QD-1206, and ReconcileNetworkZoneMailPolicy (dns_zone_model.go) takes it at the
+//     network's next refresh where no write comes.
 //
 // Every writer takes the label's lock, then the zone's, as every zone writer does, and writes through
 // §12.6's one path. Nothing here runs unless the binary links MG2 and MG5.
@@ -118,25 +124,33 @@ type DnsScopeState struct {
 	EdgeApex bool
 	// The scope's own mail (M8; DNS-M8-01): MX 10 mx.<scope>, mx.<scope>'s router rows and b.<scope>.
 	Mail bool
-	// What the network's mail set carries into the scope's: its report token and §12.7's policy records
-	// (DNS-M8-01).
+	// The network's mail policy, whose report token and host the scope's report records name (DNS-M8-01). Its
+	// MTA-STS policy never reaches the scope's set, which publishes no _mta-sts (QD-1206).
 	MailPolicy *DnsZoneMailPolicy
 }
 
-// The zone state a scope's set is written from: a network zone's, at the scope's apex.
+// The zone state a scope's set is written from: a network zone's, at the scope's apex, with the network's mail
+// policy less its MTA-STS policy, so DnsSystemRecords writes the report records there and no _mta-sts.
 func (self *DnsScopeState) zoneState() *DnsZoneState {
+	var policy *DnsZoneMailPolicy
+	if self.MailPolicy != nil {
+		scopePolicy := *self.MailPolicy
+		scopePolicy.MtaSts = nil
+		policy = &scopePolicy
+	}
 	return &DnsZoneState{
 		Root:         self.Root,
 		Apex:         dnsservice.DnsScopeApex(self.Apex, self.Scope),
 		EdgeWildcard: self.EdgeWildcard,
 		EdgeApex:     self.EdgeApex,
 		Mail:         self.Mail,
-		MailPolicy:   self.MailPolicy,
+		MailPolicy:   policy,
 	}
 }
 
 // §12.7's set for a Team scope (see the file header): DnsSystemRecords at the scope's apex, so a scope's
-// set is a network's by construction. Refuses a scope label that is not one LDH label.
+// set is a network's by construction, but for _mta-sts, which it never holds, whatever its mail policy carries
+// (QD-1206). Refuses a scope label that is not one LDH label.
 func DnsScopeRecords(state *DnsScopeState, ttl *dnsservice.DnsTtlSettings) ([]dnsservice.DnsRecordSet, error) {
 	if !isDnsCtLabel(state.Scope) {
 		return nil, fmt.Errorf("%w: %q is no scope label", dnsservice.ErrDnsScopeLabelRefused, state.Scope)

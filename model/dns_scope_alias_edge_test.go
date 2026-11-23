@@ -4,14 +4,14 @@ package model
 
 // §12.7's edge records beyond a network's own * and @ (dns_edge_grants_model.go; DNS-M6-06, DNS-M6-01, owner
 // decision 335), through the edge's own answer path over the rows Postgres serves: a Team scope's zone serves its *
-// A and AAAA, its mail and its _mta-sts once a host of the scope is published, and loses its addresses when the
-// grant ends, its mail standing; a scope's first publish draws the network's zone; a scope label the zone already
-// holds as a host is refused and counted, the others written; api's sync reads the scopes and grants of the state its
-// sequencer holds, at the sequencer's clock; the hourly pass writes and takes away scope addresses from its source;
-// a certified alias answers the label's and each scope's edge records, and loses them with the grants; the mail
-// toggle turns each written scope's mail with the zone's, both ways, leaving a withheld scope to the sync after its
-// lift; and POST /mail/enable writes the system publish's * and each scope's mail at once rather than at the hourly
-// pass.
+// A and AAAA and its mail, never an _mta-sts (QD-1206), once a host of the scope is published, and loses its
+// addresses when the grant ends, its mail standing; a scope's first publish draws the network's zone; a scope label
+// the zone already holds as a host is refused and counted, the others written; api's sync reads the scopes and grants
+// of the state its sequencer holds, at the sequencer's clock; the hourly pass writes and takes away scope addresses
+// from its source; a certified alias answers the label's and each scope's edge records, and loses them with the
+// grants; the mail toggle turns each written scope's mail with the zone's, both ways, leaving a withheld scope to the
+// sync after its lift; and POST /mail/enable writes the system publish's * and each scope's mail at once rather than
+// at the hourly pass.
 
 import (
 	"bytes"
@@ -159,10 +159,11 @@ func TestDnsEdgeZoneGrantsOfDropsWhatEnded(t *testing.T) {
 }
 
 // A Team scope's zone, through the edge's answer path: once a host of it is published the scope serves its * A and
-// AAAA, its mail host with the router interfaces and its _mta-sts, its apex no address; a scope that publishes nothing
-// has its set and mail but no address; neither the network's own * nor a scope the state does not list takes
-// anything; the same grants again write nothing; the grant's end takes the scope's addresses and leaves its mail; and
-// a bare * publishes every scope's hosts. No scope row is an entry.
+// AAAA and its mail host with the router interfaces, its apex no address, and no _mta-sts, which only the verified
+// network's own zone answers (QD-1206); a scope that publishes nothing has its set and mail but no address; neither
+// the network's own * nor a scope the state does not list takes anything; the same grants again write nothing; the
+// grant's end takes the scope's addresses and leaves its mail; and a bare * publishes every scope's hosts. No scope
+// row is an entry.
 func TestSyncDnsEdgeZonesServesATeamScopesEdgeAndMail(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -186,12 +187,14 @@ func TestSyncDnsEdgeZonesServesATeamScopesEdgeAndMail(t *testing.T) {
 		requireDnsViewAnswer(t, view, healthy, "maple-1234."+engApex, dns.TypeMX, dns.RcodeSuccess, "10 mx."+engApex)
 		requireDnsViewAnswer(t, view, healthy, "mx."+engApex, dns.TypeA, dns.RcodeSuccess, "192.0.2.2")
 		requireDnsViewAnswer(t, view, healthy, "mx."+engApex, dns.TypeAAAA, dns.RcodeSuccess, "2001:db8::2")
-		requireDnsViewAnswer(t, view, healthy, dnsMtaStsLabel+"."+engApex, dns.TypeTXT, dns.RcodeSuccess, testDnsMtaStsValue(engApex))
+		// no _mta-sts of the scope's own: the scope's * answers the name, with no TXT; the network's stands
+		requireDnsViewAnswer(t, view, healthy, dnsMtaStsLabel+"."+engApex, dns.TypeTXT, dns.RcodeSuccess)
+		requireDnsViewAnswer(t, view, healthy, dnsMtaStsLabel+"."+apex, dns.TypeTXT, dns.RcodeSuccess, testDnsMtaStsValue(apex))
 		// no grant spells a scope's @
 		requireDnsEdgeAddresses(t, view, healthy, engApex, false)
 		// ops publishes nothing: its set and its mail, no address
 		requireDnsViewAnswer(t, view, healthy, opsApex, dns.TypeMX, dns.RcodeSuccess, "10 mx."+opsApex)
-		requireDnsViewAnswer(t, view, healthy, dnsMtaStsLabel+"."+opsApex, dns.TypeTXT, dns.RcodeSuccess, testDnsMtaStsValue(opsApex))
+		requireDnsViewAnswer(t, view, healthy, dnsMtaStsLabel+"."+opsApex, dns.TypeTXT, dns.RcodeSuccess)
 		requireDnsEdgeAddresses(t, view, healthy, "web."+opsApex, false)
 		// a scope host is its scope's, never the zone's *; dev, which the state does not list, takes no set
 		requireDnsEdgeAddresses(t, view, healthy, "web."+apex, false)
@@ -214,7 +217,7 @@ func TestSyncDnsEdgeZonesServesATeamScopesEdgeAndMail(t *testing.T) {
 		requireDnsEdgeAddresses(t, view, healthy, "web."+engApex, false)
 		requireDnsViewAnswer(t, view, healthy, engApex, dns.TypeMX, dns.RcodeSuccess, "10 mx."+engApex)
 		requireDnsViewAnswer(t, view, healthy, "mx."+engApex, dns.TypeA, dns.RcodeSuccess, "192.0.2.2")
-		requireDnsViewAnswer(t, view, healthy, dnsMtaStsLabel+"."+engApex, dns.TypeTXT, dns.RcodeSuccess, testDnsMtaStsValue(engApex))
+		requireDnsViewAnswer(t, view, healthy, dnsMtaStsLabel+"."+engApex, dns.TypeTXT, dns.RcodeSuccess)
 
 		// dns:* takes every host, a scope's too: the zone's * and both scopes' in three writes
 		synced, err = SyncDnsEdgeZones(ctx, networkId, root, testDnsEdgeZoneGrants(scopes, "*"))
@@ -503,7 +506,8 @@ func TestSyncDnsEdgeZonesReachACertifiedAlias(t *testing.T) {
 }
 
 // The mail toggle turns every written scope with its zone, both ways, in its own transaction: mail on gives each
-// scope its mail host, b and _mta-sts, keeping its addresses; mail off takes them back to the null MX.
+// scope its mail host and b, keeping its addresses, and no _mta-sts, though the network is verified (QD-1206); mail
+// off takes them back to the null MX.
 func TestDnsSetMailRecordsTurnsEveryWrittenScope(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -527,8 +531,9 @@ func TestDnsSetMailRecordsTurnsEveryWrittenScope(t *testing.T) {
 			requireDnsViewAnswer(t, view, healthy, scopeApex, dns.TypeMX, dns.RcodeSuccess, "10 mx."+scopeApex)
 			requireDnsViewAnswer(t, view, healthy, "mx."+scopeApex, dns.TypeA, dns.RcodeSuccess, "192.0.2.2")
 			requireDnsViewAnswer(t, view, healthy, "b."+scopeApex, dns.TypeMX, dns.RcodeSuccess, "10 mx."+scopeApex)
-			requireDnsViewAnswer(t, view, healthy, dnsMtaStsLabel+"."+scopeApex, dns.TypeTXT, dns.RcodeSuccess, testDnsMtaStsValue(scopeApex))
+			requireDnsViewAnswer(t, view, healthy, dnsMtaStsLabel+"."+scopeApex, dns.TypeTXT, dns.RcodeSuccess)
 		}
+		requireDnsViewAnswer(t, view, healthy, dnsMtaStsLabel+"."+apex, dns.TypeTXT, dns.RcodeSuccess, testDnsMtaStsValue(apex))
 		requireDnsEdgeAddresses(t, view, healthy, "web."+engApex, true)
 		// the sync finds the scopes' mail at the zone's, and writes nothing
 		serial := testDnsRootSerial(t, ctx, root)
@@ -597,7 +602,8 @@ func TestDnsSetMailRecordsLeavesAWithheldScopeToTheSync(t *testing.T) {
 
 // POST /mail/enable's write syncs the edge records once it commits: a state whose only grant is the system publish,
 // a receiver's smtp/25/mx listen, gets no zone before mail; the enable draws the zone and, at once, mta-sts.<net>
-// answers the edge through *, _mta-sts stands, and the state's Team scope has its set with mail on.
+// answers the edge through *, _mta-sts stands, and the state's Team scope has its set with mail on and no _mta-sts
+// (QD-1206).
 func TestEnableMailWritesTheSystemPublishAndScopeMailAtOnce(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -628,7 +634,7 @@ func TestEnableMailWritesTheSystemPublishAndScopeMailAtOnce(t *testing.T) {
 		requireDnsViewAnswer(t, view, healthy, dnsMtaStsLabel+"."+apex, dns.TypeTXT, dns.RcodeSuccess, testDnsMtaStsValue(apex))
 		engApex := "eng." + apex
 		requireDnsViewAnswer(t, view, healthy, engApex, dns.TypeMX, dns.RcodeSuccess, "10 mx."+engApex)
-		requireDnsViewAnswer(t, view, healthy, dnsMtaStsLabel+"."+engApex, dns.TypeTXT, dns.RcodeSuccess, testDnsMtaStsValue(engApex))
+		requireDnsViewAnswer(t, view, healthy, dnsMtaStsLabel+"."+engApex, dns.TypeTXT, dns.RcodeSuccess)
 		requireDnsEdgeAddresses(t, view, healthy, "web."+engApex, false)
 	})
 }

@@ -16,9 +16,10 @@ package model
 //	scopes    each Team scope the state lists (sidecar.ConfigState.TeamScopeLabels: the verified projection, never
 //	          a hostname or a grant, §12.5) repeats the zone's set under <scope>.<net>.<root> (DnsScopeRecords)
 //	          once the zone exists: its * by the grants, its mail the zone's own flag read under the zone's lock,
-//	          so with mail on it answers MX 10 mx.<scope>, mx.<scope>'s router rows, b.<scope> and, for a verified
-//	          network, _mta-sts. A scope whose first set §12.5's rules refuse (a host the zone holds, the screen) is
-//	          counted and left unwritten. Scope labels never leave a valid projection, so nothing here withdraws one
+//	          so with mail on it answers MX 10 mx.<scope>, mx.<scope>'s router rows and b.<scope>, never _mta-sts,
+//	          whose policy no receiver serves for a scope (QD-1206). A scope whose first set §12.5's rules refuse (a
+//	          host the zone holds, the screen) is counted and left unwritten. Scope labels never leave a valid
+//	          projection, so nothing here withdraws one
 //	aliases   a certified alias answers its label's rows with its apex rewritten (dnsservice's zone_alias.go): its
 //	          * and @ are the label's, and each scope's set below it too, so an alias zone follows these grants with
 //	          no write of its own; one claimed and not yet certified answers only its own challenges (reading 11)

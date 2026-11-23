@@ -32,8 +32,9 @@ package model
 //     same rua joins _dmarc. A zone with no token or no report host publishes
 //     _dmarc with no rua, keeping p=reject, and no _smtp._tls, whose rua RFC
 //     8460 requires. A Team scope's set (dns_scope_model.go) is this same
-//     function at the scope's apex, with the network's token; a burner domain
-//     publishes no policy (RFC 8461 §3.4).
+//     function at the scope's apex, with the network's token and no MTA-STS
+//     policy, so no _mta-sts, since no receiver serves one for a scope
+//     (QD-1206); a burner domain publishes no policy (RFC 8461 §3.4).
 //   - <root> (reading 19): SOA, NS and their glue, CAA per §13.8 with iodef,
 //     @ TXT v=spf1 -all, @ MX 10 to the report host, @ A and AAAA kind edge
 //     when the apex redirects, _dmarc strict with psd=y once company mail has
