@@ -118,32 +118,37 @@ func TestWeekLeafNames(t *testing.T) {
 	}
 }
 
-// The floor is never later than 42 days before now (owner, 2026-11-21; 70
-// before).
+// The floor is never later than 25 days before now: the C1 transition's
+// 18-day contract horizon and the reaper's weekly rescan (owner, 2026-11-23;
+// 42 days from 2026-11-21, 70 before).
 func TestEffectiveCloseTimeFloor(t *testing.T) {
-	if MinCloseAge != 42*24*time.Hour {
-		t.Fatalf("the close age floor is %s, not 42 days", MinCloseAge)
+	if MinCloseAge != 25*24*time.Hour {
+		t.Fatalf("the close age floor is %s, not 25 days", MinCloseAge)
 	}
 	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
 	if got := EffectiveCloseTimeFloor(DefaultCloseTimeFloor, now); !got.Equal(DefaultCloseTimeFloor) {
 		t.Fatalf("the default floor is %s", got)
 	}
-	if got := EffectiveCloseTimeFloor(now, now); !got.Equal(time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)) {
-		t.Fatalf("a floor of now is %s, not 42 days before it", got)
+	if got := EffectiveCloseTimeFloor(now, now); !got.Equal(time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)) {
+		t.Fatalf("a floor of now is %s, not 25 days before it", got)
 	}
 	// Main's control floor of 2026-11-05: on 11-21 the floor in force is
-	// 10-10, where 70 days held it at 09-12
-	if got := EffectiveCloseTimeFloor(time.Date(2026, 11, 5, 0, 0, 0, 0, time.UTC), time.Date(2026, 11, 21, 0, 0, 0, 0, time.UTC)); !got.Equal(time.Date(2026, 10, 10, 0, 0, 0, 0, time.UTC)) {
+	// 10-27, where 42 days held it at 10-10 and 70 days at 09-12; from 11-30
+	// the date binds
+	if got := EffectiveCloseTimeFloor(time.Date(2026, 11, 5, 0, 0, 0, 0, time.UTC), time.Date(2026, 11, 21, 0, 0, 0, 0, time.UTC)); !got.Equal(time.Date(2026, 10, 27, 0, 0, 0, 0, time.UTC)) {
 		t.Fatalf("on 11-21 the floor of 11-05 is in force at %s", got)
 	}
-	// before 2026-10-13 the 42 days bind the default floor
-	early := time.Date(2026, 10, 10, 0, 0, 0, 0, time.UTC)
-	if got := EffectiveCloseTimeFloor(DefaultCloseTimeFloor, early); !got.Equal(time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC)) {
-		t.Fatalf("on 10-10 the default floor is %s", got)
+	if got := EffectiveCloseTimeFloor(time.Date(2026, 11, 5, 0, 0, 0, 0, time.UTC), time.Date(2026, 11, 30, 0, 0, 0, 0, time.UTC)); !got.Equal(time.Date(2026, 11, 5, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("on 11-30 the floor of 11-05 is in force at %s", got)
+	}
+	// before 2026-09-26 the 25 days bind the default floor
+	early := time.Date(2026, 9, 20, 0, 0, 0, 0, time.UTC)
+	if got := EffectiveCloseTimeFloor(DefaultCloseTimeFloor, early); !got.Equal(time.Date(2026, 8, 26, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("on 09-20 the default floor is %s", got)
 	}
 }
 
-// rolling names no date: the floor in force is always 42 days before now. It
+// rolling names no date: the floor in force is always 25 days before now. It
 // reads back as written, as dates and times do; anything else is refused.
 func TestRollingCloseTimeFloor(t *testing.T) {
 	rolling, err := ParseCloseTimeFloor(" rolling ")
@@ -155,7 +160,7 @@ func TestRollingCloseTimeFloor(t *testing.T) {
 		time.Date(2027, 6, 1, 0, 0, 0, 0, time.UTC),
 		time.Date(2099, 12, 31, 23, 59, 59, 0, time.UTC),
 	} {
-		if got := EffectiveCloseTimeFloor(rolling, now); !got.Equal(now.Add(-42 * 24 * time.Hour)) {
+		if got := EffectiveCloseTimeFloor(rolling, now); !got.Equal(now.Add(-25 * 24 * time.Hour)) {
 			t.Fatalf("at %s the rolling floor is %s", now, got)
 		}
 	}

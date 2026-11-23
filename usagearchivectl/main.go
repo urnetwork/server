@@ -171,7 +171,7 @@ func runExport(ctx context.Context, args []string) error {
 	flags := flag.NewFlagSet("export", flag.ContinueOnError)
 	pgPath := flags.String("pg", "/srv/warp/main/vault/pg_maintenance.yml", "the PostgreSQL resource")
 	dir := flags.String("dir", "", "where the copies go")
-	floor := flags.String("floor", usagearchive.DefaultCloseTimeFloor.Format(time.DateOnly), "the close time floor, YYYY-MM-DD or rolling for none: only weeks that end by it and whose rows all closed before it are exported (never later than 42 days ago)")
+	floor := flags.String("floor", usagearchive.DefaultCloseTimeFloor.Format(time.DateOnly), fmt.Sprintf("the close time floor, YYYY-MM-DD or rolling for none: only weeks that end by it and whose rows all closed before it are exported (never later than %d days ago)", int64(usagearchive.MinCloseAge/(24*time.Hour))))
 	maxWeeks := flags.Int("max-weeks", 4, "weeks exported at most in this run")
 	var weeks weekList
 	flags.Var(&weeks, "week", "export only this week (its Monday, YYYY-MM-DD); repeatable")

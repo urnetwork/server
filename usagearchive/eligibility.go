@@ -31,13 +31,22 @@ import (
 var DefaultCloseTimeFloor = time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
 
 // A row closed within this long before now never leaves PostgreSQL: the
-// lowest horizon the contract reaper can run (35 days) and its weekly rescan
-// (7 days), which deletes the contracts its first read kept because they
-// closed late, so a week's contracts are archived in the week and not in the
-// DEFAULT partition, which is never dropped. An SN epoch, a 7-day window, is
-// recorded about 9 days after its window opens. Owner, 2026-11-21: 42 days,
-// down from 70.
-const MinCloseAge = 42 * 24 * time.Hour
+// contract reaper's horizon (N) and its weekly rescan (7 days), which deletes
+// the contracts its first read kept because they closed late, so a week's
+// contracts are archived in the week and not in the DEFAULT partition, which
+// is never dropped. Owner, 2026-11-23: 25 days, N + 7 for the C1 cutover's
+// transition horizon of 18 days (server/CONTRACT-PARTITION-CUTOVER-NOW.md,
+// decision 8); 42 days (35 + 7) from 2026-11-21, 70 before. A horizon raised
+// past 18 days needs this raised with it, or a week can leave before the
+// reaper's horizon reaches it (ReaperCheckContracts), and the contracts the
+// reaper archives later land in DEFAULT: kept, but never dropped.
+//
+// It does not guard the SN epochs: an SN epoch, a 7-day window, is recorded
+// about 9 days after its window opens, and the server's drop holds its own
+// floor a week before the window of the earliest epoch not yet recorded
+// (server/db_provider_usage_archive_export.go), which binds instead of this
+// one only when an epoch is recorded more than 9 days late.
+const MinCloseAge = 25 * 24 * time.Hour
 
 // The floor that names no date, for the export control and the exporter: the
 // floor in force rolls with the clock, MinCloseAge before now.

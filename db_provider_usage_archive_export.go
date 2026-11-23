@@ -20,7 +20,8 @@
 //   - the export control's floor: usagearchive.DefaultCloseTimeFloor
 //     (2026-09-01, a month before the earliest SN earning cutoff) until the
 //     control sets a date, and no date at all when it sets rolling;
-//   - usagearchive.MinCloseAge (42 days) before the database's clock;
+//   - usagearchive.MinCloseAge (25 days since 2026-11-23, 42 before) before
+//     the database's clock;
 //   - a week before the window of the earliest SN epoch not yet recorded, in
 //     the drop's own snapshot (providerUsageArchiveSnFloorSql).
 //
@@ -28,8 +29,9 @@
 // census and any rebuild asked of it. So the floor never passes a window that
 // can still be read, however late its epoch is recorded, and a rolling floor
 // moves without anyone checking the epochs first. The owner approved the
-// 42-day floor (2026-11-21); payout audits of older windows restore the
-// weeks they need from their copies.
+// 42-day floor (2026-11-21) and the 25-day floor (2026-11-23, the reaper's
+// 18-day transition horizon plus its weekly rescan); payout audits of older
+// windows restore the weeks they need from their copies.
 //
 // The week also waits until the contract horizon reaper has passed it, so the
 // contracts the reaper still archives land in the week rather than in the
@@ -73,8 +75,9 @@
 //   - `mode`: on, dry_run or off. Absent, or any other value, is off: a
 //     deploy drops nothing early until an operator sets it.
 //   - `closeTimeFloor`: the floor, as YYYY-MM-DD or RFC 3339, or `rolling`
-//     for none: the floor in force then rolls 42 days behind the database's
-//     clock, held back by SN epochs not yet recorded. A value that does not
+//     for none: the floor in force then rolls usagearchive.MinCloseAge (25
+//     days) behind the database's clock, held back by SN epochs not yet
+//     recorded. A value that does not
 //     parse turns the mode off.
 //   - `maxWeeksPerPass`: early drops (or dry-run verifications) per pass, at
 //     most ProviderUsageArchiveExportSettings.MaxWeeksPerPass; zero, or a
@@ -385,8 +388,10 @@ func providerUsageArchiveRangeExpired(ctx context.Context, now time.Time, r Part
 // How far before the window of the earliest SN epoch not yet recorded the
 // floor stays, and the block time that places a window: the margin absorbs
 // the placement's error, a chain halt of up to a week included. While epochs
-// are recorded on time (about 9 days after their window opens), the floor in
-// force is MinCloseAge before now, a month earlier, and this never binds.
+// are recorded on time (about 9 days after their window opens), this floor is
+// at most 16 days before now, and the floor in force is MinCloseAge before
+// now, 25 days, so this binds only for an epoch recorded more than 9 days
+// late.
 const (
 	providerUsageArchiveSnFloorMargin  = 7 * 24 * time.Hour
 	providerUsageArchiveSnBlockSeconds = 12
