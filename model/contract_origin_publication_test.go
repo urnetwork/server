@@ -6,7 +6,6 @@ package model
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 	"testing"
 	"time"
@@ -39,10 +38,8 @@ func TestContractOriginPublicationAllCreatorsAreCommitted(t *testing.T) {
 					func(publishCtx context.Context, publications []contractOriginPublication) error {
 						key := contractOriginPairHash(sourceId, destinationId)
 						var observedErr error
-						// one pipeline: the bucket channel's digest, then the pair channel's edge
-						if len(publications) != 2 ||
-							publications[0].payload != hex.EncodeToString(key[:]) || publications[0].channel != contractOriginChannel(int(key[0])%contractOriginBucketCount) ||
-							publications[1].payload != "" || publications[1].channel != contractOriginPairChannel(key) {
+						// the pair channel's edge alone
+						if len(publications) != 1 || publications[0].payload != "" || publications[0].channel != contractOriginPairChannel(key) {
 							observedErr = errors.New("wrong ordered-pair event")
 						}
 						server.Db(publishCtx, func(conn server.PgConn) {

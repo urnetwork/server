@@ -116,24 +116,19 @@ func originSubscriptionsAcknowledged(t testing.TB) float64 {
 }
 
 // Starts the subscription bucket of a route's reverse pair and waits for its
-// first acknowledgement. Until then an acknowledgement may close the fence of
-// a missing-origin refusal and leave it unstored, so this is the barrier
-// after which only an origin edge for the pair can. Call once per owner and
-// bucket. The deadline only bounds a broken fixture.
+// first acknowledgement, so the requests that follow find a live socket. The
+// anchor's acknowledgement wakes no watch, so the counter is read on a short
+// pace. Call once per owner and bucket. The deadline only bounds a broken
+// fixture.
 func awaitRouteRejectionBucket(t testing.TB, ctx context.Context, sourceId server.Id, destinationId server.Id) {
 	t.Helper()
 	before := originSubscriptionsAcknowledged(t)
 	watch := model.GetContractOriginNotifications(ctx).Watch(destinationId, sourceId)
 	defer watch.Close()
 	deadline := time.After(time.Minute)
-	for {
-		// the counter rises before the acknowledgement bumps the watch
-		update, _ := watch.Update()
-		if before < originSubscriptionsAcknowledged(t) {
-			return
-		}
+	for before == originSubscriptionsAcknowledged(t) {
 		select {
-		case <-update:
+		case <-time.After(10 * time.Millisecond):
 		case <-deadline:
 			t.Fatal("the origin subscription was not acknowledged")
 		}
@@ -385,10 +380,17 @@ func TestCreateContractMissingOriginAcrossItsCommitIsNotRecorded(t *testing.T) {
 		})
 		awaitRouteRejectionBucket(t, ctx, sourceId, destinationId)
 
-		// the Stream fallback's origin lookup is the read that decides
+		// The Stream fallback's first lookup misses before its pair is
+		// subscribed, so it decides nothing; the re-check after the pair's
+		// acknowledgement is the read that decides.
 		previousOriginExists := companionOriginExists
 		defer func() { companionOriginExists = previousOriginExists }()
+		lookups := 0
 		companionOriginExists = func(ctx context.Context, _ server.Id, _ server.Id, _ time.Duration) bool {
+			lookups += 1
+			if lookups == 1 {
+				return false
+			}
 			watch := model.GetContractOriginNotifications(ctx).Watch(destinationId, sourceId)
 			defer watch.Close()
 			edge, _ := watch.Update()
