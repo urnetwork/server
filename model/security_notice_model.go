@@ -13,10 +13,15 @@
 // whole transaction anyway (a serialization failure, a deadlock, the caller's
 // stop) is left to the change's own transaction handling.
 //
-// Recipients are the admin's sign-in email addresses
-// (securityNoticeRecipientsInTx). A phone number or a wallet is no email: an
-// account that signs in only with those gets no notice, and no notice goes by
-// SMS (AWS approved SMS for verification codes, password resets and the
+// Recipients are sign-in email addresses. A personal network's notices go to
+// its owner's, the admin's (securityNoticeRecipientsInTx). A team's owner of
+// record never signs in (D-TEAM-2), so a team's notices go to members by role:
+// a payout or subnet wallet change to each member whose role holds billing, its
+// Owners and Billing admins (securityNoticeBillingRecipientsInTx, QD-1217), and
+// the key and authority notices to its Owners and Admins
+// (securityNoticeAuthorityRecipientsInTx). A phone number or a wallet is no
+// email: an account that signs in only with those gets no notice, and no notice
+// goes by SMS (AWS approved SMS for verification codes, password resets and the
 // password-changed notice only).
 //
 // Coalescing: a change owes its notice due the settings' CoalesceWindow later.
@@ -433,6 +438,10 @@ const securityNoticeRecipientsSql = `
 // The network's security notice recipients: its admin's sign-in email
 // addresses (securityNoticeEmails). A phone number or a wallet is no email, so
 // an admin who signs in only with those, or a network that is gone, has none.
+// In a team the admin is the owner of record, which has no sign-in, so a notice
+// that can reach a team takes its recipients from a rule that tells a team's
+// members by role (securityNoticeBillingRecipientsInTx,
+// securityNoticeAuthorityRecipientsInTx).
 func securityNoticeRecipientsInTx(ctx context.Context, tx server.PgTx, networkId server.Id) []string {
 	userAuths := []string{}
 	result, err := tx.Query(ctx, securityNoticeRecipientsSql, networkId)
@@ -461,6 +470,91 @@ func securityNoticeEmails(userAuths []string) []string {
 		emails = emails[:recipientMaxCount]
 	}
 	return emails
+}
+
+// Whether the network is a team, read in tx: a network_team row, which only
+// team-create writes. False in a binary that does not link MG6, which has no
+// teams.
+func securityNoticeTeamInTx(ctx context.Context, tx server.PgTx, networkId server.Id) (team bool) {
+	if !server.SidecarMg6Linked() {
+		return false
+	}
+	server.Raise(tx.QueryRow(
+		ctx,
+		`SELECT EXISTS (SELECT 1 FROM network_team WHERE network_id = $1)`,
+		networkId,
+	).Scan(&team))
+	return
+}
+
+// The sign-in email addresses of a team's members whose role is one of $2,
+// read in the caller's transaction as securityNoticeRecipientsSql reads an
+// admin's, for each member's user. A removed member has no row, and a JIT
+// pending one (§7.6) holds no role's reach, so neither is told.
+const securityNoticeMemberRecipientsSql = `
+	WITH members AS (
+		SELECT user_id
+		FROM network_member
+		WHERE network_id = $1 AND NOT pending AND role = ANY($2)
+	)
+	SELECT network_user.user_auth
+	FROM members
+	INNER JOIN network_user ON network_user.user_id = members.user_id
+	WHERE network_user.user_auth IS NOT NULL
+	UNION ALL
+	SELECT network_user_auth_password.user_auth
+	FROM members
+	INNER JOIN network_user_auth_password ON network_user_auth_password.user_id = members.user_id
+	WHERE
+		network_user_auth_password.auth_type = 'email' AND
+		network_user_auth_password.verified
+	UNION ALL
+	SELECT network_user_auth_sso.user_auth
+	FROM members
+	INNER JOIN network_user_auth_sso ON network_user_auth_sso.user_id = members.user_id
+`
+
+// The security notice recipients among a team's standing, not pending members
+// whose role is one of roles: their member users' sign-in email addresses
+// (securityNoticeEmails).
+func securityNoticeMemberRecipientsInTx(ctx context.Context, tx server.PgTx, networkId server.Id, roles []NetworkMemberRole) []string {
+	roleNames := []string{}
+	for _, role := range roles {
+		roleNames = append(roleNames, string(role))
+	}
+	userAuths := []string{}
+	result, err := tx.Query(ctx, securityNoticeMemberRecipientsSql, networkId, roleNames)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var userAuth string
+			server.Raise(result.Scan(&userAuth))
+			userAuths = append(userAuths, userAuth)
+		}
+	})
+	return securityNoticeEmails(userAuths)
+}
+
+// The recipients of a notice about where the network's payouts go, read in tx
+// (QD-1217): in a personal network its owner's sign-in email addresses
+// (securityNoticeRecipientsInTx); in a team each standing, not pending
+// member's whose role holds RolePermissionBilling, its Owners and Billing
+// admins, at its member user's sign-in email addresses. Those are the members
+// who can change where the team's payouts go and the only ones the role table
+// lets read it (§7.5), so an Admin, which holds no billing, is not told. A team
+// with no such member that has an email has none, and its notice is owed to
+// nobody, counted as no_email.
+func securityNoticeBillingRecipientsInTx(ctx context.Context, tx server.PgTx, networkId server.Id) []string {
+	if !securityNoticeTeamInTx(ctx, tx, networkId) {
+		return securityNoticeRecipientsInTx(ctx, tx, networkId)
+	}
+	billingRoles := []NetworkMemberRole{}
+	for role := range networkMemberRolePermissions {
+		if role.Permits(RolePermissionBilling) {
+			billingRoles = append(billingRoles, role)
+		}
+	}
+	slices.Sort(billingRoles)
+	return securityNoticeMemberRecipientsInTx(ctx, tx, networkId, billingRoles)
 }
 
 // The network the user administers, or nil.
@@ -736,9 +830,11 @@ func securityNoticeChain(chain string) string {
 	return strings.ToUpper(strings.TrimSpace(chain))
 }
 
-// Owes the payout wallet notice for the changes `read` returns. `read` runs
+// Owes the payout wallet notice for the changes `read` returns, to the people
+// who hold the network's billing (securityNoticeBillingRecipientsInTx): a
+// personal network's owner, a team's Owners and Billing admins. `read` runs
 // under the notice's savepoint, after the change, and returns nothing when the
-// wallets did not change.
+// wallets did not change. Every payout and subnet wallet notice is owed here.
 func oweSecurityWalletNoticeInTx(
 	ctx context.Context,
 	tx server.PgTx,
@@ -756,7 +852,7 @@ func oweSecurityWalletNoticeInTx(
 		if len(changes) == 0 {
 			return ""
 		}
-		recipients := securityNoticeRecipientsInTx(ctx, tx, networkId)
+		recipients := securityNoticeBillingRecipientsInTx(ctx, tx, networkId)
 		return oweSecurityNoticeInTx(ctx, tx, networkId, recipients, SecurityPayoutWalletTemplateName, func(templateJson string) (string, error) {
 			return applySecurityNoticeChanges(templateJson, (*SecurityWalletNotice).add, changes)
 		})

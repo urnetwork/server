@@ -84,57 +84,16 @@ func (self *SecurityNetworkAuthorityNotice) add(change *SecurityNetworkAuthority
 }
 
 // The sign-in email addresses of the network's Owners and Admins, read in tx:
-// its owner's in a personal network, each Owner's and Admin's member user's in
-// a team.
+// its owner's in a personal network, each standing, not pending Owner's and
+// Admin's member user's in a team (securityNoticeMemberRecipientsInTx).
 func securityNoticeAuthorityRecipientsInTx(ctx context.Context, tx server.PgTx, networkId server.Id) []string {
-	team := false
-	if server.SidecarMg6Linked() {
-		server.Raise(tx.QueryRow(
-			ctx,
-			`SELECT EXISTS (SELECT 1 FROM network_team WHERE network_id = $1)`,
-			networkId,
-		).Scan(&team))
-	}
-	if !team {
+	if !securityNoticeTeamInTx(ctx, tx, networkId) {
 		return securityNoticeRecipientsInTx(ctx, tx, networkId)
 	}
-	userAuths := []string{}
-	result, err := tx.Query(
-		ctx,
-		`
-			WITH admins AS (
-				SELECT user_id
-				FROM network_member
-				WHERE network_id = $1 AND NOT pending AND role IN ($2, $3)
-			)
-			SELECT network_user.user_auth
-			FROM admins
-			INNER JOIN network_user ON network_user.user_id = admins.user_id
-			WHERE network_user.user_auth IS NOT NULL
-			UNION ALL
-			SELECT network_user_auth_password.user_auth
-			FROM admins
-			INNER JOIN network_user_auth_password ON network_user_auth_password.user_id = admins.user_id
-			WHERE
-				network_user_auth_password.auth_type = 'email' AND
-				network_user_auth_password.verified
-			UNION ALL
-			SELECT network_user_auth_sso.user_auth
-			FROM admins
-			INNER JOIN network_user_auth_sso ON network_user_auth_sso.user_id = admins.user_id
-		`,
-		networkId,
-		string(NetworkMemberRoleOwner),
-		string(NetworkMemberRoleAdmin),
-	)
-	server.WithPgResult(result, err, func() {
-		for result.Next() {
-			var userAuth string
-			server.Raise(result.Scan(&userAuth))
-			userAuths = append(userAuths, userAuth)
-		}
+	return securityNoticeMemberRecipientsInTx(ctx, tx, networkId, []NetworkMemberRole{
+		NetworkMemberRoleOwner,
+		NetworkMemberRoleAdmin,
 	})
-	return securityNoticeEmails(userAuths)
 }
 
 // Owes the network authority notice for a change the caller's transaction
