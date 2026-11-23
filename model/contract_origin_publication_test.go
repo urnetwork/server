@@ -36,10 +36,13 @@ func TestContractOriginPublicationAllCreatorsAreCommitted(t *testing.T) {
 					func(context.Context, string) (contractOriginSubscription, error) {
 						return nil, errors.New("unused reader")
 					},
-					func(publishCtx context.Context, channel string, payload string) error {
+					func(publishCtx context.Context, publications []contractOriginPublication) error {
 						key := contractOriginPairHash(sourceId, destinationId)
 						var observedErr error
-						if payload != hex.EncodeToString(key[:]) || channel != contractOriginChannel(int(key[0])%contractOriginBucketCount) {
+						// one pipeline: the bucket channel's digest, then the pair channel's edge
+						if len(publications) != 2 ||
+							publications[0].payload != hex.EncodeToString(key[:]) || publications[0].channel != contractOriginChannel(int(key[0])%contractOriginBucketCount) ||
+							publications[1].payload != "" || publications[1].channel != contractOriginPairChannel(key) {
 							observedErr = errors.New("wrong ordered-pair event")
 						}
 						server.Db(publishCtx, func(conn server.PgConn) {
@@ -101,7 +104,7 @@ func TestContractOriginPublicationDoesNotEscapeFailedCommit(t *testing.T) {
 			func(context.Context, string) (contractOriginSubscription, error) {
 				return nil, errors.New("unused reader")
 			},
-			func(context.Context, string, string) error { return nil })
+			func(context.Context, []contractOriginPublication) error { return nil })
 		defer owner.Close()
 		before := testutil.ToFloat64(contractOriginNotificationCounter.WithLabelValues("enqueued"))
 		var recovered any
@@ -155,12 +158,55 @@ func TestContractOriginNotificationsRedisEvent(t *testing.T) {
 				t.Fatal("Redis subscription acknowledgement missing")
 			}
 		}
-		update := watch.Update()
+		update, _ := watch.Update()
 		notifyCommittedContractOrigin(WithContractOriginNotifications(ctx, owner), sourceId, destinationId)
 		select {
 		case <-update:
 		case <-ctx.Done():
 			t.Fatal("committed origin notification did not reach real Redis subscriber")
+		}
+	})
+}
+
+// The pair channel end to end on a real Redis: a watch that missed holds its
+// pair, whose subscription is acknowledged, and a committed origin's edge then
+// reaches the read armed after it on the pair's own channel.
+func TestContractOriginNotificationsRedisPairEvent(t *testing.T) {
+	(&server.TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		owner := NewContractOriginNotifications(ctx, DefaultContractOriginNotificationSettings())
+		defer owner.Close()
+		sourceId, destinationId := server.NewId(), server.NewId()
+		watch := owner.Watch(sourceId, destinationId)
+		defer watch.Close()
+		watch.Update()
+		registration, held := watch.Missed()
+		if !held {
+			t.Fatal("the missed pair was not held")
+		}
+		select {
+		case <-registration:
+		case <-ctx.Done():
+			t.Fatal("Redis pair subscription acknowledgement missing")
+		}
+		update, fenced := watch.Update()
+		if !fenced {
+			t.Fatal("a read armed after the pair's acknowledgement was not fenced")
+		}
+		before := testutil.ToFloat64(contractOriginNotificationCounter.WithLabelValues("v2_received"))
+		notifyCommittedContractOrigin(WithContractOriginNotifications(ctx, owner), sourceId, destinationId)
+		select {
+		case <-update:
+		case <-ctx.Done():
+			t.Fatal("committed origin notification did not reach real Redis subscriber")
+		}
+		for testutil.ToFloat64(contractOriginNotificationCounter.WithLabelValues("v2_received")) == before {
+			select {
+			case <-ctx.Done():
+				t.Fatal("the pair channel's edge did not arrive")
+			case <-time.After(10 * time.Millisecond):
+			}
 		}
 	})
 }

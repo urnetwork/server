@@ -11,6 +11,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -27,14 +28,18 @@ type originRefusalTestEvent struct {
 }
 
 // One synthetic shard subscription socket, read by its owner's reader
-// goroutine. Pings are answered, so an idle socket stays live.
+// goroutine. Pings are answered, so an idle socket stays live. A pair channel
+// is acknowledged at once with the socket's shard channel count, as a node
+// does, and only a subscribed channel's edges are delivered.
 type originRefusalTestSocket struct {
 	channel   string
 	events    chan originRefusalTestEvent
 	closed    chan struct{}
 	closeOnce sync.Once
 	// the reader's own: the previous event's barrier
-	handled chan struct{}
+	handled      chan struct{}
+	stateLock    sync.Mutex
+	pairChannels map[string]bool
 }
 
 func (self *originRefusalTestSocket) ReceiveTimeout(ctx context.Context, timeout time.Duration) (any, error) {
@@ -55,8 +60,34 @@ func (self *originRefusalTestSocket) ReceiveTimeout(ctx context.Context, timeout
 	}
 }
 
-func (self *originRefusalTestSocket) SSubscribe(context.Context, ...string) error {
+func (self *originRefusalTestSocket) SSubscribe(_ context.Context, channels ...string) error {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	for _, channel := range channels {
+		if channel == self.channel {
+			continue
+		}
+		self.pairChannels[channel] = true
+		self.events <- originRefusalTestEvent{event: &redis.Subscription{Kind: "ssubscribe", Channel: channel, Count: 1 + len(self.pairChannels)}}
+	}
 	return nil
+}
+
+func (self *originRefusalTestSocket) SUnsubscribe(_ context.Context, channels ...string) error {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	for _, channel := range channels {
+		delete(self.pairChannels, channel)
+		self.events <- originRefusalTestEvent{event: &redis.Subscription{Kind: "sunsubscribe", Channel: channel, Count: 1 + len(self.pairChannels)}}
+	}
+	return nil
+}
+
+// Whether the node holds the channel for this socket.
+func (self *originRefusalTestSocket) subscribed(channel string) bool {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return channel == self.channel || self.pairChannels[channel]
 }
 
 func (self *originRefusalTestSocket) Ping(context.Context, ...string) error {
@@ -95,9 +126,10 @@ func newOriginRefusalTestSockets() *originRefusalTestSockets {
 
 func (self *originRefusalTestSockets) open(_ context.Context, channel string) (server.RedisShardSubscription, error) {
 	socket := &originRefusalTestSocket{
-		channel: channel,
-		events:  make(chan originRefusalTestEvent, 64),
-		closed:  make(chan struct{}),
+		channel:      channel,
+		events:       make(chan originRefusalTestEvent, 64),
+		closed:       make(chan struct{}),
+		pairChannels: map[string]bool{},
 	}
 	func() {
 		self.stateLock.Lock()
@@ -108,10 +140,18 @@ func (self *originRefusalTestSockets) open(_ context.Context, channel string) (s
 	return socket, nil
 }
 
+// The live socket subscribed to the channel: its bucket's own, or one of the
+// bucket's pair channels, which share the bucket's hash tag.
 func (self *originRefusalTestSockets) socket(channel string) *originRefusalTestSocket {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
-	return self.channelSockets[channel]
+	for _, socket := range self.channelSockets {
+		tag := socket.channel[strings.Index(socket.channel, "{"):]
+		if strings.Contains(channel, tag) && socket.subscribed(channel) {
+			return socket
+		}
+	}
+	return nil
 }
 
 // The deadline only bounds a broken fixture.
@@ -140,11 +180,10 @@ func TestCreateContractCompanionRefusalKeepsItsWatchUntilRecorded(t *testing.T) 
 		publishedEdges := make(chan chan struct{}, 64)
 		owner := model.Testing_NewContractOriginNotifications(ctx, model.DefaultContractOriginNotificationSettings(), sockets.open,
 			func(_ context.Context, channel string, payload string) error {
-				socket := sockets.socket(channel)
-				if socket == nil {
-					return errors.New("no synthetic subscriber for the channel")
+				// as SPUBLISH, nothing reaches a channel nobody subscribed to
+				if socket := sockets.socket(channel); socket != nil {
+					publishedEdges <- socket.feed(&redis.Message{Channel: channel, Payload: payload})
 				}
-				publishedEdges <- socket.feed(&redis.Message{Channel: channel, Payload: payload})
 				return nil
 			})
 		defer owner.Close()

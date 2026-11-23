@@ -24,10 +24,14 @@ type testContractOriginSubscription struct {
 	closed       chan struct{}
 	closeOnce    sync.Once
 	closeBarrier <-chan struct{}
+	// the bucket channel it was opened for, and the pair channels it carries
+	stateLock    sync.Mutex
+	channel      string
+	pairChannels map[string]bool
 }
 
 func newTestContractOriginSubscription() *testContractOriginSubscription {
-	return &testContractOriginSubscription{events: make(chan any, 64), closed: make(chan struct{})}
+	return &testContractOriginSubscription{events: make(chan any, 64), closed: make(chan struct{}), pairChannels: map[string]bool{}}
 }
 
 func (self *testContractOriginSubscription) ReceiveTimeout(ctx context.Context, _ time.Duration) (any, error) {
@@ -46,9 +50,31 @@ func (self *testContractOriginSubscription) ReceiveTimeout(ctx context.Context, 
 
 func (self *testContractOriginSubscription) Ping(context.Context, ...string) error { return nil }
 
-// A re-assertion is never acknowledged here, so an unexpected one would
-// replace the socket.
-func (self *testContractOriginSubscription) SSubscribe(context.Context, ...string) error { return nil }
+// A re-assertion of the bucket channel is never acknowledged here, so an
+// unexpected one would replace the socket. A pair channel is acknowledged at
+// once with the socket's shard channel count, as a node does.
+func (self *testContractOriginSubscription) SSubscribe(_ context.Context, channels ...string) error {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	for _, channel := range channels {
+		if channel == self.channel {
+			continue
+		}
+		self.pairChannels[channel] = true
+		self.events <- &redis.Subscription{Kind: "ssubscribe", Channel: channel, Count: 1 + len(self.pairChannels)}
+	}
+	return nil
+}
+
+func (self *testContractOriginSubscription) SUnsubscribe(_ context.Context, channels ...string) error {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	for _, channel := range channels {
+		delete(self.pairChannels, channel)
+		self.events <- &redis.Subscription{Kind: "sunsubscribe", Channel: channel, Count: 1 + len(self.pairChannels)}
+	}
+	return nil
+}
 
 func (self *testContractOriginSubscription) Close() error {
 	self.closeOnce.Do(func() {
@@ -68,9 +94,14 @@ type testContractOriginOpen struct {
 func testContractOriginOwner(ctx context.Context, settings ContractOriginNotificationSettings, opened chan<- testContractOriginOpen) *ContractOriginNotifications {
 	return newContractOriginNotifications(ctx, settings, func(_ context.Context, channel string) (contractOriginSubscription, error) {
 		subscription := newTestContractOriginSubscription()
-		opened <- testContractOriginOpen{channel: channel, subscription: subscription}
+		subscription.channel = channel
+		// a test takes the sockets it acts on; later reopens are not waited on
+		select {
+		case opened <- testContractOriginOpen{channel: channel, subscription: subscription}:
+		default:
+		}
 		return subscription, nil
-	}, func(context.Context, string, string) error { return nil })
+	}, func(context.Context, []contractOriginPublication) error { return nil })
 }
 
 func TestContractOriginNotificationsFanOutAndRefcount(t *testing.T) {
@@ -81,7 +112,8 @@ func TestContractOriginNotificationsFanOutAndRefcount(t *testing.T) {
 		sourceId, destinationId := server.NewId(), server.NewId()
 		first, second := owner.Watch(sourceId, destinationId), owner.Watch(sourceId, destinationId)
 		defer second.Close()
-		firstUpdate, secondUpdate := first.Update(), second.Update()
+		firstUpdate, _ := first.Update()
+		secondUpdate, _ := second.Update()
 		synctest.Wait()
 		connection := <-opened
 		connection.subscription.events <- &redis.Subscription{Kind: "ssubscribe", Channel: connection.channel}
@@ -94,7 +126,7 @@ func TestContractOriginNotificationsFanOutAndRefcount(t *testing.T) {
 			}
 		}
 		first.Close()
-		secondUpdate = second.Update()
+		secondUpdate, _ = second.Update()
 		key := contractOriginPairHash(sourceId, destinationId)
 		connection.subscription.events <- &redis.Message{Channel: connection.channel, Payload: hex.EncodeToString(key[:])}
 		synctest.Wait()
@@ -163,7 +195,7 @@ func TestContractOriginNotificationsRecoverLostEpochOnReconnect(t *testing.T) {
 		first := <-opened
 		first.subscription.events <- &redis.Subscription{Kind: "ssubscribe", Channel: first.channel}
 		synctest.Wait()
-		update := watch.Update()
+		update, _ := watch.Update()
 		first.subscription.events <- errors.New("synthetic connection lost")
 		synctest.Wait()
 		time.Sleep(time.Second)
@@ -210,15 +242,17 @@ func TestContractOriginNotificationsCloseJoinsOwnedReaders(t *testing.T) {
 
 func TestContractOriginNotificationsPublishQueueIsNonblockingAndOwned(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		settings := ContractOriginNotificationSettings{MaxWaiters: 1, PublishQueueSize: 1, PublishWorkers: 1}
+		settings := DefaultContractOriginNotificationSettings()
+		settings.MaxWaiters, settings.PublishQueueSize, settings.PublishWorkers = 1, 1, 1
 		entered := make(chan struct{})
 		var publishes atomic.Int32
 		owner := newContractOriginNotifications(t.Context(), settings,
 			func(context.Context, string) (contractOriginSubscription, error) { return nil, errors.New("unused") },
-			func(ctx context.Context, channel string, payload string) error {
+			func(ctx context.Context, publications []contractOriginPublication) error {
 				publishes.Add(1)
-				if len(payload) != 64 {
-					t.Errorf("unbounded/nonhashed payload length %d", len(payload))
+				// the bucket channel's hashed digest, and the pair channel's empty edge
+				if len(publications) != 2 || len(publications[0].payload) != 64 || publications[1].payload != "" {
+					t.Errorf("unbounded/nonhashed publications %+v", publications)
 				}
 				close(entered)
 				<-ctx.Done()
@@ -255,7 +289,7 @@ func TestContractOriginNotificationsSeparateOwnersAndDirections(t *testing.T) {
 		}
 		synctest.Wait()
 		connectionB := <-openedB
-		update := watchB.Update()
+		update, _ := watchB.Update()
 		first.Close()
 		connectionB.subscription.events <- &redis.Message{Channel: connectionB.channel, Payload: hex.EncodeToString(forward[:])}
 		synctest.Wait()
@@ -276,7 +310,7 @@ func TestContractOriginNotificationsRejectUnrelatedAndMalformedPayloads(t *testi
 		defer watch.Close()
 		synctest.Wait()
 		connection := <-opened
-		update := watch.Update()
+		update, _ := watch.Update()
 		connection.subscription.events <- &redis.Message{Channel: connection.channel, Payload: "synthetic-invalid-payload"}
 		key := contractOriginPairHash(server.NewId(), server.NewId())
 		connection.subscription.events <- &redis.Message{Channel: connection.channel, Payload: hex.EncodeToString(key[:])}
@@ -299,7 +333,7 @@ func TestContractOriginNotificationsCommitOutlivesRequestCancellation(t *testing
 			func(context.Context, string) (contractOriginSubscription, error) {
 				return nil, errors.New("unused reader")
 			},
-			func(ctx context.Context, _ string, _ string) error { published <- ctx.Err(); return nil })
+			func(ctx context.Context, _ []contractOriginPublication) error { published <- ctx.Err(); return nil })
 		defer owner.Close()
 		ctx, cancel := context.WithCancel(WithContractOriginNotifications(context.Background(), owner))
 		cancel()
@@ -402,13 +436,18 @@ func TestContractOriginNotificationsCountWhatEachEdgeFinds(t *testing.T) {
 				t.Fatalf("%s: counted %+v, want %+v", check.name, got, check.want)
 			}
 		}
-		// an acknowledgement nothing asked for resyncs the bucket
+		// a lost socket's replacement resyncs the bucket
 		resubscribedBefore := testutil.ToFloat64(contractOriginNotificationCounter.WithLabelValues("reconnected"))
 		before := testContractOriginMatchCounts()
-		connection.subscription.events <- &redis.Subscription{Kind: "ssubscribe", Channel: connection.channel}
+		connection.subscription.events <- errors.New("synthetic connection lost")
+		synctest.Wait()
+		time.Sleep(settings.SubscriptionReconnectTimeout)
+		synctest.Wait()
+		connection = <-opened
+		connection.subscription.events <- &redis.Subscription{Kind: "ssubscribe", Channel: connection.channel, Count: 1}
 		synctest.Wait()
 		if testutil.ToFloat64(contractOriginNotificationCounter.WithLabelValues("reconnected")) != resubscribedBefore+1 {
-			t.Fatal("the fixture's acknowledgement did not resync the bucket")
+			t.Fatal("the fixture's replacement did not resync the bucket")
 		}
 		if after := testContractOriginMatchCounts(); after != before {
 			t.Fatalf("a resync counted %+v, then %+v", before, after)

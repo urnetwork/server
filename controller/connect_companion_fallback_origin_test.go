@@ -20,7 +20,7 @@ import (
 // Sums authoritative origin lookups across every wake source.
 func companionOriginLookupTotal() float64 {
 	total := 0.0
-	for _, source := range []string{"initial", "event", "fallback", "deadline"} {
+	for _, source := range []string{"initial", "event", "fallback", "deadline", "registration"} {
 		total += testutil.ToFloat64(companionOriginLookupCounter.WithLabelValues(source))
 	}
 	return total

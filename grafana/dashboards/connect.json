@@ -1665,8 +1665,8 @@
         {
             "id": 46,
             "type": "timeseries",
-            "title": "contract-origin notifications / s",
-            "description": "Advisory notification operations by event class. A drop requires the authoritative timed recheck.",
+            "title": "contract-origin notifications / s, and held pairs",
+            "description": "Advisory notification operations by event class. A drop requires the authoritative timed recheck. Received edges also count what they found: matched_waiter, matched_refusal, unmatched. Pair channels (CPUOPT7-ORIGIN-DELIVERY): subscribed_pair, pair_acknowledged, pair_released, subscribe_failed, pair_cap, bucket_closed, and the shadow pair v1_for_acknowledged_pair and v2_received, equal once every publisher runs Build A. Held pairs (a gauge, not a rate): pairs the owners hold past a miss, each subscribed on its own channel.",
             "gridPos": {
                 "h": 8,
                 "w": 12,
@@ -1700,6 +1700,11 @@
                     "refId": "A",
                     "expr": "sum by (service, event) (rate(urnetwork_contract_origin_notifications_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))",
                     "legendFormat": "{{service}} {{event}}"
+                },
+                {
+                    "refId": "B",
+                    "expr": "sum by (service) (urnetwork_contract_origin_held_pairs{env=\"$env\",instance!=\"\"})",
+                    "legendFormat": "held pairs {{service}}"
                 }
             ]
         },
