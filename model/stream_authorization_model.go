@@ -4,14 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
 	"time"
 )
 
+// The text is built without fmt: every stream authorization builds it, and
+// fmt boxed the id and ran its printer for it (CPUOPT7.md §12).
 func streamAuthorityKey(streamId server.Id, suffix string) string {
-	return fmt.Sprintf("{sa_%s}%s", streamId, suffix)
+	return "{sa_" + streamId.String() + "}" + suffix
 }
 
 type streamEndpointAuthorization struct {

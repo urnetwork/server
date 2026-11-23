@@ -1,6 +1,7 @@
 package work
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/urnetwork/glog"
@@ -56,6 +57,11 @@ func scheduleRemoveGoneStClientKeyHistory(
 	)
 }
 
+// A run whose delete batch or discovery page ran into its bound and rolled
+// back fails, so the task reports the failure (until 2026-11-23 such runs
+// reported success, and the retention deleted nothing for two days unseen).
+// Its retry resumes from the cursor of the batches that committed, after the
+// task's ordinary error backoff.
 func RemoveGoneStClientKeyHistory(
 	removeGoneStClientKeyHistory *RemoveGoneStClientKeyHistoryArgs,
 	clientSession *session.ClientSession,
@@ -66,17 +72,29 @@ func RemoveGoneStClientKeyHistory(
 		removeGoneStClientKeyHistory.Cursor,
 		model.DefaultStClientKeyHistoryRetentionSettings(),
 	)
-	if 0 < report.ExaminedRecordCount || 0 < report.DiscoveredClientCount || report.DeleteStop == model.StClientKeyHistoryRetentionStopBatchBound || report.DiscoverBounded {
+	if 0 < report.ExaminedRecordCount || 0 < report.DiscoveredClientCount || report.Bounded() || report.DeletePassRestarted {
 		glog.Infof(
-			"[ckh]removed the key history of %d clients gone over %s (%d registrations) from %d records read, recorded %d more as gone, deletes ended %s, discovery bounded %t\n",
+			"[ckh]removed the key history of %d clients gone over %s (%d registrations) from %d records read, recorded %d more as gone, deletes ended %s, pass restarted %t, %d records due (at most %d counted), discovery bounded %t\n",
 			report.RemovedClientCount,
 			report.Horizon,
 			report.RemovedHistoryCount,
 			report.ExaminedRecordCount,
 			report.DiscoveredClientCount,
 			report.DeleteStop,
+			report.DeletePassRestarted,
+			report.DueRecordCount,
+			model.DefaultStClientKeyHistoryRetentionSettings().DueProbeLimit,
 			report.DiscoverBounded,
 		)
+	}
+	if report.Bounded() {
+		err := fmt.Errorf(
+			"key history retention: a batch ran into its bound and rolled back (deletes ended %s, discovery bounded %t); %d registrations removed before it",
+			report.DeleteStop,
+			report.DiscoverBounded,
+			report.RemovedHistoryCount,
+		)
+		return nil, task.WithRetryArgs(err, &RemoveGoneStClientKeyHistoryArgs{Cursor: cursor})
 	}
 	return &RemoveGoneStClientKeyHistoryResult{
 		Cursor: cursor,

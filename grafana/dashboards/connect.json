@@ -4488,7 +4488,7 @@
         {
             "id": 115,
             "type": "row",
-            "title": "runtime timer changes (CPUOPT7 §11, timer_census.go)",
+            "title": "record formats: resident records and exchange headers (CPUOPT7 §12)",
             "collapsed": false,
             "gridPos": {
                 "h": 1,
@@ -4501,13 +4501,118 @@
         {
             "id": 116,
             "type": "timeseries",
+            "title": "resident record decodes / s by service, format and result; records written / s by format",
+            "description": "Every read of a client's resident record (ncr_), in every service that reads it (connect, api, taskworker), by record format, gob or typed (CPUOPT7 §12), and result; and the records connect's nominations write, by format. Typed records are written only once typed_resident_records is on in connect.yml, which waits until every reader runs a build that reads them; a reader from before treats a typed record as corrupt and replaces it. A decode error is a record this process could not read: none is expected. Before any reader rolls back below that build, the flag goes off, connect rolls, and typed decodes read zero for the resident ttl (the rollback floor). Every process from that build exports these series, at zero until it reads or writes a record; a process from before has none.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 420
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "ops",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (service, format, result) (rate(urnetwork_network_client_resident_decodes_total{env=\"$env\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "read {{service}} {{format}} {{result}}"
+                },
+                {
+                    "refId": "B",
+                    "expr": "sum by (format) (rate(urnetwork_network_client_resident_encodes_total{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "written {{format}}"
+                }
+            ]
+        },
+        {
+            "id": 117,
+            "type": "timeseries",
+            "title": "exchange header decodes / s by format and result; headers written / s by format",
+            "description": "The header of each exchange connection, which its dialer writes and its acceptor reads and echoes in its own format, by format, gob or typed (CPUOPT7 §12). Only connect reads it. Typed headers are written only once typed_exchange_headers is on in connect.yml, which waits until every connect process runs a build that reads them; a connect from before fails a typed header and the connection with it. A decode error is a header this process could not read: none is expected. Before connect rolls back below that build, the flag goes off and connect rolls (the rollback floor).",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 420
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "ops",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (format, result) (rate(urnetwork_connect_exchange_header_decodes_total{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "read {{format}} {{result}}"
+                },
+                {
+                    "refId": "B",
+                    "expr": "sum by (format) (rate(urnetwork_connect_exchange_header_encodes_total{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+                    "legendFormat": "written {{format}}"
+                }
+            ]
+        },
+        {
+            "id": 118,
+            "type": "row",
+            "title": "runtime timer changes (CPUOPT7 §11, timer_census.go)",
+            "collapsed": false,
+            "gridPos": {
+                "h": 1,
+                "w": 24,
+                "x": 0,
+                "y": 428
+            },
+            "panels": []
+        },
+        {
+            "id": 119,
+            "type": "timeseries",
             "title": "timer changes / s by block and horizon",
             "description": "Sampled one call in 64 and counted as 64 (timer_census.go). A call that may move a Go runtime timer in a P's heap, a Reset or a socket deadline, is counted at its site in the bucket of how far ahead the timer is then due. A P walks its whole timer heap (runtime.(*timers).adjust) when the earliest moved deadline on it arrives, so the walk rate is set by the frequent changes with the shortest horizons, not by their CPU: about 75 walks a second a P, the g2 excess of 11-23, needs a change due about every 13 ms on each of a process's 20 Ps. Compare g2 and g4 with g1 and g3 (CPUOPT7 §11). Stops and deadline clears, which leave zombies and set off no walk, are left out here.",
             "gridPos": {
                 "h": 8,
                 "w": 12,
                 "x": 0,
-                "y": 420
+                "y": 429
             },
             "datasource": {
                 "type": "prometheus",
@@ -4540,7 +4645,7 @@
             ]
         },
         {
-            "id": 117,
+            "id": 120,
             "type": "timeseries",
             "title": "timer changes due within 100 ms / s by block and site",
             "description": "Sampled one call in 64 and counted as 64 (timer_census.go). A call that may move a Go runtime timer in a P's heap, a Reset or a socket deadline, is counted at its site in the bucket of how far ahead the timer is then due. A P walks its whole timer heap (runtime.(*timers).adjust) when the earliest moved deadline on it arrives, so the walk rate is set by the frequent changes with the shortest horizons, not by their CPU: about 75 walks a second a P, the g2 excess of 11-23, needs a change due about every 13 ms on each of a process's 20 Ps. Compare g2 and g4 with g1 and g3 (CPUOPT7 §11). Only the buckets under 100 ms (lt_1ms, 1ms_10ms, 10ms_100ms): the candidates for the trigger. The front_* sites count every deadline on a public TCP socket, the h1 transport's (h1_*) among them; client_* are the connect library's waits in residents' clients, quic_* and http3_* quic-go's.",
@@ -4548,7 +4653,7 @@
                 "h": 8,
                 "w": 12,
                 "x": 12,
-                "y": 420
+                "y": 429
             },
             "datasource": {
                 "type": "prometheus",
@@ -4581,7 +4686,7 @@
             ]
         },
         {
-            "id": 118,
+            "id": 121,
             "type": "timeseries",
             "title": "timer changes / s by site, every horizon",
             "description": "Sampled one call in 64 and counted as 64 (timer_census.go). A call that may move a Go runtime timer in a P's heap, a Reset or a socket deadline, is counted at its site in the bucket of how far ahead the timer is then due. A P walks its whole timer heap (runtime.(*timers).adjust) when the earliest moved deadline on it arrives, so the walk rate is set by the frequent changes with the shortest horizons, not by their CPU: about 75 walks a second a P, the g2 excess of 11-23, needs a change due about every 13 ms on each of a process's 20 Ps. Compare g2 and g4 with g1 and g3 (CPUOPT7 §11).",
@@ -4589,7 +4694,7 @@
                 "h": 8,
                 "w": 12,
                 "x": 0,
-                "y": 428
+                "y": 437
             },
             "datasource": {
                 "type": "prometheus",
@@ -4622,7 +4727,7 @@
             ]
         },
         {
-            "id": 119,
+            "id": 122,
             "type": "timeseries",
             "title": "timer stops and deadline clears / s by site",
             "description": "A stop, a deadline cleared, or a deadline set at or before now leaves a zombie in a P's heap, which a walk or the heap's head removes; it sets off no walk itself, but a socket deadline set again while the zombie is still there is a move. Sampled one call in 64 and counted as 64 (timer_census.go).",
@@ -4630,7 +4735,7 @@
                 "h": 8,
                 "w": 12,
                 "x": 12,
-                "y": 428
+                "y": 437
             },
             "datasource": {
                 "type": "prometheus",

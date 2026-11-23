@@ -74,6 +74,9 @@ func exchangeSettingsForRun(options RunOptions) *ExchangeSettings {
 	// (client_recycle.go) on every block, with no runtime control; alt's
 	// exchange keeps the ceiling off.
 	settings.EnableStuckProviderRecycle = true
+	// The formats of the records it writes, from connect.yml: gob until the
+	// owner's config release turns each on (CPUOPT7.md §12).
+	settings.ExchangeRecordFormatSettings = *exchangeRecordFormatSettingsFromConfig()
 	if options.MemoryOwnerLedger {
 		settings.MemoryOwnerLedger = &connectcore.TransferMemoryOwnerLedger{}
 		settings.payloadOwnerLedger = &residentPayloadLedger{}

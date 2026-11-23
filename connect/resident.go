@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"encoding/binary"
-	"encoding/gob"
 	"errors"
 	"fmt"
 	"io"
@@ -19,7 +18,6 @@ import (
 
 	// "errors"
 	// mathrand "math/rand/v2"
-	"bytes"
 	cryptorand "crypto/rand"
 	// "slices"
 
@@ -650,6 +648,8 @@ type ExchangeSettings struct {
 	// the process's census of its runtime timer changes (timer_census.go),
 	// which the connect service starts with its exchange
 	TimerCensus server.TimerCensusSettings
+
+	ExchangeRecordFormatSettings
 }
 
 // Reports one exchange writer ping timer arm to a test.
@@ -779,6 +779,8 @@ func DefaultExchangeSettingsWithBufferSize(bufferSize int) *ExchangeSettings {
 		ExchangeStuckProviderRecycleSettings: *DefaultExchangeStuckProviderRecycleSettings(),
 
 		TimerCensus: *server.DefaultTimerCensusSettings(),
+
+		ExchangeRecordFormatSettings: *DefaultExchangeRecordFormatSettings(),
 	}
 }
 
@@ -1295,11 +1297,12 @@ func (self *Exchange) nominateLocalResident(
 	// Cleanup also covers an ambiguous canceled Redis command whose write may
 	// already have succeeded. Generation comparison preserves replacements.
 	abandonedNomination = nomination
-	nominated := model.NominateResident(
+	nominated := model.NominateResidentWithFormat(
 		admissionCtx,
 		residentIdToReplace,
 		nomination,
 		self.settings.ExchangeResidentTtl,
+		self.settings.residentRecordFormat(),
 	)
 	if !nominated {
 		if admissionCtx.Err() == nil {
@@ -2852,11 +2855,10 @@ func (self *ExchangeBuffer) connWriter(conn net.Conn) io.Writer {
 	return &self.countingWriter
 }
 
+// Writes the header in the format of the buffer's settings
+// (TypedExchangeHeaders, exchange_header_codec.go).
 func (self *ExchangeBuffer) WriteHeader(ctx context.Context, conn net.Conn, header *ExchangeHeader) error {
-	b := bytes.NewBuffer(nil)
-	e := gob.NewEncoder(b)
-	e.Encode(header)
-	headerBytes := b.Bytes()
+	headerBytes := encodeExchangeHeader(self.settings.TypedExchangeHeaders, header)
 
 	if err := conn.SetWriteDeadline(time.Now().Add(self.settings.ExchangeWriteHeaderTimeout)); err != nil {
 		return err
@@ -2873,6 +2875,7 @@ func (self *ExchangeBuffer) WriteHeader(ctx context.Context, conn net.Conn, head
 	return nil
 }
 
+// Reads a header in either format (exchange_header_codec.go).
 func (self *ExchangeBuffer) ReadHeader(ctx context.Context, conn net.Conn) (*ExchangeHeader, error) {
 	if err := conn.SetReadDeadline(time.Now().Add(self.settings.ExchangeReadHeaderTimeout)); err != nil {
 		return nil, err
@@ -2884,11 +2887,7 @@ func (self *ExchangeBuffer) ReadHeader(ctx context.Context, conn net.Conn) (*Exc
 	}
 	defer connect.MessagePoolReturn(headerBytes)
 
-	var header ExchangeHeader
-
-	b := bytes.NewBuffer(headerBytes)
-	e := gob.NewDecoder(b)
-	err = e.Decode(&header)
+	header, err := decodeExchangeHeader(headerBytes)
 	// an accepted connection's buffer learns its operation from the header
 	if err == nil && self.ioOp == exchangeIOOpUnknown {
 		self.setIOOp(header.Op)
@@ -2897,7 +2896,7 @@ func (self *ExchangeBuffer) ReadHeader(ctx context.Context, conn net.Conn) (*Exc
 	if err != nil {
 		return nil, err
 	}
-	return &header, nil
+	return header, nil
 }
 
 // FIXME resident transport can have write backpressure timeout
