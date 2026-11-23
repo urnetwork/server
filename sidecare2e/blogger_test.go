@@ -65,6 +65,9 @@
 //     (sidecar de3dec40, b0ab56a9, server 02b4eab04 to e40ff5925, QD-1174) gives each edge client the connect identity
 //     it had in every earlier process of its slot, derived from the edge bearer
 //
+// On both fixes, e2e-headers-final's run passed the case and its sub-case (2026-11-22, 109 s and 10 s, server
+// e4a38cd64 on sidecar c88a64af).
+//
 // Each phase has its bound and dumps the world's and the blogs' progress when it stalls; the case has the conventions'
 // 10 minutes. Run it through the build's wrapper: -tags 'sidecar_e2e sidecar_pending sidecar_localstack'.
 

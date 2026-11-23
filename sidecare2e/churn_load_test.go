@@ -136,9 +136,9 @@
 //     internet sender's or a same-network send, before any chaos and after an api restart, answered delivered and
 //     never listed: deposits pushed on a state two bases behind the group's writer, whose own ACL saves landed those
 //     bases, judged at a pin its log no longer retained), which mail-group-ingest-loss classes at the installed state
-//     (sidecar 840e3738 to abfab622, QD-1196). A group repo's ingest still waits for the mail component's pass, 2 s in
-//     this world, rather than its hint; mail-group-hint-watch, running in the mail lane as this refresh was made, has
-//     it watch the hints
+//     (sidecar 840e3738 to abfab622, QD-1196). A group repo's ingest then still waited for the mail component's pass,
+//     2 s in this world, rather than its hint, until mail-group-hint-watch (sidecar 23f898c3 to a30407d9) had each
+//     group repo's hints watched
 //   - an evs writer's second write of a path refused 409 PATH_CONFLICT 48 ms after its first was answered, its plan
 //     read on evs's cache before its own push reached it (evs-write-update-stale-cache, sidecar af2e0136, 52848695);
 //     a plain read right after a device's own push sees that push too since evs-read-own-writes (sidecar 64074a84 to
@@ -151,6 +151,10 @@
 //     spends each object once the store shows its create took effect, and the case passed on it (its track's run,
 //     2026-11-22, 283 s). Its report names the same spend before a PUT in rev/'s store and the abuse holds' store,
 //     which api-budget-spend-on-create, queued, fixes
+//
+// On every fix, e2e-headers-final's run passed (2026-11-23, 276 s, server 9d7022daa on sidecar c88a64af), api's P0
+// exactly the price of the 89 log objects and 4 rev/ objects it wrote, and passed again once mail-group-hint-watch
+// had landed (239 s, server 34d3472f2 on sidecar a30407d9), api's P0 exactly that of its 110 log and 4 rev/ objects.
 //
 // In two of e2e-control-plane-verify's runs api restarted after bases a later device signed, the team's second Owner
 // device's in both and b's second, third and fourth devices' in one, and every network loaded at api's gate and

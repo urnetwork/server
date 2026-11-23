@@ -141,6 +141,8 @@
 //     syncs a network's zone at api after each accepted entry and in an hourly pass, and holds the case to the edge's
 //     A and AAAA it had only logged; its three runs passed (2026-11-22, about 280 s each)
 //
+// On every fix, e2e-headers-final's run passed (2026-11-23, 279 s, server 9d7022daa on sidecar c88a64af).
+//
 // Each phase has PhaseTimeout and dumps the world's progress when it stalls. Run it through the build's wrapper:
 // -tags 'sidecar_e2e sidecar_pending sidecar_localstack'.
 

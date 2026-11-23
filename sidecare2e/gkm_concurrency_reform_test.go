@@ -53,7 +53,15 @@
 //     f4557d83, server 9ba67c4f1, a662f0499) lists each newly consented device in its owner's owner-bound repos
 //
 // With those fixes both pass: gkm-reader-key-upload-retry's last two runs passed the re-form case (2026-11-22), the
-// second device's case beside it in one.
+// second device's case beside it in one, and e2e-headers-final's run passed both (2026-11-22, the re-form case in 57 s
+// and the second device's in 15 s, server e4a38cd64 on sidecar c88a64af).
+//
+// The re-form case also showed a delay, within its bound: each member followed a re-form only at its next sync or
+// resync, 43 s here, since the claim of the new group's first generation hints the repo's readers on the new group
+// alone, which none of them held yet and each passed over. gkm-commit-hint-new-group (sidecar ecf26653 to a83454bd)
+// has a member look at its repos' forms at a commit hint naming a group it holds none of, and follow the re-form at
+// once; on it, e2e-headers-final's run passed both cases again (2026-11-23, the re-form case in 18 s and the second
+// device's in 11 s, server abf8f0e23 on sidecar a83454bd).
 //
 // Each runs inside the conventions' 10 minutes. Run them through the build's wrapper: -tags 'sidecar_e2e
 // sidecar_pending sidecar_localstack'.
