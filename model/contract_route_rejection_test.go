@@ -193,7 +193,7 @@ func TestContractRouteRejectionClosedFenceRefusesStaleVerdict(t *testing.T) {
 		defer watch.Close()
 		missing := ContractRouteRejection{Cause: ContractRouteMissingOrigin, ResolutionPath: "requested_companion"}
 
-		fence := watch.Update()
+		fence, _ := watch.Update()
 		key := contractOriginPairHash(destinationId, sourceId)
 		connection.subscription.events <- &redis.Message{Channel: connection.channel, Payload: hex.EncodeToString(key[:])}
 		synctest.Wait()
@@ -204,7 +204,8 @@ func TestContractRouteRejectionClosedFenceRefusesStaleVerdict(t *testing.T) {
 			t.Fatal("a fenced verdict was replayed")
 		}
 
-		if !owner.RecordRouteRejection(sourceId, destinationId, true, missing, watch.Update()) {
+		openFence, _ := watch.Update()
+		if !owner.RecordRouteRejection(sourceId, destinationId, true, missing, openFence) {
 			t.Fatal("a verdict with an open fence was not stored")
 		}
 	})

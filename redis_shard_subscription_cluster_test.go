@@ -32,7 +32,10 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-func TestRedisShardSubscriptionFollowsSlotMigration(t *testing.T) {
+// The disposable cluster WARP_TEST_REDIS_CLUSTER names, after its read-only
+// checks, installed as the process client until the test ends. Skips when no
+// cluster is named.
+func testRedisShardCluster(t *testing.T) (context.Context, *redis.ClusterClient) {
 	authority := os.Getenv("WARP_TEST_REDIS_CLUSTER")
 	if authority == "" {
 		t.Skip("WARP_TEST_REDIS_CLUSTER names no disposable local cluster")
@@ -46,13 +49,13 @@ func TestRedisShardSubscriptionFollowsSlotMigration(t *testing.T) {
 		t.Fatalf("WARP_TEST_REDIS_CLUSTER=%s is a production data tunnel port; use a disposable cluster on other ports", authority)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
+	t.Cleanup(cancel)
 
 	clusterClient := redis.NewClusterClient(&redis.ClusterOptions{
 		Addrs:  []string{authority},
 		Dialer: currentTestEnvDialGuard().wrapDial("redis", NewDialer(5*time.Second).DialContext),
 	})
-	defer clusterClient.Close()
+	t.Cleanup(func() { clusterClient.Close() })
 
 	// read-only checks that this is a disposable cluster
 	clusterInfo, err := clusterClient.ClusterInfo(ctx).Result()
@@ -92,6 +95,11 @@ func TestRedisShardSubscriptionFollowsSlotMigration(t *testing.T) {
 			safeClient.client = previousClient
 		})
 	}()
+	return ctx, clusterClient
+}
+
+func TestRedisShardSubscriptionFollowsSlotMigration(t *testing.T) {
+	ctx, clusterClient := testRedisShardCluster(t)
 
 	channel := fmt.Sprintf("test:shard-subscription:{%s}", NewId())
 	// a key in the channel's slot, so the move migrates data like a rebalance
@@ -191,6 +199,178 @@ func TestRedisShardSubscriptionFollowsSlotMigration(t *testing.T) {
 	}
 	if value, err := clusterClient.Get(ctx, key).Result(); err != nil || value != "synthetic" {
 		t.Fatalf("migrated key=%q err=%v", value, err)
+	}
+}
+
+// CPUOPT7-ORIGIN-DELIVERY.md §4.3 test 14. A consumer also carries channels of
+// the owned channel's slot on its socket, as the contract-origin owner carries
+// its held pairs' channels: it subscribes them on each socket the handler's
+// Socket hands it, in one SSUBSCRIBE, and judges their notices by the shard
+// channel count. The slot move ends them with the owned channel; the socket is
+// replaced, the channels resubscribe on the new owner, and an edge published
+// after the move reaches the consumer exactly once.
+func TestRedisShardSubscriptionFollowsSlotMigrationWithSlotChannels(t *testing.T) {
+	ctx, clusterClient := testRedisShardCluster(t)
+
+	id := NewId()
+	channel := fmt.Sprintf("test:shard-subscription:{%s}", id)
+	slotChannels := []string{
+		fmt.Sprintf("test:shard-subscription:{%s}:pair-a", id),
+		fmt.Sprintf("test:shard-subscription:{%s}:pair-b", id),
+	}
+	key := fmt.Sprintf("%s:key", channel)
+	if err := clusterClient.Set(ctx, key, "synthetic", time.Minute).Err(); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	defer clusterClient.Del(context.Background(), key)
+
+	type notice struct {
+		kind    string
+		channel string
+		count   int
+	}
+	subscribeds := make(chan bool, 16)
+	notices := make(chan notice, 64)
+	payloads := make(chan string, 16)
+	subscriptionCtx, subscriptionCancel := context.WithCancel(ctx)
+	returned := make(chan struct{})
+	acknowledgedChannels := map[string]bool{}
+	go func() {
+		defer close(returned)
+		RunRedisShardSubscription(subscriptionCtx, channel, DefaultRedisShardSubscriptionSettings(), DefaultRedisShardSubscriptionSource(), &RedisShardSubscriptionHandler{
+			Socket: func(subscription RedisShardSubscription) {
+				clear(acknowledgedChannels)
+				if err := subscription.SSubscribe(subscriptionCtx, slotChannels...); err != nil {
+					t.Errorf("slot channels: %v", err)
+				}
+			},
+			Subscribed: func(resubscribed bool) {
+				subscribeds <- resubscribed
+			},
+			Message: func(message RedisMessage) bool {
+				payloads <- message.Channel + "=" + message.Payload
+				return true
+			},
+			Notice: func(subscriptionNotice RedisSubscriptionNotice) error {
+				switch subscriptionNotice.Kind {
+				case "ssubscribe":
+					acknowledgedChannels[subscriptionNotice.Channel] = true
+				case "sunsubscribe":
+					// nothing here asks for one: the slot moved
+					delete(acknowledgedChannels, subscriptionNotice.Channel)
+					notices <- notice{kind: subscriptionNotice.Kind, channel: subscriptionNotice.Channel, count: subscriptionNotice.Count}
+					return fmt.Errorf("unrequested sunsubscribe of %s", subscriptionNotice.Channel)
+				}
+				notices <- notice{kind: subscriptionNotice.Kind, channel: subscriptionNotice.Channel, count: subscriptionNotice.Count}
+				if subscriptionNotice.Count != 1+len(acknowledgedChannels) {
+					return fmt.Errorf("shard channel count %d, want %d", subscriptionNotice.Count, 1+len(acknowledgedChannels))
+				}
+				return nil
+			},
+		})
+	}()
+	defer func() {
+		subscriptionCancel()
+		<-returned
+	}()
+
+	requireSubscribed := func(want bool, message string) {
+		select {
+		case resubscribed := <-subscribeds:
+			if resubscribed != want {
+				t.Fatalf("%s: resubscribed=%t, want %t", message, resubscribed, want)
+			}
+		case <-time.After(20 * time.Second):
+			t.Fatal(message)
+		}
+	}
+	requireSlotChannels := func(message string) {
+		for i := range slotChannels {
+			select {
+			case received := <-notices:
+				// one SSUBSCRIBE, acknowledged in order with the growing count
+				if received.kind != "ssubscribe" || received.channel != slotChannels[i] || received.count != 2+i {
+					t.Fatalf("%s: notice %+v, want ssubscribe %s with count %d", message, received, slotChannels[i], 2+i)
+				}
+			case <-time.After(20 * time.Second):
+				t.Fatalf("%s: slot channel %s was not acknowledged", message, slotChannels[i])
+			}
+		}
+	}
+	publish := func(publishChannel string, payload string) {
+		receiverCount, err := clusterClient.SPublish(ctx, publishChannel, payload).Result()
+		if err != nil {
+			t.Fatalf("spublish %s: %v", payload, err)
+		}
+		if receiverCount != 1 {
+			t.Fatalf("spublish %s reached %d subscribers, want 1", payload, receiverCount)
+		}
+		select {
+		case received := <-payloads:
+			if received != publishChannel+"="+payload {
+				t.Fatalf("received %s, want %s=%s", received, publishChannel, payload)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("no message %s", payload)
+		}
+	}
+
+	requireSubscribed(false, "no subscription acknowledged")
+	requireSlotChannels("first socket")
+	publish(slotChannels[1], "before-move")
+
+	slot, err := clusterClient.ClusterKeySlot(ctx, channel).Result()
+	if err != nil {
+		t.Fatalf("keyslot: %v", err)
+	}
+	sourceAddr, masterAddrs := testRedisSlotOwner(t, ctx, clusterClient, slot)
+	targetAddr := ""
+	for _, masterAddr := range masterAddrs {
+		if masterAddr != sourceAddr {
+			targetAddr = masterAddr
+			break
+		}
+	}
+	if targetAddr == "" {
+		t.Fatal("the cluster has a single master")
+	}
+	testRedisMoveSlot(t, ctx, slot, sourceAddr, targetAddr, masterAddrs)
+	defer testRedisMoveSlot(t, context.Background(), slot, targetAddr, sourceAddr, masterAddrs)
+
+	requireSubscribed(true, "the moved slot was never subscribed again")
+	// the old owner's sunsubscribes, if read before the socket closed, then
+	// the new owner's acknowledgements
+	deadline := time.After(20 * time.Second)
+	acknowledged := 0
+	for acknowledged < len(slotChannels) {
+		select {
+		case received := <-notices:
+			switch {
+			case received.kind == "sunsubscribe":
+			case received.kind == "ssubscribe" && received.channel == slotChannels[acknowledged] && received.count == 2+acknowledged:
+				acknowledged += 1
+			default:
+				t.Fatalf("after the move: notice %+v", received)
+			}
+		case <-deadline:
+			t.Fatalf("after the move: %d of %d slot channels acknowledged", acknowledged, len(slotChannels))
+		}
+	}
+	publish(slotChannels[0], "after-move")
+
+	target := redis.NewClient(&redis.Options{
+		Addr:   targetAddr,
+		Dialer: currentTestEnvDialGuard().wrapDial("redis", NewDialer(5*time.Second).DialContext),
+	})
+	defer target.Close()
+	subscriberCounts, err := target.PubSubShardNumSub(ctx, append([]string{channel}, slotChannels...)...).Result()
+	if err != nil {
+		t.Fatalf("shardnumsub: %v", err)
+	}
+	for _, subscribedChannel := range append([]string{channel}, slotChannels...) {
+		if subscriberCounts[subscribedChannel] != 1 {
+			t.Fatalf("new owner subscribers of %s=%d, want 1", subscribedChannel, subscriberCounts[subscribedChannel])
+		}
 	}
 }
 
