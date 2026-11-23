@@ -203,7 +203,8 @@ type ContractHorizonSettings struct {
 	TargetBatchDuration time.Duration
 	// Contracts read per second while the control sets no rate.
 	DefaultMaxRowsPerSecond float64
-	// The control's rate never exceeds this.
+	// The control's rates, the horizon's (maxRowsPerSecond) and the zero-byte
+	// pass's (zeroByteMaxRowsPerSecond), each never exceed this.
 	MaxRowsPerSecond float64
 	// Wall clock for one run, pacing included. Well under the task's MaxTime,
 	// so a run always returns its cursor.
@@ -255,8 +256,11 @@ func DefaultContractHorizonSettings() *ContractHorizonSettings {
 		// about 17M contracts a day: a cautious start while the effect on
 		// edge-2's I/O, WAL and vacuum is measured
 		DefaultMaxRowsPerSecond: 200,
-		// about 173M contracts a day, over twice the newest days' creation
-		MaxRowsPerSecond: 2000,
+		// about 432M contracts a day for each pass (owner, 2026-11-23: the
+		// zero-byte pass to 3,000 a second). It was 2000, about 173M a day,
+		// until 2026-11-23. Each pass reads at the rate its own control field
+		// sets, up to this.
+		MaxRowsPerSecond: 5000,
 		RunBudget:        10 * time.Minute,
 		StatementTimeout: 30 * time.Second,
 		LockTimeout:      2 * time.Second,
