@@ -19,6 +19,10 @@ import (
 //   - `maxClientsPerSecond`: gone records the deletes examine per second, and
 //     so the most gone clients they delete per second, at most the code's
 //     MaxDeleteClientsPerSecond; zero, or a value that does not parse, is off.
+//     A batch is paced by the records it read or the registrations it
+//     deleted, whichever is more, so the rate also bounds registrations
+//     deleted per second: the same for clients with one registration, slower
+//     in clients for clients with many.
 //   - `horizonDays`: the retention's horizon in whole days: history goes once
 //     this long has passed since its client went. It only narrows: it is never
 //     below the guard's floor (server.ClientKeyHistoryRetentionFloor, 7 days),
@@ -47,7 +51,8 @@ type StClientKeyHistoryRetentionControl struct {
 	// deletes run
 	On bool
 	// gone records examined, and so clients deleted, per second at most, while
-	// On
+	// On; a batch that deleted more registrations than it read records counts
+	// its registrations
 	MaxClientsPerSecond float64
 	// the retention's own horizon, from `horizonDays`; nil keeps the code's
 	// Retention (StClientKeyHistoryRetentionSettings.horizon)
