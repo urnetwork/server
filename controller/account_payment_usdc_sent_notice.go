@@ -1,10 +1,18 @@
-// `bringyourctl payouts usdc-sent-notice` (owner, 2026-10-28): emails the admin
-// of each listed payment's network that its USDC payout was sent and that USDC
-// payouts are ending. A payment counts as sent when its row is completed, or
-// when Circle reports its transfer COMPLETE before the status check records it.
-// Each payment's notice goes out once: the send journals a
-// usdc_payout_sent_notice event, keyed by an id derived from the payment, and a
-// rerun skips a payment that has one.
+// `bringyourctl payouts usdc-sent-notice` (owner, 2026-10-28): emails each
+// listed payment's network that its USDC payout was sent and that USDC payouts
+// are ending. A payment counts as sent when its row is completed, or when
+// Circle reports its transfer COMPLETE before the status check records it.
+//
+// A personal network's notice goes to its admin's login. A Team's admin is an
+// owner of record that never signs in (D-TEAM-2), so a Team's notice goes to
+// its billing recipients, its Owners and Billing admins at their sign-in email
+// addresses (model.GetTeamBillingRecipientsInTx, QD-1222), Owners first and
+// within the bound on the people a Team's mail reaches (QD-1218), one message
+// per address, and the report has a row for each address.
+//
+// Each notice goes out once: the send journals a usdc_payout_sent_notice
+// event, keyed by an id derived from the payment, or for a Team's address from
+// the payment and the address, and a rerun skips a notice that has one.
 package controller
 
 import (
@@ -28,6 +36,30 @@ const UsdcPayoutSentNoticeEventType = "usdc_payout_sent_notice"
 func usdcPayoutSentNoticeEventId(paymentId server.Id) server.Id {
 	sum := md5.Sum([]byte(UsdcPayoutSentNoticeEventType + "/" + paymentId.String()))
 	return server.RequireIdFromBytes(sum[:])
+}
+
+// A Team's notice to one of its addresses: the md5 of the prefix, the payment
+// id and the address (QD-1222), so each address is journaled once and an
+// address the Team gains after a run still gets its notice in the next. The
+// text hashed goes on past a personal network's, which ends at the payment id.
+func usdcPayoutSentTeamNoticeEventId(paymentId server.Id, userAuth string) server.Id {
+	sum := md5.Sum([]byte(UsdcPayoutSentNoticeEventType + "/" + paymentId.String() + "/" + userAuth))
+	return server.RequireIdFromBytes(sum[:])
+}
+
+// Tunables of the notice (QD-702), from defaultUsdcSentNoticeSettings.
+type usdcSentNoticeSettings struct {
+	// The characters of the wallet address the notice shows, from its end: 4,
+	// enough for a person to tell its own wallet from another, as the payout
+	// wallet's security notice shows. A shorter address is unreadable and
+	// holds the notice. Non-positive shows none of it.
+	WalletSuffixLength int
+}
+
+func defaultUsdcSentNoticeSettings() *usdcSentNoticeSettings {
+	return &usdcSentNoticeSettings{
+		WalletSuffixLength: 4,
+	}
 }
 
 // The notice that one of a network's last USDC payouts was sent. Transfer is
@@ -68,25 +100,37 @@ const (
 	usdcSentNoticeByCircle = "circle"
 )
 
-// The admin login the notice goes to.
+// The login the notice goes to.
 const (
 	usdcSentNoticeRecipientEmail = "email"
 	usdcSentNoticeRecipientPhone = "phone"
 	usdcSentNoticeRecipientNone  = "none"
 )
 
-// One listed payment, as the notice read it, and what the send did.
+// One listed payment's notice to one recipient, as the notice read it, and
+// what the send did. A Team's payment that is due has a row for each of its
+// billing recipients' addresses, in their order; any other payment has one.
 type PayoutUsdcSentNoticeRow struct {
 	PaymentId         server.Id       `json:"payment_id"`
 	NetworkId         server.Id       `json:"network_id"`
 	TransferNanoCents model.NanoCents `json:"transfer_nano_cents"`
 	SentBy            string          `json:"sent_by,omitempty"`
-	Recipient         string          `json:"recipient"`
-	Problem           string          `json:"problem,omitempty"`
-	AlreadyNotified   bool            `json:"already_notified,omitempty"`
-	Notified          bool            `json:"notified,omitempty"`
+	// the payment's network is a Team, whose notice goes to its billing
+	// recipients
+	Team bool `json:"team,omitempty"`
+	// a Team's address: its place among the Team's billing recipients'
+	// addresses, from 1, Owners first, and how many there are; both zero for
+	// any other row
+	RecipientNumber int    `json:"recipient_number,omitempty"`
+	RecipientCount  int    `json:"recipient_count,omitempty"`
+	Recipient       string `json:"recipient"`
+	Problem         string `json:"problem,omitempty"`
+	AlreadyNotified bool   `json:"already_notified,omitempty"`
+	Notified        bool   `json:"notified,omitempty"`
 
 	userAuth string
+	// the key the send is journaled by
+	eventId  server.Id
 	template *UsdcPayoutSentTemplate
 }
 
@@ -96,9 +140,9 @@ type PayoutUsdcSentNoticeReport struct {
 	Rows []*PayoutUsdcSentNoticeRow `json:"rows"`
 }
 
-// Reads each payment's notice and, with `send`, sends each one that is due.
-// A notice is due when its payment was sent, its admin signs in by email, and
-// no earlier run journaled it.
+// Reads each payment's notices and, with `send`, sends each one that is due.
+// A notice is due when its payment was sent, its recipient signs in by email,
+// and no earlier run journaled it.
 func PayoutsUsdcSentNotice(clientSession *session.ClientSession, paymentIds []server.Id, send bool) (*PayoutUsdcSentNoticeReport, error) {
 	ctx := clientSession.Ctx
 	report := &PayoutUsdcSentNoticeReport{
@@ -108,9 +152,12 @@ func PayoutsUsdcSentNotice(clientSession *session.ClientSession, paymentIds []se
 	if send {
 		report.Mode = "send"
 	}
-	reader := &usdcSentNoticeReader{ctx: ctx}
+	reader := &usdcSentNoticeReader{
+		ctx:      ctx,
+		settings: defaultUsdcSentNoticeSettings(),
+	}
 	for _, paymentId := range paymentIds {
-		report.Rows = append(report.Rows, reader.read(paymentId))
+		report.Rows = append(report.Rows, reader.read(paymentId)...)
 	}
 	if !send {
 		return report, nil
@@ -134,6 +181,7 @@ func PayoutsUsdcSentNotice(clientSession *session.ClientSession, paymentIds []se
 // whose row is not completed.
 type usdcSentNoticeReader struct {
 	ctx       context.Context
+	settings  *usdcSentNoticeSettings
 	circle    usdcSentNoticeCircle
 	circleErr error
 	circleSet bool
@@ -147,15 +195,19 @@ func (self *usdcSentNoticeReader) circleClient() (usdcSentNoticeCircle, error) {
 	return self.circle, self.circleErr
 }
 
-func (self *usdcSentNoticeReader) read(paymentId server.Id) *PayoutUsdcSentNoticeRow {
+// The payment's rows: for a Team's payment that is due, one for each of its
+// billing recipients' addresses; else one, which names what holds a held
+// notice.
+func (self *usdcSentNoticeReader) read(paymentId server.Id) []*PayoutUsdcSentNoticeRow {
 	row := &PayoutUsdcSentNoticeRow{
 		PaymentId: paymentId,
 		Recipient: usdcSentNoticeRecipientNone,
 	}
+	rows := []*PayoutUsdcSentNoticeRow{row}
 	payment, err := model.GetPayment(self.ctx, paymentId)
 	if err != nil || payment == nil {
 		row.Problem = "no such payment"
-		return row
+		return rows
 	}
 	row.NetworkId = payment.NetworkId
 	row.TransferNanoCents = payment.Payout - model.UsdToNanoCents(providerPaymentFeeUsd)
@@ -164,7 +216,7 @@ func (self *usdcSentNoticeReader) read(paymentId server.Id) *PayoutUsdcSentNotic
 	switch {
 	case payment.Canceled:
 		row.Problem = "the payment is canceled"
-		return row
+		return rows
 	case payment.Completed:
 		row.SentBy = usdcSentNoticeByRecord
 		template.SentTime = server.NowUtc()
@@ -178,43 +230,72 @@ func (self *usdcSentNoticeReader) read(paymentId server.Id) *PayoutUsdcSentNotic
 		transaction, problem := self.circleTransfer(*payment.PaymentRecord)
 		if problem != "" {
 			row.Problem = problem
-			return row
+			return rows
 		}
 		row.SentBy = usdcSentNoticeByCircle
 		template.SentTime = transaction.sentTime
 		template.TxHash = transaction.txHash
 	default:
 		row.Problem = "not sent: Circle holds no transfer for it"
-		return row
+		return rows
 	}
 
 	if payment.WalletId == nil {
 		row.Problem = "the payment has no wallet"
-		return row
+		return rows
 	}
 	wallet := model.GetAccountWallet(self.ctx, *payment.WalletId)
-	if wallet == nil || len(wallet.WalletAddress) < 4 {
+	walletSuffixLength := max(self.settings.WalletSuffixLength, 0)
+	if wallet == nil || wallet.WalletAddress == "" || len(wallet.WalletAddress) < walletSuffixLength {
 		row.Problem = "the payment's wallet is unreadable"
-		return row
+		return rows
 	}
-	template.WalletSuffix = wallet.WalletAddress[len(wallet.WalletAddress)-4:]
+	template.WalletSuffix = wallet.WalletAddress[len(wallet.WalletAddress)-walletSuffixLength:]
+
+	// a Team's billing recipients, or none for a personal network (QD-1222)
+	var teamUserAuths []string
+	var team bool
+	server.Tx(self.ctx, func(tx server.PgTx) {
+		teamUserAuths, team = model.GetTeamBillingRecipientsInTx(self.ctx, tx, []server.Id{payment.NetworkId})[payment.NetworkId]
+	})
+	if team {
+		row.Team = true
+		if len(teamUserAuths) == 0 {
+			row.Problem = "the Team has no Owner or Billing admin with an email login"
+			return rows
+		}
+		rows = []*PayoutUsdcSentNoticeRow{}
+		for i, userAuth := range teamUserAuths {
+			addressRow := *row
+			addressRow.RecipientNumber = i + 1
+			addressRow.RecipientCount = len(teamUserAuths)
+			addressRow.Recipient = usdcSentNoticeRecipientEmail
+			addressRow.userAuth = userAuth
+			addressRow.eventId = usdcPayoutSentTeamNoticeEventId(paymentId, userAuth)
+			addressRow.template = template
+			addressRow.AlreadyNotified = usdcPayoutSentNoticeJournaled(self.ctx, addressRow.eventId, paymentId)
+			rows = append(rows, &addressRow)
+		}
+		return rows
+	}
 
 	_, userAuth, ok := model.GetNetworkAdminUserAuth(self.ctx, payment.NetworkId)
 	switch {
 	case !ok || userAuth == "":
 		row.Problem = "the network's admin has no email login"
-		return row
+		return rows
 	case !strings.Contains(userAuth, "@"):
 		// SMS sends are blocked, and this notice has no SMS body
 		row.Recipient = usdcSentNoticeRecipientPhone
 		row.Problem = "the network's admin signs in by phone"
-		return row
+		return rows
 	}
 	row.Recipient = usdcSentNoticeRecipientEmail
 	row.userAuth = userAuth
+	row.eventId = usdcPayoutSentNoticeEventId(paymentId)
 	row.template = template
-	row.AlreadyNotified = usdcPayoutSentNoticeJournaled(self.ctx, paymentId)
-	return row
+	row.AlreadyNotified = usdcPayoutSentNoticeJournaled(self.ctx, row.eventId, paymentId)
+	return rows
 }
 
 type usdcSentNoticeTransfer struct {
@@ -246,12 +327,13 @@ func (self *usdcSentNoticeReader) circleTransfer(transactionId string) (*usdcSen
 	return transfer, ""
 }
 
-func usdcPayoutSentNoticeJournaled(ctx context.Context, paymentId server.Id) (journaled bool) {
+// Whether a notice of the payment is journaled under the event id.
+func usdcPayoutSentNoticeJournaled(ctx context.Context, eventId server.Id, paymentId server.Id) (journaled bool) {
 	server.Db(ctx, func(conn server.PgConn) {
 		server.Raise(conn.QueryRow(
 			ctx,
 			`SELECT EXISTS (SELECT 1 FROM audit_account_payment WHERE event_id = $1 AND payment_id = $2 AND event_type = $3)`,
-			usdcPayoutSentNoticeEventId(paymentId),
+			eventId,
 			paymentId,
 			UsdcPayoutSentNoticeEventType,
 		).Scan(&journaled))
@@ -259,13 +341,18 @@ func usdcPayoutSentNoticeJournaled(ctx context.Context, paymentId server.Id) (jo
 	return
 }
 
-// Journals a sent notice. A notice sent twice, because its journal write
-// failed after the send, is the only duplicate this allows.
+// Journals a sent notice under its row's key. A notice sent twice, because its
+// journal write failed after the send, is the only duplicate this allows. A
+// Team's notice says so, and the journal holds no address.
 func journalUsdcPayoutSentNotice(ctx context.Context, row *PayoutUsdcSentNoticeRow) {
-	details, err := json.Marshal(map[string]any{
+	eventDetails := map[string]any{
 		"transfer_nano_cents": row.TransferNanoCents,
 		"sent_by":             row.SentBy,
-	})
+	}
+	if row.Team {
+		eventDetails["team"] = true
+	}
+	details, err := json.Marshal(eventDetails)
 	server.Raise(err)
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
@@ -275,7 +362,7 @@ func journalUsdcPayoutSentNotice(ctx context.Context, row *PayoutUsdcSentNoticeR
 				VALUES ($1, $2, $3, $4, $5)
 				ON CONFLICT DO NOTHING
 			`,
-			usdcPayoutSentNoticeEventId(row.PaymentId),
+			row.eventId,
 			server.NowUtc(),
 			row.PaymentId,
 			UsdcPayoutSentNoticeEventType,
@@ -284,12 +371,19 @@ func journalUsdcPayoutSentNotice(ctx context.Context, row *PayoutUsdcSentNoticeR
 	})
 }
 
-// The report without ids, wallet addresses or recipients.
+// The report without ids, wallet addresses or recipients: a line for each row,
+// numbered by its payment's place in the list, and a Team's rows by their
+// address's place among the Team's.
 func (self *PayoutUsdcSentNoticeReport) Text() string {
 	b := &strings.Builder{}
 	fmt.Fprintf(b, "payouts usdc-sent-notice, mode %s\n", self.Mode)
 	due := 0
-	for i, row := range self.Rows {
+	paymentNumber := -1
+	for _, row := range self.Rows {
+		// a payment's first row; a Team's later addresses follow it
+		if row.RecipientNumber <= 1 {
+			paymentNumber += 1
+		}
 		status := "due"
 		switch {
 		case row.Problem != "":
@@ -301,8 +395,16 @@ func (self *PayoutUsdcSentNoticeReport) Text() string {
 		default:
 			due += 1
 		}
-		fmt.Fprintf(b, "  payment %d: %.2f USDC, sent by %s, recipient %s, %s\n",
-			i, model.NanoCentsToUsd(row.TransferNanoCents), usdcSentNoticeOrUnknown(row.SentBy), row.Recipient, status)
+		payment := fmt.Sprintf("payment %d", paymentNumber)
+		if row.Team {
+			if 0 < row.RecipientCount {
+				payment += fmt.Sprintf(", Team address %d of %d", row.RecipientNumber, row.RecipientCount)
+			} else {
+				payment += ", Team"
+			}
+		}
+		fmt.Fprintf(b, "  %s: %.2f USDC, sent by %s, recipient %s, %s\n",
+			payment, model.NanoCentsToUsd(row.TransferNanoCents), usdcSentNoticeOrUnknown(row.SentBy), row.Recipient, status)
 	}
 	if self.Mode == "dry_run" {
 		fmt.Fprintf(b, "%d notice(s) due; --send sends them\n", due)

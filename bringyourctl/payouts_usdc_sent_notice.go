@@ -1,7 +1,8 @@
 // `payouts usdc-sent-notice` (controller/account_payment_usdc_sent_notice.go):
-// emails each listed payment's network admin that its USDC payout was sent and
-// that USDC payouts are ending. The dry run reads only; --send sends each due
-// notice once.
+// emails each listed payment's network that its USDC payout was sent and that
+// USDC payouts are ending: a personal network's admin, and a Team's Owners and
+// Billing admins at each of their addresses (QD-1222). The dry run reads only;
+// --send sends each due notice once. The report has a row for each address.
 package main
 
 import (
@@ -18,8 +19,18 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
-// at most this many payments in one run
-const payoutsUsdcSentNoticeMaxPayments = 1024
+// Tunables of the command (QD-702), from defaultPayoutsUsdcSentNoticeSettings.
+type payoutsUsdcSentNoticeSettings struct {
+	// The most payment ids one run reads: 1,024. A file with more is refused
+	// whole. Non-positive bounds nothing.
+	MaxPaymentCount int
+}
+
+func defaultPayoutsUsdcSentNoticeSettings() *payoutsUsdcSentNoticeSettings {
+	return &payoutsUsdcSentNoticeSettings{
+		MaxPaymentCount: 1024,
+	}
+}
 
 func payoutsUsdcSentNoticeCommand(opts docopt.Opts) int {
 	file, _ := opts.String("--file")
@@ -30,7 +41,8 @@ func payoutsUsdcSentNoticeCommand(opts docopt.Opts) int {
 	}
 	clientSession := session.NewLocalClientSession(context.Background(), "0.0.0.0:0", nil)
 	defer clientSession.Cancel()
-	return runPayoutsUsdcSentNotice(os.Stdout, os.Stderr, file, os.ReadFile, func(paymentIds []server.Id) (*controller.PayoutUsdcSentNoticeReport, error) {
+	settings := defaultPayoutsUsdcSentNoticeSettings()
+	return runPayoutsUsdcSentNotice(os.Stdout, os.Stderr, file, os.ReadFile, settings, func(paymentIds []server.Id) (*controller.PayoutUsdcSentNoticeReport, error) {
 		return controller.PayoutsUsdcSentNotice(clientSession, paymentIds, send)
 	})
 }
@@ -42,6 +54,7 @@ func runPayoutsUsdcSentNotice(
 	stderr io.Writer,
 	file string,
 	readFile func(string) ([]byte, error),
+	settings *payoutsUsdcSentNoticeSettings,
 	notice func([]server.Id) (*controller.PayoutUsdcSentNoticeReport, error),
 ) int {
 	data, err := readFile(file)
@@ -49,7 +62,7 @@ func runPayoutsUsdcSentNotice(
 		fmt.Fprintf(stderr, "payouts usdc-sent-notice: reading %s: %s\n", file, err)
 		return 1
 	}
-	paymentIds, err := parsePayoutsUsdcSentNoticeIds(data)
+	paymentIds, err := parsePayoutsUsdcSentNoticeIds(data, settings)
 	if err != nil {
 		fmt.Fprintf(stderr, "payouts usdc-sent-notice: %s\n", err)
 		return 1
@@ -64,8 +77,9 @@ func runPayoutsUsdcSentNotice(
 }
 
 // One payment id per line; blank lines and # comments are skipped. A
-// malformed or repeated id refuses the whole file.
-func parsePayoutsUsdcSentNoticeIds(data []byte) ([]server.Id, error) {
+// malformed or repeated id, or more ids than the settings' MaxPaymentCount,
+// refuses the whole file.
+func parsePayoutsUsdcSentNoticeIds(data []byte, settings *payoutsUsdcSentNoticeSettings) ([]server.Id, error) {
 	paymentIds := []server.Id{}
 	seen := map[server.Id]bool{}
 	for i, line := range strings.Split(string(data), "\n") {
@@ -86,8 +100,8 @@ func parsePayoutsUsdcSentNoticeIds(data []byte) ([]server.Id, error) {
 	if len(paymentIds) == 0 {
 		return nil, fmt.Errorf("no payment ids")
 	}
-	if payoutsUsdcSentNoticeMaxPayments < len(paymentIds) {
-		return nil, fmt.Errorf("more than %d payment ids", payoutsUsdcSentNoticeMaxPayments)
+	if maxPaymentCount := settings.MaxPaymentCount; 0 < maxPaymentCount && maxPaymentCount < len(paymentIds) {
+		return nil, fmt.Errorf("more than %d payment ids", maxPaymentCount)
 	}
 	return paymentIds, nil
 }
