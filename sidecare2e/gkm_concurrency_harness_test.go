@@ -12,8 +12,9 @@
 //     what gkm took and refused from the wire, never from gkm's own objects
 //   - the cuts at that origin: a sidecar cut off from gkm, each of its requests answered 503 with no gkm body, as the
 //     lb answers with no upstream, which its client takes as no answer from gkm (KF7); and a filter that loses the
-//     requests it matches the same way, which the case uses to lose the deliveries a holder makes to a device while it
-//     is cut off, so the device must ask for them late
+//     requests it matches the same way, which the case uses to lose the deliveries holders make to a device from the
+//     moment it is cut off until its own late ask reaches gkm, the ask ending the filter as it passes, so the device
+//     must ask for them late
 //   - the chaos at that origin: armed for the next request it matches, it either lets the block answer that request
 //     in full, restarts the block on its stores and loses the answer (502, as an lb whose upstream went away before
 //     the answer reached it), or restarts the block with the request held and loses the request (502 too), so a
@@ -242,6 +243,8 @@ type gkmConcurrencyAsk struct {
 	generation uint64
 	want       string
 	status     int
+	// whether it passed every cut and reached the block
+	reached bool
 }
 
 // One re-form's GroupForm or ladder call, as gkm answered it.
@@ -285,6 +288,9 @@ type gkmConcurrencyChaos struct {
 type gkmConcurrencyCut struct {
 	name  string
 	match func(request *gkmConcurrencyRequest) bool
+	// the request that ends the cut as it passes every cut, which then reaches the block; nil for none, the cut lasting
+	// until its remove
+	endedBy func(request *gkmConcurrencyRequest) bool
 	// how many requests it lost
 	count int
 }
@@ -339,7 +345,13 @@ func (self *gkmConcurrencyOrigin) setDescribe(describe func(request *gkmConcurre
 
 // Adds a cut, until its remove.
 func (self *gkmConcurrencyOrigin) cut(name string, match func(request *gkmConcurrencyRequest) bool) (*gkmConcurrencyCut, func()) {
-	cut := &gkmConcurrencyCut{name: name, match: match}
+	return self.cutUntil(name, match, nil)
+}
+
+// Adds a cut until the first request endedBy takes passes every cut, or until its remove, whichever comes first: the
+// request that ends it reaches the block after the cut is gone, so what it sets off is not lost.
+func (self *gkmConcurrencyOrigin) cutUntil(name string, match func(request *gkmConcurrencyRequest) bool, endedBy func(request *gkmConcurrencyRequest) bool) (*gkmConcurrencyCut, func()) {
+	cut := &gkmConcurrencyCut{name: name, match: match, endedBy: endedBy}
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	self.cuts = append(self.cuts, cut)
@@ -389,6 +401,10 @@ func (self *gkmConcurrencyOrigin) ServeHTTP(w http.ResponseWriter, r *http.Reque
 				return
 			}
 		}
+		// the request passes every cut: a cut it ends is gone before it reaches the block
+		self.cuts = slices.DeleteFunc(self.cuts, func(held *gkmConcurrencyCut) bool {
+			return held.endedBy != nil && held.endedBy(request)
+		})
 		if self.armed != nil && self.armed.match(request) {
 			chaos = self.armed
 			self.armed = nil
@@ -517,7 +533,7 @@ func (self *gkmConcurrencyOrigin) keep(request *gkmConcurrencyRequest, status in
 		defer self.stateLock.Unlock()
 		self.asks = append(self.asks, &gkmConcurrencyAsk{
 			time: request.time, sidecarId: request.sidecarId, groupId: request.groupId, generation: request.generation,
-			want: request.query.Get("want"), status: status,
+			want: request.query.Get("want"), status: status, reached: reached,
 		})
 	case gkmConcurrencyRequestForm:
 		reform := &protocol.GkmGroupReformRequest{}
