@@ -4,7 +4,8 @@ package model
 // plan-DNS-metadata-rows #5): SuspendZone, SuspendHost and Restore withhold a
 // network's records, MX included, and return them, each within one write plus
 // the TTL. The rows stay: a withheld row leaves the journal as a delete and
-// every snapshot, and Restore puts back exactly what was there.
+// every snapshot, and Restore puts back exactly what was there, its copy rows
+// as the zone then needs them.
 //
 //   - A zone suspension is network_dns_zone's reason and until, and a withheld
 //     owner at each of the zone's apexes, its label and each live alias, so a
@@ -22,6 +23,15 @@ package model
 //     serial, so §19.10's abuse step lands in the snapshot the edges reload
 //     (§12.6). Its map change takes the serial after the restored one, which no
 //     write can hold before the restore's jump.
+//   - Every change plans copy rows in its own journal row, as every writer does
+//     (dnsservice.PlanCopyRows over what edges serve once it commits; QD-1190):
+//     at and below a withheld owner nothing, so a suspension keeps the copies it
+//     withholds, and above one what its existing needs, so the empty
+//     non-terminal over a multi-label host takes its copy with the suspension
+//     and drops it with Restore. Restore plans over the rows it returns, so a
+//     copy the zone stopped needing while it was withheld is deleted with no
+//     journal row rather than returned, and one it started needing comes back
+//     with them.
 //
 // Every hook is idempotent by network and host: a second call finds nothing to
 // change and writes nothing. Each runs in a transaction of its own, holds no
@@ -31,6 +41,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -209,21 +220,10 @@ func changeDnsSuspension(ctx context.Context, networkId server.Id, change func(s
 	return nil
 }
 
-// One zone's change, in its own transaction: the suspension it asks for, as
-// the visible rows it leaves, diffed against what edges hold now.
-func changeDnsSuspensionInTx(ctx context.Context, tx server.PgTx, root string, networkId server.Id, change func(suspension *dnsSuspension)) error {
-	now := server.NowUtc()
-	lockDnsZoneInTx(ctx, tx, root, networkId)
-	server.RaisePgResult(tx.Exec(
-		ctx,
-		`
-			INSERT INTO network_dns_zone (root, network_id, create_time) VALUES ($1, $2, $3)
-			ON CONFLICT (root, network_id) DO NOTHING
-		`,
-		root,
-		networkId,
-		now,
-	))
+// The suspension as it stands: network_dns_zone's reason and until, its row
+// locked, and the hosts whose withheld owners stored holds below an apex. In tx
+// under the zone's lock.
+func getDnsSuspensionInTx(ctx context.Context, tx server.PgTx, root string, networkId server.Id, apexes []string, stored []*dnsStoredRow) *dnsSuspension {
 	suspension := &dnsSuspension{hosts: map[string]bool{}}
 	var reason *string
 	result, err := tx.Query(
@@ -241,8 +241,6 @@ func changeDnsSuspensionInTx(ctx context.Context, tx server.PgTx, root string, n
 		suspension.zoneSuspended = true
 		suspension.reason = *reason
 	}
-	apexes := getDnsZoneApexesInTx(ctx, tx, root, networkId)
-	stored := getDnsZoneRowsInTx(ctx, tx, root, networkId)
 	for _, row := range stored {
 		if row.set.Kind != dnsservice.DnsRecordKindWithheld || slices.Contains(apexes, row.set.Owner) {
 			continue
@@ -253,32 +251,57 @@ func changeDnsSuspensionInTx(ctx context.Context, tx server.PgTx, root string, n
 			}
 		}
 	}
+	return suspension
+}
 
-	// a user row withheld while the suspension as it stood left it visible is
-	// the downgrade's (DNS-M6-07), and no change here releases it
-	visibleBefore := dnsSuspensionVisible(suspension, apexes)
+// A copy whose changes leave self as it is.
+func (self *dnsSuspension) clone() *dnsSuspension {
+	return &dnsSuspension{
+		zoneSuspended: self.zoneSuspended,
+		reason:        self.reason,
+		until:         self.until,
+		hosts:         maps.Clone(self.hosts),
+	}
+}
 
-	change(suspension)
+// What a change of a zone's suspension does to its rows.
+type dnsSuspensionRows struct {
+	// The journal's: rows edges serve again or for the first time, and rows
+	// they stop serving that go.
+	upserts []dnsservice.DnsRecordSet
+	deletes []dnsservice.DnsRecordKey
+	// Rows edges stop serving that stay stored, withheld, for Restore. They
+	// leave the journal as deletes.
+	withholds []dnsservice.DnsRecordKey
+	// Rows that change with no journal row: never seen by an edge, before or
+	// after.
+	quietInserts []dnsservice.DnsRecordSet
+	quietDeletes []dnsservice.DnsRecordKey
+	// What edges serve once the change commits.
+	served []dnsservice.DnsRecordSet
+}
 
-	// the withheld owners the suspension asks for: one at each apex while the
-	// zone is suspended, and one at each host under each apex
+// What the zone's suspension changing from before to after asks of its rows,
+// stored being every row the zone holds: the withheld owners after asks for,
+// one at each apex while the zone is suspended and one at each host under each
+// apex, and every other row withheld or served again as after leaves it
+// visible. A user row withheld while before left it visible is the
+// downgrade's (DNS-M6-07), and no change here releases it. Copy rows are
+// planned apart (planCopies).
+func planDnsSuspensionRows(stored []*dnsStoredRow, apexes []string, before *dnsSuspension, after *dnsSuspension) *dnsSuspensionRows {
+	visibleBefore := dnsSuspensionVisible(before, apexes)
 	markers := map[string]bool{}
 	for _, apex := range apexes {
-		if suspension.zoneSuspended {
+		if after.zoneSuspended {
 			markers[apex] = true
 		}
-		for host := range suspension.hosts {
+		for host := range after.hosts {
 			markers[host+"."+apex] = true
 		}
 	}
-	visible := dnsSuspensionVisible(suspension, apexes)
+	visible := dnsSuspensionVisible(after, apexes)
 
-	upserts := []dnsservice.DnsRecordSet{}
-	deletes := []dnsservice.DnsRecordKey{}
-	withholds := []dnsservice.DnsRecordKey{}
-	// rows that change with no journal row: never seen by an edge, before or after
-	quietInserts := []dnsservice.DnsRecordSet{}
-	quietDeletes := []dnsservice.DnsRecordKey{}
+	rows := &dnsSuspensionRows{}
 	held := map[string]bool{}
 	for _, row := range stored {
 		set := row.set
@@ -286,20 +309,22 @@ func changeDnsSuspensionInTx(ctx context.Context, tx server.PgTx, root string, n
 			held[set.Owner] = true
 			if !markers[set.Owner] {
 				if row.withheld {
-					quietDeletes = append(quietDeletes, set.Key())
+					rows.quietDeletes = append(rows.quietDeletes, set.Key())
 				} else {
-					deletes = append(deletes, set.Key())
+					rows.deletes = append(rows.deletes, set.Key())
 				}
 				continue
 			}
 		}
 		switch {
 		case !row.withheld && !visible(&set):
-			withholds = append(withholds, set.Key())
+			rows.withholds = append(rows.withholds, set.Key())
 		case row.withheld && visible(&set) && set.Kind == dnsservice.DnsRecordKindUser && visibleBefore(&set):
 			// withheld by the downgrade, not by a suspension: it stays
 		case row.withheld && visible(&set):
-			upserts = append(upserts, set)
+			rows.upserts = append(rows.upserts, set)
+		case !row.withheld:
+			rows.served = append(rows.served, set)
 		}
 	}
 	markerOwners := []string{}
@@ -313,11 +338,81 @@ func changeDnsSuspensionInTx(ctx context.Context, tx server.PgTx, root string, n
 		}
 		set := dnsservice.DnsRecordSet{Owner: owner, Type: dnsservice.DnsWithheldType, Kind: dnsservice.DnsRecordKindWithheld}
 		if visible(&set) {
-			upserts = append(upserts, set)
+			rows.upserts = append(rows.upserts, set)
 		} else {
-			quietInserts = append(quietInserts, set)
+			rows.quietInserts = append(rows.quietInserts, set)
 		}
 	}
+	// what stays served, and what is served again or for the first time
+	rows.served = append(rows.served, rows.upserts...)
+	return rows
+}
+
+// Adds the copy rows what edges serve once the change commits needs, as every
+// writer plans them (dnsservice.PlanCopyRows; QD-1190), apexes being the
+// zone's: at and below a withheld owner nothing, and above one what its
+// existing needs, an empty non-terminal over a multi-label host among them. A
+// copy the change would serve again that the zone no longer needs, its owner's
+// rows gone or covered no more while it was withheld, is deleted with no
+// journal row, since no edge holds it.
+func (self *dnsSuspensionRows) planCopies(apexes []string) {
+	released := map[dnsservice.DnsRecordKey]bool{}
+	for index := range self.upserts {
+		released[self.upserts[index].Key()] = true
+	}
+	copyUpserts := []dnsservice.DnsRecordSet{}
+	copyDeletes := []dnsservice.DnsRecordKey{}
+	unreleased := map[dnsservice.DnsRecordKey]bool{}
+	for _, apex := range apexes {
+		apexUpserts, apexDeletes := dnsservice.PlanCopyRows(apex, self.served)
+		copyUpserts = append(copyUpserts, apexUpserts...)
+		copyDeletes = append(copyDeletes, apexDeletes...)
+		for _, key := range apexDeletes {
+			if released[key] {
+				unreleased[key] = true
+				self.quietDeletes = append(self.quietDeletes, key)
+			} else {
+				self.deletes = append(self.deletes, key)
+			}
+		}
+	}
+	self.upserts = slices.DeleteFunc(self.upserts, func(set dnsservice.DnsRecordSet) bool {
+		return unreleased[set.Key()]
+	})
+	self.upserts = append(self.upserts, copyUpserts...)
+	self.served = dnsservice.DnsRowsAfter(self.served, copyUpserts, copyDeletes)
+}
+
+// One zone's change, in its own transaction: the suspension it asks for, as
+// the visible rows it leaves and the copy rows they need, diffed against what
+// edges hold now.
+func changeDnsSuspensionInTx(ctx context.Context, tx server.PgTx, root string, networkId server.Id, change func(suspension *dnsSuspension)) error {
+	now := server.NowUtc()
+	lockDnsZoneInTx(ctx, tx, root, networkId)
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			INSERT INTO network_dns_zone (root, network_id, create_time) VALUES ($1, $2, $3)
+			ON CONFLICT (root, network_id) DO NOTHING
+		`,
+		root,
+		networkId,
+		now,
+	))
+	apexes := getDnsZoneApexesInTx(ctx, tx, root, networkId)
+	stored := getDnsZoneRowsInTx(ctx, tx, root, networkId)
+	before := getDnsSuspensionInTx(ctx, tx, root, networkId, apexes, stored)
+	suspension := before.clone()
+	change(suspension)
+	visible := dnsSuspensionVisible(suspension, apexes)
+
+	rows := planDnsSuspensionRows(stored, apexes, before, suspension)
+	rows.planCopies(apexes)
+	upserts := rows.upserts
+	deletes := rows.deletes
+	withholds := rows.withholds
+	quietInserts := rows.quietInserts
+	quietDeletes := rows.quietDeletes
 
 	var restoring bool
 	var serialColumn int64
