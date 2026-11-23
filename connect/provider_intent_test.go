@@ -415,6 +415,11 @@ type providerIntentTestServer struct {
 
 // Serves until the test ends.
 func newProviderIntentTestServer(t testing.TB, ctx context.Context) *providerIntentTestServer {
+	return newProviderIntentTestServerWithSettings(t, ctx, func(*ConnectHandlerSettings) {})
+}
+
+// Serves with the handler settings adjusted, until the test ends.
+func newProviderIntentTestServerWithSettings(t testing.TB, ctx context.Context, adjust func(*ConnectHandlerSettings)) *providerIntentTestServer {
 	exchangeSettings := DefaultExchangeSettings()
 	exchangeSettings.KeyEventDelivery.Enabled = false
 	exchange := NewExchange(
@@ -441,6 +446,7 @@ func newProviderIntentTestServer(t testing.TB, ctx context.Context) *providerInt
 	settings.EnableProxyProtocol = false
 	settings.TransportTlsSettings.EnableSelfSign = true
 	settings.TransportTlsSettings.DefaultHostName = "127.0.0.1"
+	adjust(settings)
 	handler := NewConnectHandlerWithPacketConns(ctx, handlerId, exchange, settings, ConnectHandlerPacketConns{
 		H3: h3PacketConn,
 	})

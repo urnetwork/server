@@ -1,6 +1,7 @@
 package timersweep
 
 import (
+	"fmt"
 	mathrand "math/rand/v2"
 	"runtime"
 	"sync"
@@ -133,6 +134,85 @@ func BenchmarkTimerHeapWalkCost(b *testing.B) {
 			b.StopTimer()
 			b.ReportMetric(float64(processCpu()-startCpu)/float64(b.N), "cpu-ns/op")
 		})
+	}
+}
+
+// What one source of timer changes costs in heap walks, by the horizon of its
+// changes (CPUOPT7.md §11). Each op re-arms a channel timer and waits on it in
+// a select that another goroutine's message ends first, as the connect
+// library's ACK compression wait does when a quiet-head signal wakes it: the
+// select leaves the timer in the heap as a zombie, and the next Reset moves
+// it. On one P, whose heap holds a connect process's 55,000 timers or none of
+// them, the P walks its heap when a moved deadline comes due, about
+// 1/(op interval + horizon) times a second, so the same rate of changes costs
+// a walk every few ops at a short horizon and almost none at a long one. The
+// walk CPU of an op is its process CPU on the full heap less on the empty one.
+func BenchmarkTimerWalksByChangeHorizon(b *testing.B) {
+	for _, horizon := range []time.Duration{
+		500 * time.Microsecond,
+		5 * time.Millisecond,
+		50 * time.Millisecond,
+		500 * time.Millisecond,
+		5 * time.Second,
+		50 * time.Second,
+	} {
+		for _, c := range []struct {
+			name   string
+			timers int
+		}{
+			{name: "production", timers: productionTimersPerP},
+			{name: "empty", timers: 0},
+		} {
+			b.Run(fmt.Sprintf("%s/%s", horizon, c.name), func(b *testing.B) {
+				procs := runtime.GOMAXPROCS(1)
+				defer runtime.GOMAXPROCS(procs)
+				stop := spreadRuntimeTimers(c.timers)
+				defer stop()
+				// the message that ends each wait, sent once the wait has
+				// blocked: with one P the sender runs only then
+				ready := make(chan struct{}, 1)
+				wake := make(chan struct{})
+				done := make(chan struct{})
+				go func() {
+					for {
+						select {
+						case <-done:
+							return
+						case <-ready:
+						}
+						select {
+						case <-done:
+							return
+						case wake <- struct{}{}:
+						}
+					}
+				}()
+				defer close(done)
+				timer := time.NewTimer(time.Hour)
+				defer timer.Stop()
+				b.ReportMetric(float64(c.timers), "heap-timers")
+				runtime.GC()
+				startCpu := processCpu()
+				startTime := time.Now()
+				b.ResetTimer()
+				for range b.N {
+					timer.Reset(horizon)
+					// a sender holding an earlier message needs no other: a
+					// wait the timer ended left that message unreceived
+					select {
+					case ready <- struct{}{}:
+					default:
+					}
+					select {
+					case <-wake:
+					case <-timer.C:
+					}
+				}
+				b.StopTimer()
+				b.ReportMetric(float64(processCpu()-startCpu)/float64(b.N), "cpu-ns/op")
+				b.ReportMetric(float64(b.N)/time.Since(startTime).Seconds(), "changes/s")
+			})
+		}
 	}
 }
 

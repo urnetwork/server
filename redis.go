@@ -238,12 +238,14 @@ func (self *safeRedisClient) open() redis.UniversalClient {
 		dialer := NewDialer(dialTimeout)
 		authority := redisKeys.RequireString("authority")
 		password := localEvaluationCredential("EVALUATION_REDIS_PASSWORD", redisKeys.RequireString("password"))
-		dialContext := redisPoolDialer(
+		// every pooled socket counts its deadlines in the timer census
+		// (redis_timer_census.go)
+		dialContext := redisTimerCensusDialer(redisPoolDialer(
 			currentTestEnvDialGuard(),
 			authority,
 			redisNodeRoutes(LanHosts(), Routes()),
 			dialer.DialContext,
-		)
+		))
 
 		cluster := redisKeys.RequireBool("cluster")
 
