@@ -78,8 +78,9 @@
 // not hide the next. As it landed (2026-11-22) it passed: every shrink rotated with cause REMOVE within about 1.4 s of
 // its entry's sync, every holder converged within a second of each phase's last change, the late device's ask was
 // answered by a writer that was not its granting device about half a second after it came back, and every gkm
-// refusal was a revoked caller's or one whose grant had ended. Each phase has PhaseTimeout and dumps the world's
-// progress when it stalls; the case has the conventions' 10 minutes. Run it through the build's wrapper:
+// refusal was a revoked caller's or one whose grant had ended. It passed again in e2e-headers-final's run (2026-11-22,
+// 31 s, server e4a38cd64 on sidecar c88a64af). Each phase has PhaseTimeout and dumps the world's progress when it
+// stalls; the case has the conventions' 10 minutes. Run it through the build's wrapper:
 // -tags 'sidecar_e2e sidecar_pending sidecar_localstack'.
 
 package sidecare2e

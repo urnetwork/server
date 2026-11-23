@@ -152,6 +152,9 @@
 //     2026-11-22, 283 s). Its report names the same spend before a PUT in rev/'s store and the abuse holds' store,
 //     which api-budget-spend-on-create, queued, fixes
 //
+// On every fix, e2e-headers-final's run passed (2026-11-23, 276 s, server 9d7022daa on sidecar c88a64af), api's P0
+// exactly the price of the 89 log objects and 4 rev/ objects it wrote.
+//
 // In two of e2e-control-plane-verify's runs api restarted after bases a later device signed, the team's second Owner
 // device's in both and b's second, third and fourth devices' in one, and every network loaded at api's gate and
 // converged after it. Every enrollment step landed, five bursts of two steps across the runs, so none met the 503 at

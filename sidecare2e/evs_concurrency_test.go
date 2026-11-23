@@ -97,6 +97,8 @@
 //     pin, withholding it with ErrConfigPinAhead only past that bound. A refusal of that kind still says when it came
 //     back and where the device's follower and the newest one stood (pinAheadNote).
 //
+// On every fix, e2e-headers-final's run passed (2026-11-22, 51 s, server e4a38cd64 on sidecar c88a64af).
+//
 // Each phase has PhaseTimeout and dumps the world's progress when it stalls; the case has the conventions' 10 minutes.
 // Run it through the build's wrapper: -tags 'sidecar_e2e sidecar_pending sidecar_localstack'.
 

@@ -66,8 +66,9 @@
 //     owner-bound repo, and the case passed in full on it (2026-11-22), its group mailboxes included
 //
 // The churn case met one more loss in a group mailbox, under racing ingest pushes, which mail-group-ingest-loss fixed
-// (churn_load_test.go's header). Run it through the build's wrapper: -tags 'sidecar_e2e sidecar_pending
-// sidecar_localstack'.
+// (churn_load_test.go's header). On every fix, e2e-headers-final's run passed the case and
+// TestE2eMailInternetSenderVerdicts (2026-11-23, 149 s and 107 s, server 9d7022daa on sidecar c88a64af). Run it
+// through the build's wrapper: -tags 'sidecar_e2e sidecar_pending sidecar_localstack'.
 
 package sidecare2e
 

@@ -81,7 +81,10 @@
 //     track's change and without it), three failed so and on nothing else, one of them at an invite's admission,
 //     which landed while its step failed, so the members check also named that member as one the case did not keep.
 //     The fix is the harness's: retire a member's devices before its denial, and end a sync's wait on a device once
-//     it is retired
+//     it is retired. The churn load case's departures remove members by the same path
+//
+// e2e-headers-final's run passed all four cases (2026-11-23, server 9d7022daa on sidecar c88a64af): this one in 59 s,
+// the race not meeting it, the chaos in 31 s, the cold gate in 30 s and the quotas in 223 s.
 //
 // Three parts are cases of their own: the chaos, api and a member device restarted mid-save, mid-invite, mid-removal
 // and mid-statement on their stores (TestE2eControlPlaneConcurrencyChaos), a reader starting cold at a base a later

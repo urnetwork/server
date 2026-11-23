@@ -83,6 +83,10 @@
 // router-0's restarted one among them). The probe now picks a client the target itself answers, and the liveness row
 // names each granted attempt of a window it fails.
 //
+// On every fix, e2e-headers-final's run passed all five cases (2026-11-23, server e4a38cd64 on sidecar c88a64af):
+// TestE2eItBridge in 162 s, TestE2eItBridgeStatic in 89 s, TestE2eItBridgeRouteGrants in 242 s,
+// TestE2eItBridgeShares in 318 s and TestE2eItBridgeLinksPastSidecarClients in 106 s.
+//
 // Run it through the build's wrapper: -tags 'sidecar_e2e sidecar_pending sidecar_localstack' -run TestE2eItBridge.
 
 package sidecare2e
