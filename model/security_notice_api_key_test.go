@@ -76,6 +76,7 @@ func TestEveryApiKeyWriteOwesTheSecurityNotice(t *testing.T) {
 // trimmed. A long name is cut short of the limit and ends in an ellipsis.
 // Applying the rule again changes nothing.
 func TestSecurityNoticeApiKeyNameKeepsOneLine(t *testing.T) {
+	maxNameLength := DefaultSecurityApiKeyNoticeSettings().MaxNameLength
 	long := strings.Repeat("é", MaxApiKeyNameLength)
 	for _, c := range []struct {
 		name string
@@ -91,9 +92,9 @@ func TestSecurityNoticeApiKeyNameKeepsOneLine(t *testing.T) {
 		{"line separator", "one\u2028two", "one two"},
 		{"only space", " \t\n", ""},
 		{"empty", "", ""},
-		{"at the limit", strings.Repeat("k", securityNoticeMaxApiKeyNameLength), strings.Repeat("k", securityNoticeMaxApiKeyNameLength)},
-		{"two-byte characters past the limit", long, strings.Repeat("é", securityNoticeMaxApiKeyNameLength-1) + "…"},
-		{"a cut at a space", strings.Repeat("k", securityNoticeMaxApiKeyNameLength-2) + " " + strings.Repeat("k", 10), strings.Repeat("k", securityNoticeMaxApiKeyNameLength-2) + "…"},
+		{"at the limit", strings.Repeat("k", maxNameLength), strings.Repeat("k", maxNameLength)},
+		{"two-byte characters past the limit", long, strings.Repeat("é", maxNameLength-1) + "…"},
+		{"a cut at a space", strings.Repeat("k", maxNameLength-2) + " " + strings.Repeat("k", 10), strings.Repeat("k", maxNameLength-2) + "…"},
 	} {
 		got := SecurityNoticeApiKeyName(c.key)
 		if got != c.want {
@@ -102,11 +103,41 @@ func TestSecurityNoticeApiKeyNameKeepsOneLine(t *testing.T) {
 		if again := SecurityNoticeApiKeyName(got); again != got {
 			t.Errorf("%s: applied again, %q became %q", c.name, got, again)
 		}
-		if securityNoticeMaxApiKeyNameLength < utf8.RuneCountInString(got) {
-			t.Errorf("%s: %q is longer than %d characters", c.name, got, securityNoticeMaxApiKeyNameLength)
+		if maxNameLength < utf8.RuneCountInString(got) {
+			t.Errorf("%s: %q is longer than %d characters", c.name, got, maxNameLength)
 		}
 		if strings.ContainsAny(got, "\r\n\t\u202e\u200b\ufeff\u2028") {
 			t.Errorf("%s: %q keeps a control or format character", c.name, got)
+		}
+	}
+}
+
+// The name's limit is the settings' MaxNameLength: a shorter limit cuts the
+// name short of it, and a limit below 1 counts as 1, which shows a longer name
+// as the ellipsis alone and a one-character name whole. Applying the rule
+// again under the same settings changes nothing.
+func TestSecurityNoticeApiKeyNameTakesItsLimitFromTheSettings(t *testing.T) {
+	for _, c := range []struct {
+		maxNameLength int
+		key           string
+		want          string
+	}{
+		{4, "deploy-bot", "dep…"},
+		{4, "ci k", "ci k"},
+		{4, "ci  bot", "ci…"},
+		{1, "deploy-bot", "…"},
+		{0, "deploy-bot", "…"},
+		{-1, "deploy-bot", "…"},
+		{0, "k", "k"},
+		{0, "", ""},
+	} {
+		settings := &SecurityApiKeyNoticeSettings{MaxNameLength: c.maxNameLength}
+		got := securityNoticeApiKeyNameOf(c.key, settings)
+		if got != c.want {
+			t.Errorf("under a limit of %d, %q is shown as %q, want %q", c.maxNameLength, c.key, got, c.want)
+		}
+		if again := securityNoticeApiKeyNameOf(got, settings); again != got {
+			t.Errorf("under a limit of %d, applied again, %q became %q", c.maxNameLength, got, again)
 		}
 	}
 }

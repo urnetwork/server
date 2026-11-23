@@ -33,8 +33,21 @@ const (
 	SecurityApiKeyDeleted = "deleted"
 )
 
-// The most characters of an API key's name a notice shows.
-const securityNoticeMaxApiKeyNameLength = 64
+// Tunables of the API key notice.
+type SecurityApiKeyNoticeSettings struct {
+	// The most characters of a key's name a notice shows: 64, so the name
+	// stays on one line of the notice, in quotes. A longer name is cut short
+	// of it and ends in an ellipsis. Below 1 counts as 1, which shows a longer
+	// name as the ellipsis alone.
+	MaxNameLength int
+}
+
+// The defaults, a fresh value each call.
+func DefaultSecurityApiKeyNoticeSettings() *SecurityApiKeyNoticeSettings {
+	return &SecurityApiKeyNoticeSettings{
+		MaxNameLength: 64,
+	}
+}
 
 // One change of an API key.
 type SecurityApiKeyChange struct {
@@ -63,14 +76,20 @@ func (self *SecurityApiKeyNotice) add(change *SecurityApiKeyChange) {
 	self.Changes, self.MoreCount = addSecurityNoticeChange(self.Changes, self.MoreCount, change)
 }
 
-// An API key's name as a notice shows it. The name is free text that whoever
-// created the key chose, so a notice keeps it to one line in reading order:
-// control and format characters (line breaks, tabs, direction overrides,
-// zero-width marks) count as space, each run of space is one space, and the
-// ends are trimmed. A name longer than securityNoticeMaxApiKeyNameLength
-// characters is cut short of it and ends in an ellipsis. Applying it again
-// changes nothing.
+// An API key's name as a notice shows it, under the default settings
+// (securityNoticeApiKeyNameOf).
 func SecurityNoticeApiKeyName(name string) string {
+	return securityNoticeApiKeyNameOf(name, DefaultSecurityApiKeyNoticeSettings())
+}
+
+// An API key's name as a notice under the settings shows it. The name is free
+// text that whoever created the key chose, so a notice keeps it to one line in
+// reading order: control and format characters (line breaks, tabs, direction
+// overrides, zero-width marks) count as space, each run of space is one space,
+// and the ends are trimmed. A name longer than MaxNameLength characters is cut
+// short of it and ends in an ellipsis. Applying it again changes nothing.
+func securityNoticeApiKeyNameOf(name string, settings *SecurityApiKeyNoticeSettings) string {
+	maxNameLength := max(1, settings.MaxNameLength)
 	builder := strings.Builder{}
 	pendingSpace := false
 	for _, r := range name {
@@ -85,10 +104,10 @@ func SecurityNoticeApiKeyName(name string) string {
 		builder.WriteRune(r)
 	}
 	runes := []rune(builder.String())
-	if len(runes) <= securityNoticeMaxApiKeyNameLength {
+	if len(runes) <= maxNameLength {
 		return string(runes)
 	}
-	return strings.TrimRight(string(runes[:securityNoticeMaxApiKeyNameLength-1]), " ") + "…"
+	return strings.TrimRight(string(runes[:maxNameLength-1]), " ") + "…"
 }
 
 // A change of an API key, made by the request of ctx now. keyCreateTime is the
