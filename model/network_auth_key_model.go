@@ -42,9 +42,12 @@ package model
 //
 // Creating and revoking a key owe the auth key security notice
 // (security_notice_auth_key.go) and an admin event (§7.11), in the change's
-// transaction. A row is deleted when its key is revoked, or within the hour
-// after it expires (RemoveExpiredNetworkAuthKeys), so none outlives the 90 days
-// §2.8 publishes.
+// transaction. A row is deleted when its key is revoked, when its creator's
+// membership of a team is removed, by the server's denial or the log's
+// MemberRevoke (network_member_deny_model.go, QD-1211), since a key names its
+// creator by user and would otherwise enroll again once the same person
+// re-joined, or within the hour after it expires (RemoveExpiredNetworkAuthKeys),
+// so none outlives the 90 days §2.8 publishes.
 //
 // Nothing here reads or writes network_auth_key unless MG1 is linked
 // (server.SidecarMg1Linked); until then each route answers that auth keys are
@@ -391,8 +394,46 @@ func authKeyCreatorFilterOf(clientSession *session.ClientSession) (creatorUserId
 // The owners are read once, so a save that takes the caller off a tag's
 // tagOwners just after the read leaves the key made; it never enrolls, since
 // each enrollment asks the owners again (network_client_owner_model.go).
+//
+// In a team the caller's membership is read again in the key's transaction,
+// under a share lock, before anything is written: a removal of the member that
+// committed after the role was read refuses the creation 403 and spends no
+// admin token's use, and one still running either makes the creation wait for
+// it or, once the creation commits first, meets the key's admin event and runs
+// again, deleting the key (network_member_deny_model.go, QD-1211), so no key
+// outlives its creator's removal to enroll again once the same person re-joins.
 func CreateAuthKey(createAuthKey *CreateAuthKeyArgs, clientSession *session.ClientSession) (*CreateAuthKeyResult, error) {
 	return createAuthKeyAt(createAuthKey, clientSession, DefaultNetworkAuthKeySettings(), server.NowUtc())
+}
+
+// Called once a creation has read its caller's reach and before the key's
+// transaction: where a test removes the creator. nil in production.
+var Testing_CreateAuthKeyBeforeTx func()
+
+// Whether the caller's membership memberId of networkId is still live for
+// userId, read in tx under a share lock, which a removal's lock on the row
+// waits for: the row exists and is not JIT pending. False in a binary that does
+// not link MG6, which holds no membership.
+func authKeyCreatorMemberLiveInTx(ctx context.Context, tx server.PgTx, networkId server.Id, memberId server.Id, userId server.Id) (live bool) {
+	if !server.SidecarMg6Linked() {
+		return false
+	}
+	result, err := tx.Query(
+		ctx,
+		`
+			SELECT member_id
+			FROM network_member
+			WHERE network_id = $1 AND member_id = $2 AND user_id = $3 AND NOT pending
+			FOR SHARE
+		`,
+		networkId,
+		memberId,
+		userId,
+	)
+	server.WithPgResult(result, err, func() {
+		live = result.Next()
+	})
+	return
 }
 
 func createAuthKeyAt(
@@ -490,9 +531,20 @@ func createAuthKeyAt(
 		AuthKey:    authKeyBearer(authKey.AuthKeyId, secret),
 		ExpireTime: &expireTime,
 	}
+	if Testing_CreateAuthKeyBeforeTx != nil {
+		Testing_CreateAuthKeyBeforeTx()
+	}
 	var replayed *CreateAuthKeyResult
+	var refusal error
 	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
-		replayed = nil
+		replayed, refusal = nil, nil
+		if memberId := clientSession.ByJwt.MemberId; memberId != nil &&
+			!authKeyCreatorMemberLiveInTx(clientSession.Ctx, tx, authKey.NetworkId, *memberId, authKey.CreatorUserId) {
+			// the caller's membership ended after its role was read: a removed
+			// member makes no key (the function's doc)
+			refusal = fmt.Errorf("%d %s", http.StatusForbidden, authKeyRoleRefusedMessage)
+			return
+		}
 		if adminCommand != nil {
 			storedResult, first, err := ClaimAdminTokenUseInTx(clientSession.Ctx, tx, adminCommand, now)
 			server.Raise(err)
@@ -549,6 +601,9 @@ func createAuthKeyAt(
 			server.Raise(StoreAdminTokenUseResultInTx(clientSession.Ctx, tx, adminCommand.Jti, resultJson))
 		}
 	})
+	if refusal != nil {
+		return nil, refusal
+	}
 	if replayed != nil {
 		return replayed, nil
 	}

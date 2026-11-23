@@ -213,7 +213,20 @@ func TestExchangeTakesATeamsTaggedDevicePastItsSponsor(t *testing.T) {
 
 		// its sponsor removed at api: the client stays, and so does its exchange
 		server.Tx(ctx, func(tx server.PgTx) {
-			_, err := model.DenyNetworkMemberInTx(ctx, tx, &model.NetworkMemberDenial{NetworkId: networkId, MemberId: creator.MemberId, Time: server.NowUtc()})
+			memberId := creator.MemberId
+			_, err := model.DenyNetworkMemberInTx(ctx, tx, &model.NetworkMemberDenial{
+				NetworkId: networkId,
+				MemberId:  memberId,
+				Time:      server.NowUtc(),
+				Event: &model.AdminEvent{
+					NetworkId:  networkId,
+					ActorKind:  model.AdminEventActorSystem,
+					Action:     model.AdminEventActionMemberRemove,
+					TargetKind: model.AdminEventTargetMember,
+					TargetId:   &memberId,
+					Result:     model.AdminEventResultOk,
+				},
+			})
 			server.Raise(err)
 		})
 		requireTagRights("the tagged device's tag rights past its sponsor's removal")

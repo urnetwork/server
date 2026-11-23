@@ -28,7 +28,14 @@ package model
 //	            and its own rev/ object
 //	            a member whose row the entry removed: §7.10's chain on the
 //	            member, its rev/ object, and its network_member row, where a
-//	            team has one
+//	            team has one, with every auth key the membership's user made in
+//	            the network, owing the auth key notice once and an
+//	            auth_key.revoke admin event for each key, named for the entry's
+//	            signer and request (QD-1211), so a MemberRevoke no server
+//	            denial came before ends the keys as a denial does; a membership
+//	            the server already denied has no row left, and a later
+//	            membership of the same person, under its own member_id, keeps
+//	            its keys
 //	            a member whose role the entry set (an AdminSet, a MemberAdmit,
 //	            or a completed proposal of either): network_member's role,
 //	            mirrored from the log (TEAM-M6-03)
@@ -37,7 +44,8 @@ package model
 //	            (security_notice_authority.go, §7.8); a forwarding
 //	            Delegation is no new way to admit devices or sign people in,
 //	            so it owes none (QD-647)
-//	          and one admin event naming the entry (§7.11)
+//	          and one admin event naming the entry (§7.11), beside the
+//	          auth_key.revoke events of the keys a removal ended
 //	sponsors  each run that met a SponsorSet or a member's removal, and a
 //	          process's first run for a network, sets every tagged client's
 //	          network_client_owner.sponsor_user_id to its sidecar's sponsor at
@@ -490,10 +498,44 @@ func removeConfigSidecarInTx(ctx context.Context, tx server.PgTx, networkId serv
 	})
 }
 
-// Ends a member the log removed, in tx: §7.10's chain on the member at the
+// Ends a member the log removed, in tx: every auth key its membership's user
+// made in the network, owed in the name of entryEvent's signer and request
+// (endNetworkMemberAuthKeysInTx, QD-1211), §7.10's chain on the member at the
 // entry's time, and its network_member row where a team has one. Its devices
-// are the entry's revoked sidecars, ended beside it.
-func removeConfigMemberInTx(ctx context.Context, tx server.PgTx, networkId server.Id, memberId server.Id, at time.Time) error {
+// are the entry's revoked sidecars, ended beside it. A membership the server
+// denied before has no row left, its keys having ended with the denial, and a
+// later membership of the same person has a member_id of its own, so its keys
+// stay.
+func removeConfigMemberInTx(ctx context.Context, tx server.PgTx, networkId server.Id, memberId server.Id, at time.Time, entryEvent *AdminEvent) error {
+	if server.SidecarMg6Linked() {
+		// the membership's user, its row locked as a denial locks it, so an
+		// enrollment's spend, which reads the row first, waits for the removal
+		var userId *server.Id
+		result, err := tx.Query(
+			ctx,
+			`SELECT user_id FROM network_member WHERE network_id = $1 AND member_id = $2 FOR UPDATE`,
+			networkId,
+			memberId,
+		)
+		if err != nil {
+			return err
+		}
+		for result.Next() {
+			var rowUserId server.Id
+			if err := result.Scan(&rowUserId); err != nil {
+				result.Close()
+				return err
+			}
+			userId = &rowUserId
+		}
+		result.Close()
+		if err := result.Err(); err != nil {
+			return err
+		}
+		if userId != nil {
+			endNetworkMemberAuthKeysInTx(ctx, tx, networkId, *userId, entryEvent, at)
+		}
+	}
 	if err := ApplyRemovalEffectsInTx(ctx, tx, &Removal{
 		Subjects: []*RemovalSubject{{NetworkId: networkId, Kind: sidecar.RevocationKindMember, SubjectId: memberId}},
 		Reason:   sidecar.RevocationReasonRemoved,
@@ -559,25 +601,8 @@ func applyConfigLogEntryEffectInTx(ctx context.Context, tx server.PgTx, networkI
 		return false, nil
 	}
 	at := time.UnixMilli(effect.timeMs).UTC()
-	for _, sidecarId := range effect.revokedSidecarIds {
-		if err := removeConfigSidecarInTx(ctx, tx, networkId, sidecarId, effect.reason, at); err != nil {
-			return false, err
-		}
-	}
-	for _, memberId := range effect.removedMemberIds {
-		if err := removeConfigMemberInTx(ctx, tx, networkId, memberId, at); err != nil {
-			return false, err
-		}
-	}
-	if err := mirrorConfigMemberRolesInTx(ctx, tx, networkId, effect.memberRoles); err != nil {
-		return false, err
-	}
-	if 0 < effect.delegationCount {
-		oweSecurityNetworkAuthorityNoticeInTx(ctx, tx, networkId, &SecurityNetworkAuthorityChange{ChangeTime: at, Action: SecurityNetworkAuthorityDelegation})
-	}
-	if effect.adminSetChanged {
-		oweSecurityNetworkAuthorityNoticeInTx(ctx, tx, networkId, &SecurityNetworkAuthorityChange{ChangeTime: at, Action: SecurityNetworkAuthorityAdminSet})
-	}
+	// the entry's event, recorded last; a removal's auth_key.revoke events
+	// name its actor and request
 	event := &AdminEvent{
 		NetworkId:  networkId,
 		ActorKind:  AdminEventActorSystem,
@@ -598,6 +623,25 @@ func applyConfigLogEntryEffectInTx(ctx context.Context, tx server.PgTx, networkI
 	case 0 < len(effect.revokedSidecarIds):
 		sidecarId := effect.revokedSidecarIds[0]
 		event.TargetKind, event.TargetId = AdminEventTargetSidecar, &sidecarId
+	}
+	for _, sidecarId := range effect.revokedSidecarIds {
+		if err := removeConfigSidecarInTx(ctx, tx, networkId, sidecarId, effect.reason, at); err != nil {
+			return false, err
+		}
+	}
+	for _, memberId := range effect.removedMemberIds {
+		if err := removeConfigMemberInTx(ctx, tx, networkId, memberId, at, event); err != nil {
+			return false, err
+		}
+	}
+	if err := mirrorConfigMemberRolesInTx(ctx, tx, networkId, effect.memberRoles); err != nil {
+		return false, err
+	}
+	if 0 < effect.delegationCount {
+		oweSecurityNetworkAuthorityNoticeInTx(ctx, tx, networkId, &SecurityNetworkAuthorityChange{ChangeTime: at, Action: SecurityNetworkAuthorityDelegation})
+	}
+	if effect.adminSetChanged {
+		oweSecurityNetworkAuthorityNoticeInTx(ctx, tx, networkId, &SecurityNetworkAuthorityChange{ChangeTime: at, Action: SecurityNetworkAuthorityAdminSet})
 	}
 	AddAdminEventInTx(ctx, tx, event)
 	return true, nil

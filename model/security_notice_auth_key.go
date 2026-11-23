@@ -6,11 +6,13 @@ package model
 // (security_notice_api_key.go), so an owner notices a key they did not make. A
 // key admits devices to the network until it expires or its uses run out.
 //
-// Both ways to change a key owe it: POST /network/auth-keys (CreateAuthKey) and
-// POST /network/auth-key-revoke (RevokeAuthKey). Expiry is no change anyone
-// made, and owes none. Like the other notices it is owed under the notice's
-// savepoint, so it never fails or rolls back the change, and repeats inside the
-// coalescing window join one email.
+// Every way to change a key owes it: POST /network/auth-keys (CreateAuthKey),
+// POST /network/auth-key-revoke (RevokeAuthKey), and a team member's removal,
+// which ends every key the member's user made in the team and owes one notice
+// listing each of them (network_member_deny_model.go, QD-1211). Expiry is no
+// change anyone made, and owes none. Like the other notices it is owed under
+// the notice's savepoint, so it never fails or rolls back the change, and
+// repeats inside the coalescing window join one email.
 //
 // A key has no name, so the notice describes it: its expiry, its uses, whether
 // it is ephemeral or pre-approved and how many tags it carries. It never holds
@@ -82,14 +84,18 @@ func newSecurityAuthKeyChange(ctx context.Context, action string, authKey *Netwo
 	return change
 }
 
-// Owes the auth key notice for a key the caller's transaction created or
-// revoked, to the network admin's sign-in email addresses. It never fails the
-// change (guardSecurityNoticeInTx).
-func oweSecurityAuthKeyNoticeInTx(ctx context.Context, tx server.PgTx, networkId server.Id, change *SecurityAuthKeyChange) {
+// Owes the auth key notice for the keys the caller's transaction created or
+// revoked, one change each, in one notice, to the network admin's sign-in
+// email addresses. No change owes nothing. It never fails the change
+// (guardSecurityNoticeInTx).
+func oweSecurityAuthKeyNoticeInTx(ctx context.Context, tx server.PgTx, networkId server.Id, changes ...*SecurityAuthKeyChange) {
+	if len(changes) == 0 {
+		return
+	}
 	guardSecurityNoticeInTx(ctx, tx, SecurityNoticeAuthKey, func() string {
 		recipients := securityNoticeRecipientsInTx(ctx, tx, networkId)
 		return oweSecurityNoticeInTx(ctx, tx, networkId, recipients, SecurityAuthKeyTemplateName, func(templateJson string) (string, error) {
-			return applySecurityNoticeChanges(templateJson, (*SecurityAuthKeyNotice).add, []*SecurityAuthKeyChange{change})
+			return applySecurityNoticeChanges(templateJson, (*SecurityAuthKeyNotice).add, changes)
 		})
 	})
 }

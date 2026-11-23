@@ -11,16 +11,23 @@ package controller
 //	         removed only by an Owner, since the admin set is the Owner's
 //	         (§7.5's table), and the team keeps at least one Owner
 //	deny     model.DenyNetworkMemberInTx in one transaction: the membership's
-//	         row, its untagged clients through the deactivation path, and the
-//	         member's rev/ object; one admin event, member.remove; the network
-//	         authority notice when the member was in the AdminSet
-//	answer   the member, whether its MemberRevoke needs k of n, and
-//	         signature_owed, always set: the server's denial is not the
-//	         removal (owner decisions 5, 59). Until an admin device signs the
-//	         MemberRevoke, an authority statement for an AdminSet member, with
-//	         its presence countersignature where §7.9's presence row asks,
-//	         members still encrypt to the member's devices; `ur admin members
-//	         remove` signs it beside this call
+//	         row, its untagged clients through the deactivation path, every
+//	         auth key the member's user made in the team (QD-1211), each with
+//	         its auth_key.revoke admin event and all of them in one auth key
+//	         notice, and the member's rev/ object; the removal's admin event,
+//	         member.remove; the network authority notice when the member was
+//	         in the AdminSet
+//	answer   the member, whether its MemberRevoke needs k of n, how many
+//	         clients and auth keys the denial ended, and signature_owed, always
+//	         set: the server's denial is not the removal (owner decisions 5,
+//	         59). Until an admin device signs the MemberRevoke, an authority
+//	         statement for an AdminSet member, with its presence
+//	         countersignature where §7.9's presence row asks, members still
+//	         encrypt to the member's devices; `ur admin members remove` signs
+//	         it beside this call. When an ended key was pre-approved,
+//	         bundle_still_admits and its note say that a copy of its bundle
+//	         still admits devices until its Delegation ends, as a key's revoke
+//	         answers (D-TEAM-31)
 //
 // A refusal names no member it did not find.
 
@@ -51,6 +58,10 @@ const (
 	networkMemberRemoveUnavailableReason = "Teams are not available."
 )
 
+// What a removal that ended a pre-approved auth key answers (D-TEAM-31), as
+// the key's revoke does.
+const networkMemberRemoveBundleNote = "Removing the member revoked the auth keys it made, which stops their bearers only. A copy of a pre-approved key's bundle still admits devices until its Delegation ends: run `ur admin delegations revoke` on an admin device to end it."
+
 func init() {
 	// a one-command admin token reaches the route, and its use is spent in the
 	// removal's transaction (session.RegisterAdminCommandRoute)
@@ -72,6 +83,14 @@ type RemoveNetworkMemberResult struct {
 	AdminSet bool `json:"admin_set,omitempty"`
 	// the member's untagged clients the denial deactivated
 	DeactivatedClientCount int64 `json:"deactivated_client_count,omitempty"`
+	// the auth keys the member's user made in the team, which the denial
+	// revoked: their bearers enroll nothing more
+	RevokedAuthKeyCount int64 `json:"revoked_auth_key_count,omitempty"`
+	// a revoked key was pre-approved: a copy of its bundle keeps admitting
+	// devices until its Delegation ends (D-TEAM-31)
+	BundleStillAdmits bool `json:"bundle_still_admits,omitempty"`
+	// what to do about such a bundle
+	Note string `json:"note,omitempty"`
 	// the removal is cryptographic only once an admin device signs the
 	// member's MemberRevoke; set on every removal
 	SignatureOwed bool                      `json:"signature_owed,omitempty"`
@@ -152,10 +171,13 @@ func (self *networkMemberRemovals) remove(args *RemoveNetworkMemberArgs, clientS
 			refuse(networkMemberRemoveLastOwnerMessage)
 		}
 		if answer == nil {
+			// the removal's event, which the denial records after its keys'
+			memberId := args.MemberId
 			denied, err := model.DenyNetworkMemberInTx(ctx, tx, &model.NetworkMemberDenial{
 				NetworkId: byJwt.NetworkId,
 				MemberId:  args.MemberId,
 				Time:      now,
+				Event:     model.NewSessionAdminEvent(clientSession, model.AdminEventActionMemberRemove, model.AdminEventTargetMember, &memberId),
 			})
 			switch {
 			case errors.Is(err, model.ErrNetworkMemberNotFound):
@@ -163,9 +185,6 @@ func (self *networkMemberRemovals) remove(args *RemoveNetworkMemberArgs, clientS
 			case err != nil:
 				server.Raise(err)
 			default:
-				memberId := denied.Member.MemberId
-				event := model.NewSessionAdminEvent(clientSession, model.AdminEventActionMemberRemove, model.AdminEventTargetMember, &memberId)
-				model.AddAdminEventInTx(ctx, tx, event)
 				adminSet := denied.Member.Role.AdminSet()
 				if adminSet {
 					model.OweNetworkMemberDeniedNoticeInTx(ctx, tx, byJwt.NetworkId, now)
@@ -174,7 +193,12 @@ func (self *networkMemberRemovals) remove(args *RemoveNetworkMemberArgs, clientS
 					MemberId:               &memberId,
 					AdminSet:               adminSet,
 					DeactivatedClientCount: denied.DeactivatedClientCount,
+					RevokedAuthKeyCount:    int64(len(denied.RevokedAuthKeys)),
 					SignatureOwed:          true,
+				}
+				if denied.BundleStillAdmits() {
+					answer.BundleStillAdmits = true
+					answer.Note = networkMemberRemoveBundleNote
 				}
 			}
 		}

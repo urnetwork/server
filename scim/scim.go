@@ -10,11 +10,12 @@
 //	users     a SCIM User is a member of the team, id its member_id, userName its email. Unsigned SCIM data adds no
 //	          reader (§7.6): POST /Users of a person who is no member queues a user_create for an admin device to
 //	          invite, its id the change's, and a member is never made here. active=false, by PATCH or PUT, or a
-//	          DELETE, denies the member at once (model.DenyNetworkMemberInTx: its row, its untagged clients, its
-//	          rev/ object) and queues its MemberRevoke, which is the removal only once an admin device, or for a
-//	          member outside the AdminSet the indexer ServiceSettings.scim_signer names, signs it (D-TEAM-25); until
-//	          then members still encrypt to its devices, which the console lists. The deactivated user reads
-//	          active=false while its queued change lasts. Of a queued create, active=false or a DELETE withdraws it
+//	          DELETE, denies the member at once (model.DenyNetworkMemberInTx: its row, its untagged clients, the
+//	          auth keys its user made in the team, its rev/ object; QD-1211) and queues its MemberRevoke, which is
+//	          the removal only once an admin device, or for a member outside the AdminSet the indexer
+//	          ServiceSettings.scim_signer names, signs it (D-TEAM-25); until then members still encrypt to its
+//	          devices, which the console lists. The deactivated user reads active=false while its queued change
+//	          lasts. Of a queued create, active=false or a DELETE withdraws it
 //	groups    groups live in the config repo (owner decision 46), so every group request queues a group change for
 //	          an admin device, and reads answer from the queue: a group the queue no longer holds is unknown here
 //	roles     never sync (§7.6): no attribute here sets one
@@ -532,14 +533,20 @@ func (self *scimRequest) targetUser(target *scimUserTarget) *scimUser {
 	}
 }
 
-// Denies a member at once and queues its MemberRevoke, in tx (the package header).
+// Denies a member at once and queues its MemberRevoke, in tx (the package header). The denial records the
+// deactivation's admin event, after the auth_key.revoke event of each key it ends, which name SCIM as their actor.
 func (self *scimRequest) deactivateInTx(ctx context.Context, tx server.PgTx, member *model.NetworkMember) (*model.NetworkScimChange, error) {
 	now := self.service.now().UTC().Truncate(time.Microsecond)
-	denied, err := model.DenyNetworkMemberInTx(ctx, tx, &model.NetworkMemberDenial{NetworkId: self.networkId, MemberId: member.MemberId, Time: now})
+	memberId := member.MemberId
+	denied, err := model.DenyNetworkMemberInTx(ctx, tx, &model.NetworkMemberDenial{
+		NetworkId: self.networkId,
+		MemberId:  memberId,
+		Time:      now,
+		Event:     self.adminEvent(model.AdminEventActionScimDeactivate, model.AdminEventTargetMember, &memberId),
+	})
 	if err != nil {
 		return nil, err
 	}
-	memberId := denied.Member.MemberId
 	change, err := model.AddNetworkScimChangeInTx(ctx, tx, self.networkId, &memberId, model.NetworkScimChangeKindMemberRevoke, &model.NetworkScimMemberRevokeDetail{
 		Email: denied.Member.Email,
 		Role:  denied.Member.Role,
@@ -547,7 +554,6 @@ func (self *scimRequest) deactivateInTx(ctx context.Context, tx server.PgTx, mem
 	if err != nil {
 		return nil, err
 	}
-	model.AddAdminEventInTx(ctx, tx, self.adminEvent(model.AdminEventActionScimDeactivate, model.AdminEventTargetMember, &memberId))
 	if denied.Member.Role.AdminSet() {
 		model.OweNetworkMemberDeniedNoticeInTx(ctx, tx, self.networkId, now)
 	}

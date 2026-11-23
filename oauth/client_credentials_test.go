@@ -167,7 +167,20 @@ func TestAClientStopsWhenItsCreatorLeaves(t *testing.T) {
 		response, err := ExchangeClientCredentials(self.ctx, &ClientCredentialsArgs{ClientId: self.created.ClientId, ClientSecret: self.created.ClientSecret})
 		connect.AssertEqual(t, err, nil)
 		server.Tx(self.ctx, func(tx server.PgTx) {
-			_, err := model.DenyNetworkMemberInTx(self.ctx, tx, &model.NetworkMemberDenial{NetworkId: self.teamNetworkId, MemberId: self.creator.MemberId, Time: server.NowUtc()})
+			memberId := self.creator.MemberId
+			_, err := model.DenyNetworkMemberInTx(self.ctx, tx, &model.NetworkMemberDenial{
+				NetworkId: self.teamNetworkId,
+				MemberId:  memberId,
+				Time:      server.NowUtc(),
+				Event: &model.AdminEvent{
+					NetworkId:  self.teamNetworkId,
+					ActorKind:  model.AdminEventActorSystem,
+					Action:     model.AdminEventActionMemberRemove,
+					TargetKind: model.AdminEventTargetMember,
+					TargetId:   &memberId,
+					Result:     model.AdminEventResultOk,
+				},
+			})
 			server.Raise(err)
 		})
 		if _, err := ExchangeClientCredentials(self.ctx, &ClientCredentialsArgs{ClientId: self.created.ClientId, ClientSecret: self.created.ClientSecret}); !errors.Is(err, ErrInvalidGrant) {

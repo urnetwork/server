@@ -189,14 +189,19 @@ func requireTeamEnrollRefusal(t testing.TB, err error, status int, code string) 
 	}
 }
 
-// The api's removal of the member (§7.10): its row, its untagged clients and
-// its rev/ object, in one transaction.
+// The api's removal of the member (§7.10): its row, its untagged clients, the
+// auth keys its user made, and its rev/ object, in one transaction.
 func denyTeamEnrollMember(t testing.TB, ctx context.Context, networkId server.Id, memberId server.Id) *NetworkMemberDenied {
 	t.Helper()
 	var denied *NetworkMemberDenied
 	server.Tx(ctx, func(tx server.PgTx) {
 		var err error
-		denied, err = DenyNetworkMemberInTx(ctx, tx, &NetworkMemberDenial{NetworkId: networkId, MemberId: memberId, Time: server.NowUtc()})
+		denied, err = DenyNetworkMemberInTx(ctx, tx, &NetworkMemberDenial{
+			NetworkId: networkId,
+			MemberId:  memberId,
+			Time:      server.NowUtc(),
+			Event:     newTestMemberRemovalEvent(networkId, memberId),
+		})
 		server.Raise(err)
 	})
 	return denied
@@ -360,7 +365,8 @@ func TestTeamEphemeralEnrollmentIsItsCreatorsMemberDevice(t *testing.T) {
 // answers 401 auth_key_invalid, never 500, spending nothing: a removed
 // creator's tagged and ephemeral keys, a creator past its reauth_deadline, and
 // a creator removed after its sign-in was read and before the mint's
-// transaction, where the mint's own state check refuses.
+// transaction, where the mint's own state check refuses. The removal ended the
+// creator's keys, so their rows are gone (QD-1211).
 func TestTeamEnrollmentOfAKeyWhoseCreatorLeftIsRefused(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		self := newTeamEnrollFixture(t, NetworkMemberRoleAdmin)
@@ -396,8 +402,8 @@ func TestTeamEnrollmentOfAKeyWhoseCreatorLeftIsRefused(t *testing.T) {
 			_, err := EnrollNetworkClient(self.ctx, teamEnrollArgs(t, bearer), "192.0.2.9:1")
 			requireTeamEnrollRefusal(t, err, http.StatusUnauthorized, NetworkEnrollCodeAuthKeyInvalid)
 		}
-		connect.AssertEqual(t, readTeamEnrollKeyUseCount(t, self.ctx, taggedKeyId), 0)
-		connect.AssertEqual(t, readTeamEnrollKeyUseCount(t, self.ctx, ephemeralKeyId), 0)
+		connect.AssertEqual(t, testAuthKeyExists(t, self.ctx, taggedKeyId), false)
+		connect.AssertEqual(t, testAuthKeyExists(t, self.ctx, ephemeralKeyId), false)
 		connect.AssertEqual(t, countTeamEnrollClients(t, self.ctx, self.networkId), 0)
 	})
 }
