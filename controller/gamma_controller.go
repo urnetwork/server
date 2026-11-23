@@ -17,7 +17,9 @@ package controller
 // authentication: we assigned the deposit hotkey to the account, so whoever
 // mints into it pays for that account. A deposit hotkey is not a pay-to
 // address and there is no wallet URI: the customer's coldkey mints with
-// `btcli tx mint-gamma`, and we charge the price with spend_gamma.
+// `btcli tx mint-gamma`, and we charge the price with spend_gamma, signed by
+// the deposit's own hotkey at our service (runtime 493: a deposit names no
+// spender, and the customer's coldkey can move its gamma away at any time).
 
 import (
 	"encoding/json"
@@ -59,12 +61,11 @@ const (
 	// the deposit's daily spend cap did not allow the price when we spent
 	GammaErrorCodeDailyCapExceeded = "daily_cap_exceeded"
 	// the deposit's daily spend cap is below the price, so no spend can pass
+	// (also a skipped spend)
 	GammaErrorCodeDailyCapTooLow = "daily_cap_too_low"
-	// the deposit names another spender (also a skipped spend)
-	GammaErrorCodeWrongSpender = "wrong_spender"
 	// there is no deposit at the hotkey (a skipped spend)
 	GammaErrorCodeNoDeposit = "no_deposit"
-	// the chain refused the amount (a skipped spend)
+	// the chain refused the amount or the spend (a skipped spend)
 	GammaErrorCodeInvalidAmount = "invalid_amount"
 	// a mint below 0.1 gamma fails (AmountTooLow)
 	GammaErrorCodeMintTooSmall = "mint_too_small"
@@ -172,6 +173,65 @@ func gammaMaxSpend() int64 {
 	return largest
 }
 
+// A new deposit's daily spend cap is the largest charge it is opened for,
+// plus this headroom (the owner, 2026-11-20: "Yes, with headroom"): a price
+// raised by up to a quarter, or a smaller second charge the same day, still
+// passes without the customer raising the cap. Gamma is one US dollar, so
+// the cap moves only with our own prices, never with TAO's.
+const gammaDailyCapHeadroomPercent = 125
+
+// gammaDailyCapFor is the daily spend cap, in gamma units, a new deposit
+// opens with for a purchase of amount: the larger of the purchase and the
+// largest automatic charge (gammaMaxSpend: a yearly renewal, a data top-up,
+// a seat upgrade), plus the headroom, rounded up to a whole gamma. A spend
+// larger than its deposit's cap can never pass, so every charge the deposit
+// is opened for must fit within one day's cap.
+func gammaDailyCapFor(amount int64) int64 {
+	return gammaDailyCapOf(max(amount, gammaMaxSpend()))
+}
+
+// gammaDailyCapOf is the cap for a largest charge: plus the headroom, rounded
+// up to a whole gamma.
+func gammaDailyCapOf(largest int64) int64 {
+	scaled := new(big.Int).Mul(big.NewInt(max(largest, 0)), big.NewInt(gammaDailyCapHeadroomPercent))
+	unit := big.NewInt(100 * gammaUnitsPerGamma)
+	gammas := new(big.Int).Div(scaled.Add(scaled, new(big.Int).Sub(unit, big.NewInt(1))), unit)
+	return max(gammas.Int64(), 1) * gammaUnitsPerGamma
+}
+
+// The seconds a Subtensor block takes, for the time a daily cap needs to
+// refill.
+const gammaBlockSeconds = 12
+
+// gammaCapRefillWait is how long a deposit's daily cap, allowing spendable
+// now, takes to allow amount: the cap refills linearly over 7200 blocks.
+func gammaCapRefillWait(dailyCap int64, spendable int64, amount int64) time.Duration {
+	if dailyCap <= 0 || amount <= spendable {
+		return 0
+	}
+	blocks := new(big.Int).Mul(big.NewInt(amount-max(spendable, 0)), big.NewInt(gammaRefillBlocks))
+	blocks.Add(blocks, big.NewInt(dailyCap-1))
+	blocks.Div(blocks, big.NewInt(dailyCap))
+	return time.Duration(blocks.Int64()*gammaBlockSeconds) * time.Second
+}
+
+// gammaWaitText is a wait in plain words, rounded up: "40 minutes",
+// "about 3 hours".
+func gammaWaitText(wait time.Duration) string {
+	if wait < time.Hour {
+		minutes := max(1, int64((wait+time.Minute-1)/time.Minute))
+		if minutes == 1 {
+			return "1 minute"
+		}
+		return fmt.Sprintf("%d minutes", minutes)
+	}
+	hours := int64((wait + time.Hour - 1) / time.Hour)
+	if hours == 1 {
+		return "about 1 hour"
+	}
+	return fmt.Sprintf("about %d hours", hours)
+}
+
 // GammaServicesHandler serves the services document with
 // Access-Control-Allow-Origin: *, as the services guide requires.
 func GammaServicesCors(w http.ResponseWriter) {
@@ -199,9 +259,11 @@ type GammaTermsResult struct {
 	MintUnavailableReason string `json:"mint_unavailable_reason,omitempty"`
 	Netuid                uint16 `json:"netuid"`
 	ServiceHotkey         string `json:"service_hotkey"`
-	Spender               string `json:"spender"`
-	ServicesUrl           string `json:"services_url"`
-	PriceTier             string `json:"price_tier"`
+	// retired with runtime 493 (a deposit names no spender; its own hotkey
+	// spends it): always empty, kept so clients that read it do not break
+	Spender     string `json:"spender"`
+	ServicesUrl string `json:"services_url"`
+	PriceTier   string `json:"price_tier"`
 	// the oracle's accepted TAO/USD price, in dollars; "" before any feed
 	TaoUsd            string            `json:"tao_usd"`
 	PriceAgeBlocks    uint64            `json:"price_age_blocks"`
@@ -211,10 +273,14 @@ type GammaTermsResult struct {
 	Items             []*GammaTermsItem `json:"items"`
 	// the daily cap that lets every automatic charge (a yearly renewal, a
 	// seat upgrade, a top-up) be spent
-	AutoMinDailyCapGamma string     `json:"auto_min_daily_cap_gamma"`
-	Disclaimer           string     `json:"disclaimer"`
-	AutomaticNotice      string     `json:"automatic_notice"`
-	UpdatedAt            *time.Time `json:"updated_at"`
+	AutoMinDailyCapGamma string `json:"auto_min_daily_cap_gamma"`
+	// the daily spend cap a new deposit opens with for a plan or a data pack
+	// (the mint command names it): the largest of those charges plus
+	// headroom, in gamma
+	DailyCapGamma   string     `json:"daily_cap_gamma"`
+	Disclaimer      string     `json:"disclaimer"`
+	AutomaticNotice string     `json:"automatic_notice"`
+	UpdatedAt       *time.Time `json:"updated_at"`
 }
 
 // gammaView is what the API knows of Gamma: the settings and the biller's
@@ -249,6 +315,14 @@ func gammaLoadView(clientSession *session.ClientSession) *gammaView {
 	if 0 < len(state.Terms) && json.Unmarshal(state.Terms, terms) == nil {
 		view.terms = terms
 	}
+	// Sell only while this copy of gamma.yml names the deposit master the
+	// biller signs for: a hotkey assigned from another master is one the
+	// biller cannot spend from (a rollout with the api and the taskworker on
+	// different gamma.yml, or terms from before the deposit seed). Until they
+	// agree, Gamma is not configured: "temporarily unavailable".
+	if view.terms == nil || view.terms.DepositHotkeyMaster != gammaAddress(settings.DepositHotkeyMaster) {
+		view.readiness, view.mint = gammaNotConfigured, gammaNotConfigured
+	}
 	return view
 }
 
@@ -273,7 +347,6 @@ func GammaTerms(clientSession *session.ClientSession) (*GammaTermsResult, error)
 	if view.settings != nil {
 		result.Netuid = view.settings.Netuid
 		result.ServiceHotkey = view.settings.ServiceAddress
-		result.Spender = view.settings.SpenderAddress
 		result.ServicesUrl = view.settings.ServicesUrl
 	}
 	if view.state != nil {
@@ -327,6 +400,7 @@ func GammaTerms(clientSession *session.ClientSession) (*GammaTermsResult, error)
 		})
 	}
 	result.AutoMinDailyCapGamma = gammaFormatUnits(largest)
+	result.DailyCapGamma = gammaFormatUnits(gammaDailyCapFor(largest))
 	return result, nil
 }
 
@@ -374,16 +448,22 @@ type GammaPaymentIntentResult struct {
 	PriceUsd        float64 `json:"price_usd"`
 	RegularPriceUsd float64 `json:"regular_price_usd"`
 	AmountGamma     string  `json:"amount_gamma"`
-	// the public 32-byte spend reference our GammaSpent will carry
+	// the purchase's 32-byte reference: since runtime 493 a GammaSpent
+	// carries none, and it names the purchase only here and in its status
 	Reference     string `json:"reference"`
 	Netuid        uint16 `json:"netuid"`
 	DepositHotkey string `json:"deposit_hotkey"`
 	ServiceHotkey string `json:"service_hotkey"`
-	Spender       string `json:"spender"`
+	// retired with runtime 493: always empty (GammaTermsResult.Spender)
+	Spender string `json:"spender"`
 	// the daily cap the deposit needs for this purchase, and for every
 	// automatic charge after it
-	MinDailyCapGamma      string                    `json:"min_daily_cap_gamma"`
-	AutoMinDailyCapGamma  string                    `json:"auto_min_daily_cap_gamma"`
+	MinDailyCapGamma     string `json:"min_daily_cap_gamma"`
+	AutoMinDailyCapGamma string `json:"auto_min_daily_cap_gamma"`
+	// the daily spend cap the mint command opens a new deposit with (that,
+	// plus headroom); "" when the deposit exists, whose own cap the mint
+	// keeps (naming another fails: GammaDepositDailySpendCapMismatch)
+	MintDailyCapGamma     string                    `json:"mint_daily_cap_gamma"`
 	MinMintGamma          string                    `json:"min_mint_gamma"`
 	IndicativeTao         string                    `json:"indicative_tao"`
 	MintAvailable         bool                      `json:"mint_available"`
@@ -801,11 +881,17 @@ var errGammaNoFreeHotkey = fmt.Errorf("no deposit hotkey of the account can take
 // account's first hotkey, or with a coldkey, the first whose deposit that
 // coldkey owns or can open (no deposit there, and the hotkey unassociated or
 // associated with it). An account with none gets its first; one whose every
-// hotkey is taken gets another.
+// hotkey is taken gets another. Only hotkeys of the configured deposit master
+// count: one of an earlier master is never handed out again, since nothing
+// here can spend from it.
 func gammaPickDepositHotkey(clientSession *session.ClientSession, settings *gammaSettings, networkId server.Id, coldkey string) (*model.GammaDepositHotkey, error) {
 	ctx := clientSession.Ctx
-	hotkeys := model.GetGammaDepositHotkeys(ctx, networkId)
-	for _, hotkey := range hotkeys {
+	current := 0
+	for _, hotkey := range model.GetGammaDepositHotkeys(ctx, networkId) {
+		if !gammaDepositHotkeyCurrent(settings, hotkey) {
+			continue
+		}
+		current++
 		if coldkey == "" {
 			return hotkey, nil
 		}
@@ -815,7 +901,7 @@ func gammaPickDepositHotkey(clientSession *session.ClientSession, settings *gamm
 			return hotkey, nil
 		}
 	}
-	if gammaMaxDepositHotkeysPerNetwork <= len(hotkeys) {
+	if gammaMaxDepositHotkeysPerNetwork <= current {
 		return nil, errGammaNoFreeHotkey
 	}
 	return model.AllocateGammaDepositHotkey(ctx, networkId, func(index int64) (string, error) {
@@ -847,7 +933,9 @@ func gammaIntentResult(
 	if view.terms != nil && view.mint == gammaReady {
 		gammaPerTao = view.terms.GammaPerTao
 	}
-	// a mint of the remainder, at least the chain's minimum
+	// a mint of the remainder, at least the chain's minimum. Since runtime 493
+	// a mint names no spender (bittensor 11.3.5 and later): the deposit's
+	// hotkey, which we hold, spends it at our service.
 	mintUnits := max(remaining, gammaMinMintUnits)
 	indicative := gammaIndicativeTao(mintUnits, gammaPerTao)
 	amountArg := indicative
@@ -855,9 +943,17 @@ func gammaIntentResult(
 		amountArg = "<TAO>"
 	}
 	command := fmt.Sprintf(
-		"btcli tx mint-gamma --netuid %d --hotkey %s --amount-tao %s --service-hotkey %s",
-		settings.Netuid, hotkey.Hotkey, amountArg, settings.ServiceAddress,
+		"btcli tx mint-gamma --netuid %d --hotkey %s --amount-tao %s",
+		settings.Netuid, hotkey.Hotkey, amountArg,
 	)
+	// a new deposit opens with its daily spend cap, so it never runs without
+	// one; a mint into an existing deposit keeps that deposit's cap (naming
+	// another fails the mint: GammaDepositDailySpendCapMismatch)
+	mintDailyCap := ""
+	if hotkey.DepositColdkey == nil {
+		mintDailyCap = gammaFormatUnits(gammaDailyCapFor(amount))
+		command += " --daily-spend-cap-gamma " + mintDailyCap
+	}
 	expiresAt := intent.ExpiresAt
 	result := &GammaPaymentIntentResult{
 		IntentId:             intent.IntentId.String(),
@@ -874,9 +970,9 @@ func gammaIntentResult(
 		Netuid:               settings.Netuid,
 		DepositHotkey:        hotkey.Hotkey,
 		ServiceHotkey:        settings.ServiceAddress,
-		Spender:              settings.SpenderAddress,
 		MinDailyCapGamma:     gammaFormatUnits(amount),
 		AutoMinDailyCapGamma: gammaFormatUnits(max(amount, gammaMaxSpend())),
+		MintDailyCapGamma:    mintDailyCap,
 		MinMintGamma:         gammaFormatUnits(gammaMinMintUnits),
 		IndicativeTao:        indicative,
 		MintAvailable:        view.mint == gammaReady,
@@ -1056,17 +1152,24 @@ func gammaStatusResult(clientSession *session.ClientSession, view *gammaView, in
 	switch {
 	case hotkey == nil || balance <= 0:
 		result.Status = gammaStatusPending
-	case hotkey.DepositSpender != nil && view.settings != nil && *hotkey.DepositSpender != view.settings.SpenderAddress:
-		result.Status = gammaStatusSeen
-		result.Error = &CryptoPaymentError{Code: GammaErrorCodeWrongSpender, Message: "The deposit names another spender. Point it at URnetwork's service with btcli gamma set-spender --service-hotkey."}
 	case balance < amount:
 		result.Status = gammaStatusSeen
 	case hotkey.DepositDailyCap != nil && *hotkey.DepositDailyCap < amount:
 		result.Status = gammaStatusSeen
 		result.Error = &CryptoPaymentError{Code: GammaErrorCodeDailyCapTooLow, Message: fmt.Sprintf("The deposit's daily spend cap is below the price. Raise it to at least %s gamma.", gammaFormatUnits(amount))}
 	case spendable < amount:
-		// the cap refills; the charge goes when it allows the price
+		// the cap refills; the charge goes when it allows the price. A
+		// changed cap keeps what it allows now (gamma.rs
+		// do_set_gamma_deposit_daily_spend_cap), so a higher cap only
+		// refills faster; a removed cap allows the whole balance.
 		result.Status = gammaStatusSeen
+		if hotkey.DepositDailyCap != nil {
+			wait := gammaCapRefillWait(*hotkey.DepositDailyCap, spendable, amount)
+			result.Error = &CryptoPaymentError{Code: GammaErrorCodeDailyCapExceeded, Message: fmt.Sprintf(
+				"The deposit's daily spend cap allows %s gamma now and refills over a day, so this payment goes through in %s, on its own. To pay sooner, raise the cap, which refills faster, or remove it.",
+				gammaFormatUnits(max(spendable, 0)), gammaWaitText(wait),
+			)}
+		}
 	default:
 		// covered: the next biller run charges it
 		result.Status = gammaStatusConfirming
@@ -1074,16 +1177,18 @@ func gammaStatusResult(clientSession *session.ClientSession, view *gammaView, in
 	return result
 }
 
+// gammaSkipError is a skipped charge's error: why the deposit could not pay
+// when we went to spend (nothing was sent), and what to change.
 func gammaSkipError(reason string, amount int64) *CryptoPaymentError {
 	switch reason {
 	case GammaErrorCodeInsufficientGamma:
-		return &CryptoPaymentError{Code: reason, Message: "The deposit held less gamma than the price when we spent. Mint more; we try again once the deposit changes."}
+		return &CryptoPaymentError{Code: reason, Message: "The deposit held less gamma than the price when we went to spend. Mint more; we try again once the deposit changes."}
 	case GammaErrorCodeDailyCapExceeded:
 		return &CryptoPaymentError{Code: reason, Message: fmt.Sprintf("The deposit's daily spend cap did not allow the price. Raise it to at least %s gamma.", gammaFormatUnits(amount))}
-	case GammaErrorCodeWrongSpender:
-		return &CryptoPaymentError{Code: reason, Message: "The deposit names another spender. Point it at URnetwork's service with btcli gamma set-spender --service-hotkey."}
+	case GammaErrorCodeDailyCapTooLow:
+		return &CryptoPaymentError{Code: reason, Message: fmt.Sprintf("The deposit's daily spend cap is below the price. Raise it to at least %s gamma.", gammaFormatUnits(amount))}
 	case GammaErrorCodeNoDeposit:
-		return &CryptoPaymentError{Code: reason, Message: "There was no deposit at the hotkey when we spent."}
+		return &CryptoPaymentError{Code: reason, Message: "There was no deposit at the hotkey when we went to spend."}
 	}
 	return &CryptoPaymentError{Code: GammaErrorCodeInvalidAmount, Message: "The spend did not go through; we try again once the deposit changes."}
 }

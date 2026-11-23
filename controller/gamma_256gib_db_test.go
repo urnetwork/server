@@ -59,7 +59,7 @@ func TestGammaSellsThe256GibPack(t *testing.T) {
 
 		hotkey := gammaTestAccount(t, intent.DepositHotkey)
 		coldkey := gammaTestAccount(t, gammaTestColdkey)
-		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: coldkey, spender: f.settings.Spender, balance: 1_000_000_000})
+		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: coldkey, balance: 1_000_000_000})
 		connect.AssertEqual(t, f.run().Charged, 1)
 		f.sim.mine()
 		f.run()
@@ -90,7 +90,7 @@ func TestGammaTopsUpWithThe256GibPack(t *testing.T) {
 			t.Fatalf("the intent was refused: %+v", intent.Error)
 		}
 		hotkey := gammaTestAccount(t, intent.DepositHotkey)
-		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: coldkey, spender: f.settings.Spender, balance: 2_000_000_000})
+		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: coldkey, balance: 2_000_000_000})
 		f.run()
 		f.sim.mine()
 		f.run()

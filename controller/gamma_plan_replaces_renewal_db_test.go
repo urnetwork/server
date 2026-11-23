@@ -34,7 +34,7 @@ const gammaReplaceTestYearlyPriceGam = uint64(40_000_000_000)
 func gammaReplaceTestPendingRenewal(t testing.TB, f *gammaDbFixture, networkId server.Id, clientSession *session.ClientSession) ([32]byte, *model.GammaPaymentIntent, time.Time) {
 	ctx := f.ctx
 	hotkey := gammaDeletedTestBuy(t, f, clientSession, &CreateGammaPaymentIntentArgs{Plan: model.SolanaPlanMonthly})
-	f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: gammaTestAccount(t, gammaTestColdkey), spender: f.settings.Spender, balance: 0})
+	f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: gammaTestAccount(t, gammaTestColdkey), balance: 0})
 	termEnd := cryptoDbRenewals(t, ctx, networkId, model.SubscriptionMarketGamma).endTime.Add(-manualPaymentGracePeriod)
 	f.now = termEnd.Add(-30 * time.Minute)
 	f.autoNow()
@@ -50,17 +50,23 @@ func gammaReplaceTestPendingRenewal(t testing.TB, f *gammaDbFixture, networkId s
 }
 
 func gammaReplaceTestDeposit(t testing.TB, f *gammaDbFixture, hotkey [32]byte, balance uint64) {
-	f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: gammaTestAccount(t, gammaTestColdkey), spender: f.settings.Spender, balance: balance})
+	f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: gammaTestAccount(t, gammaTestColdkey), balance: balance})
 }
 
-// gammaReplaceTestSubmittedReferences are the references of the spend entries
-// submitted since the last mine.
+// gammaReplaceTestSubmittedReferences are the references of the charges whose
+// spends were submitted since the last mine. A spend carries no reference
+// (runtime 493): each is recorded with its one charge before it is sent, so
+// its charge is found by the submitted extrinsic's hash.
 func gammaReplaceTestSubmittedReferences(f *gammaDbFixture) []string {
 	references := []string{}
 	for _, encoded := range f.sim.submitted {
-		_, _, entries := f.sim.parse(encoded)
-		for _, entry := range entries {
-			references = append(references, gammaHex(entry.Reference[:]))
+		hash := gammaExtrinsicHash(encoded).Hex()
+		batch := model.GetGammaSpendBatchByExtrinsicHash(f.ctx, hash)
+		if batch == nil {
+			f.t.Fatalf("submitted spend %s was not recorded", hash)
+		}
+		for _, charge := range model.ListGammaChargesForBatch(f.ctx, batch.BatchId) {
+			references = append(references, gammaHex(charge.Reference))
 		}
 	}
 	return references

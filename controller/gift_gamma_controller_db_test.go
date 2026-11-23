@@ -151,7 +151,7 @@ func TestGiftGammaOrderLifecycle(t *testing.T) {
 		// the deposit pays: the biller charges the gift like any purchase
 		hotkey := gammaTestAccount(t, intent.DepositHotkey)
 		coldkey := gammaTestAccount(t, gammaTestColdkey)
-		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: coldkey, spender: f.settings.Spender, balance: 200_000_000_000})
+		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: coldkey, balance: 200_000_000_000})
 		result := f.run()
 		connect.AssertEqual(t, result.Charged, 1)
 		connect.AssertEqual(t, len(f.sim.submitted), 1)
@@ -458,7 +458,7 @@ func TestGiftRetentionUnlinksGammaOrders(t *testing.T) {
 
 		intent := giftGammaTestIntent(t, clientSession, giftGammaTestArgs(2, model.GiftDeliveryMe))
 		connect.AssertEqual(t, intent.Error == nil, true)
-		f.sim.setDeposit(gammaTestAccount(t, intent.DepositHotkey), &gammaSimDeposit{coldkey: gammaTestAccount(t, gammaTestColdkey), spender: f.settings.Spender, balance: 100_000_000_000})
+		f.sim.setDeposit(gammaTestAccount(t, intent.DepositHotkey), &gammaSimDeposit{coldkey: gammaTestAccount(t, gammaTestColdkey), balance: 100_000_000_000})
 		f.run()
 		f.now = f.now.Add(time.Minute)
 		f.sim.mine()
@@ -556,11 +556,16 @@ func TestGiftGammaNewPurchaseVoidsTheOpenOne(t *testing.T) {
 		connect.AssertEqual(t, again.Status, model.GiftOrderStatusPending)
 		connect.AssertEqual(t, again.Error == nil, true)
 
-		// the deposit could pay everything: the voided gift is never charged
+		// the deposit could pay everything: the voided gift is never charged.
+		// The data pack and the gift are each one spend signed by the
+		// deposit's hotkey (runtime 493), one live at a time: the first lands
+		// before the second is sent.
 		hotkey := gammaTestAccount(t, second.DepositHotkey)
-		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: gammaTestAccount(t, gammaTestColdkey), spender: f.settings.Spender, balance: 1_000_000_000_000})
-		connect.AssertEqual(t, f.run().Charged, 2)
+		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: gammaTestAccount(t, gammaTestColdkey), balance: 1_000_000_000_000})
+		connect.AssertEqual(t, f.run().Charged, 1)
 		f.now = f.now.Add(time.Minute)
+		f.sim.mine()
+		connect.AssertEqual(t, f.run().Charged, 1)
 		f.sim.mine()
 		f.run()
 		connect.AssertEqual(t, gammaDbStatus(t, clientSession, &second.GammaPaymentIntentResult).Status, gammaStatusPaid)
@@ -597,7 +602,7 @@ func TestGiftGammaPaymentInProgress(t *testing.T) {
 		first := giftGammaTestIntent(t, clientSession, giftGammaTestArgs(1, model.GiftDeliveryMe))
 		connect.AssertEqual(t, first.Error == nil, true)
 		hotkey := gammaTestAccount(t, first.DepositHotkey)
-		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: gammaTestAccount(t, gammaTestColdkey), spender: f.settings.Spender, balance: 100_000_000_000})
+		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: gammaTestAccount(t, gammaTestColdkey), balance: 100_000_000_000})
 		connect.AssertEqual(t, f.run().Charged, 1)
 		connect.AssertEqual(t, len(f.sim.submitted), 1)
 
@@ -690,7 +695,7 @@ func TestGiftGammaCancel(t *testing.T) {
 		// deposit holds
 		hotkey := gammaTestAccount(t, pending.DepositHotkey)
 		coldkey := gammaTestAccount(t, gammaTestColdkey)
-		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: coldkey, spender: f.settings.Spender, balance: 100_000_000_000})
+		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: coldkey, balance: 100_000_000_000})
 		connect.AssertEqual(t, f.run().Charged, 0)
 		connect.AssertEqual(t, len(f.sim.submitted), 0)
 		f.sim.mine()
@@ -699,13 +704,17 @@ func TestGiftGammaCancel(t *testing.T) {
 		connect.AssertEqual(t, gammaDbCount(t, ctx, `SELECT COUNT(*) FROM gamma_spend_batch`), 0)
 		connect.AssertEqual(t, f.sim.deposit(hotkey).balance, uint64(100_000_000_000))
 
-		// a skipped charge: the deposit was emptied as the spend landed
+		// a skipped charge: the deposit was emptied before the spend landed,
+		// so the chain refuses it (runtime 493: it never enters a block), and
+		// once its era is over the charge is skipped
 		skipped := giftGammaTestIntent(t, clientSession, giftGammaTestArgs(1, model.GiftDeliveryMe))
 		connect.AssertEqual(t, skipped.Error == nil, true)
 		connect.AssertEqual(t, f.run().Charged, 1)
-		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: coldkey, spender: f.settings.Spender, balance: 1_000_000_000})
+		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: coldkey, balance: 1_000_000_000})
 		f.now = f.now.Add(time.Minute)
 		f.sim.mine()
+		f.run()
+		f.sim.advance(int(f.settings.EraPeriod) + 2)
 		f.run()
 		skippedIntentId := server.RequireParseId(skipped.IntentId)
 		connect.AssertEqual(t, model.GetGammaChargeForIntent(ctx, skippedIntentId).State, model.GammaChargeSkipped)
@@ -714,7 +723,7 @@ func TestGiftGammaCancel(t *testing.T) {
 		connect.AssertEqual(t, cancelled.Cancelled, true)
 		connect.AssertEqual(t, model.GetGammaChargeForIntent(ctx, skippedIntentId).State, model.GammaChargeVoided)
 		// the deposit changes and could pay: nothing is re-armed or sent
-		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: coldkey, spender: f.settings.Spender, balance: 100_000_000_000})
+		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: coldkey, balance: 100_000_000_000})
 		f.run()
 		f.run()
 		connect.AssertEqual(t, len(f.sim.submitted), 0)
@@ -809,7 +818,7 @@ func TestGiftGammaPurchaseExpiresInTwoHours(t *testing.T) {
 		pack := gammaDbIntent(t, clientSession, &CreateGammaPaymentIntentArgs{ItemId: StripeItemData1Tib, Delivery: model.CryptoDeliveryCode})
 		connect.AssertEqual(t, pack.Error == nil, true)
 		hotkey := gammaTestAccount(t, pack.DepositHotkey)
-		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: gammaTestAccount(t, gammaTestColdkey), spender: f.settings.Spender, balance: 100_000_000_000})
+		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: gammaTestAccount(t, gammaTestColdkey), balance: 100_000_000_000})
 		connect.AssertEqual(t, f.run().Charged, 1)
 		f.now = f.now.Add(time.Minute)
 		f.sim.mine()

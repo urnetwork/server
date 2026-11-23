@@ -57,7 +57,7 @@ func gammaDeletedTestBuy(t testing.TB, f *gammaDbFixture, clientSession *session
 	}
 	hotkey := gammaTestAccount(t, intent.DepositHotkey)
 	if f.sim.deposit(hotkey) == nil {
-		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: gammaTestAccount(t, gammaTestColdkey), spender: f.settings.Spender, balance: gammaDeletedTestDepositBalance})
+		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: gammaTestAccount(t, gammaTestColdkey), balance: gammaDeletedTestDepositBalance})
 	}
 	f.run()
 	f.sim.mine()
@@ -208,7 +208,7 @@ func TestGammaDeletedAccountsOpenPurchaseIsNeverCharged(t *testing.T) {
 
 		connect.AssertEqual(t, gammaDeletedTestRemove(t, ctx, clientSession), model.RemoveNetworkRemoved)
 		hotkey := gammaTestAccount(t, intent.DepositHotkey)
-		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: gammaTestAccount(t, gammaTestColdkey), spender: f.settings.Spender, balance: gammaDeletedTestDepositBalance})
+		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: gammaTestAccount(t, gammaTestColdkey), balance: gammaDeletedTestDepositBalance})
 		f.run()
 		connect.AssertEqual(t, len(f.sim.submitted), 0)
 		connect.AssertEqual(t, gammaDbCount(t, ctx, `SELECT COUNT(*) FROM gamma_payment_intent WHERE network_id = $1 AND voided_at IS NOT NULL`, networkId), 1)
@@ -221,8 +221,8 @@ func TestGammaDeletedAccountsOpenPurchaseIsNeverCharged(t *testing.T) {
 	})
 }
 
-// A charge the chain skipped before the deletion is not re-armed when the
-// deposit changes after it.
+// A charge skipped before the deletion is not re-armed when the deposit
+// changes after it.
 func TestGammaDeletedAccountsSkippedChargeIsNeverRetried(t *testing.T) {
 	skipWithoutProYml(t)
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
@@ -233,18 +233,24 @@ func TestGammaDeletedAccountsSkippedChargeIsNeverRetried(t *testing.T) {
 		intent := gammaDbIntent(t, clientSession, &CreateGammaPaymentIntentArgs{ItemId: StripeItemData1Tib})
 		hotkey := gammaTestAccount(t, intent.DepositHotkey)
 		coldkey := gammaTestAccount(t, gammaTestColdkey)
-		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: coldkey, spender: f.settings.Spender, balance: 5_000_000_000})
+		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: coldkey, balance: 5_000_000_000})
 		f.run()
 		connect.AssertEqual(t, len(f.sim.submitted), 1)
-		// moved away in the block the spend lands in: skipped
-		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: coldkey, spender: f.settings.Spender, balance: 1_000_000_000})
+		// moved away before the spend lands: the chain refuses it, and once
+		// its era is over the charge is skipped (runtime 493: a refused spend
+		// never enters a block, and could land until its era ends)
+		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: coldkey, balance: 1_000_000_000})
 		f.sim.mine()
+		f.run()
+		// still in flight within its era: the deletion waits
+		connect.AssertEqual(t, gammaDeletedTestRemove(t, ctx, clientSession), model.RemoveNetworkGammaChargeInFlight)
+		f.sim.advance(int(f.settings.EraPeriod) + 2)
 		f.run()
 		connect.AssertEqual(t, gammaDbStatus(t, clientSession, intent).Error.Code, GammaErrorCodeInsufficientGamma)
 
 		// a skipped charge is not in flight: the deletion goes ahead
 		connect.AssertEqual(t, gammaDeletedTestRemove(t, ctx, clientSession), model.RemoveNetworkRemoved)
-		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: coldkey, spender: f.settings.Spender, balance: 4_000_000_000})
+		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: coldkey, balance: 4_000_000_000})
 		f.run()
 		f.run()
 		connect.AssertEqual(t, len(f.sim.submitted), 0)
@@ -265,7 +271,7 @@ func TestGammaDeletionWaitsForAChargeInFlight(t *testing.T) {
 		f.run()
 		intent := gammaDbIntent(t, clientSession, &CreateGammaPaymentIntentArgs{Plan: model.SolanaPlanMonthly})
 		hotkey := gammaTestAccount(t, intent.DepositHotkey)
-		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: gammaTestAccount(t, gammaTestColdkey), spender: f.settings.Spender, balance: 20_000_000_000})
+		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: gammaTestAccount(t, gammaTestColdkey), balance: 20_000_000_000})
 		f.run()
 		connect.AssertEqual(t, len(f.sim.submitted), 1)
 
@@ -299,7 +305,7 @@ func TestGammaLiveBatchIsNeverResubmittedForANetworkThatIsGone(t *testing.T) {
 		f.run()
 		intent := gammaDbIntent(t, clientSession, &CreateGammaPaymentIntentArgs{Plan: model.SolanaPlanMonthly})
 		hotkey := gammaTestAccount(t, intent.DepositHotkey)
-		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: gammaTestAccount(t, gammaTestColdkey), spender: f.settings.Spender, balance: 20_000_000_000})
+		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: gammaTestAccount(t, gammaTestColdkey), balance: 20_000_000_000})
 		f.run()
 		connect.AssertEqual(t, len(f.sim.submitted), 1)
 
@@ -337,7 +343,7 @@ func TestGammaSpendForANetworkThatIsGoneRaisesAnAlarm(t *testing.T) {
 		f.run()
 		intent := gammaDbIntent(t, clientSession, &CreateGammaPaymentIntentArgs{Plan: model.SolanaPlanMonthly})
 		hotkey := gammaTestAccount(t, intent.DepositHotkey)
-		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: gammaTestAccount(t, gammaTestColdkey), spender: f.settings.Spender, balance: 20_000_000_000})
+		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: gammaTestAccount(t, gammaTestColdkey), balance: 20_000_000_000})
 		f.run()
 		connect.AssertEqual(t, len(f.sim.submitted), 1)
 

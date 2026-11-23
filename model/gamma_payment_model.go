@@ -2252,32 +2252,41 @@ type GammaAlarm struct {
 // was already recorded.
 func AddGammaAlarm(ctx context.Context, alarmKey string, kind string, blockNumber *int64, detail string, now time.Time) (added bool) {
 	server.Tx(ctx, func(tx server.PgTx) {
-		tag := server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-				INSERT INTO gamma_alarm (alarm_key, kind, block_number, detail, create_time)
-				VALUES ($1, $2, $3, $4, $5)
-				ON CONFLICT DO NOTHING
-			`,
-			alarmKey,
-			kind,
-			blockNumber,
-			detail,
-			now,
-		))
-		added = tag.RowsAffected() == 1
+		added = AddGammaAlarmInTx(tx, ctx, alarmKey, kind, blockNumber, detail, now)
 	})
 	return
 }
 
-// ListGammaAlarms are the alarms since a time, newest first.
+// AddGammaAlarmInTx records an alarm, or a record of the watcher's (a direct
+// payment), once per key; added = false when the key was there.
+func AddGammaAlarmInTx(tx server.PgTx, ctx context.Context, alarmKey string, kind string, blockNumber *int64, detail string, now time.Time) (added bool) {
+	tag := server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			INSERT INTO gamma_alarm (alarm_key, kind, block_number, detail, create_time)
+			VALUES ($1, $2, $3, $4, $5)
+			ON CONFLICT DO NOTHING
+		`,
+		alarmKey,
+		kind,
+		blockNumber,
+		detail,
+		now,
+	))
+	return tag.RowsAffected() == 1
+}
+
+// ListGammaAlarms are the alarms since a time, newest first. Direct payments,
+// recorded in the same table for their claims (GammaRecordKindDirectPayment),
+// are records and not alarms.
 func ListGammaAlarms(ctx context.Context, since time.Time, limit int) (alarms []*GammaAlarm) {
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
-			`SELECT alarm_key, kind, block_number, detail, create_time FROM gamma_alarm WHERE $1 <= create_time ORDER BY create_time DESC LIMIT $2`,
+			`SELECT alarm_key, kind, block_number, detail, create_time FROM gamma_alarm WHERE $1 <= create_time AND kind <> $3 ORDER BY create_time DESC LIMIT $2`,
 			since,
 			limit,
+			GammaRecordKindDirectPayment,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {

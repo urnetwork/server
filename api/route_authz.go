@@ -221,6 +221,8 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /pay/gamma/status":                        routeAccessPublic,  // the intent's status token is the credential
 	"GET /pay/gamma/settings":                       routeAccessNetwork, // the automatic charges' switches
 	"POST /pay/gamma/settings":                      routeAccessNetwork,
+	"POST /pay/gamma/claim/challenge":               routeAccessClient, // as POST /pay/gamma/intent: credits the caller's network
+	"POST /pay/gamma/claim":                         routeAccessClient,
 	"GET /wallet/balance":                           routeAccessNetwork, // Circle wallet balance
 	"POST /wallet/validate-address":                 routeAccessClient,
 	"POST /wallet/circle-init":                      routeAccessNetwork, // creates the Circle wallet

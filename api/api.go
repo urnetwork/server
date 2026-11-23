@@ -314,6 +314,8 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		router.NewRoute("POST", "/pay/gamma/status", handlers.GammaPaymentStatus),
 		router.NewRoute("GET", "/pay/gamma/settings", handlers.GammaSettings),
 		router.NewRoute("POST", "/pay/gamma/settings", handlers.GammaSetSettings),
+		router.NewRoute("POST", "/pay/gamma/claim/challenge", handlers.GammaClaimChallenge),
+		router.NewRoute("POST", "/pay/gamma/claim", handlers.GammaClaim),
 		router.NewRoute("GET", "/wallet/balance", handlers.WalletBalance),
 		router.NewRoute("POST", "/wallet/validate-address", handlers.WalletValidateAddress),
 		router.NewRoute("POST", "/wallet/circle-init", handlers.WalletCircleInit),
