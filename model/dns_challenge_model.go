@@ -15,7 +15,9 @@ package model
 //   - At most dns_challenges_per_name_hour writes a name an hour (§12.7's 10,
 //     pro.yml's sidecar_abuse:), counted from the journal's last hour, so Let's
 //     Encrypt's failed-authorization limit is never reached by our retries. A
-//     removal is never counted or refused.
+//     removal is never counted or refused. A refusal says how long until the
+//     name takes a write again (DnsChallengeRateError), which the route's 429
+//     names in its Retry-After and certs holds the name's orders for (QD-1204).
 //   - Every write takes a new serial, the same values again included: certs
 //     writes again after /dns/ready answers stale, and that rewrite must reach a
 //     serial the restored edges serve (§13.8).
@@ -50,9 +52,29 @@ var (
 	ErrDnsChallengeName = errors.New("dns challenge name names no live label")
 	// More than two values, or a value that is no TXT string.
 	ErrDnsChallengeValues = errors.New("dns challenge values refused")
-	// The name's writes this hour reached dns_challenges_per_name_hour.
+	// The name's writes this hour reached dns_challenges_per_name_hour. The write path's refusal is a
+	// *DnsChallengeRateError, which is this.
 	ErrDnsChallengeRate = errors.New("dns challenge rate reached")
 )
+
+// The cap's refusal of a write at Owner, with how long until the name takes a write again (QD-1204).
+type DnsChallengeRateError struct {
+	// The challenge's owner name, _acme-challenge.<name> or a custom domain's target.
+	Owner string
+	// Until the write whose leaving brings the name's count in the window below the cap has left it, the
+	// oldest when the count is at the cap, rounded up to the whole second past that, since the window counts
+	// a write at its edge: at least a second. Zero when no write's leaving lets one in, as with a cap of
+	// zero.
+	RetryAfter time.Duration
+}
+
+func (self *DnsChallengeRateError) Error() string {
+	return fmt.Sprintf("%s: %s", ErrDnsChallengeRate, self.Owner)
+}
+
+func (self *DnsChallengeRateError) Unwrap() error {
+	return ErrDnsChallengeRate
+}
 
 // The label every challenge sits under (RFC 8555 §8.4).
 const DnsChallengeLabel = "_acme-challenge"
@@ -218,8 +240,15 @@ func DnsPutChallengeInTx(ctx context.Context, tx server.PgTx, args *DnsChallenge
 	// the zone's lock first, so two writes for one name count each other
 	lockDnsZoneInTx(ctx, tx, root, networkId)
 	limit := dnsChallengesPerNameHour()
-	if limit <= int64(countDnsChallengeWritesInTx(ctx, tx, root, networkId, owner, server.NowUtc().Add(-DefaultDnsChallengeSettings().RateWindow))) {
-		return nil, fmt.Errorf("%w: %s", ErrDnsChallengeRate, owner)
+	now := server.NowUtc()
+	count, freeTime := countDnsChallengeWritesInTx(ctx, tx, root, networkId, owner, now, DefaultDnsChallengeSettings().RateWindow, limit)
+	if limit <= int64(count) {
+		rateErr := &DnsChallengeRateError{Owner: owner}
+		if !freeTime.IsZero() {
+			// the window counts a write at its edge, so the name takes one only past freeTime
+			rateErr.RetryAfter = (freeTime.Sub(now)/time.Second + 1) * time.Second
+		}
+		return nil, rateErr
 	}
 	return DnsWriteInTx(ctx, tx, &DnsWriteArgs{
 		Root:      root,
@@ -253,32 +282,54 @@ func DnsPutChallenge(ctx context.Context, args *DnsChallengeArgs) (*DnsWriteResu
 	return result, returnErr
 }
 
-// How many journal rows since since wrote owner's challenge: the network's
-// rows of the window, through its index, matched by containment.
-func countDnsChallengeWritesInTx(ctx context.Context, query server.PgCanQuery, root string, networkId server.Id, owner string, since time.Time) int {
+// How many journal rows in the window ending at now wrote owner's challenge, and when the name takes a
+// write again under limit: window past the commit of the row whose leaving brings the count below limit,
+// the oldest row's when the count is at limit (QD-1204). Zero while the count is below limit, and when no
+// row's leaving brings it there, as with a limit of zero. The network's rows of the window, through its
+// index, matched by containment: at most about limit of them match.
+func countDnsChallengeWritesInTx(
+	ctx context.Context,
+	query server.PgCanQuery,
+	root string,
+	networkId server.Id,
+	owner string,
+	now time.Time,
+	window time.Duration,
+	limit int64,
+) (int, time.Time) {
 	match := fmt.Sprintf(`{"upserts":[{"owner":%q,"type":%d}]}`, owner, dns.TypeTXT)
-	count := 0
+	since := now.Add(-window).UTC()
 	// a network's rows through its index; <root>'s own, a custom domain's challenge target among them, write
 	// with no network, through the commit time's
 	sql := `
-		SELECT count(*) FROM dns_zone_journal
+		SELECT commit_time FROM dns_zone_journal
 		WHERE network_id = $1 AND $2 <= commit_time AND root = $3 AND diff @> $4::jsonb
+		ORDER BY commit_time
 	`
-	args := []any{networkId, since.UTC(), root, match}
+	args := []any{networkId, since, root, match}
 	if networkId == (server.Id{}) {
 		sql = `
-			SELECT count(*) FROM dns_zone_journal
+			SELECT commit_time FROM dns_zone_journal
 			WHERE network_id IS NULL AND $1 <= commit_time AND root = $2 AND diff @> $3::jsonb
+			ORDER BY commit_time
 		`
-		args = []any{since.UTC(), root, match}
+		args = []any{since, root, match}
 	}
+	commitTimes := []time.Time{}
 	result, err := query.Query(ctx, sql, args...)
 	server.WithPgResult(result, err, func() {
-		if result.Next() {
-			server.Raise(result.Scan(&count))
+		for result.Next() {
+			var commitTime time.Time
+			server.Raise(result.Scan(&commitTime))
+			commitTimes = append(commitTimes, commitTime.UTC())
 		}
 	})
-	return count
+	count := len(commitTimes)
+	if limit <= 0 || int64(count) < limit {
+		return count, time.Time{}
+	}
+	// below limit once count - limit + 1 rows have left, this one the last of them
+	return count, commitTimes[int64(count)-limit].Add(window)
 }
 
 // A custom domain's challenge target in root as the journal names its owner, name canonical with no *., for a

@@ -5,6 +5,7 @@ package model
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -94,6 +95,80 @@ func TestDnsChallengeRateLimit(t *testing.T) {
 		}
 		if _, err := DnsPutChallenge(ctx, &DnsChallengeArgs{Root: root, Name: apex}); err != nil {
 			t.Fatalf("a removal at the cap answered %v", err)
+		}
+	})
+}
+
+// The commit time of the journal's row at serial in root.
+func testDnsCommitTime(t testing.TB, ctx context.Context, root string, serial uint64) time.Time {
+	t.Helper()
+	var commitTime time.Time
+	server.Db(ctx, func(conn server.PgConn) {
+		server.Raise(conn.QueryRow(
+			ctx,
+			`SELECT commit_time FROM dns_zone_journal WHERE root = $1 AND serial = $2`,
+			root,
+			dnsSerialColumn(serial),
+		).Scan(&commitTime))
+	})
+	return commitTime.UTC()
+}
+
+// The cap's refusal says how long until the name takes a write again (QD-1204): until its oldest write in
+// the window leaves it, rounded up to the whole second past that, the window counting a write at its edge;
+// with the cap lowered below the count, until the write whose leaving brings the count below the cap has
+// left; and no time with a cap of zero, which takes no write. A removal is still never refused.
+func TestDnsChallengeRateSaysWhenTheNameTakesAWrite(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		defer Testing_SetDnsChallengesPerNameHour(10)()
+		root := testDnsRoot(t, ctx)
+		_, apex := testDnsNetwork(t, ctx, root)
+		owner := DnsChallengeLabel + "." + apex
+		window := DefaultDnsChallengeSettings().RateWindow
+		commitTimes := []time.Time{}
+		for index := range 10 {
+			result, err := DnsPutChallenge(ctx, &DnsChallengeArgs{Root: root, Name: apex, Values: []string{fmt.Sprintf("digest-%d", index)}})
+			if err != nil {
+				t.Fatalf("write %d: %v", index+1, err)
+			}
+			commitTimes = append(commitTimes, testDnsCommitTime(t, ctx, root, result.Serial))
+		}
+		refuse := func() *DnsChallengeRateError {
+			t.Helper()
+			_, err := DnsPutChallenge(ctx, &DnsChallengeArgs{Root: root, Name: apex, Values: []string{"refused"}})
+			var rateErr *DnsChallengeRateError
+			if !errors.As(err, &rateErr) || !errors.Is(err, ErrDnsChallengeRate) || rateErr.Owner != owner {
+				t.Fatalf("a write past the cap answered %v", err)
+			}
+			return rateErr
+		}
+		// whole seconds past freeTime, as the model's clock read it between before and after
+		check := func(freeTime time.Time) {
+			t.Helper()
+			before := server.NowUtc()
+			rateErr := refuse()
+			after := server.NowUtc()
+			low := (freeTime.Sub(after)/time.Second + 1) * time.Second
+			high := (freeTime.Sub(before)/time.Second + 1) * time.Second
+			if rateErr.RetryAfter%time.Second != 0 || rateErr.RetryAfter < low || high < rateErr.RetryAfter {
+				t.Fatalf("Retry-After %v, not whole seconds in [%v, %v]", rateErr.RetryAfter, low, high)
+			}
+		}
+		check(commitTimes[0].Add(window))
+
+		restoreEight := Testing_SetDnsChallengesPerNameHour(8)
+		defer restoreEight()
+		// ten in the window under a cap of eight: the third oldest's leaving brings them to seven
+		check(commitTimes[2].Add(window))
+
+		restoreZero := Testing_SetDnsChallengesPerNameHour(0)
+		defer restoreZero()
+		if rateErr := refuse(); rateErr.RetryAfter != 0 {
+			t.Fatalf("a cap of zero said %v", rateErr.RetryAfter)
+		}
+		if _, err := DnsPutChallenge(ctx, &DnsChallengeArgs{Root: root, Name: apex}); err != nil {
+			t.Fatalf("a removal under a cap of zero answered %v", err)
 		}
 	})
 }
