@@ -52,6 +52,7 @@ Usage:
     bringyourctl db close-evidence-retention [--mode=<mode>] [--max-rows-per-second=<n>] [--remove]
     bringyourctl db usage-archive-export [--mode=<mode>] [--close-time-floor=<date>] [--max-weeks-per-pass=<n>] [--remove]
     bringyourctl db reindex-index <index> [--dry-run] [--lock-timeout=<duration>] [--timeout=<duration>] [--parallel=<n>]
+    bringyourctl db contract-legacy-compact [--dry-run] [--table=<table>] [--max-rows=<n>] [--count-timeout=<duration>] [--compact-timeout=<duration>]
     bringyourctl evidence move-flat [--checkpoint=<path>] [--journal=<path>] [--snapshot=<path>] [--objects-per-second=<n>] [--workers=<n>] [--batch-rows=<n>] [--max-moves=<n>] [--until-created=<time>] [--dry-run]
     bringyourctl evidence snapshot-hashes --out=<path> [--pages-per-second=<n>] [--batch-pages=<n>]
     bringyourctl evidence move-flat-verify --journal=<path> [--checkpoint=<path>] [--fallback-sample=<n>]
@@ -234,7 +235,20 @@ Options:
     --drop-old     Drop the old egress health history once --verify passes.
                    With model migrate table-swap, drop the table's kept old
                    table once its rollback window (a day) has passed.
-    --table=<table>  With model migrate table-swap, the table whose live rows
+    --max-rows=<n>  With db contract-legacy-compact, the most live rows a
+                   legacy leaf may hold to be rewritten (default 100000, at
+                   most 250000). With the reaper's 60k unsettled contracts,
+                   contract_close holds about twice as many rows.
+    --count-timeout=<duration>  With db contract-legacy-compact, the bound
+                   of each leaf's live row count, a read only walk of its
+                   primary key (Go duration, default 5s, at most 1m).
+    --compact-timeout=<duration>  With db contract-legacy-compact, the bound
+                   of each leaf's CLUSTER once it holds the leaf's lock, which
+                   it waits for at most 1s (Go duration, default 3s, at most
+                   10s). Statements on that leaf wait behind it.
+    --table=<table>  With db contract-legacy-compact, the one contract table
+                   whose legacy leaf to compact; every one when omitted. With
+                   model migrate table-swap, the table whose live rows
                    are copied into a fresh twin and swapped in under its name
                    (PARTITION-CANDIDATES.md §4.4): pending_task, with every
                    taskworker stopped. The copy and the index builds run
@@ -419,6 +433,8 @@ func main() {
 			dbUsageArchiveExport(opts)
 		} else if reindexIndex, _ := opts.Bool("reindex-index"); reindexIndex {
 			dbReindexIndex(opts)
+		} else if contractLegacyCompact, _ := opts.Bool("contract-legacy-compact"); contractLegacyCompact {
+			dbContractLegacyCompact(opts)
 		}
 	} else if evidence, _ := opts.Bool("evidence"); evidence {
 		if moveFlatVerify, _ := opts.Bool("move-flat-verify"); moveFlatVerify {
@@ -939,6 +955,65 @@ func dbReindexIndex(opts docopt.Opts) {
 	if err != nil {
 		panic(err)
 	}
+}
+
+// dbContractLegacyCompact rewrites each legacy leaf of the partitioned
+// contract tables down to the row versions it still holds
+// (server.CompactContractLegacyPartition; CONTRACT-PARTITION-CUTOVER-NOW.md
+// 4.6), smallest first: S1's admission, count and CLUSTER, under a bound of
+// 100,000 live rows a leaf and a statement bound of a few seconds. It deletes
+// no row, and never detaches or drops the legacy partition. Run it once the
+// contract horizon reaper has passed the cutover day and the legacy's primary
+// keys are rebuilt, in a quiet minute: statements that read a leaf wait behind
+// its rewrite, up to their 2 s lock bound. --dry-run counts and admits only.
+// A leaf that waits is printed with the reason, untouched; rerun later.
+func dbContractLegacyCompact(opts docopt.Opts) {
+	settings, err := contractLegacyCompactOptions(opts)
+	if err != nil {
+		panic(err)
+	}
+	report, err := server.CompactContractLegacyPartition(context.Background(), settings, func(format string, args ...any) {
+		fmt.Printf(format+"\n", args...)
+	})
+	if report != nil {
+		fmt.Printf("legacy partition of the cutover day %s\n", report.CutoverDay.Format(time.DateOnly))
+		for _, leaf := range report.Leaves {
+			fmt.Printf("leaf %s bytes_before %d bytes_after %d statistics_live_rows %d live_rows %d compacted %t reason %q\n",
+				leaf.Leaf, leaf.BytesBefore, leaf.BytesAfter, leaf.StatisticsLiveRows, leaf.LiveRows, leaf.Compacted, leaf.Reason)
+		}
+	}
+	if err != nil {
+		panic(err)
+	}
+}
+
+// The legacy compaction's bounds the options ask for. Durations are Go
+// durations; the compaction refuses bounds past a few seconds of lock.
+func contractLegacyCompactOptions(opts docopt.Opts) (settings *server.ContractLegacyCompactionSettings, err error) {
+	settings = server.DefaultContractLegacyCompactionSettings()
+	settings.DryRun, _ = opts.Bool("--dry-run")
+	if table, _ := opts.String("--table"); table != "" {
+		settings.Tables = []string{table}
+	}
+	if value, _ := opts.String("--max-rows"); value != "" {
+		if settings.MaxCompactRows, err = strconv.ParseInt(value, 10, 64); err != nil {
+			return nil, fmt.Errorf("--max-rows: %w", err)
+		}
+	}
+	if value, _ := opts.String("--count-timeout"); value != "" {
+		if settings.CountTimeout, err = time.ParseDuration(value); err != nil {
+			return nil, fmt.Errorf("--count-timeout: %w", err)
+		}
+	}
+	if value, _ := opts.String("--compact-timeout"); value != "" {
+		if settings.CompactTimeout, err = time.ParseDuration(value); err != nil {
+			return nil, fmt.Errorf("--compact-timeout: %w", err)
+		}
+	}
+	if err = settings.Validate(); err != nil {
+		return nil, err
+	}
+	return settings, nil
 }
 
 // The index and the rebuild's bounds the options ask for. Durations are Go
