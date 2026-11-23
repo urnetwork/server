@@ -7,10 +7,11 @@ package model
 // creator by user, never by membership, so before the fix a key the removal left enrolled again once the same person
 // re-joined under a new member_id. Here each of the removed member's keys, untagged, tagged and pre-approved, answers
 // 401 auth_key_invalid after a re-join, spending, minting and posting nothing, while a key made after the re-join
-// enrolls; the removal owes one auth key notice naming each key once and an auth_key.revoke admin event for each,
-// with the removal's actor and request, before the removal's own event; a MemberRevoke that lands with no denial
-// before it ends the keys the same way; and a creation racing the removal leaves no key behind, whether the removal
-// commits between the creation's role read and its transaction or the creation commits under the removal's snapshot.
+// enrolls; the removal owes each of the team's Owners and Admins one auth key notice naming each key once (QD-1215)
+// and an auth_key.revoke admin event for each, with the removal's actor and request, before the removal's own event;
+// a MemberRevoke that lands with no denial before it ends the keys the same way; and a creation racing the removal
+// leaves no key behind, whether the removal commits between the creation's role read and its transaction or the
+// creation commits under the removal's snapshot.
 
 import (
 	"context"
@@ -229,25 +230,30 @@ func TestARemovedMembersKeysDoNotEnrollOnceItRejoins(t *testing.T) {
 	})
 }
 
-// The removal owes the auth key notice once, one revoked change for each key it ended and nothing of the keys
-// themselves, and an auth_key.revoke admin event for each key in auth_key_id order, naming the removal's actor and
-// request, before the removal's own event. Another member's key in the team and the removed person's key in its own
-// network stay.
+// The removal owes the auth key notice once to each of the team's Owners and Admins (QD-1215), the removed Admin
+// among them, as it still is when the removal reads them, each listing one revoked change for each key it ended and
+// nothing of the keys themselves, and an auth_key.revoke admin event for each key in auth_key_id order, naming the
+// removal's actor and request, before the removal's own event. Another member's key in the team and the removed
+// person's key in its own network stay.
 func TestAMemberRemovalOwesOneNoticeAndAnEventPerKey(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		self := newCreatorRoleTeam(t)
+		// the Owner's own account, whose sign-in the notice reaches
+		owner := newKeyNoticeAccount(t, self.ctx, self.owner.UserId, newKeyNoticeEmail("owner"))
 		untagged := createTestAuthKey(t, self.creatorSession, &CreateAuthKeyArgs{DurationSeconds: 3600, MaxUses: 3}, server.NowUtc())
 		tagged := createTestAuthKey(t, self.creatorSession, &CreateAuthKeyArgs{DurationSeconds: 3600, MaxUses: 4, Tags: []string{teamEnrollTagHex}}, server.NowUtc())
 		preApproved := createTestAuthKey(t, self.creatorSession, &CreateAuthKeyArgs{DurationSeconds: 3600, MaxUses: 5, PreApproved: true}, server.NowUtc())
 
 		// another member of the team, and the removed person's own network
 		bystanderUserId := server.NewId()
-		Testing_CreateNetwork(self.ctx, server.NewId(), "bystander-"+bystanderUserId.String(), bystanderUserId)
+		bystanderEmail := Testing_CreateNetwork(self.ctx, server.NewId(), "bystander-"+bystanderUserId.String(), bystanderUserId)
 		_, bystanderSession := joinTestTeamMember(t, self.ctx, self.networkId, bystanderUserId, NetworkMemberRoleAdmin)
 		bystanderKey := createTestAuthKey(t, bystanderSession, &CreateAuthKeyArgs{DurationSeconds: 3600, MaxUses: 1}, server.NowUtc())
 		var personalNetworkId server.Id
+		var creatorEmail string
 		server.Db(self.ctx, func(conn server.PgConn) {
 			server.Raise(conn.QueryRow(self.ctx, `SELECT network_id FROM network WHERE admin_user_id = $1`, self.creatorUserId).Scan(&personalNetworkId))
+			server.Raise(conn.QueryRow(self.ctx, `SELECT user_auth FROM network_user WHERE user_id = $1`, self.creatorUserId).Scan(&creatorEmail))
 		})
 		personalSession := session.NewLocalClientSession(self.ctx, "192.0.2.1:1", session.NewByJwt(personalNetworkId, self.creatorUserId, "creator-"+self.creatorUserId.String(), false, false))
 		defer personalSession.Cancel()
@@ -276,38 +282,47 @@ func TestAMemberRemovalOwesOneNoticeAndAnEventPerKey(t *testing.T) {
 		requireTestRemovalEvents(t, testAdminEventsAfter(self.ctx, self.networkId, headSeq), revokedIds, removal)
 
 		notices := unsentTestNotices(t, self.ctx, self.networkId, testAuthKeyNoticeTemplate)
-		if len(notices) != 1 {
-			t.Fatalf("%d auth key notices after the removal, want one", len(notices))
+		recipients := []string{}
+		for _, notice := range notices {
+			recipients = append(recipients, notice.userAuth)
 		}
-		changes := notices[0].changes(t)
-		if len(changes) != 3 {
-			t.Fatalf("the removal's notice lists %d changes, want one per key: %s", len(changes), notices[0].templateJson)
+		slices.Sort(recipients)
+		wantRecipients := append(slices.Clone(owner.emails), strings.ToLower(creatorEmail), strings.ToLower(bystanderEmail))
+		slices.Sort(wantRecipients)
+		if !slices.Equal(recipients, wantRecipients) {
+			t.Fatalf("the removal's auth key notices went to %v, want one each to the Owner and the two Admins %v", recipients, wantRecipients)
 		}
-		byMaxUses := map[string]map[string]any{}
-		for _, change := range changes {
-			connect.AssertEqual(t, fmt.Sprint(change["action"]), SecurityAuthKeyRevoked)
-			byMaxUses[fmt.Sprint(change["max_uses"])] = change
-		}
-		for maxUses, want := range map[string]map[string]string{
-			"3": {"tag_count": "<nil>", "pre_approved": "<nil>"},
-			"4": {"tag_count": "1", "pre_approved": "<nil>"},
-			"5": {"tag_count": "<nil>", "pre_approved": "true"},
-		} {
-			change, ok := byMaxUses[maxUses]
-			if !ok {
-				t.Fatalf("the notice names no key of %s uses: %s", maxUses, notices[0].templateJson)
+		for _, notice := range notices {
+			changes := notice.changes(t)
+			if len(changes) != 3 {
+				t.Fatalf("the removal's notice lists %d changes, want one per key: %s", len(changes), notice.templateJson)
 			}
-			for key, value := range want {
-				if got := fmt.Sprint(change[key]); got != value {
-					t.Fatalf("the key of %s uses has %s %s, want %s: %s", maxUses, key, got, value, notices[0].templateJson)
+			byMaxUses := map[string]map[string]any{}
+			for _, change := range changes {
+				connect.AssertEqual(t, fmt.Sprint(change["action"]), SecurityAuthKeyRevoked)
+				byMaxUses[fmt.Sprint(change["max_uses"])] = change
+			}
+			for maxUses, want := range map[string]map[string]string{
+				"3": {"tag_count": "<nil>", "pre_approved": "<nil>"},
+				"4": {"tag_count": "1", "pre_approved": "<nil>"},
+				"5": {"tag_count": "<nil>", "pre_approved": "true"},
+			} {
+				change, ok := byMaxUses[maxUses]
+				if !ok {
+					t.Fatalf("the notice names no key of %s uses: %s", maxUses, notice.templateJson)
+				}
+				for key, value := range want {
+					if got := fmt.Sprint(change[key]); got != value {
+						t.Fatalf("the key of %s uses has %s %s, want %s: %s", maxUses, key, got, value, notice.templateJson)
+					}
 				}
 			}
-		}
-		for _, created := range []*CreateAuthKeyResult{untagged, tagged, preApproved} {
-			idText, secretText, _ := strings.Cut(strings.TrimPrefix(created.AuthKey, "ur-authkey-"), "-")
-			for _, secret := range []string{created.AuthKey, idText, secretText, created.AuthKeyId.String(), teamEnrollTagHex} {
-				if strings.Contains(notices[0].templateJson, secret) {
-					t.Fatalf("the notice holds %q: %s", secret, notices[0].templateJson)
+			for _, created := range []*CreateAuthKeyResult{untagged, tagged, preApproved} {
+				idText, secretText, _ := strings.Cut(strings.TrimPrefix(created.AuthKey, "ur-authkey-"), "-")
+				for _, secret := range []string{created.AuthKey, idText, secretText, created.AuthKeyId.String(), teamEnrollTagHex} {
+					if strings.Contains(notice.templateJson, secret) {
+						t.Fatalf("the notice holds %q: %s", secret, notice.templateJson)
+					}
 				}
 			}
 		}
@@ -356,10 +371,13 @@ func TestADenialWithoutItsAdminEventIsRefused(t *testing.T) {
 
 // A MemberRevoke an admin device signed with no denial before it ends the member's keys when its effects run, as a
 // denial does: the rows go, each owes an auth_key.revoke event naming the entry's signer and request before the
-// entry's own event, and a re-joined person's old keys answer 401 auth_key_invalid.
+// entry's own event, the notice of them reaches the team's Owner, the member being a Member by then (QD-1215), and a
+// re-joined person's old keys answer 401 auth_key_invalid.
 func TestAMemberRevokeWithNoDenialEndsTheMembersKeys(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		self := newCreatorRoleTeam(t)
+		// the Owner's own account, whose sign-in the notice reaches
+		owner := newKeyNoticeAccount(t, self.ctx, self.owner.UserId, newKeyNoticeEmail("owner"))
 		untaggedBearer, untaggedKeyId := newTeamEnrollAuthKey(t, self.creatorSession, &CreateAuthKeyArgs{})
 		taggedBearer, taggedKeyId := newTeamEnrollAuthKey(t, self.creatorSession, &CreateAuthKeyArgs{Tags: []string{teamEnrollTagHex}})
 		// out of the AdminSet, so an admin's MemberRevoke removes it alone
@@ -385,8 +403,12 @@ func TestAMemberRevokeWithNoDenialEndsTheMembersKeys(t *testing.T) {
 		slices.SortFunc(wantIds, func(a server.Id, b server.Id) int { return a.Cmp(b) })
 		requireTestRemovalEvents(t, events, wantIds, &entry.AdminEvent)
 		notices := unsentTestNotices(t, self.ctx, self.networkId, testAuthKeyNoticeTemplate)
-		if len(notices) != 1 || len(notices[0].changes(t)) != 2 {
-			t.Fatalf("the MemberRevoke's auth key notices: %d", len(notices))
+		if len(notices) != 1 || !slices.Contains(owner.emails, notices[0].userAuth) || len(notices[0].changes(t)) != 2 {
+			recipients := []string{}
+			for _, notice := range notices {
+				recipients = append(recipients, notice.userAuth)
+			}
+			t.Fatalf("the MemberRevoke's auth key notices went to %v, want one, to the Owner's %v, listing both keys", recipients, owner.emails)
 		}
 
 		_, _ = joinTestTeamMember(t, self.ctx, self.networkId, self.creatorUserId, NetworkMemberRoleAdmin)

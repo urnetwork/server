@@ -2,9 +2,16 @@ package model
 
 // The API key security notice (security_notice_model.go; owner decision
 // 2026-10-29, "Yes, API keys too"): creating or deleting an API key owes an
-// email to the admin's sign-in email addresses, in the transaction of the
-// change, so an owner notices a key they did not make. An API key is a full
-// network credential (AUTHZ1.md G3) that outlives every sign-in session.
+// email to the network's Owners and Admins, in the transaction of the change,
+// so an owner notices a key they did not make. An API key is a full network
+// credential (AUTHZ1.md G3) that outlives every sign-in session.
+//
+// The recipients are the auth key notice's, the network authority notice's
+// (securityNoticeAuthorityRecipientsInTx, QD-1215): a personal network's
+// owner's sign-in email addresses, and in a team each standing Owner's and
+// Admin's member user's, never the team's owner of record, which never signs in
+// and has no address (D-TEAM-2). A team none of whose Owners and Admins has an
+// email owes nothing, counted as no_email.
 //
 // Both ways to create or delete a key owe it: POST /account/api-key
 // (CreateApiKey) and POST /account/api-key/remove (DeleteApiKey). The only
@@ -127,11 +134,11 @@ func newSecurityApiKeyChange(ctx context.Context, action string, name string, ke
 }
 
 // Owes the API key notice for a key the caller's transaction created or deleted,
-// to the network admin's sign-in email addresses. It never fails the change
-// (guardSecurityNoticeInTx).
+// to the network's Owners and Admins (the file header). It never fails the
+// change (guardSecurityNoticeInTx).
 func oweSecurityApiKeyNoticeInTx(ctx context.Context, tx server.PgTx, networkId server.Id, change *SecurityApiKeyChange) {
 	guardSecurityNoticeInTx(ctx, tx, SecurityNoticeApiKey, func() string {
-		recipients := securityNoticeRecipientsInTx(ctx, tx, networkId)
+		recipients := securityNoticeAuthorityRecipientsInTx(ctx, tx, networkId)
 		return oweSecurityNoticeInTx(ctx, tx, networkId, recipients, SecurityApiKeyTemplateName, func(templateJson string) (string, error) {
 			return applySecurityNoticeChanges(templateJson, (*SecurityApiKeyNotice).add, []*SecurityApiKeyChange{change})
 		})
