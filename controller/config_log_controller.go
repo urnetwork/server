@@ -24,8 +24,9 @@ package controller
 // since no reader holds a client row.
 //
 // Once an append is answered, §12.7's edge address records follow the state
-// it leaves (model.SyncDnsEdgeRecordsAtTip; owner decision 335), best effort,
-// so the answer never fails with the zone's write.
+// it leaves, the zone's and each of its Team scopes' (model.SyncDnsEdgeRecordsAtTip;
+// owner decision 335), best effort, so the answer never fails with the zone's
+// write.
 //
 // Refusals answer {"error", "code", "tip"}: 403 config_refused, 409
 // config_tip_moved and config_unadmitted's 403; an unavailable store or a

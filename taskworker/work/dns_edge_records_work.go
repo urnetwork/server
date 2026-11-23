@@ -1,12 +1,13 @@
 package work
 
 // §12.7's hourly pass over the edge grants (owner decision 335; plan-DNS-edge-record-trigger, QD-130): each run walks
-// the networks with a log through model.ReconcileDnsEdgeRecords, which reads each network's published names from the
-// process's published-names source (QD-770) and writes its zone's * and @ edge flags where they differ, so a grant
-// that expired loses its records and a sync a crash lost after an entry's PUT is made. A run that stops at its bound
-// hands its cursor to the next, which runs at once; a run that cannot read the grants (no source yet, or a source
-// that fails) writes nothing past what it read and is tried again RetryInterval on. A binary that does not link MG2
-// and MG5 schedules nothing, and a process serving no root reads nothing.
+// the networks with a log through model.ReconcileDnsEdgeRecords, which reads each network's published names and Team
+// scope labels from the process's published-state source (taskworker's gate cache, dns_edge_published.go) and writes
+// its zone's * and @ edge flags and each Team scope's set where they differ, so a grant that expired loses its records
+// and a sync a crash lost after an entry's PUT is made. A run that stops at its bound hands its cursor to the next,
+// which runs at once; a run that cannot read the grants (no source yet, or a source that fails) writes nothing past
+// what it read and is tried again RetryInterval on. A binary that does not link MG2 and MG5 schedules nothing, and a
+// process serving no root reads nothing.
 
 import (
 	"time"
@@ -83,7 +84,11 @@ func DnsEdgeRecords(
 		return nil, task.WithRetryDelay(err, settings.RetryInterval)
 	}
 	if (0 < result.WriteCount || 0 < result.FailedCount) && glog.V(1) {
-		glog.Infof("[dns]edge records pass: %d networks read, %d zones written, %d waiting, %d failed\n", result.NetworkCount, result.WriteCount, result.WaitingCount, result.FailedCount)
+		glog.Infof("[dns]edge records pass: %d networks read, %d writes, %d waiting, %d failed\n", result.NetworkCount, result.WriteCount, result.WaitingCount, result.FailedCount)
+	}
+	if 0 < result.RefusedScopeCount {
+		// a count, never a scope's label (I-13): each stays unwritten until what §12.5 refuses it for is gone
+		glog.Warningf("[dns]edge records pass: §12.5's rules refuse %d team scopes' first sets\n", result.RefusedScopeCount)
 	}
 	return &DnsEdgeRecordsResult{DnsEdgeRecordsReconcileResult: *result}, nil
 }
