@@ -84,8 +84,10 @@ func (self *SecurityNetworkAuthorityNotice) add(change *SecurityNetworkAuthority
 }
 
 // The sign-in email addresses of the network's Owners and Admins, read in tx:
-// its owner's in a personal network, each standing, not pending Owner's and
-// Admin's member user's in a team (securityNoticeMemberRecipientsInTx).
+// its owner's in a personal network; in a team each standing, not pending
+// Owner's member user's first, then each such Admin's, up to the settings'
+// TeamRecipientMemberMaxCount people (securityNoticeMemberRecipientsInTx,
+// QD-1218).
 func securityNoticeAuthorityRecipientsInTx(ctx context.Context, tx server.PgTx, networkId server.Id) []string {
 	if !securityNoticeTeamInTx(ctx, tx, networkId) {
 		return securityNoticeRecipientsInTx(ctx, tx, networkId)

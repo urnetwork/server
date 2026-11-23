@@ -19,9 +19,14 @@
 // a payout or subnet wallet change to each member whose role holds billing, its
 // Owners and Billing admins (securityNoticeBillingRecipientsInTx, QD-1217), and
 // the key and authority notices to its Owners and Admins
-// (securityNoticeAuthorityRecipientsInTx). A phone number or a wallet is no
-// email: an account that signs in only with those gets no notice, and no notice
-// goes by SMS (AWS approved SMS for verification codes, password resets and the
+// (securityNoticeAuthorityRecipientsInTx). A team's notice reaches every Owner
+// first, at all its addresses, then the other members it tells, person by
+// person in member_id order, up to the settings' TeamRecipientMemberMaxCount
+// people, so a large team's cut takes whole people and never an Owner before
+// the rest (QD-1218); one account's addresses, a personal network's, are
+// bounded at RecipientMaxCount. A phone number or a wallet is no email: an
+// account that signs in only with those gets no notice, and no notice goes by
+// SMS (AWS approved SMS for verification codes, password resets and the
 // password-changed notice only).
 //
 // Coalescing: a change owes its notice due the settings' CoalesceWindow later.
@@ -78,10 +83,22 @@ type SecurityNoticeSettings struct {
 	// not listed, so the list always ends with the latest state. Below 1, a
 	// notice lists the latest change alone.
 	ChangeMaxCount int
-	// The most sign-in email addresses one change notifies: 8, room for every
-	// address one account signs in with. The addresses kept are the first in
-	// sort order. Non-positive bounds nothing.
+	// The most sign-in email addresses of one account a change notifies: 8,
+	// room for every address one account signs in with. It bounds each notice
+	// that goes to one account's addresses, a personal network's and the
+	// sign-in and password notices; a team's notices are bounded by whole
+	// people instead (TeamRecipientMemberMaxCount). The addresses kept are the
+	// first in sort order. Non-positive bounds nothing.
 	RecipientMaxCount int
+	// The most people a team's notice reaches (QD-1218): 50. A team's notice
+	// goes to each Owner first, then to each other member it tells, person by
+	// person in member_id order, each at all its addresses
+	// (securityNoticeMemberEmails), so past this the cut takes whole people,
+	// those that joined last, and takes an Owner only when the Owners alone
+	// are more than this. Each address reached owes one outbox row, and a
+	// person signs in at few: one per kind of sign-in. Non-positive bounds
+	// nothing.
+	TeamRecipientMemberMaxCount int
 	// The shortest time between two default-level reports of notices that
 	// could not be owed: 1 minute, so a failing outbox shows in the log
 	// without flooding it; each report counts the ones suppressed since the
@@ -106,14 +123,15 @@ type SecurityNoticeSettings struct {
 // The defaults, a fresh value each call.
 func DefaultSecurityNoticeSettings() *SecurityNoticeSettings {
 	return &SecurityNoticeSettings{
-		CoalesceWindow:         1 * time.Minute,
-		ChangeMaxCount:         10,
-		RecipientMaxCount:      8,
-		FailureReportInterval:  1 * time.Minute,
-		WalletMaskEndLength:    4,
-		WalletMaskMinLength:    12,
-		PhoneMaskEndDigitCount: 2,
-		PhoneMaskMinDigitCount: 6,
+		CoalesceWindow:              1 * time.Minute,
+		ChangeMaxCount:              10,
+		RecipientMaxCount:           8,
+		TeamRecipientMemberMaxCount: 50,
+		FailureReportInterval:       1 * time.Minute,
+		WalletMaskEndLength:         4,
+		WalletMaskMinLength:         12,
+		PhoneMaskEndDigitCount:      2,
+		PhoneMaskMinDigitCount:      6,
 	}
 }
 
@@ -455,9 +473,18 @@ func securityNoticeRecipientsInTx(ctx context.Context, tx server.PgTx, networkId
 	return securityNoticeEmails(userAuths)
 }
 
-// The email addresses among user auths, normalized, distinct and sorted, at
-// most the settings' RecipientMaxCount.
+// The email addresses among one account's user auths
+// (distinctSecurityNoticeEmails), at most the settings' RecipientMaxCount.
 func securityNoticeEmails(userAuths []string) []string {
+	emails := distinctSecurityNoticeEmails(userAuths)
+	if recipientMaxCount := DefaultSecurityNoticeSettings().RecipientMaxCount; 0 < recipientMaxCount && recipientMaxCount < len(emails) {
+		emails = emails[:recipientMaxCount]
+	}
+	return emails
+}
+
+// The email addresses among user auths, normalized, distinct and sorted.
+func distinctSecurityNoticeEmails(userAuths []string) []string {
 	emails := []string{}
 	for _, userAuth := range userAuths {
 		normalUserAuth, userAuthType := NormalUserAuth(userAuth)
@@ -466,9 +493,6 @@ func securityNoticeEmails(userAuths []string) []string {
 		}
 	}
 	slices.Sort(emails)
-	if recipientMaxCount := DefaultSecurityNoticeSettings().RecipientMaxCount; 0 < recipientMaxCount && recipientMaxCount < len(emails) {
-		emails = emails[:recipientMaxCount]
-	}
 	return emails
 }
 
@@ -487,51 +511,127 @@ func securityNoticeTeamInTx(ctx context.Context, tx server.PgTx, networkId serve
 	return
 }
 
-// The sign-in email addresses of a team's members whose role is one of $2,
-// read in the caller's transaction as securityNoticeRecipientsSql reads an
-// admin's, for each member's user. A removed member has no row, and a JIT
-// pending one (§7.6) holds no role's reach, so neither is told.
+// The sign-in user auths of a team's members whose role is one of $2, each with
+// its member and the member's role, read in the caller's transaction as
+// securityNoticeRecipientsSql reads an admin's, for each member's user. A
+// removed member has no row, and a JIT pending one (§7.6) holds no role's
+// reach, so neither is told.
 const securityNoticeMemberRecipientsSql = `
 	WITH members AS (
-		SELECT user_id
+		SELECT member_id, user_id, role
 		FROM network_member
 		WHERE network_id = $1 AND NOT pending AND role = ANY($2)
 	)
-	SELECT network_user.user_auth
+	SELECT members.member_id, members.role, network_user.user_auth
 	FROM members
 	INNER JOIN network_user ON network_user.user_id = members.user_id
 	WHERE network_user.user_auth IS NOT NULL
 	UNION ALL
-	SELECT network_user_auth_password.user_auth
+	SELECT members.member_id, members.role, network_user_auth_password.user_auth
 	FROM members
 	INNER JOIN network_user_auth_password ON network_user_auth_password.user_id = members.user_id
 	WHERE
 		network_user_auth_password.auth_type = 'email' AND
 		network_user_auth_password.verified
 	UNION ALL
-	SELECT network_user_auth_sso.user_auth
+	SELECT members.member_id, members.role, network_user_auth_sso.user_auth
 	FROM members
 	INNER JOIN network_user_auth_sso ON network_user_auth_sso.user_id = members.user_id
 `
 
+// One sign-in of a team member's user, as securityNoticeMemberRecipientsSql
+// reads it.
+type securityNoticeMemberUserAuth struct {
+	memberId server.Id
+	role     NetworkMemberRole
+	// an email address, a phone number or whatever else the sign-in holds
+	userAuth string
+}
+
 // The security notice recipients among a team's standing, not pending members
-// whose role is one of roles: their member users' sign-in email addresses
-// (securityNoticeEmails).
+// whose role is one of roles: their member users' sign-in email addresses, each
+// Owner's first, up to the settings' TeamRecipientMemberMaxCount people
+// (securityNoticeMemberEmails).
 func securityNoticeMemberRecipientsInTx(ctx context.Context, tx server.PgTx, networkId server.Id, roles []NetworkMemberRole) []string {
 	roleNames := []string{}
 	for _, role := range roles {
 		roleNames = append(roleNames, string(role))
 	}
-	userAuths := []string{}
+	memberUserAuths := []*securityNoticeMemberUserAuth{}
 	result, err := tx.Query(ctx, securityNoticeMemberRecipientsSql, networkId, roleNames)
 	server.WithPgResult(result, err, func() {
 		for result.Next() {
-			var userAuth string
-			server.Raise(result.Scan(&userAuth))
-			userAuths = append(userAuths, userAuth)
+			memberUserAuth := &securityNoticeMemberUserAuth{}
+			var role string
+			server.Raise(result.Scan(&memberUserAuth.memberId, &role, &memberUserAuth.userAuth))
+			memberUserAuth.role = NetworkMemberRole(role)
+			memberUserAuths = append(memberUserAuths, memberUserAuth)
 		}
 	})
-	return securityNoticeEmails(userAuths)
+	return securityNoticeMemberEmails(memberUserAuths, DefaultSecurityNoticeSettings())
+}
+
+// The email addresses a team's notice reaches among its members' sign-ins
+// (QD-1218): each Owner first, then each other member, person by person in
+// member_id order (ids are ULIDs, so about the order they joined), each at all
+// its email addresses in sort order, until the notice reaches the settings'
+// TeamRecipientMemberMaxCount people. So every Owner hears before any other
+// member is cut, the cut takes whole people and never some of one person's
+// addresses, and who is cut is a matter of role and of when they joined, never
+// of how their addresses spell. When the Owners alone are more than the bound,
+// the Owners that joined last are cut too, and no other member is reached. A
+// member with no email address reaches nobody and takes no place, nor does one
+// whose every address an earlier member already reaches: an address is owed
+// the notice once.
+func securityNoticeMemberEmails(memberUserAuths []*securityNoticeMemberUserAuth, settings *SecurityNoticeSettings) []string {
+	type recipientMember struct {
+		memberId  server.Id
+		owner     bool
+		userAuths []string
+	}
+	recipientMembers := []*recipientMember{}
+	memberIdRecipientMembers := map[server.Id]*recipientMember{}
+	for _, memberUserAuth := range memberUserAuths {
+		member, ok := memberIdRecipientMembers[memberUserAuth.memberId]
+		if !ok {
+			member = &recipientMember{
+				memberId: memberUserAuth.memberId,
+				owner:    memberUserAuth.role == NetworkMemberRoleOwner,
+			}
+			memberIdRecipientMembers[memberUserAuth.memberId] = member
+			recipientMembers = append(recipientMembers, member)
+		}
+		member.userAuths = append(member.userAuths, memberUserAuth.userAuth)
+	}
+	slices.SortFunc(recipientMembers, func(a *recipientMember, b *recipientMember) int {
+		if a.owner != b.owner {
+			if a.owner {
+				return -1
+			}
+			return 1
+		}
+		return a.memberId.Cmp(b.memberId)
+	})
+	emails := []string{}
+	reachedEmails := map[string]bool{}
+	reachedMemberCount := 0
+	for _, member := range recipientMembers {
+		if memberMaxCount := settings.TeamRecipientMemberMaxCount; 0 < memberMaxCount && memberMaxCount <= reachedMemberCount {
+			break
+		}
+		reached := false
+		for _, email := range distinctSecurityNoticeEmails(member.userAuths) {
+			if !reachedEmails[email] {
+				reachedEmails[email] = true
+				emails = append(emails, email)
+				reached = true
+			}
+		}
+		if reached {
+			reachedMemberCount += 1
+		}
+	}
+	return emails
 }
 
 // The recipients of a notice about where the network's payouts go, read in tx
@@ -540,9 +640,11 @@ func securityNoticeMemberRecipientsInTx(ctx context.Context, tx server.PgTx, net
 // member's whose role holds RolePermissionBilling, its Owners and Billing
 // admins, at its member user's sign-in email addresses. Those are the members
 // who can change where the team's payouts go and the only ones the role table
-// lets read it (§7.5), so an Admin, which holds no billing, is not told. A team
-// with no such member that has an email has none, and its notice is owed to
-// nobody, counted as no_email.
+// lets read it (§7.5), so an Admin, which holds no billing, is not told. Its
+// Owners come first, then its Billing admins, up to the settings'
+// TeamRecipientMemberMaxCount people (securityNoticeMemberEmails, QD-1218). A
+// team with no such member that has an email has none, and its notice is owed
+// to nobody, counted as no_email.
 func securityNoticeBillingRecipientsInTx(ctx context.Context, tx server.PgTx, networkId server.Id) []string {
 	if !securityNoticeTeamInTx(ctx, tx, networkId) {
 		return securityNoticeRecipientsInTx(ctx, tx, networkId)
