@@ -11,6 +11,21 @@ samples and index-bounded counts (each statement under a `statement_timeout` of 
 three hours of taskworker logs, the retention brakes in Main's Redis (`HGETALL` only) and the evidence
 mover's own progress log on edge-0. Code is server main at f09d3edd6. Method and queries: §8.
 
+**Fixed in 6b0c08ff0 (11-23, not deployed).** The key-history stall (§3.3, option A of §3.5) is fixed on
+server main. It ships with the next taskworker build, which needs the owner's go.
+- A batch deletes at most 1,000 registrations, and its cursor moves only past clients with nothing left,
+  so a heavy page goes over several batches instead of rolling back.
+- A pass starts over at the oldest record an hour after it began, and at once for today's cursor, so the
+  55.3M backdated records are reached.
+- A batch that runs into its bound fails the task run. RetentionStalled (warp 329ed07,
+  `grafana/alerting/retention-stall.yml`) warns when a table's newest due count
+  (`urnetwork_retention_due_rows`) is above zero and nothing of it was deleted for 6 h. It needs the next
+  Grafana deploy as well.
+- **First-day brake: keep 1,000/s** (as set). Batches measured 67 ms for 500 rows and 114 ms for 1,000
+  locally, about 2.5× that on Main *(inferred from the old statement's 163 ms)*, every statement by index.
+  At the 0.6 duty of 11-18..11-20 the ~57M rows go in about 26 h *(inferred)*. Use 300/s (about 4 days)
+  only if the edge-6 replay test is still running, and not 2,000/s on the first day.
+
 - Sizes are GiB (2^30), as `pg_size_pretty` and Mimir report them. M is million, B billion. Times are UTC.
 - *(inferred)* marks a figure reasoned from code or arithmetic rather than measured.
 - "Real disk" means free space on edge-2's filesystem. `vacuum_truncate` is off server-wide, so a delete
