@@ -8,11 +8,12 @@ package model
 // network_member by that user, so before the fix every key the removal left acted again, with the new role's reach,
 // once the same person re-joined under a new member_id. Here each of the removed member's keys authenticates nothing
 // after a re-join and its auth codes are gone, while a key made after the re-join acts as the new membership; the
-// removal owes one API key notice naming each key once and an api_key.delete admin event for each, with the
-// removal's actor and request, after the auth keys' events and before the removal's own; a MemberRevoke that lands
-// with no denial before it ends the keys the same way; another member's key and the removed person's personal
-// network are unchanged; and a creation racing the removal leaves no key behind, whether the removal commits before
-// the creation's transaction or the creation commits under the removal's snapshot.
+// removal owes each of the team's Owners and Admins one API key notice naming each key once (QD-1215) and an
+// api_key.delete admin event for each, with the removal's actor and request, after the auth keys' events and before
+// the removal's own; a MemberRevoke that lands with no denial before it ends the keys the same way; another member's
+// key and the removed person's personal network are unchanged; and a creation racing the removal leaves no key
+// behind, whether the removal commits before the creation's transaction or the creation commits under the removal's
+// snapshot.
 
 import (
 	"context"
@@ -220,12 +221,13 @@ func TestARemovedMembersApiKeysAuthenticateNothingOnceItRejoins(t *testing.T) {
 	})
 }
 
-// The removal owes the API key notice once, one deleted change for each key it ended at the removal's time, with
-// the key's name as a notice shows it and its creation time and nothing of the key itself, and an api_key.delete
-// admin event for each key in api_key_id order, naming the removal's actor and request, after the auth key's
-// auth_key.revoke and before the removal's own event. Another member's key in the team and the removed person's key
-// in its own network stay and still act; a removal of a member that made no API key owes no API key notice and no
-// api_key.delete event.
+// The removal owes the API key notice once to each of the team's Owners and Admins (QD-1215), the removed Admin
+// among them, as it still is when the removal reads them, each listing one deleted change for each key it ended at
+// the removal's time, with the key's name as a notice shows it and its creation time and nothing of the key itself,
+// and an api_key.delete admin event for each key in api_key_id order, naming the removal's actor and request, after
+// the auth key's auth_key.revoke and before the removal's own event. Another member's key in the team and the removed
+// person's key in its own network stay and still act; a removal of a member that made no API key owes no API key
+// notice and no api_key.delete event.
 func TestAMemberRemovalOwesOneApiKeyNoticeAndAnEventPerKey(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		self := newTeamEnrollFixture(t, NetworkMemberRoleAdmin)
@@ -237,13 +239,26 @@ func TestAMemberRemovalOwesOneApiKeyNoticeAndAnEventPerKey(t *testing.T) {
 
 		// another member of the team, and the removed person's own network
 		bystanderUserId := server.NewId()
-		Testing_CreateNetwork(self.ctx, server.NewId(), "bystander-"+bystanderUserId.String(), bystanderUserId)
+		bystanderEmail := Testing_CreateNetwork(self.ctx, server.NewId(), "bystander-"+bystanderUserId.String(), bystanderUserId)
 		bystander, bystanderSession := joinTestTeamMember(t, self.ctx, self.networkId, bystanderUserId, NetworkMemberRoleAdmin)
 		bystanderKey := createTestApiKey(t, bystanderSession, "bystander-bot")
 		var personalNetworkId server.Id
+		var creatorEmail string
 		server.Db(self.ctx, func(conn server.PgConn) {
 			server.Raise(conn.QueryRow(self.ctx, `SELECT network_id FROM network WHERE admin_user_id = $1`, self.creatorUserId).Scan(&personalNetworkId))
+			server.Raise(conn.QueryRow(self.ctx, `SELECT user_auth FROM network_user WHERE user_id = $1`, self.creatorUserId).Scan(&creatorEmail))
 		})
+		// the team's two Admins, the removed one and the bystander; the fixture's team has no Owner member
+		wantRecipients := []string{strings.ToLower(creatorEmail), strings.ToLower(bystanderEmail)}
+		slices.Sort(wantRecipients)
+		recipientsOf := func(notices []*testOutboxNotice) []string {
+			recipients := []string{}
+			for _, notice := range notices {
+				recipients = append(recipients, notice.userAuth)
+			}
+			slices.Sort(recipients)
+			return recipients
+		}
 		personalSession := session.NewLocalClientSession(self.ctx, "192.0.2.1:1", session.NewByJwt(personalNetworkId, self.creatorUserId, "creator-"+self.creatorUserId.String(), false, false))
 		defer personalSession.Cancel()
 		personalKey := createTestApiKey(t, personalSession, "personal-bot")
@@ -278,37 +293,45 @@ func TestAMemberRemovalOwesOneApiKeyNoticeAndAnEventPerKey(t *testing.T) {
 		requireTestKeyRemovalEvents(t, testAdminEventsAfter(self.ctx, self.networkId, headSeq), []server.Id{authKeyId}, deletedIds, removal)
 
 		notices := unsentTestNotices(t, self.ctx, self.networkId, testApiKeyNoticeTemplate)
-		if len(notices) != 1 {
-			t.Fatalf("%d API key notices after the removal, want one", len(notices))
+		if recipients := recipientsOf(notices); !slices.Equal(recipients, wantRecipients) {
+			t.Fatalf("the removal's API key notices went to %v, want one each to the two Admins %v", recipients, wantRecipients)
 		}
-		changes := notices[0].changes(t)
-		if len(changes) != 3 {
-			t.Fatalf("the removal's notice lists %d changes, want one per key: %s", len(changes), notices[0].templateJson)
-		}
-		byName := map[string]map[string]any{}
-		for _, change := range changes {
-			connect.AssertEqual(t, fmt.Sprint(change["action"]), SecurityApiKeyDeleted)
-			changeTime, err := time.Parse(time.RFC3339Nano, fmt.Sprint(change["change_time"]))
-			if err != nil || !changeTime.Equal(removalTime) {
-				t.Fatalf("a change names time %v (%v), want the removal's %v: %s", change["change_time"], err, removalTime, notices[0].templateJson)
+		for _, notice := range notices {
+			changes := notice.changes(t)
+			if len(changes) != 3 {
+				t.Fatalf("the removal's notice lists %d changes, want one per key: %s", len(changes), notice.templateJson)
 			}
-			byName[fmt.Sprint(change["name"])] = change
-		}
-		for name, apiKeyId := range map[string]server.Id{"deploy-bot": deployKey.Id, "ops bot": opsKey.Id, "nightly": nightlyKey.Id} {
-			change, ok := byName[name]
-			if !ok {
-				t.Fatalf("the notice names no key %q: %s", name, notices[0].templateJson)
+			byName := map[string]map[string]any{}
+			for _, change := range changes {
+				connect.AssertEqual(t, fmt.Sprint(change["action"]), SecurityApiKeyDeleted)
+				changeTime, err := time.Parse(time.RFC3339Nano, fmt.Sprint(change["change_time"]))
+				if err != nil || !changeTime.Equal(removalTime) {
+					t.Fatalf("a change names time %v (%v), want the removal's %v: %s", change["change_time"], err, removalTime, notice.templateJson)
+				}
+				byName[fmt.Sprint(change["name"])] = change
 			}
-			if keyCreateTime := testKeyCreateTime(t, change); !keyCreateTime.Equal(listed[apiKeyId].CreateTime) {
-				t.Fatalf("the notice names %q created %v, want %v as listed", name, keyCreateTime, listed[apiKeyId].CreateTime)
+			for name, apiKeyId := range map[string]server.Id{"deploy-bot": deployKey.Id, "ops bot": opsKey.Id, "nightly": nightlyKey.Id} {
+				change, ok := byName[name]
+				if !ok {
+					t.Fatalf("the notice names no key %q: %s", name, notice.templateJson)
+				}
+				if keyCreateTime := testKeyCreateTime(t, change); !keyCreateTime.Equal(listed[apiKeyId].CreateTime) {
+					t.Fatalf("the notice names %q created %v, want %v as listed", name, keyCreateTime, listed[apiKeyId].CreateTime)
+				}
 			}
 		}
 		for _, created := range []*CreateApiKeyResult{deployKey, opsKey, nightlyKey} {
 			requireTestNoticesHoldNoKey(t, self.ctx, self.networkId, created)
 		}
-		// the auth key's own notice, apart from the API keys'
-		if authKeyNotices := unsentTestNotices(t, self.ctx, self.networkId, testAuthKeyNoticeTemplate); len(authKeyNotices) != 1 || len(authKeyNotices[0].changes(t)) != 1 {
-			t.Fatalf("the removal's auth key notices: %d", len(authKeyNotices))
+		// the auth key's own notice, apart from the API keys', to the same two
+		authKeyNotices := unsentTestNotices(t, self.ctx, self.networkId, testAuthKeyNoticeTemplate)
+		if recipients := recipientsOf(authKeyNotices); !slices.Equal(recipients, wantRecipients) {
+			t.Fatalf("the removal's auth key notices went to %v, want one each to the two Admins %v", recipients, wantRecipients)
+		}
+		for _, notice := range authKeyNotices {
+			if changes := notice.changes(t); len(changes) != 1 {
+				t.Fatalf("the removal's auth key notice lists %d changes, want its one key: %s", len(changes), notice.templateJson)
+			}
 		}
 
 		// the other member's key and the personal network's stay, and act as before
@@ -337,10 +360,13 @@ func TestAMemberRemovalOwesOneApiKeyNoticeAndAnEventPerKey(t *testing.T) {
 
 // A MemberRevoke an admin device signed with no denial before it ends the member's API keys when its effects run, as
 // a denial does: the rows go with their auth codes, each owes an api_key.delete event naming the entry's signer and
-// request before the entry's own event, one notice lists both, and a re-joined person's old keys authenticate nothing.
+// request before the entry's own event, one notice lists both and reaches the team's Owner, the member being a
+// Member by then (QD-1215), and a re-joined person's old keys authenticate nothing.
 func TestAMemberRevokeWithNoDenialEndsTheMembersApiKeys(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		self := newCreatorRoleTeam(t)
+		// the Owner's own account, whose sign-in the notice reaches
+		owner := newKeyNoticeAccount(t, self.ctx, self.owner.UserId, newKeyNoticeEmail("owner"))
 		deployKey := createTestApiKey(t, self.creatorSession, "deploy-bot")
 		nightlyKey := createTestApiKey(t, self.creatorSession, "nightly")
 		authCodeId := insertTestApiKeyAuthCode(t, self.ctx, self.networkId, self.creatorUserId, deployKey.Id)
@@ -368,8 +394,12 @@ func TestAMemberRevokeWithNoDenialEndsTheMembersApiKeys(t *testing.T) {
 		connect.AssertEqual(t, entry.Action, AdminEventActionConfigPrefix+configLogSignedTypeWord(bridge.SignedType_SIGNED_MEMBER_REVOKE))
 		requireTestKeyRemovalEvents(t, events, nil, sortedTestIds(deployKey.Id, nightlyKey.Id), &entry.AdminEvent)
 		notices := unsentTestNotices(t, self.ctx, self.networkId, testApiKeyNoticeTemplate)
-		if len(notices) != 1 || len(notices[0].changes(t)) != 2 {
-			t.Fatalf("the MemberRevoke's API key notices: %d", len(notices))
+		if len(notices) != 1 || !slices.Contains(owner.emails, notices[0].userAuth) || len(notices[0].changes(t)) != 2 {
+			recipients := []string{}
+			for _, notice := range notices {
+				recipients = append(recipients, notice.userAuth)
+			}
+			t.Fatalf("the MemberRevoke's API key notices went to %v, want one, to the Owner's %v, listing both keys", recipients, owner.emails)
 		}
 
 		_, _ = joinTestTeamMember(t, self.ctx, self.networkId, self.creatorUserId, NetworkMemberRoleAdmin)
