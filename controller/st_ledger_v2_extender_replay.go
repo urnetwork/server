@@ -8,7 +8,8 @@ package controller
 // usage under the rule plus its pooled shares, the same-network shares and any
 // registered platform endpoint's; and coldkeys and head flags do not move. It
 // reads only, records and retains nothing, and needs the epoch's contracts live,
-// inside the 35-day contract horizon.
+// inside the contract horizon (the reaper's horizonDays, 14 to 91 days): an
+// epoch whose window opened less than the horizon ago.
 
 import (
 	"bytes"

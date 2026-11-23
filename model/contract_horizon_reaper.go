@@ -1,7 +1,7 @@
 // Contract row retention on the contract tables as they are today,
 // unpartitioned. The horizon is the owner's R (CONTRACT-PARTITION.md
 // "Retention": 13 weeks, server.ContractRetention) unless the runtime control
-// shortens it, to no less than ContractHorizonFloor (35 days). The floor is
+// shortens it, to no less than ContractHorizonFloor (14 days). The floor is
 // the reaper's own: nothing else that server.ContractRetention sets moves.
 // It keeps deleting row by row once the partition cutover lands: the daily
 // partitions it has emptied are then compacted to the rows it keeps and
@@ -144,24 +144,40 @@ func (self ContractHorizonMode) String() string {
 }
 
 // The shortest horizon the reaper applies, whatever its settings or control
-// say (owner, 2026-11-01: 35 days). It is the reaper's: server.ContractRetention,
-// which the partition drop and the sn-reconcile floor share, stays 91 days.
-// Close evidence retention follows the reaper's horizon while its mode is on
-// (server.RemoveExpiredCloseEvidence), over its guard's 35-day floor
-// (server.CloseEvidenceRetentionFloor), with its own brake, and keeps 91 days
-// in a dry run, with the mode off, or without the control. Key history
-// retention no longer follows it: a gone client's history goes 7 days after
-// the client went (RemoveGoneStClientKeyHistory, owner 2026-11-16). What keeps a
-// contract that operator block points or a USDC obligation can still read is
-// the reaper's row checks, never its horizon. The transfer audit
-// rollup never replaces a day the floor can reach
-// (TransferAuditRollupFirstDay).
+// say: 14 days (owner, 2026-11-23, for the C1 cutover's transition horizon,
+// server/CONTRACT-PARTITION-CUTOVER-NOW.md; 35 days from 2026-11-01). The
+// floor is the lowest the control may set, not a recommendation: the control
+// sets the horizon (horizonDays), 18 days for the transition. It is the
+// reaper's: server.ContractRetention, which the partition family declares,
+// stays 91 days. The retirement of the contract days follows the reaper's
+// horizon down to the same floor (server.ContractDayRetentionFloor), so a day
+// the reaper has emptied goes at the horizon the reaper deletes at.
 //
-// Below 91 days users see less history: the 90-day provider stats views
-// undercount the days past the horizon by the contracts deleted there, and
-// the unpaid bytes of /transfer/stats fall as the unpaid sweeps of contracts
-// minted after the earning cutoff, which the subnet pool pays, pass it.
-const ContractHorizonFloor = 35 * 24 * time.Hour
+// What reads contracts older than the horizon (CONTRACT-PARTITION-CUTOVER-NOW
+// §3):
+//   - the SN25 amended epochs read the live rows of every contract that
+//     closed in an epoch's window, from the first build, about 9 days after
+//     the window opened, until finalization, about 2 days later, and fail the
+//     epoch on an archived contract with bytes (stEpochAmendedUsage). Below
+//     16 days an on-time first build has less slack than the week of chain
+//     halt the archive's SN floor budgets for: the floor admits 14 for the
+//     disk, and the control's horizon is what keeps the slack;
+//   - what keeps a contract that operator block points, a payment hold or
+//     review, a dispute or an unsettled escrow can still read is the reaper's
+//     row checks, never its horizon, so each holds at any horizon;
+//   - close evidence keeps its own retention, over its guard's floor
+//     (server.CloseEvidenceRetentionFloor), with its own brake;
+//   - the provider work session journal (C4) follows the reaper's horizon
+//     over its own guard's 35-day floor;
+//   - key history retention no longer follows it: a gone client's history
+//     goes 7 days after the client went (RemoveGoneStClientKeyHistory, owner
+//     2026-11-16);
+//   - the transfer audit rollup never replaces a day the floor can reach
+//     (TransferAuditRollupFirstDay).
+//
+// Below 91 days the 90-day provider stats views undercount the days past the
+// horizon by the contracts deleted there. /transfer/stats reads payments only.
+const ContractHorizonFloor = 14 * 24 * time.Hour
 
 // Code settings, which bound the runtime control.
 type ContractHorizonSettings struct {
@@ -293,15 +309,14 @@ const contractHorizonControlKey = "{contract_horizon}control"
 //   - `maxRowsPerSecond`: contracts read per second, at most the code's;
 //   - `batchSize`: contracts per batch, between the code's minimum and size;
 //   - `horizonDays`: the horizon in whole days, between ContractHorizonFloor
-//     (35) and the code's horizon (91); a value past either end counts as that
-//     end. Below 91 days users see less history in the provider stats and
-//     /transfer/stats (ContractHorizonFloor). It moves more than the reaper:
-//     while the mode is on, close evidence and key history retention follow
-//     it (ContractHorizonFloor). At 35 the close evidence deletes permanently
-//     remove about a billion rows, the evidence accepted from 2026-10-06 on,
-//     whatever the reaper's keep rules; their own brake
-//     (server.RemoveExpiredCloseEvidence) stops the row deletes, and this mode
-//     alone the weekly drops once the evidence is partitioned;
+//     (14) and the code's horizon (91); a value past either end counts as that
+//     end. Below 91 days users see less history in the provider stats
+//     (ContractHorizonFloor). It moves more than the reaper: while the mode is
+//     on, the contract days retire at it once the contract tables are
+//     partitioned (server.ContractDayRetention), and the provider work session
+//     journal and close evidence follow it, each over its own guard's floor;
+//     the evidence deletes take whatever the reaper's keep rules keep, at the
+//     pace of their own brake (server.RemoveExpiredCloseEvidence);
 //   - the zero-byte pass's `zeroByteMode`, `zeroByteMaxRowsPerSecond` and
 //     `zeroByteHorizonDays` (contract_horizon_zero_byte.go).
 //
@@ -677,7 +692,7 @@ var (
 	})
 	contractHorizonHorizonSecondsGauge = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "urnetwork_contract_horizon_horizon_seconds",
-		Help: "How long past its creation and its close a contract is kept, as the contract horizon reaper's last control read set it: 35 to 91 days",
+		Help: "How long past its creation and its close a contract is kept, as the contract horizon reaper's last control read set it: 14 to 91 days",
 	})
 	contractHorizonLagGauge = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "urnetwork_contract_horizon_lag_seconds",

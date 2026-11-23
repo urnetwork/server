@@ -11,7 +11,7 @@
 // deleted, and keeps every row the reaper keeps, by construction.
 //
 //   - A day expires RetireDelay after its upper bound passes the reaper's
-//     horizon (ContractDayRetention: 35 days at the shortest) while the
+//     horizon (ContractDayRetention: 14 days at the shortest) while the
 //     reaper's mode is on; otherwise at ContractRetention (91 days). With the
 //     mode off the reaper deletes nothing, so an expired day stays.
 //   - An expired day whose six leaves hold no tuple at all, live or dead, in a
@@ -59,10 +59,16 @@ import (
 	"github.com/urnetwork/glog"
 )
 
-// The shortest contract horizon the reaper applies (model.ContractHorizonFloor,
-// owner 2026-11-01): a day never expires sooner than this past its upper
-// bound, whatever ctx carries.
-const ContractDayRetentionFloor = 35 * 24 * time.Hour
+// The shortest contract horizon the reaper applies (model.ContractHorizonFloor:
+// 14 days, owner 2026-11-23 for the C1 transition; 35 days from 2026-11-01): a
+// day never expires sooner than this past its upper bound, whatever ctx
+// carries. It equals the reaper's floor (model's
+// TestContractDayRetentionFloorIsTheReaperFloor). Above it, a day the reaper
+// empties at a shorter horizon would keep its storage until this floor, and
+// the shorter horizon would return nothing after the cutover. Below it, it
+// would never bind: the horizon ctx carries is the reaper's, never below the
+// reaper's floor.
+const ContractDayRetentionFloor = 14 * 24 * time.Hour
 
 // Tunables of the retirement of expired contract days.
 type ContractDayRetirementSettings struct {

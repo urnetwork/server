@@ -1,5 +1,5 @@
 // The contract horizon reaper at the horizon the runtime control's horizonDays
-// sets, down to the 35-day floor: what the shorter horizon reaches, exactly
+// sets, down to the 14-day floor: what the shorter horizon reaches, exactly
 // where it stops, that the control applies from the next batch, that every
 // protection still holds there, and that operator block points keep the
 // sweeps they still read.
@@ -17,7 +17,7 @@ import (
 )
 
 // The control field as an operator sets it:
-// HSET {contract_horizon}control horizonDays 35
+// HSET {contract_horizon}control horizonDays 18
 const horizonTestDaysField = "horizonDays"
 
 // The value of the unlabeled gauge the process exports as name, as a scrape
@@ -49,14 +49,18 @@ func checkHorizonTestExported(t testing.TB, now time.Time, report *ContractHoriz
 	}
 }
 
-// horizonDays shortens the horizon to as few as 35 days. At 45 days a
-// contract 60 days old goes, into the archive since it bears credit; at 35 a
-// contract 40 days old goes too, and contracts 34 and 30 days old stay. The
-// boundary is exactly 35 days for the close time, and the pass reads a
-// contract once the mint time in its id is exactly the close settle time past
-// it; a value below the floor reaches no closer. Without the field, or
-// with one that does not parse or is past 91 days, the horizon is the code's
-// 91 days. Each run reports and exports the horizon it applied.
+// horizonDays shortens the horizon to as few as 14 days, the floor (owner,
+// 2026-11-23, for the C1 cutover's transition, whose control sets 18). At 45
+// days a contract 60 days old goes, into the archive since it bears credit; at
+// 18 one 20 days old goes, into the archive too, and contracts 17, 15, 13 and
+// 10 days old stay; at 14 the ones 17 and 15 days old go, and those 13 and 10
+// days old stay. The boundary is exactly 14 days for the close time, and the
+// pass reads a contract once the mint time in its id is exactly the close
+// settle time past it; a value below the floor, 13 or 1, reaches no closer.
+// Without the field, or with one that does not parse or is past 91 days, the
+// horizon is the code's 91 days. Each run reports and exports the horizon it
+// applied. Before the floor moved from 35 days, 18 counted as 35, and the
+// contract 20 days old stayed.
 func TestContractHorizonControlShortensHorizonToFloor(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -68,20 +72,23 @@ func TestContractHorizonControlShortensHorizonToFloor(t *testing.T) {
 		// a whole millisecond, so a mint time and a close time can sit exactly
 		// on the horizon
 		now := server.NowUtc().Truncate(time.Millisecond)
-		floor := now.Add(-35 * day)
+		floor := now.Add(-14 * day)
 
-		// credit-bearing and unswept, so nothing but the horizon keeps it
+		// credit-bearing and unswept, so nothing but the horizon keeps them
 		aged60 := newHorizonTestContract(now.Add(-60*day), "settled")
 		aged60.unswept = true
-		aged40 := newHorizonTestContract(now.Add(-40*day), "canceled")
-		aged34 := newHorizonTestContract(now.Add(-34*day), "canceled")
-		aged30 := newHorizonTestContract(now.Add(-30*day), "canceled")
+		aged20 := newHorizonTestContract(now.Add(-20*day), "settled")
+		aged20.unswept = true
+		aged17 := newHorizonTestContract(now.Add(-17*day), "canceled")
+		aged15 := newHorizonTestContract(now.Add(-15*day), "canceled")
+		aged13 := newHorizonTestContract(now.Add(-13*day), "canceled")
+		aged10 := newHorizonTestContract(now.Add(-10*day), "canceled")
 		// closed before it was minted, so only the id decides
 		mintBoundary := newHorizonTestContract(floor, "canceled")
 		mintBoundary.closeTime = horizonTestPointer(floor.Add(-time.Hour))
-		closeBoundary := newHorizonTestContract(now.Add(-40*day), "canceled")
+		closeBoundary := newHorizonTestContract(now.Add(-16*day), "canceled")
 		closeBoundary.closeTime = horizonTestPointer(floor)
-		all := []*horizonTestContract{aged60, aged40, aged34, aged30, mintBoundary, closeBoundary}
+		all := []*horizonTestContract{aged60, aged20, aged17, aged15, aged13, aged10, mintBoundary, closeBoundary}
 		insertHorizonTestContracts(t, ctx, f, all...)
 
 		present := func(contract *horizonTestContract) bool {
@@ -103,7 +110,7 @@ func TestContractHorizonControlShortensHorizonToFloor(t *testing.T) {
 			return report
 		}
 
-		for _, horizonDays := range []string{"", "soon", "35.5", "400"} {
+		for _, horizonDays := range []string{"", "soon", "18.5", "400"} {
 			if report := run(now, horizonDays); !report.HorizonTime.Equal(now.Add(-91*day)) || report.Scanned != 0 {
 				t.Fatalf("horizonDays %q is not the code's 91 days: %s, %+v", horizonDays, now.Sub(report.HorizonTime), report)
 			}
@@ -119,38 +126,53 @@ func TestContractHorizonControlShortensHorizonToFloor(t *testing.T) {
 			t.Fatalf("a 45-day horizon kept a contract 60 days old: rows %v (contract, close, escrow, sweep, extender, report), archived %d, horizon %s",
 				rows, archived, now.Sub(report.HorizonTime))
 		}
-		if !present(aged40) || !present(aged34) || !present(mintBoundary) || !present(closeBoundary) {
+		if !present(aged20) || !present(aged17) || !present(mintBoundary) || !present(closeBoundary) {
 			t.Fatal("a 45-day horizon removed a contract inside it")
 		}
 
-		report = run(now, "35")
-		if present(aged40) {
-			t.Fatalf("a 35-day horizon kept a contract 40 days old: horizon %s, %+v", now.Sub(report.HorizonTime), report)
+		report = run(now, "18")
+		if rows, archived := countHorizonTestRows(t, ctx, aged20.contractId); rows != [6]int{} || archived != 1 {
+			t.Fatalf("an 18-day horizon kept a contract 20 days old: rows %v (contract, close, escrow, sweep, extender, report), archived %d, horizon %s",
+				rows, archived, now.Sub(report.HorizonTime))
 		}
-		if !present(aged34) || !present(aged30) || !present(mintBoundary) || !present(closeBoundary) {
-			t.Fatal("a 35-day horizon removed a contract on it or inside it")
+		if !present(aged17) || !present(aged15) || !present(aged13) || !present(aged10) || !present(mintBoundary) || !present(closeBoundary) {
+			t.Fatal("an 18-day horizon removed a contract inside it")
 		}
-		if !report.HorizonTime.Equal(floor) || report.Scanned != 2 || report.Eligible != 1 || report.Archived != 0 ||
-			report.Protected[contractHorizonProtectedRecentClose] != 1 || report.Deleted["transfer_contract"] != 1 {
-			t.Fatalf("wrong report at 35 days: %+v", report)
+		if !report.HorizonTime.Equal(now.Add(-18*day)) || report.Scanned != 1 || report.Eligible != 1 || report.Archived != 1 ||
+			report.Deleted["transfer_contract"] != 1 {
+			t.Fatalf("wrong report at 18 days: %+v", report)
+		}
+
+		report = run(now, "14")
+		if present(aged17) || present(aged15) {
+			t.Fatalf("a 14-day horizon kept a contract 17 or 15 days old: horizon %s, %+v", now.Sub(report.HorizonTime), report)
+		}
+		if !present(aged13) || !present(aged10) || !present(mintBoundary) || !present(closeBoundary) {
+			t.Fatal("a 14-day horizon removed a contract on it or inside it")
+		}
+		if !report.HorizonTime.Equal(floor) || report.Scanned != 3 || report.Eligible != 2 || report.Archived != 0 ||
+			report.Protected[contractHorizonProtectedRecentClose] != 1 || report.Deleted["transfer_contract"] != 2 {
+			t.Fatalf("wrong report at 14 days: %+v", report)
 		}
 
 		// a microsecond later the close boundary is past; the mint boundary's
 		// millisecond is not
-		if run(now.Add(time.Microsecond), "35"); present(closeBoundary) || !present(mintBoundary) {
-			t.Fatal("the 35-day horizon is not exact for the close time")
+		if run(now.Add(time.Microsecond), "14"); present(closeBoundary) || !present(mintBoundary) {
+			t.Fatal("the 14-day horizon is not exact for the close time")
 		}
 		// the close settle time later the mint boundary is read only a
 		// millisecond after, and a horizon below the floor still keeps the
-		// contract 34 days old
+		// contracts 13 and 10 days old
 		settle := horizonTestSettings().CloseSettleTime
-		if run(now.Add(settle), "35"); !present(mintBoundary) {
-			t.Fatal("a contract minted exactly the close settle time before the 35-day horizon was read")
+		if run(now.Add(settle), "14"); !present(mintBoundary) {
+			t.Fatal("a contract minted exactly the close settle time before the 14-day horizon was read")
 		}
-		report = run(now.Add(settle+time.Millisecond), "1")
-		if present(mintBoundary) || !present(aged34) || !present(aged30) || !report.HorizonTime.Equal(floor.Add(settle+time.Millisecond)) {
-			t.Fatalf("a horizon below the floor is not exactly 35 days and the close settle time for the mint time: %s, %+v",
-				now.Add(settle+time.Millisecond).Sub(report.HorizonTime), report)
+		for _, horizonDays := range []string{"13", "1"} {
+			report = run(now.Add(settle+time.Millisecond), horizonDays)
+			if present(mintBoundary) || !present(aged13) || !present(aged10) || !report.HorizonTime.Equal(floor.Add(settle+time.Millisecond)) {
+				t.Fatalf("horizonDays %s below the floor is not exactly 14 days and the close settle time for the mint time: %s, %+v",
+					horizonDays, now.Add(settle+time.Millisecond).Sub(report.HorizonTime), report)
+			}
 		}
 	})
 }
@@ -206,20 +228,22 @@ func TestContractHorizonControlHorizonAppliesFromNextBatch(t *testing.T) {
 	})
 }
 
-// At the 35-day floor every protection the reaper applies still holds. In a
-// cohort minted 60 days ago, past the floor and inside 91 days, a contract
-// keeps every row when it is open, disputed or unsettled; when a sweep of it is
-// held by a pending or externally attempted payment, of a missing payment, or
-// paid too recently; when it closed inside the horizon; or when another
-// transaction holds it or its sweep. The earning cutoff falls 70 days back, as
-// production's falls inside 91 days. The rest goes, so the horizon was 35
-// days: a paid contract, one whose completed payment still carries a former
-// release's retention stamping flag, a canceled one, an unpaid one past the
-// cutoff, whose provider earns through the subnet pool, a paid one before the
-// cutoff, one of a safely canceled payment, and one minted before the cutoff,
-// 80 days ago, with an unpaid legacy sweep. USDC payouts ended, so the last two
-// are forfeited (owner decision 2026-11-13). Once the other transaction ends,
-// the held contracts go too, and a fresh pass deletes nothing more.
+// At the 14-day floor every protection the reaper applies still holds. In a
+// cohort minted 20 days ago, past the floor and inside the 35 days the floor
+// was until 2026-11-23, a contract keeps every row when it is open, disputed
+// or unsettled; when a sweep of it is held by a pending or externally
+// attempted payment, of a missing payment, or paid too recently; when it
+// closed inside the horizon; or when another transaction holds it or its
+// sweep. The earning cutoff falls 70 days back, as production's falls inside
+// 91 days. The rest goes, so the horizon was 14 days: a paid contract, one
+// whose completed payment still carries a former release's retention stamping
+// flag, a canceled one, an unpaid one past the cutoff, whose provider earns
+// through the subnet pool, a paid one before the cutoff, one of a safely
+// canceled payment, and one minted before the cutoff, 80 days ago, with an
+// unpaid legacy sweep. USDC payouts ended, so the last two are forfeited
+// (owner decision 2026-11-13). Once the other transaction ends, the held
+// contracts go too, and a fresh pass deletes nothing more. Before the floor
+// moved, the cohort stayed whole.
 func TestContractHorizonFloorKeepsProtectedContracts(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -231,15 +255,17 @@ func TestContractHorizonFloorKeepsProtectedContracts(t *testing.T) {
 		now := server.NowUtc().Truncate(time.Microsecond)
 		usePayoutTransitionAt(t, now.Add(-70*day).Truncate(time.Second))
 		f := newNetEscrowOrderingTestFixture(t, ctx)
-		at := func(i int) time.Time { return now.Add(-60*day + time.Duration(i)*time.Second) }
+		at := func(i int) time.Time { return now.Add(-20*day + time.Duration(i)*time.Second) }
 		legacyAt := func(i int) time.Time { return now.Add(-80*day + time.Duration(i)*time.Second) }
 
+		// completed after the cohort was minted, and longer ago than
+		// CompletedContractExpiration
 		completedOldPaymentId := insertHorizonTestPayment(t, ctx, f.destinationNetworkId, horizonTestPayment{
-			completed: true, completeTime: horizonTestPointer(now.Add(-30 * day))})
+			completed: true, completeTime: horizonTestPointer(now.Add(-16 * day))})
 		completedRecentPaymentId := insertHorizonTestPayment(t, ctx, f.destinationNetworkId, horizonTestPayment{
 			completed: true, completeTime: horizonTestPointer(now.Add(-2 * day))})
 		retentionPendingPaymentId := insertHorizonTestPayment(t, ctx, f.destinationNetworkId, horizonTestPayment{
-			completed: true, completeTime: horizonTestPointer(now.Add(-30 * day)), retentionPending: true})
+			completed: true, completeTime: horizonTestPointer(now.Add(-16 * day)), retentionPending: true})
 		pendingPaymentId := insertHorizonTestPayment(t, ctx, f.destinationNetworkId, horizonTestPayment{})
 		canceledRecordedPaymentId := insertHorizonTestPayment(t, ctx, f.destinationNetworkId, horizonTestPayment{
 			canceled: true, paymentRecord: horizonTestPointer("synthetic-record")})
@@ -292,7 +318,7 @@ func TestContractHorizonFloorKeepsProtectedContracts(t *testing.T) {
 			contractHorizonProtectedRecentClose:       {recentClose},
 			contractHorizonProtectedBusy:              {heldContract, heldSweep},
 		}
-		young := newHorizonTestContract(now.Add(-30*day), "canceled")
+		young := newHorizonTestContract(now.Add(-13*day), "canceled")
 		all := append([]*horizonTestContract{young}, eligible...)
 		for _, contracts := range protected {
 			all = append(all, contracts...)
@@ -313,7 +339,7 @@ func TestContractHorizonFloorKeepsProtectedContracts(t *testing.T) {
 		server.RaisePgResult(held.Exec(ctx, `SELECT 1 FROM transfer_contract WHERE contract_id=$1 FOR UPDATE`, heldContract.contractId))
 		server.RaisePgResult(held.Exec(ctx, `SELECT 1 FROM transfer_escrow_sweep WHERE contract_id=$1 FOR UPDATE`, heldSweep.contractId))
 
-		setHorizonTestControl(t, ctx, map[string]string{horizonTestDaysField: "35"})
+		setHorizonTestControl(t, ctx, map[string]string{horizonTestDaysField: "14"})
 		settings := horizonTestSettings()
 		settings.LockTimeout = 200 * time.Millisecond
 		report, _, err := RemoveContractsPastHorizon(ctx, now, ContractHorizonCursor{}, settings)
@@ -327,14 +353,14 @@ func TestContractHorizonFloorKeepsProtectedContracts(t *testing.T) {
 				wantArchived = 0
 			}
 			if rows != [6]int{} || archived != wantArchived {
-				t.Fatalf("a 35-day horizon kept an eligible %s contract minted %s ago: rows %v (contract, close, escrow, sweep, extender, report), archived %d, horizon %s",
+				t.Fatalf("a 14-day horizon kept an eligible %s contract minted %s ago: rows %v (contract, close, escrow, sweep, extender, report), archived %d, horizon %s",
 					contract.outcome, now.Sub(contract.createTime), rows, archived, now.Sub(report.HorizonTime))
 			}
 		}
 		for reason, contracts := range protected {
 			for _, contract := range contracts {
 				if rows, archived := countHorizonTestRows(t, ctx, contract.contractId); rows != before[contract.contractId] || archived != 0 {
-					t.Fatalf("a 35-day horizon changed a %s contract: %v, was %v, archived %d", reason, rows, before[contract.contractId], archived)
+					t.Fatalf("a 14-day horizon changed a %s contract: %v, was %v, archived %d", reason, rows, before[contract.contractId], archived)
 				}
 			}
 			if report.Protected[reason] != int64(len(contracts)) {
@@ -342,7 +368,7 @@ func TestContractHorizonFloorKeepsProtectedContracts(t *testing.T) {
 			}
 		}
 		if rows, _ := countHorizonTestRows(t, ctx, young.contractId); rows != before[young.contractId] {
-			t.Fatal("a contract minted inside the 35-day horizon changed", rows)
+			t.Fatal("a contract minted inside the 14-day horizon changed", rows)
 		}
 		wantDeleted := map[string]int64{
 			"transfer_contract":     7,
@@ -357,7 +383,7 @@ func TestContractHorizonFloorKeepsProtectedContracts(t *testing.T) {
 				t.Errorf("deleted %s = %d, want %d", table, report.Deleted[table], count)
 			}
 		}
-		if !report.HorizonTime.Equal(now.Add(-35*day)) || report.Scanned != int64(len(all)-1) || report.Eligible != 7 || report.Archived != 6 ||
+		if !report.HorizonTime.Equal(now.Add(-14*day)) || report.Scanned != int64(len(all)-1) || report.Eligible != 7 || report.Archived != 6 ||
 			!report.CaughtUp || report.Stop != contractHorizonStopHorizon || report.Mode != ContractHorizonModeOn {
 			t.Fatalf("wrong report: %+v", report)
 		}
@@ -392,7 +418,7 @@ func awardHorizonTestBlock(t testing.TB, ctx context.Context, block int64) {
 // Operator block points read a block's unpaid sweeps by settlement time until
 // the block is awarded or its reliability passes retention, and a contract
 // can settle long after it closed: a dispute resolved late, say. Among
-// contracts minted and closed 40 days ago, past the 35-day floor, the reaper
+// contracts minted and closed 40 days ago, past the 14-day floor, the reaper
 // keeps the ones settled with an unpaid sweep in the open block and in the
 // last completed block, which has no award yet. It deletes the ones settled in
 // an awarded block, in a block whose reliability is past retention (an award
@@ -448,7 +474,7 @@ func TestContractHorizonKeepsSweepsOperatorBlockPointsStillRead(t *testing.T) {
 			before[contract.contractId], _ = countHorizonTestRows(t, ctx, contract.contractId)
 		}
 
-		setHorizonTestControl(t, ctx, map[string]string{horizonTestDaysField: "35"})
+		setHorizonTestControl(t, ctx, map[string]string{horizonTestDaysField: "14"})
 		report, _, err := RemoveContractsPastHorizon(ctx, now, ContractHorizonCursor{}, horizonTestSettings())
 		if err != nil {
 			t.Fatal(err)
@@ -460,7 +486,7 @@ func TestContractHorizonKeepsSweepsOperatorBlockPointsStillRead(t *testing.T) {
 			"paid, settled in the open block":   paidInOpen,
 		} {
 			if rows, archived := countHorizonTestRows(t, ctx, contract.contractId); rows != [6]int{} || archived != 1 {
-				t.Fatalf("a 35-day horizon kept a contract %s that block points no longer read: rows %v, archived %d, horizon %s, %+v",
+				t.Fatalf("a 14-day horizon kept a contract %s that block points no longer read: rows %v, archived %d, horizon %s, %+v",
 					name, rows, archived, now.Sub(report.HorizonTime), report)
 			}
 		}
@@ -469,7 +495,7 @@ func TestContractHorizonKeepsSweepsOperatorBlockPointsStillRead(t *testing.T) {
 			"settled in the last block, not awarded yet": inLast,
 		} {
 			if rows, archived := countHorizonTestRows(t, ctx, contract.contractId); rows != before[contract.contractId] || archived != 0 {
-				t.Fatalf("a 35-day horizon removed a contract %s, whose unpaid sweep block points still read: rows %v, was %v, archived %d",
+				t.Fatalf("a 14-day horizon removed a contract %s, whose unpaid sweep block points still read: rows %v, was %v, archived %d",
 					name, rows, before[contract.contractId], archived)
 			}
 		}
@@ -497,8 +523,8 @@ func TestContractHorizonKeepsSweepsOperatorBlockPointsStillRead(t *testing.T) {
 // A payment that completed under attribution review queues no retention
 // stamping for its contracts (completePaymentInTx), so the payment completion
 // path keeps them until the straggler horizon while the review is open. Past
-// the horizon the reaper keeps a contract that payment paid, and still deletes
-// one paid as long ago by an ordinary payment.
+// the horizon, here the 14-day floor, the reaper keeps a contract that payment
+// paid, and still deletes one paid as long ago by an ordinary payment.
 func TestContractHorizonKeepsContractsUnderAttributionReview(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -510,17 +536,17 @@ func TestContractHorizonKeepsContractsUnderAttributionReview(t *testing.T) {
 		usePayoutTransitionAt(t, now.Add(-70*day).Truncate(time.Second))
 		f := newNetEscrowOrderingTestFixture(t, ctx)
 		reviewedPaymentId := insertHorizonTestPayment(t, ctx, f.destinationNetworkId, horizonTestPayment{
-			completed: true, completeTime: horizonTestPointer(now.Add(-30 * day)), attributionReview: true})
+			completed: true, completeTime: horizonTestPointer(now.Add(-16 * day)), attributionReview: true})
 		paidPaymentId := insertHorizonTestPayment(t, ctx, f.destinationNetworkId, horizonTestPayment{
-			completed: true, completeTime: horizonTestPointer(now.Add(-30 * day))})
-		underReview := newHorizonTestContract(now.Add(-60*day), "settled")
+			completed: true, completeTime: horizonTestPointer(now.Add(-16 * day))})
+		underReview := newHorizonTestContract(now.Add(-20*day), "settled")
 		underReview.paymentId = &reviewedPaymentId
-		paid := newHorizonTestContract(now.Add(-60*day+time.Second), "settled")
+		paid := newHorizonTestContract(now.Add(-20*day+time.Second), "settled")
 		paid.paymentId = &paidPaymentId
 		insertHorizonTestContracts(t, ctx, f, underReview, paid)
 		before, _ := countHorizonTestRows(t, ctx, underReview.contractId)
 
-		setHorizonTestControl(t, ctx, map[string]string{horizonTestDaysField: "35"})
+		setHorizonTestControl(t, ctx, map[string]string{horizonTestDaysField: "14"})
 		report, _, err := RemoveContractsPastHorizon(ctx, now, ContractHorizonCursor{}, horizonTestSettings())
 		if err != nil {
 			t.Fatal(err)
