@@ -22,7 +22,8 @@ package model
 //     writes again after /dns/ready answers stale, and that rewrite must reach a
 //     serial the restored edges serve (§13.8).
 //   - A row expires an hour after its last write (dnsCommitInTx), and taskworker
-//     removes it through the journal (RemoveExpiredDnsChallenges).
+//     removes it through the journal (RemoveExpiredDnsChallenges), or with no
+//     journal row while a suspension withholds it, planning copies either way.
 //   - Challenges are free of dns_entries and add no admin event (§12.7, §12.8).
 //   - A write takes no idempotency key: every write is a new serial. So what certs needs to settle a write whose
 //     answer it never heard (QD-1165) is here: the journal's commit of a value at a custom domain's challenge
@@ -36,6 +37,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -418,10 +420,14 @@ func GetDnsAcmeChallengeWindowInTx(ctx context.Context, query server.PgCanQuery,
 	return count, oldest.UTC().Add(window)
 }
 
-// Removes every challenge and canary past its hour at now, through the journal,
-// one write a zone (D-DNS-8). Returns how many went and whether more wait. A
-// zone that cannot be written now, restoring or suspended, keeps its rows for
-// the next pass.
+// Removes every challenge and canary past its hour at now, one transaction a
+// zone under its lock (D-DNS-8; removeExpiredDnsZoneRowsInTx): those edges
+// serve through the journal, one write a zone that plans their copies, and
+// those a suspension withholds with no journal row, since no edge holds them,
+// their withheld copies planned as the suspension's lift will serve them, so
+// neither leaves a copy standing alone. Returns how many went and whether more
+// wait. A zone whose served rows cannot be written now, its root restoring,
+// keeps its rows for the next pass and answers the refusal.
 func RemoveExpiredDnsChallenges(ctx context.Context, now time.Time) (int, bool, error) {
 	if !server.SidecarMg5Linked() {
 		return 0, false, nil
@@ -463,32 +469,105 @@ func RemoveExpiredDnsChallenges(ctx context.Context, now time.Time) (int, bool, 
 	})
 	removedCount := 0
 	errs := []error{}
-	for key, deletes := range zoneKeys {
-		_, err := DnsWrite(ctx, &DnsWriteArgs{Root: key.root, NetworkId: key.networkId, Deletes: deletes})
+	for key, keys := range zoneKeys {
+		var zoneRemovedCount int
+		var returnErr error
+		err := dnsCatchRefusal(func() {
+			server.Tx(ctx, func(tx server.PgTx) {
+				zoneRemovedCount, returnErr = removeExpiredDnsZoneRowsInTx(ctx, tx, key.root, key.networkId, keys, now)
+				if returnErr != nil {
+					panic(dnsWriteRefusal{err: returnErr})
+				}
+			}, server.TxReadCommitted)
+		})
 		switch {
 		case err == nil:
-			removedCount += len(deletes)
+			removedCount += zoneRemovedCount
 		case errors.Is(err, dnsservice.ErrDnsWriteEmpty):
 			// gone already
-		case errors.Is(err, ErrDnsZoneSuspended):
-			// a suspended zone's rows are withheld, so no edge holds them, and
-			// they go with no journal row
-			server.Tx(ctx, func(tx server.PgTx) {
-				tag := server.RaisePgResult(tx.Exec(
-					ctx,
-					`
-						DELETE FROM network_dns_record
-						WHERE root = $1 AND network_id = $2 AND expire_time < $3 AND withheld_time IS NOT NULL
-					`,
-					key.root,
-					key.networkId,
-					now.UTC(),
-				))
-				removedCount += int(tag.RowsAffected())
-			})
 		default:
 			errs = append(errs, err)
 		}
 	}
 	return removedCount, rowCount == DefaultDnsModelSettings().ExpiryBatchSize, errors.Join(errs...)
+}
+
+// One zone's challenges and canaries among keys, the rows a pass's scan found
+// past their hour at now, removed in tx, which must be read committed. Each key
+// is read again under the zone's lock, since a write after the scan renews its
+// row and must keep it. Those edges serve go in one write through §12.6's path,
+// which plans their copies over what edges serve once it commits; those a
+// suspension withholds go with no journal row, their withheld copies planned
+// as the suspension's lift will serve them (removeWithheldDnsRowsInTx). A
+// refusal of the write, its root restoring, rolls back both. Returns how many
+// went.
+func removeExpiredDnsZoneRowsInTx(ctx context.Context, tx server.PgTx, root string, networkId server.Id, keys []dnsservice.DnsRecordKey, now time.Time) (int, error) {
+	lockDnsZoneInTx(ctx, tx, root, networkId)
+	scanned := map[dnsservice.DnsRecordKey]bool{}
+	scannedOwners := map[string]bool{}
+	for _, key := range keys {
+		scanned[key] = true
+		scannedOwners[key.Owner] = true
+	}
+	owners := slices.Sorted(maps.Keys(scannedOwners))
+	// the zone's rows at the scan's owners still past their hour, through the
+	// primary key; <root>'s own hold no network
+	var result server.PgResult
+	var err error
+	if networkId == (server.Id{}) {
+		result, err = tx.Query(
+			ctx,
+			`
+				SELECT owner, rrtype, withheld_time IS NOT NULL FROM network_dns_record
+				WHERE root = $1 AND owner = ANY($2) AND network_id IS NULL AND expire_time < $3
+				ORDER BY owner, rrtype
+			`,
+			root,
+			owners,
+			now.UTC(),
+		)
+	} else {
+		result, err = tx.Query(
+			ctx,
+			`
+				SELECT owner, rrtype, withheld_time IS NOT NULL FROM network_dns_record
+				WHERE root = $1 AND owner = ANY($2) AND network_id = $3 AND expire_time < $4
+				ORDER BY owner, rrtype
+			`,
+			root,
+			owners,
+			networkId,
+			now.UTC(),
+		)
+	}
+	servedKeys := []dnsservice.DnsRecordKey{}
+	withheldKeys := []dnsservice.DnsRecordKey{}
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var owner string
+			var rrType int32
+			var withheld bool
+			server.Raise(result.Scan(&owner, &rrType, &withheld))
+			key := dnsservice.DnsRecordKey{Owner: owner, Type: uint16(rrType)}
+			switch {
+			case !scanned[key]:
+				// past its hour, but not among the scan's: the next pass's
+			case withheld:
+				withheldKeys = append(withheldKeys, key)
+			default:
+				servedKeys = append(servedKeys, key)
+			}
+		}
+	})
+	removedCount := 0
+	if 0 < len(servedKeys) {
+		if _, err := DnsWriteInTx(ctx, tx, &DnsWriteArgs{Root: root, NetworkId: networkId, Deletes: servedKeys}); err != nil {
+			return 0, err
+		}
+		removedCount += len(servedKeys)
+	}
+	if 0 < len(withheldKeys) {
+		removedCount += removeWithheldDnsRowsInTx(ctx, tx, root, networkId, withheldKeys)
+	}
+	return removedCount, nil
 }
