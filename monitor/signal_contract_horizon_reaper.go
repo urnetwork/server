@@ -341,8 +341,8 @@ func contractHorizonReaperFindings(frame contractHorizonReaperFrame, settings *C
 		baseline:  fmt.Sprintf("Inside one pass the lag grows by less than %s in %s while the mode is on.", stormDuration(settings.LagGrowth), stormDuration(settings.LagWindow)),
 		observed:  counts + " lag_before_hours=" + contractHorizonReaperHours(lagBefore),
 		evidence:  "max(urnetwork_contract_horizon_lag_seconds) of the processes that ran the reaper, now and a lag window ago, with an unchanged urnetwork_contract_horizon_pass_start_timestamp_seconds.",
-		context:   "The reaper reads at most maxRowsPerSecond contracts a second (200 by default, 2000 at most); at about 85M new contracts a day it needs about 985 a second to hold any horizon. A rescan restarts the pass, which this check skips. A dry run never advances its cursor and is not judged.",
-		action:    "Raise the control's maxRowsPerSecond toward the code's 2000 while edge-2's I/O, WAL and vacuum allow, and read §2.4b for the disk. A lower horizonDays makes more contracts eligible, not fewer.",
+		context:   "The reaper reads at most maxRowsPerSecond contracts a second (200 by default, 5000 at most); at about 85M new contracts a day it needs about 985 a second to hold any horizon. A rescan restarts the pass, which this check skips. A dry run never advances its cursor and is not judged.",
+		action:    "Raise the control's maxRowsPerSecond toward the code's 5000 while edge-2's I/O, WAL and vacuum allow, and read §2.4b for the disk. A lower horizonDays makes more contracts eligible, not fewer.",
 		verify:    "The lag stops growing for two cadences.",
 		playbook:  "SIGNALS.md §2.4r and §2.4b",
 	})
