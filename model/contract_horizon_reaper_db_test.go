@@ -381,7 +381,7 @@ func TestContractHorizonRemovesUnpaidSweepsWithoutCutoff(t *testing.T) {
 // reads a contract once its mint time in the contract id is exactly the close
 // settle time before the horizon: a contract on either boundary stays, one a
 // microsecond of close time, or a millisecond of mint time, past it goes. A
-// horizon setting below the 45-day floor does not move the boundary inside the
+// horizon setting below the 14-day floor does not move the boundary inside the
 // floor.
 func TestContractHorizonBoundaryIsExact(t *testing.T) {
 	env := server.DefaultTestEnv()
@@ -417,9 +417,9 @@ func TestContractHorizonBoundaryIsExact(t *testing.T) {
 			t.Fatal("a contract closed a microsecond before the horizon was kept")
 		}
 		shorter := horizonTestSettings()
-		shorter.Horizon = 30 * 24 * time.Hour
-		if run(mint.Add(31*24*time.Hour), shorter); !present(mintBoundary) {
-			t.Fatal("a 30-day horizon setting removed a contract inside the 45-day floor")
+		shorter.Horizon = 10 * 24 * time.Hour
+		if run(mint.Add(13*24*time.Hour), shorter); !present(mintBoundary) {
+			t.Fatal("a 10-day horizon setting removed a contract inside the 14-day floor")
 		}
 		if report := run(mint.Add(retention), horizonTestSettings()); !present(mintBoundary) || report.Scanned != 0 {
 			t.Fatalf("a contract minted exactly at the horizon was read or removed: %+v", report)

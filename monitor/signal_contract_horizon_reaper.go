@@ -354,7 +354,7 @@ func contractHorizonReaperFindings(frame contractHorizonReaperFrame, settings *C
 		baseline:  "Zero: the daily task awards each block about two hours after it closes, and late settlement is rare.",
 		observed:  fmt.Sprintf("block_points_%s=%s %s", window, blockPoints.observed("%.0f"), counts),
 		evidence:  "increase(urnetwork_contract_horizon_protected_contracts_total{reason=\"block_points\"}); each pass that reads a kept contract counts it again.",
-		context:   "A block is awarded by controller.AwardOperatorBlockPoints daily at 12:00 UTC and by bringyourctl account-points backfill-blocks. The rule keeps a contract at most 21 days and 13 hours after its block opened.",
+		context:   "A block is awarded by controller.AwardOperatorBlockPoints daily at 12:00 UTC and by bringyourctl account-points backfill-blocks. The rule keeps a contract at most 10 days and 13 hours after its block opened: client_reliability retention, the award's 12 hours and an hour.",
 		action:    "Check payment_report for the plan ids of the recent blocks (OperatorBlockPointsPlanId) and the award task's errors. An award that cannot run is the fix; never delete the kept contracts.",
 		verify:    "No block points keep in a further window, or the blocks are awarded.",
 		playbook:  "SIGNALS.md §2.4r",

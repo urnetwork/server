@@ -89,8 +89,10 @@ func deleteDayRetirementTestContract(t testing.TB, ctx context.Context, contract
 	}, server.TxReadCommitted, server.OptNoRetry())
 }
 
-// Two expired days after the cutover, 92 days past the later one, with the
-// reaper's mode on at a 35-day horizon. Day A holds a contract for each keep
+// Two expired days after the cutover, 21 days past the later one, with the
+// reaper's mode on at its 14-day floor (owner, 2026-11-23; the C1 transition
+// sets 18). Before the floor moved, 14 counted as 35, and nothing in these
+// days was deleted or retired. Day A holds a contract for each keep
 // rule the partition drop never checked before S1 (paid under attribution
 // review, paid by a payment with no row, paid within the discharge time,
 // closed inside the horizon, an unpaid sweep in an operator block still to be
@@ -114,7 +116,7 @@ func TestContractDayRetirementKeepsWhatTheReaperKeeps(t *testing.T) {
 		dayA := cutoverDay.Add(day)
 		dayB := cutoverDay.Add(2 * day)
 		// the storage precision, so archived times compare exactly
-		now := dayB.Add(day + 92*day).Truncate(time.Microsecond)
+		now := dayB.Add(day + 21*day).Truncate(time.Microsecond)
 		cutoff := now.Add(-70 * day).Truncate(time.Second)
 		usePayoutTransitionAt(t, cutoff)
 		f := newNetEscrowOrderingTestFixture(t, ctx)
@@ -122,12 +124,14 @@ func TestContractDayRetirementKeepsWhatTheReaperKeeps(t *testing.T) {
 			return dayStart.Add(time.Hour + time.Duration(i)*time.Minute)
 		}
 
+		// completed after both days, and longer ago than
+		// CompletedContractExpiration
 		completedOldPaymentId := insertHorizonTestPayment(t, ctx, f.destinationNetworkId, horizonTestPayment{
-			completed: true, completeTime: horizonTestPointer(now.Add(-30 * day))})
+			completed: true, completeTime: horizonTestPointer(now.Add(-16 * day))})
 		completedRecentPaymentId := insertHorizonTestPayment(t, ctx, f.destinationNetworkId, horizonTestPayment{
 			completed: true, completeTime: horizonTestPointer(now.Add(-2 * day))})
 		reviewedPaymentId := insertHorizonTestPayment(t, ctx, f.destinationNetworkId, horizonTestPayment{
-			completed: true, completeTime: horizonTestPointer(now.Add(-30 * day)), attributionReview: true})
+			completed: true, completeTime: horizonTestPointer(now.Add(-16 * day)), attributionReview: true})
 		pendingPaymentId := insertHorizonTestPayment(t, ctx, f.destinationNetworkId, horizonTestPayment{})
 		missingPaymentId := server.NewId()
 		openBlock := pointsBlockOf(now)
@@ -195,7 +199,7 @@ func TestContractDayRetirementKeepsWhatTheReaperKeeps(t *testing.T) {
 			before[contract.contractId] = dayRetirementTestRows(t, ctx, contract.contractId)
 		}
 
-		setHorizonTestControl(t, ctx, map[string]string{ContractHorizonControlFieldMode: "on", horizonTestDaysField: "35"})
+		setHorizonTestControl(t, ctx, map[string]string{ContractHorizonControlFieldMode: "on", horizonTestDaysField: "14"})
 		report, _, err := RemoveContractsPastHorizon(ctx, now, ContractHorizonCursor{}, horizonTestSettings())
 		if err != nil {
 			t.Fatal(err)
@@ -212,7 +216,7 @@ func TestContractDayRetirementKeepsWhatTheReaperKeeps(t *testing.T) {
 		vacuumDayRetirementTestDay(t, ctx, dayB)
 
 		taskCtx := WithContractHorizonControl(ctx)
-		if retention := server.ContractDayRetention(taskCtx); retention != 35*day {
+		if retention := server.ContractDayRetention(taskCtx); retention != 14*day {
 			t.Fatalf("the task reads a retention of %s from the reaper's control", retention)
 		}
 		server.MaintainContractPartitions(taskCtx, now, server.ContractRetentionCursor{}, time.Minute)

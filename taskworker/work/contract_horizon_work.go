@@ -10,8 +10,9 @@ import (
 )
 
 // Contract row retention past the reaper's horizon
-// (model.RemoveContractsPastHorizon): the owner's 91 days, or as few as 35
-// once the runtime control's horizonDays shortens it. One chain: each run
+// (model.RemoveContractsPastHorizon): the owner's 91 days, or as few as 14
+// (model.ContractHorizonFloor) once the runtime control's horizonDays
+// shortens it. One chain: each run
 // reaps from its cursor for a bounded budget and returns where it stopped;
 // Post hands that cursor to the next run, soon while the pass has work left,
 // and after the idle interval once it reaches the horizon or finds the reaper

@@ -28,8 +28,8 @@ var zeroByteTestRows = [6]int{1, 2, 1, 0, 0, 1}
 // one open, in review or resolved by a dispute; one closed by one party only;
 // one with an extender party; one whose escrow is unsettled or paid out; one
 // closed inside 8 days; and one minted inside 8 days. A second pass deletes
-// nothing more. Before the zero-byte horizon, the horizon (35 days on Main) kept
-// every one of them.
+// nothing more. Before the zero-byte horizon, the horizon (35 days on Main then)
+// kept every one of them.
 func TestContractHorizonRemovesZeroByteContractsPastEightDays(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -53,7 +53,7 @@ func TestContractHorizonRemovesZeroByteContractsPastEightDays(t *testing.T) {
 		}
 
 		settings := horizonTestSettings()
-		// the horizon at its floor, as on Main
+		// the horizon at its floor, 14 days, past the zero-byte horizon
 		settings.Horizon = ContractHorizonFloor
 		if _, _, err := RemoveContractsPastHorizon(ctx, now, ContractHorizonCursor{}, settings); err != nil {
 			t.Fatal(err)
@@ -320,7 +320,7 @@ func TestContractHorizonZeroByteSkipsBusyContracts(t *testing.T) {
 		if rows, _ := countHorizonTestRows(t, ctx, held.contractId); err != nil || again.ZeroByteScanned != 0 || rows != zeroByteTestRows {
 			t.Fatalf("the zero-byte pass read a contract behind its cursor again: %+v %v", again, err)
 		}
-		// at the horizon, 35 days after it was minted
+		// past the horizon, 36 days after it was minted
 		later, _, err := RemoveContractsPastHorizon(ctx, now.Add(26*day), next, settings)
 		if rows, _ := countHorizonTestRows(t, ctx, held.contractId); err != nil || later.Eligible != 1 || rows != [6]int{} {
 			t.Fatalf("the horizon's pass did not delete the contract the zero-byte pass skipped: %+v %v", later, err)

@@ -98,7 +98,9 @@ func ProviderWorkSessionPartitionBodiesSql() (admitFloor, sessionAppend, receipt
 		strings.Split(providerWorkSessionEventDropGuardSql, "$event_drop_guard$")[1]
 }
 
-// The journal's drop guard at the contract horizon's 35-day floor.
+// The journal's drop guard at its own 35-day floor, the contract horizon's
+// floor when the guard was written; the reaper's floor is lower since
+// 2026-11-23, and the journal keeps 35 days.
 func ProviderWorkSessionEventHorizonDropGuardBodySql() string {
 	return strings.Split(providerWorkSessionEventHorizonDropGuardSql, "$event_drop_guard$")[1]
 }

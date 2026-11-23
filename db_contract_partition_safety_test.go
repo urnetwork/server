@@ -228,8 +228,8 @@ func testContractPartitionPaymentHolds(t testing.TB, ctx context.Context) ([]tes
 
 // Retirement deletes no contract and archives none, whatever its payment's
 // state (S1): the contract horizon reaper alone judges a payment. Past the
-// 91-day horizon, and past the 35-day one, every case keeps all six tables'
-// rows and no usage is archived; each day is reported kept. Clearing the
+// 91-day horizon, and past the floor's (14 days), every case keeps all six
+// tables' rows and no usage is archived; each day is reported kept. Clearing the
 // holds changes nothing until the reaper deletes a contract. The build before
 // S1 archived and dropped every contract its own, narrower, payment check
 // admitted.
