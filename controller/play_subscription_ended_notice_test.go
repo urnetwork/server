@@ -354,7 +354,7 @@ func TestPlaySubscriptionEndedNoticeIsRetriedAfterAFailedSend(t *testing.T) {
 			t.Fatalf("notice after the failed send = %+v, want still owed with the error", notice)
 		}
 
-		fixture.deliverAt(firstTime.Add(accountMessageRetryBaseDelay))
+		fixture.deliverAt(firstTime.Add(defaultAccountMessageDeliverySettings().retryBaseDelay))
 		fixture.deliverAt(firstTime.Add(time.Hour))
 		if sendCount := fixture.sendCount.Load(); sendCount != 1 {
 			t.Fatalf("delivered %d notices after the retry, want one", sendCount)
@@ -393,12 +393,12 @@ func TestPlaySubscriptionEndedNoticeSurvivesACrashDuringTheSend(t *testing.T) {
 		}
 
 		// another process, while the dead claim lasts, does not send it twice
-		fixture.deliverAt(crashTime.Add(accountMessageClaimLease - time.Second))
+		fixture.deliverAt(crashTime.Add(defaultAccountMessageDeliverySettings().claimLease - time.Second))
 		if sendCount := fixture.sendCount.Load(); sendCount != 0 {
 			t.Fatalf("delivered %d notices while the dead claim lasted", sendCount)
 		}
-		fixture.deliverAt(crashTime.Add(accountMessageClaimLease))
-		fixture.deliverAt(crashTime.Add(2 * accountMessageClaimLease))
+		fixture.deliverAt(crashTime.Add(defaultAccountMessageDeliverySettings().claimLease))
+		fixture.deliverAt(crashTime.Add(2 * defaultAccountMessageDeliverySettings().claimLease))
 		if sendCount := fixture.sendCount.Load(); sendCount != 1 {
 			t.Fatalf("delivered %d notices after the crash, want one", sendCount)
 		}

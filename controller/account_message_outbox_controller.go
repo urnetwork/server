@@ -34,42 +34,6 @@ import (
 	"github.com/urnetwork/server/task"
 )
 
-// How often the delivery task runs when no run left due messages behind.
-const accountMessageDeliverInterval = 1 * time.Minute
-
-// The longest one delivery run claims messages before it leaves the rest to the
-// next run.
-const accountMessageDeliverRunBudget = 5 * time.Minute
-
-// A claim's lease. It must outlast one send and its record, so it is longer than
-// two of the longest sends `email.yml` allows (maxAccountMessageSendTimeout).
-const accountMessageClaimLease = 10 * time.Minute
-
-// The backoff after a failed send doubles from the base to the cap.
-const accountMessageRetryBaseDelay = 1 * time.Minute
-const accountMessageRetryMaxDelay = 1 * time.Hour
-
-// A message is abandoned after this many failed attempts, about 15 hours after
-// the first with the default backoff.
-const accountMessageMaxAttemptCount = 20
-
-// A run stops after this many failed sends in a row (an outage) and leaves the
-// rest to the next run.
-const accountMessageMaxConsecutiveFailureCount = 3
-
-// Delivered and abandoned messages, with their recipients, are removed this long
-// after they were added. A writer's key is remembered as long.
-const accountMessageRetention = 7 * 24 * time.Hour
-
-// The most finished messages one run removes.
-const accountMessageRemoveLimit = 10000
-
-// The minimum time between two default-level reports of each delivery problem.
-const accountMessageDeliveryReportInterval = 1 * time.Minute
-
-// Bounds recording a send's outcome, which outlives the run's cancellation.
-const accountMessageRecordTimeout = 30 * time.Second
-
 // The templates that go through the outbox, by name, each with a constructor the
 // stored fields decode into.
 var accountMessageTemplates = map[string]func() Template{
@@ -156,9 +120,9 @@ func init() {
 // message given up, and a claim that outlived its lease (the message may go out
 // twice).
 var (
-	accountMessageRetryReports     = newBoundedReport(accountMessageDeliveryReportInterval)
-	accountMessageAbandonReports   = newBoundedReport(accountMessageDeliveryReportInterval)
-	accountMessageLeaseLostReports = newBoundedReport(accountMessageDeliveryReportInterval)
+	accountMessageRetryReports     = newBoundedReport(defaultAccountMessageDeliverySettings().reportInterval)
+	accountMessageAbandonReports   = newBoundedReport(defaultAccountMessageDeliverySettings().reportInterval)
+	accountMessageLeaseLostReports = newBoundedReport(defaultAccountMessageDeliverySettings().reportInterval)
 )
 
 // The template's metric label: its name when it goes through the outbox, so the
@@ -230,25 +194,54 @@ func decodeAccountMessageTemplate(templateName string, templateJson string) (Tem
 	return template, nil
 }
 
-// Settings of a delivery run.
+// Tunables of the delivery task and its runs.
 type accountMessageDeliverySettings struct {
-	runBudget                  time.Duration
-	claimLease                 time.Duration
-	retryBaseDelay             time.Duration
-	retryMaxDelay              time.Duration
-	maxAttemptCount            int
+	// How often the delivery task runs when no run left due messages behind.
+	deliverInterval time.Duration
+	// The longest one delivery run claims messages before it leaves the rest
+	// to the next run. The task may run twice as long, so the last send's
+	// record fits.
+	runBudget time.Duration
+	// A claim's lease. It must outlast one send and its record, so it is
+	// longer than two of the longest sends email.yml allows
+	// (accountMessageSendSettings.maxSendTimeout).
+	claimLease time.Duration
+	// The backoff after a failed send, which doubles from the base to the cap.
+	retryBaseDelay time.Duration
+	retryMaxDelay  time.Duration
+	// A message is abandoned after this many failed attempts, about 15 hours
+	// after the first with the default backoff.
+	maxAttemptCount int
+	// A run stops after this many failed sends in a row (an outage) and leaves
+	// the rest to the next run.
 	maxConsecutiveFailureCount int
+	// Delivered and abandoned messages, with their recipients, are removed
+	// this long after they were added. A writer's key is remembered as long.
+	retention time.Duration
+	// The most finished messages one run removes.
+	removeLimit int
+	// The minimum time between two default-level reports of each delivery
+	// problem.
+	reportInterval time.Duration
+	// Bounds recording a send's outcome, which outlives the run's
+	// cancellation.
+	recordTimeout time.Duration
 }
 
 // The production settings.
 func defaultAccountMessageDeliverySettings() *accountMessageDeliverySettings {
 	return &accountMessageDeliverySettings{
-		runBudget:                  accountMessageDeliverRunBudget,
-		claimLease:                 accountMessageClaimLease,
-		retryBaseDelay:             accountMessageRetryBaseDelay,
-		retryMaxDelay:              accountMessageRetryMaxDelay,
-		maxAttemptCount:            accountMessageMaxAttemptCount,
-		maxConsecutiveFailureCount: accountMessageMaxConsecutiveFailureCount,
+		deliverInterval:            1 * time.Minute,
+		runBudget:                  5 * time.Minute,
+		claimLease:                 10 * time.Minute,
+		retryBaseDelay:             1 * time.Minute,
+		retryMaxDelay:              1 * time.Hour,
+		maxAttemptCount:            20,
+		maxConsecutiveFailureCount: 3,
+		retention:                  7 * 24 * time.Hour,
+		removeLimit:                10000,
+		reportInterval:             1 * time.Minute,
+		recordTimeout:              30 * time.Second,
 	}
 }
 
@@ -341,7 +334,7 @@ func (self *accountMessageDelivery) retryDelay(attemptCount int) time.Duration {
 // recorded outcome (a process that keeps stopping in the send), is abandoned
 // unsent.
 func (self *accountMessageDelivery) deliver(message *model.AccountMessage) {
-	recordCtx, recordCancel := context.WithTimeout(context.WithoutCancel(self.ctx), accountMessageRecordTimeout)
+	recordCtx, recordCancel := context.WithTimeout(context.WithoutCancel(self.ctx), self.settings.recordTimeout)
 	defer recordCancel()
 
 	templateLabel := accountMessageTemplateLabel(message.TemplateName)
@@ -469,7 +462,7 @@ func scheduleDeliverAccountMessagesAt(clientSession *session.ClientSession, tx s
 		clientSession,
 		task.RunOnce("deliver_account_messages"),
 		task.RunAt(runAt),
-		task.MaxTime(2*accountMessageDeliverRunBudget),
+		task.MaxTime(2*defaultAccountMessageDeliverySettings().runBudget),
 	)
 }
 
@@ -485,11 +478,12 @@ func DeliverAccountMessages(
 		server.NowUtc().Add(-missingWalletNoticeHoldTimeout),
 		configuredMissingWalletNoticeMinPayout,
 	)
+	settings := defaultAccountMessageDeliverySettings()
 	delivery := newAccountMessageDelivery(
 		clientSession.Ctx,
 		GetAWSMessageSender(),
 		server.NowUtc,
-		defaultAccountMessageDeliverySettings(),
+		settings,
 	)
 	more := delivery.Run()
 	select {
@@ -498,8 +492,8 @@ func DeliverAccountMessages(
 	default:
 		model.RemoveFinishedAccountMessages(
 			clientSession.Ctx,
-			server.NowUtc().Add(-accountMessageRetention),
-			accountMessageRemoveLimit,
+			server.NowUtc().Add(-settings.retention),
+			settings.removeLimit,
 		)
 	}
 	return &DeliverAccountMessagesResult{
@@ -519,7 +513,7 @@ func DeliverAccountMessagesPost(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
-	runAt := server.NowUtc().Add(accountMessageDeliverInterval)
+	runAt := server.NowUtc().Add(defaultAccountMessageDeliverySettings().deliverInterval)
 	if result.More {
 		runAt = server.NowUtc()
 	}
