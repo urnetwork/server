@@ -32,6 +32,10 @@ package model
 //     copy the zone stopped needing while it was withheld is deleted with no
 //     journal row rather than returned, and one it started needing comes back
 //     with them.
+//   - RemoveExpiredDnsChallenges deletes a suspension's expired challenges and
+//     canaries with no journal row, since no edge holds them, and plans the
+//     withheld copies around them over what the suspension's lift will serve
+//     (removeWithheldDnsRowsInTx), so no copy is left standing alone.
 //
 // Every hook is idempotent by network and host: a second call finds nothing to
 // change and writes nothing. Each runs in a transaction of its own, holds no
@@ -490,4 +494,94 @@ func changeDnsSuspensionInTx(ctx context.Context, tx server.PgTx, root string, n
 		touchDnsLabelMapInTx(ctx, tx, root, networkId, mapSerial)
 	}
 	return nil
+}
+
+// Deletes the zone's rows at keys that a suspension withholds, with no journal
+// row, since no edge holds them: RemoveExpiredDnsChallenges' removal of a
+// suspension's expired challenges and canaries. A key the zone does not hold
+// withheld is left alone. The withheld copy rows around them follow, planned
+// as every writer plans copies (dnsservice.PlanCopyRows), over what edges will
+// serve once every suspension over a deleted row lifts, the zone's and each
+// host's at or above one: a withheld copy that plan drops is deleted, so a copy
+// whose owner held only what went is not left standing alone, and one it adds
+// is written withheld. Only withheld copies change: what edges serve now is
+// the journal's writers', and so is everything under a suspension the plan
+// leaves standing. Restore plans again over what it returns, so a change to
+// the zone before the lift costs nothing here. In tx under the zone's lock;
+// returns how many of keys went.
+func removeWithheldDnsRowsInTx(ctx context.Context, tx server.PgTx, root string, networkId server.Id, keys []dnsservice.DnsRecordKey) int {
+	now := server.NowUtc()
+	removing := map[dnsservice.DnsRecordKey]bool{}
+	for _, key := range keys {
+		removing[key] = true
+	}
+	apexes := getDnsZoneApexesInTx(ctx, tx, root, networkId)
+	stored := getDnsZoneRowsInTx(ctx, tx, root, networkId)
+	removed := []dnsservice.DnsRecordKey{}
+	remaining := []*dnsStoredRow{}
+	for _, row := range stored {
+		if row.withheld && removing[row.set.Key()] {
+			removed = append(removed, row.set.Key())
+		} else {
+			remaining = append(remaining, row)
+		}
+	}
+	if len(removed) == 0 {
+		return 0
+	}
+	suspension := getDnsSuspensionInTx(ctx, tx, root, networkId, apexes, stored)
+	visible := dnsSuspensionVisible(suspension, apexes)
+	// every suspension over a deleted row lifted: the zone's, and each host
+	// whose withheld owner is at or above one
+	lifted := suspension.clone()
+	lifted.zoneSuspended = false
+	for host := range suspension.hosts {
+		for _, apex := range apexes {
+			marker := host + "." + apex
+			if slices.ContainsFunc(removed, func(key dnsservice.DnsRecordKey) bool { return dnsOwnerAtOrBelow(key.Owner, marker) }) {
+				delete(lifted.hosts, host)
+			}
+		}
+	}
+	liftedRows := planDnsSuspensionRows(remaining, apexes, suspension, lifted)
+	withheldCopies := map[dnsservice.DnsRecordKey]bool{}
+	for _, row := range remaining {
+		if row.withheld && row.set.Kind == dnsservice.DnsRecordKindCopy {
+			withheldCopies[row.set.Key()] = true
+		}
+	}
+	quietDeletes := slices.Clone(removed)
+	quietInserts := []dnsservice.DnsRecordSet{}
+	for _, apex := range apexes {
+		copyUpserts, copyDeletes := dnsservice.PlanCopyRows(apex, liftedRows.served)
+		for _, key := range copyDeletes {
+			if withheldCopies[key] {
+				quietDeletes = append(quietDeletes, key)
+			}
+		}
+		for index := range copyUpserts {
+			if !visible(&copyUpserts[index]) {
+				quietInserts = append(quietInserts, copyUpserts[index])
+			}
+		}
+	}
+	for _, key := range quietDeletes {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`DELETE FROM network_dns_record WHERE root = $1 AND owner = $2 AND rrtype = $3`,
+			root, key.Owner, int32(key.Type),
+		))
+	}
+	for _, set := range quietInserts {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				INSERT INTO network_dns_record (root, owner, rrtype, network_id, kind, ttl, rdata, create_time, withheld_time)
+				VALUES ($1, $2, $3, $4, $5, 0, '{}', $6, $6)
+				ON CONFLICT (root, owner, rrtype) DO NOTHING
+			`,
+			root, set.Owner, int32(set.Type), networkId, string(set.Kind), now,
+		))
+	}
+	return len(removed)
 }

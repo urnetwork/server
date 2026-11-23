@@ -2,16 +2,20 @@
 
 package model
 
-// QD-1190's copy rows through §12.9's hooks (dns_suspend_model.go): SuspendHost and Restore plan copies as every
-// other writer does, through dnsservice.PlanCopyRows over what edges serve. A multi-label host's withheld owner
-// makes the names above it exist, so each takes its copy in the suspension's journal row and drops it in
-// Restore's; and Restore plans over the rows it returns, so a copy the zone stopped needing while it was withheld
-// is deleted rather than returned, and one it started needing comes back with them.
+// QD-1190's copy rows through §12.9's hooks and the challenges' expiry (dns_suspend_model.go,
+// dns_challenge_model.go): SuspendHost, Restore and RemoveExpiredDnsChallenges plan copies as every other
+// writer does, through dnsservice.PlanCopyRows over what edges serve. A multi-label host's withheld owner makes
+// the names above it exist, so each takes its copy in the suspension's journal row and drops it in Restore's;
+// Restore plans over the rows it returns, so a copy the zone stopped needing while it was withheld is deleted
+// rather than returned, and one it started needing comes back with them; and a suspension's expired challenge
+// or canary goes with its copy, leaving none standing alone, while the zone's served rows go through the journal
+// in the same pass.
 
 import (
 	"context"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/miekg/dns"
 
@@ -39,6 +43,13 @@ func requireDnsCopiesAsPlanned(t testing.TB, ctx context.Context, root string, a
 func testDnsHoldsRow(rows []dnsservice.DnsRecordSet, owner string, rrType uint16) bool {
 	return slices.ContainsFunc(rows, func(row dnsservice.DnsRecordSet) bool {
 		return row.Owner == owner && row.Type == rrType
+	})
+}
+
+// Whether keys name owner at all.
+func testDnsKeysName(keys []dnsservice.DnsRecordKey, owner string) bool {
+	return slices.ContainsFunc(keys, func(key dnsservice.DnsRecordKey) bool {
+		return key.Owner == owner
 	})
 }
 
@@ -182,5 +193,153 @@ func TestDnsRestorePlansTheCopiesItReturns(t *testing.T) {
 		view, healthy := world.view(t, ctx)
 		requireDnsViewAnswer(t, view, healthy, host, dns.TypeA, dns.RcodeSuccess, testDnsCopyEdgeAddresses...)
 		requireDnsViewAnswer(t, view, healthy, host, dns.TypeTXT, dns.RcodeSuccess, `"verify"`)
+	})
+}
+
+// A challenge at _acme-challenge.<label>, under *, holds its copy. The zone is suspended, and the pass after the
+// challenge's hour deletes it with its copy, so nothing stands at the owner; Restore then returns no copy there,
+// what edges serve is as PlanCopyRows plans it, and the owner answers from * itself.
+func TestDnsExpiredChallengeInASuspendedZoneLeavesNoCopy(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		defer Testing_SetDnsChallengesPerNameHour(10)()
+		world := newTestDnsRecordsWorld(t, ctx, sidecar.AbuseStandingStandard, true)
+		if _, err := DnsSyncEdgeRecords(ctx, world.networkId, world.root, true, false); err != nil {
+			t.Fatal(err)
+		}
+		owner := DnsChallengeLabel + "." + world.apex
+		if _, err := DnsPutChallenge(ctx, &DnsChallengeArgs{Root: world.root, Name: world.apex, Values: []string{"digest"}}); err != nil {
+			t.Fatal(err)
+		}
+		if held, _ := world.copyAt(ctx, owner); !held {
+			t.Fatal("the challenge took no copy")
+		}
+		if err := SuspendZone(ctx, world.networkId, "case", nil); err != nil {
+			t.Fatal(err)
+		}
+		if held, withheld := world.copyAt(ctx, owner); !held || !withheld {
+			t.Fatalf("the suspension left the challenge's copy held %t, withheld %t", held, withheld)
+		}
+
+		before := world.serial(t, ctx)
+		removed, _, err := RemoveExpiredDnsChallenges(ctx, server.NowUtc().Add(61*time.Minute))
+		if err != nil || removed != 1 {
+			t.Fatalf("the pass removed %d, %v", removed, err)
+		}
+		requireDnsSerial(t, ctx, world.root, before)
+		if rows := testDnsRowsAt(t, ctx, world.root, world.networkId, owner); len(rows) != 0 {
+			t.Fatalf("the pass left %+v at the challenge's owner", rows)
+		}
+
+		if err := Restore(ctx, world.networkId, ""); err != nil {
+			t.Fatal(err)
+		}
+		row := world.journalRow(t, ctx, before)
+		if testDnsHoldsCopy(row.Upserts, owner) {
+			t.Fatalf("Restore's journal row %+v returns the challenge's copy", row)
+		}
+		if rows := testDnsRowsAt(t, ctx, world.root, world.networkId, owner); len(rows) != 0 {
+			t.Fatalf("Restore left %+v at the challenge's owner", rows)
+		}
+		requireDnsCopiesAsPlanned(t, ctx, world.root, world.apex)
+		view, healthy := world.view(t, ctx)
+		requireDnsViewAnswer(t, view, healthy, owner, dns.TypeA, dns.RcodeSuccess, testDnsCopyEdgeAddresses...)
+		requireDnsViewAnswer(t, view, healthy, owner, dns.TypeTXT, dns.RcodeSuccess)
+	})
+}
+
+// A strong-mode probe's canary at shop, with its copy, is withheld when shop is suspended, while the zone's
+// challenge stays served. The pass after their hour removes both, where the write path's refusal of a key under the
+// withheld owner kept every expired row of the zone: the challenge and its copy through one journal row, the
+// canary and its copy with none, leaving shop its withheld owner alone. Restore's journal row takes that owner and
+// returns nothing.
+func TestDnsExpiredCanaryUnderASuspendedHostGoesWithTheZonesChallenge(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		defer Testing_SetDnsChallengesPerNameHour(10)()
+		world := newTestDnsCustomHostWorld(t, ctx)
+		if _, err := DnsSyncEdgeRecords(ctx, world.networkId, world.root, true, false); err != nil {
+			t.Fatal(err)
+		}
+		shop := "shop." + world.apex
+		challenge := DnsChallengeLabel + "." + world.apex
+		world.strongHost(t, ctx, "www."+world.domain, shop)
+		if _, err := DnsPutCaaCanary(ctx, world.root, testDnsCaaCanaryPut(t, shop, "")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := DnsPutChallenge(ctx, &DnsChallengeArgs{Root: world.root, Name: world.apex, Values: []string{"digest"}}); err != nil {
+			t.Fatal(err)
+		}
+		if err := SuspendHost(ctx, world.networkId, "shop"); err != nil {
+			t.Fatal(err)
+		}
+		if held, withheld := world.copyAt(ctx, shop); !held || !withheld {
+			t.Fatalf("the suspension left the canary's copy held %t, withheld %t", held, withheld)
+		}
+
+		before := world.serial(t, ctx)
+		removed, _, err := RemoveExpiredDnsChallenges(ctx, server.NowUtc().Add(61*time.Minute))
+		if err != nil || removed != 2 {
+			t.Fatalf("the pass removed %d, %v", removed, err)
+		}
+		row := world.journalRow(t, ctx, before)
+		if !slices.Contains(row.Deletes, dnsservice.DnsRecordKey{Owner: challenge, Type: dns.TypeTXT}) || !testDnsDeletesCopy(row.Deletes, challenge) {
+			t.Fatalf("the pass's journal row %+v keeps the challenge or its copy", row)
+		}
+		if len(row.Upserts) != 0 || testDnsKeysName(row.Deletes, shop) {
+			t.Fatalf("the pass's journal row %+v names the suspended host", row)
+		}
+		rows := testDnsRowsAt(t, ctx, world.root, world.networkId, shop)
+		if _, ok := rows[dnsservice.DnsRecordKindWithheld]; len(rows) != 1 || !ok {
+			t.Fatalf("the pass left %+v at the suspended host", rows)
+		}
+
+		before = world.serial(t, ctx)
+		if err := Restore(ctx, world.networkId, "shop"); err != nil {
+			t.Fatal(err)
+		}
+		row = world.journalRow(t, ctx, before)
+		if len(row.Upserts) != 0 || !slices.Equal(row.Deletes, []dnsservice.DnsRecordKey{{Owner: shop, Type: dnsservice.DnsWithheldType}}) {
+			t.Fatalf("Restore's journal row %+v", row)
+		}
+		if rows := testDnsRowsAt(t, ctx, world.root, world.networkId, shop); len(rows) != 0 {
+			t.Fatalf("Restore left %+v at the host", rows)
+		}
+		requireDnsCopiesAsPlanned(t, ctx, world.root, world.apex)
+	})
+}
+
+// A challenge rewritten after a pass's scan found it past its hour keeps its new hour: the pass reads each row
+// again under the zone's lock and removes only what is still past it at its now.
+func TestDnsChallengeRemovalRereadsUnderTheZonesLock(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		defer Testing_SetDnsChallengesPerNameHour(10)()
+		world := newTestDnsRecordsWorld(t, ctx, sidecar.AbuseStandingStandard, true)
+		owner := DnsChallengeLabel + "." + world.apex
+		if _, err := DnsPutChallenge(ctx, &DnsChallengeArgs{Root: world.root, Name: world.apex, Values: []string{"digest"}}); err != nil {
+			t.Fatal(err)
+		}
+		now := server.NowUtc().Add(61 * time.Minute)
+		keys := []dnsservice.DnsRecordKey{{Owner: owner, Type: dns.TypeTXT}}
+		// the rewrite lands between the scan and the zone's transaction: its new hour runs past now
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`UPDATE network_dns_record SET expire_time = $3 WHERE root = $1 AND owner = $2`,
+				world.root, owner, now.Add(time.Minute),
+			))
+		})
+		var removed int
+		var removeErr error
+		server.Tx(ctx, func(tx server.PgTx) {
+			removed, removeErr = removeExpiredDnsZoneRowsInTx(ctx, tx, world.root, world.networkId, keys, now)
+		}, server.TxReadCommitted)
+		if removeErr != nil || removed != 0 {
+			t.Fatalf("the zone's removal took %d, %v", removed, removeErr)
+		}
+		if row := testDnsChallengeRow(t, ctx, world.root, owner); row == nil {
+			t.Fatal("a renewed challenge went")
+		}
 	})
 }
