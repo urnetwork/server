@@ -1452,7 +1452,6 @@
     ]
   },
   "services": {
-    "alt": "certificates",
     "api": "certificates",
     "connect": "certificates",
     "gossip": "certificates",

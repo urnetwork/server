@@ -49,5 +49,5 @@
 // Diagnostics carry no client address and no lb hidden route prefix: no log,
 // metric label or error body contains either.
 //
-// The package must not import server/connect, server/alt or server/api.
+// The package must not import server/connect or server/api.
 package nginx

@@ -2,7 +2,7 @@ package connect
 
 // The front's udp sockets: QUIC on listen.quic_port, and whodis, the same
 // QUIC inside dns messages, on listen.whodis_port (LBALT-IMPL.md §2.8, §8).
-// This is alt's dispatch (alt/alt.go), moved into connect:
+// This is the retired alt service's dispatch, moved into connect:
 //
 //   - each group of SocketsPerPort sockets, one interface address and udp
 //     port, feeds one quic.Transport from connect's handler (D22 (b),
