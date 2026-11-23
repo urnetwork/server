@@ -1,11 +1,43 @@
-{{define "headline"}}YOUR PAYMENT DIDN'T GO THROUGH{{end}}
-{{define "why"}}Sent to the address on your URnetwork account when a UR Pro
+{{define "headline"}}{{if .Team}}YOUR TEAM'S PAYMENT DIDN'T GO THROUGH{{else}}YOUR PAYMENT DIDN'T GO THROUGH{{end}}{{end}}
+{{define "why"}}{{if .Team}}Sent to the sign-in email addresses of the owners and billing
+admins of {{.TeamNetwork}} when a renewal of the Team's
+subscription billed through Stripe doesn't go through. You get at most
+two of these for each payment: one when it first fails, and one before
+the subscription ends.{{else}}Sent to the address on your URnetwork account when a UR Pro
 renewal billed through Stripe doesn't go through. You get at most two of
 these for each payment: one when it first fails, and one before the
-subscription ends.{{end}}
+subscription ends.{{end}}{{end}}
 {{define "content"}}
 {{.Amount}} due
-{{if .Final}}
+{{if .Team}}{{if .Final}}
+We still couldn't collect {{.Amount}} for the renewal of
+{{.TeamNetwork}}. This is our last reminder: if the payment
+doesn't go through, the Team's subscription will end.{{if .NextAttemptDate}} The next
+automatic attempt is on {{.NextAttemptDate}}.{{end}}
+{{else}}
+We tried to renew the subscription of {{.TeamNetwork}}, but
+the payment of {{.Amount}} didn't go through.{{if .NextAttemptDate}} We'll try again
+automatically on {{.NextAttemptDate}}.{{end}} To keep the Team's subscription,
+pay the invoice with another card, or update the Team's payment method.
+{{end}}{{if .HostedInvoiceUrl}}
+Pay the invoice: {{.HostedInvoiceUrl}}
+
+Or update the Team's payment method, signed in to the Team, before the
+next attempt:
+{{.UpdatePaymentUrl}}
+
+The invoice opens on Stripe, our payment processor.
+{{else}}
+Update the Team's payment method, signed in to the Team:
+{{.UpdatePaymentUrl}}
+{{end}}
+To update the Team's payment method, sign in at ur.io and switch to
+{{.TeamNetwork}} first, since Manage Subscription opens the
+billing of the network you're signed in to. Then open Manage
+Subscription and choose "Update payment method". If the invoice is
+already paid, you can ignore this email. Questions? Contact
+support@ur.io.
+{{else}}{{if .Final}}
 We still couldn't collect {{.Amount}} for your UR Pro renewal. This is
 our last reminder: if the payment doesn't go through, your UR Pro
 subscription will end.{{if .NextAttemptDate}} The next automatic attempt is on
@@ -28,4 +60,4 @@ Update your payment method: {{.UpdatePaymentUrl}}
 To update your payment method, sign in at ur.io, open Manage
 Subscription and choose "Update payment method". If you already paid,
 you can ignore this email. Questions? Contact support@ur.io.
-{{end}}
+{{end}}{{end}}

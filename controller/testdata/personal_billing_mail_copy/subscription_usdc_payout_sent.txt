@@ -1,0 +1,18 @@
+{{define "headline"}}USDC PAYOUT SENT{{end}}
+{{define "why"}}You received this because this address administers a URnetwork
+network that was owed a USDC payout.{{end}}
+{{define "content"}}
+{{.AmountUsdc}} USDC sent
+
+We sent {{.AmountUsdc}} USDC to your network's Solana wallet ending in
+{{.WalletSuffix}} on {{.SentDateText}}.
+{{if .TxHash}}
+Solana transaction: {{.TxHash}}
+{{end}}
+This is one of the last USDC payouts: USDC payouts are ending. Your
+earnings for providing on URnetwork now settle as SN25α. Connect a
+Bittensor wallet to claim them: https://ur.io/app/account/claim
+
+If something looks wrong, contact support@ur.io. We will never ask for
+your password or private keys by email.
+{{end}}

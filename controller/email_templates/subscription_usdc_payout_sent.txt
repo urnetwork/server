@@ -1,17 +1,25 @@
 {{define "headline"}}USDC PAYOUT SENT{{end}}
-{{define "why"}}You received this because this address administers a URnetwork
-network that was owed a USDC payout.{{end}}
+{{define "why"}}{{if .Team}}Sent to the sign-in email addresses of the owners and billing
+admins of {{.TeamNetwork}}, which was owed a USDC payout.{{else}}You received this because this address administers a URnetwork
+network that was owed a USDC payout.{{end}}{{end}}
 {{define "content"}}
 {{.AmountUsdc}} USDC sent
 
-We sent {{.AmountUsdc}} USDC to your network's Solana wallet ending in
-{{.WalletSuffix}} on {{.SentDateText}}.
+{{if .Team}}We sent {{.AmountUsdc}} USDC to the Solana wallet of
+{{.TeamNetwork}}, ending in {{.WalletSuffix}}, on {{.SentDateText}}.{{else}}We sent {{.AmountUsdc}} USDC to your network's Solana wallet ending in
+{{.WalletSuffix}} on {{.SentDateText}}.{{end}}
 {{if .TxHash}}
 Solana transaction: {{.TxHash}}
 {{end}}
-This is one of the last USDC payouts: USDC payouts are ending. Your
+{{if .Team}}This is one of the last USDC payouts: USDC payouts are ending. The
+Team's earnings for providing on URnetwork now settle as SN25α. Connect
+a Bittensor wallet to the Team to claim them:
+https://ur.io/app/account/claim
+
+The claim acts on the network you're signed in to: sign in at ur.io and
+switch to {{.TeamNetwork}} first.{{else}}This is one of the last USDC payouts: USDC payouts are ending. Your
 earnings for providing on URnetwork now settle as SN25α. Connect a
-Bittensor wallet to claim them: https://ur.io/app/account/claim
+Bittensor wallet to claim them: https://ur.io/app/account/claim{{end}}
 
 If something looks wrong, contact support@ur.io. We will never ask for
 your password or private keys by email.

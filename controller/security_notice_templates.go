@@ -98,21 +98,49 @@ type accountMessageNetworkNamer interface {
 	nameNetwork(networkName string)
 }
 
-// Names the row's network in a template that names one (QD-1216), reading the
-// network's name as it stands. A template that names none, or a row without a
+// Names the row's network in a template that names one, reading the network's
+// name as it stands: a security notice's (QD-1216), and a billing or payout
+// mail's, which also reads whether the network is a Team (QD-1223,
+// team_billing_mail_copy.go). A Team is a network with a network_team row,
+// which only team-create writes, so in a binary that does not link MG6, which
+// has no Teams, a billing mail reads nothing and goes out as a personal
+// network's, as it always did. A template that names none, or a row without a
 // network, reads nothing. A network that is gone leaves the template unnamed,
-// so its notice still goes out. A failed read returns its error, and the
-// delivery tries the message again after its backoff rather than send it
-// without the name.
+// so its notice still goes out, a billing mail's as a personal network's did.
+// A failed read returns its error, and the delivery tries the message again
+// after its backoff rather than send it without the name, or a Team's mail as
+// a personal network's.
 func nameAccountMessageNetwork(ctx context.Context, networkId *server.Id, template Template) error {
-	namer, ok := template.(accountMessageNetworkNamer)
-	if !ok || networkId == nil {
+	namer, names := template.(accountMessageNetworkNamer)
+	billingNamer, billingNames := template.(accountMessageBillingNamer)
+	readTeam := billingNames && server.SidecarMg6Linked()
+	if !(names || readTeam) || networkId == nil {
 		return nil
 	}
 	networkName := ""
+	team := false
 	var readErr error
 	server.HandleError(func() {
 		server.Db(ctx, func(conn server.PgConn) {
+			if readTeam {
+				result, err := conn.Query(
+					ctx,
+					`
+						SELECT
+							network.network_name,
+							EXISTS (SELECT 1 FROM network_team WHERE network_team.network_id = network.network_id)
+						FROM network
+						WHERE network.network_id = $1
+					`,
+					*networkId,
+				)
+				server.WithPgResult(result, err, func() {
+					if result.Next() {
+						server.Raise(result.Scan(&networkName, &team))
+					}
+				})
+				return
+			}
 			result, err := conn.Query(
 				ctx,
 				`SELECT network_name FROM network WHERE network_id = $1`,
@@ -130,7 +158,12 @@ func nameAccountMessageNetwork(ctx context.Context, networkId *server.Id, templa
 	if readErr != nil {
 		return fmt.Errorf("the network's name was not read: %w", readErr)
 	}
-	namer.nameNetwork(networkName)
+	if names {
+		namer.nameNetwork(networkName)
+	}
+	if readTeam {
+		billingNamer.nameBillingMailNetwork(networkName, team)
+	}
 	return nil
 }
 

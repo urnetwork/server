@@ -128,6 +128,8 @@ func teamBillingMailAddressesOf(people ...*teamBillingMailPerson) []string {
 // its own: its first Owner at two, the rest at one.
 type teamBillingMailTeam struct {
 	networkId server.Id
+	// as team-create named it
+	name string
 	// a session of its first Owner's sign-in to it
 	ownerSession *session.ClientSession
 	owner        *teamBillingMailPerson
@@ -159,6 +161,7 @@ func newTeamBillingMailTeam(t testing.TB, ctx context.Context) *teamBillingMailT
 	t.Cleanup(ownerSession.Cancel)
 	team := &teamBillingMailTeam{
 		networkId:    *created.NetworkId,
+		name:         teamName,
 		ownerSession: ownerSession,
 		owner:        owner,
 	}
@@ -406,8 +409,9 @@ func TestTeamFailedRenewalEmailsItsOwnersAndBillingAdmins(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if subject != "Your URnetwork payment didn't go through" {
-				t.Fatalf("the notice to %s: subject %q, want the first notice's", send.userAuth, subject)
+			// a Team's notice names the Team (QD-1223)
+			if want := "The payment for your URnetwork Team " + team.name + " didn't go through"; subject != want {
+				t.Fatalf("the notice to %s: subject %q, want the first notice's, %q", send.userAuth, subject, want)
 			}
 			if template, ok := send.template.(*SubscriptionPaymentFailedTemplate); !ok || template.Final || template.Amount() != "$142.93" || template.HostedInvoiceUrl == "" {
 				t.Fatalf("the notice to %s: %+v, want the first notice of $142.93 with the invoice's page", send.userAuth, send.template)

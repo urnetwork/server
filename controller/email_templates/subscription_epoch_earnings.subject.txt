@@ -1,1 +1,1 @@
-Your network earned {{.PointsText}} points in epoch {{.Epoch}}
+{{if .Team}}In epoch {{.Epoch}}, {{.TeamNetwork}} earned {{.PointsText}} points{{else}}Your network earned {{.PointsText}} points in epoch {{.Epoch}}{{end}}

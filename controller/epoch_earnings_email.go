@@ -7,7 +7,10 @@
 // A personal network's email goes to its admin's sign-in. A Team's admin is
 // an owner of record that never signs in (D-TEAM-2), so a Team's email goes to
 // its billing recipients, its Owners and Billing admins, one email per address
-// (QD-1222), as its failed-payment and missing-wallet mail do (QD-1219).
+// (QD-1222), as its failed-payment and missing-wallet mail do (QD-1219). Each
+// of them has a network of its own, so a Team's email names the Team, read
+// with its recipients, and says the Team where a personal network's says your
+// network (QD-1223, team_billing_mail_copy.go).
 package controller
 
 import (
@@ -74,6 +77,8 @@ type EpochEarningsTemplate struct {
 	UnclaimedRao *big.Int
 	EpochEnd     time.Time
 	BaseTemplate
+	// a Team's email names the Team (QD-1223)
+	billingMailNetwork
 }
 
 func (self *EpochEarningsTemplate) Name() string {
@@ -113,8 +118,9 @@ func (self *EpochEarningsTemplate) RankText() string {
 }
 
 // Top200Text is the badge line: the bound status when a head binding is
-// active, "you qualify" when the estimate is inside the cutoff, else "" (the
-// templates omit the section).
+// active, "you qualify" when the estimate is inside the cutoff ("the Team
+// qualifies" in a Team's email, whose reader is one of its billing members),
+// else "" (the templates omit the section).
 func (self *EpochEarningsTemplate) Top200Text() string {
 	if self.Top200Bound {
 		if 0 < self.Top200Rank {
@@ -123,6 +129,9 @@ func (self *EpochEarningsTemplate) Top200Text() string {
 		return fmt.Sprintf("Top 200 · UID %d", self.Top200Uid)
 	}
 	if self.Top200Eligible {
+		if self.Team() {
+			return "Top 200 · the Team qualifies"
+		}
 		return "Top 200 · you qualify"
 	}
 	return ""
@@ -195,8 +204,9 @@ func StNotifyEpochEarnings(ctx context.Context, deploymentKey model.StDeployment
 // stSendEpochEarnings sends the epoch's earnings email to each recipient
 // network, in network id order, at the addresses stEpochEarningsRecipients
 // reads for it: one email per address, each followed by the settings'
-// SendInterval. sent counts the emails sent; skipped counts each network with
-// no address and each email whose send failed.
+// SendInterval. A Team's email names the Team as that read finds it
+// (QD-1223). sent counts the emails sent; skipped counts each network with no
+// address and each email whose send failed.
 func stSendEpochEarnings(
 	ctx context.Context,
 	deploymentKey model.StDeploymentKey,
@@ -217,15 +227,19 @@ func stSendEpochEarnings(
 		readNetworkCount = max(len(networkIds), 1)
 	}
 	for readNetworkIds := range slices.Chunk(networkIds, readNetworkCount) {
-		networkIdUserAuths := stEpochEarningsRecipients(ctx, readNetworkIds)
+		networkIdUserAuths, teamNetworkIdNames := stEpochEarningsRecipients(ctx, readNetworkIds)
 		for _, networkId := range readNetworkIds {
 			userAuths := networkIdUserAuths[networkId]
 			if len(userAuths) == 0 {
 				skipped += 1
 				continue
 			}
+			template := templates[networkId]
+			if teamName, team := teamNetworkIdNames[networkId]; team {
+				template.nameBillingMailNetwork(teamName, true)
+			}
 			for i, userAuth := range userAuths {
-				if err := sender.SendAccountMessageTemplate(userAuth, templates[networkId]); err != nil {
+				if err := sender.SendAccountMessageTemplate(userAuth, template); err != nil {
 					glog.Warningf("[st]epoch %d earnings email %d of %d to network %s failed: %s\n", epoch, i+1, len(userAuths), networkId, err)
 					skipped += 1
 				} else {
@@ -246,23 +260,31 @@ func stSendEpochEarnings(
 	return sent, skipped
 }
 
-// The addresses the earnings email of each of the networks goes to, read in
-// one transaction. A Team's are its billing recipients
-// (model.GetTeamBillingRecipientsInTx, QD-1222): its Owners and Billing admins
-// at their sign-in email addresses, Owners first and within the bound on the
-// people a Team's mail reaches (QD-1218), and none for a Team none of whose
-// such members has one. An Admin holds no billing or payouts (§7.5) and is not
-// told. A personal network's is its admin's sign-in, email or phone, as it
-// always was (model.GetUserAuthsInTx). A network with none has no entry.
-func stEpochEarningsRecipients(ctx context.Context, networkIds []server.Id) map[server.Id][]string {
-	networkIdUserAuths := map[server.Id][]string{}
+// The addresses the earnings email of each of the networks goes to, and the
+// name of each Team among them, read in one transaction. A Team's addresses
+// are its billing recipients (model.GetTeamBillingRecipientsInTx, QD-1222):
+// its Owners and Billing admins at their sign-in email addresses, Owners first
+// and within the bound on the people a Team's mail reaches (QD-1218), and none
+// for a Team none of whose such members has one. An Admin holds no billing or
+// payouts (§7.5) and is not told. A personal network's is its admin's sign-in,
+// email or phone, as it always was (model.GetUserAuthsInTx). A network with
+// none has no entry. A Team with addresses has its name, which its email shows
+// (QD-1223); a personal network has none.
+func stEpochEarningsRecipients(ctx context.Context, networkIds []server.Id) (
+	networkIdUserAuths map[server.Id][]string,
+	teamNetworkIdNames map[server.Id]string,
+) {
 	server.Tx(ctx, func(tx server.PgTx) {
+		networkIdUserAuths = map[server.Id][]string{}
+		teamNetworkIdNames = map[server.Id]string{}
 		teamNetworkIdRecipients := model.GetTeamBillingRecipientsInTx(ctx, tx, networkIds)
 		personalNetworkIds := []server.Id{}
+		teamNetworkIds := []server.Id{}
 		for _, networkId := range networkIds {
 			if recipients, team := teamNetworkIdRecipients[networkId]; team {
 				if 0 < len(recipients) {
 					networkIdUserAuths[networkId] = recipients
+					teamNetworkIds = append(teamNetworkIds, networkId)
 				}
 			} else {
 				personalNetworkIds = append(personalNetworkIds, networkId)
@@ -273,8 +295,14 @@ func stEpochEarningsRecipients(ctx context.Context, networkIds []server.Id) map[
 				networkIdUserAuths[networkId] = []string{userAuth}
 			}
 		}
+		networkIdNames := billingMailNetworkNamesInTx(ctx, tx, teamNetworkIds)
+		for _, networkId := range teamNetworkIds {
+			// a Team gone since its recipients were read is still a Team's
+			// email, with no name to show
+			teamNetworkIdNames[networkId] = networkIdNames[networkId]
+		}
 	})
-	return networkIdUserAuths
+	return
 }
 
 // stEpochPoolTotal reads the finalized pool total for (epoch, noId), or nil

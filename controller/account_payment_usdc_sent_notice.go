@@ -8,7 +8,10 @@
 // its billing recipients, its Owners and Billing admins at their sign-in email
 // addresses (model.GetTeamBillingRecipientsInTx, QD-1222), Owners first and
 // within the bound on the people a Team's mail reaches (QD-1218), one message
-// per address, and the report has a row for each address.
+// per address, and the report has a row for each address. Each of them has a
+// network of its own, so a Team's notice names the Team, read with its
+// recipients, and says the Team where a personal network's says your network
+// (QD-1223, team_billing_mail_copy.go).
 //
 // Each notice goes out once: the send journals a usdc_payout_sent_notice
 // event, keyed by an id derived from the payment, or for a Team's address from
@@ -70,6 +73,8 @@ type UsdcPayoutSentTemplate struct {
 	SentTime     time.Time
 	TxHash       string
 	BaseTemplate
+	// a Team's notice names the Team (QD-1223)
+	billingMailNetwork
 }
 
 func (self *UsdcPayoutSentTemplate) Name() string {
@@ -252,11 +257,17 @@ func (self *usdcSentNoticeReader) read(paymentId server.Id) []*PayoutUsdcSentNot
 	}
 	template.WalletSuffix = wallet.WalletAddress[len(wallet.WalletAddress)-walletSuffixLength:]
 
-	// a Team's billing recipients, or none for a personal network (QD-1222)
+	// a Team's billing recipients and its name, or none for a personal network
+	// (QD-1222, QD-1223)
 	var teamUserAuths []string
 	var team bool
+	teamName := ""
 	server.Tx(self.ctx, func(tx server.PgTx) {
 		teamUserAuths, team = model.GetTeamBillingRecipientsInTx(self.ctx, tx, []server.Id{payment.NetworkId})[payment.NetworkId]
+		teamName = ""
+		if team {
+			teamName = billingMailNetworkNamesInTx(self.ctx, tx, []server.Id{payment.NetworkId})[payment.NetworkId]
+		}
 	})
 	if team {
 		row.Team = true
@@ -264,6 +275,7 @@ func (self *usdcSentNoticeReader) read(paymentId server.Id) []*PayoutUsdcSentNot
 			row.Problem = "the Team has no Owner or Billing admin with an email login"
 			return rows
 		}
+		template.nameBillingMailNetwork(teamName, true)
 		rows = []*PayoutUsdcSentNoticeRow{}
 		for i, userAuth := range teamUserAuths {
 			addressRow := *row
