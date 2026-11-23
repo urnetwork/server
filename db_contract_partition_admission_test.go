@@ -257,13 +257,11 @@ func TestContractPartitionPrepareDefersABusyTable(t *testing.T) {
 	})
 }
 
-// On 2026-11-23 prepare's admission let the legacy bound's ACCESS EXCLUSIVE
-// request through behind transactions up to 5 s old, and each request waited
-// its full second behind them while every new statement on the table queued
-// behind it. A reader of transfer_contract whose transaction is a second old,
-// as an application transaction between its statements often is on Main, must
-// defer the bound without any lock request.
-func TestContractPartitionPrepareDoesNotQueueBehindASecondOldReader(t *testing.T) {
+// A reader of transfer_contract older than the admission age (the provider
+// list's fill and the payout sweeps read for 26 to 45 s on Main): prepare must
+// defer the legacy bound without a lock request, never queue every new
+// statement on the table behind the reader.
+func TestContractPartitionPrepareDoesNotQueueBehindALongReader(t *testing.T) {
 	DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
@@ -304,12 +302,13 @@ func TestContractPartitionPrepareDoesNotQueueBehindASecondOldReader(t *testing.T
 			}
 		}
 		defer releaseHolder()
-		// a second old by the database clock: past the admission age, and well
-		// under the 5 s that the build of 2026-11-23 admitted
+		// older than the admission age by the database clock
+		settings := DefaultContractPartitionCutoverSettings()
+		age := settings.LockSettings.MaxTransactionAge + 500*time.Millisecond
 		MaintenanceDb(ctx, func(conn PgConn) {
 			for {
 				var old bool
-				Raise(conn.QueryRow(ctx, `SELECT clock_timestamp() - xact_start > interval '1 second' FROM pg_stat_activity WHERE pid = $1`, pid).Scan(&old))
+				Raise(conn.QueryRow(ctx, `SELECT clock_timestamp() - xact_start > make_interval(secs => $2) FROM pg_stat_activity WHERE pid = $1`, pid, age.Seconds()).Scan(&old))
 				if old {
 					return
 				}
@@ -318,7 +317,6 @@ func TestContractPartitionPrepareDoesNotQueueBehindASecondOldReader(t *testing.T
 		})
 
 		// the default lock wait and admission age; a few quick attempts
-		settings := DefaultContractPartitionCutoverSettings()
 		settings.StepAttempts = 3
 		settings.StepRetryInterval = 100 * time.Millisecond
 		prepareDone := make(chan error, 1)
@@ -351,10 +349,10 @@ func TestContractPartitionPrepareDoesNotQueueBehindASecondOldReader(t *testing.T
 			}
 		})
 		if queued {
-			t.Fatalf("prepare queued an exclusive request on %s behind a reader a second old (it then returned %v)", busy, prepareErr)
+			t.Fatalf("prepare queued an exclusive request on %s behind a long reader (it then returned %v)", busy, prepareErr)
 		}
 		if prepareErr == nil || !strings.Contains(prepareErr.Error(), busy) {
-			t.Fatalf("prepare with %s read for a second must report it deferred, got %v", busy, prepareErr)
+			t.Fatalf("prepare with %s held by a long reader must report it deferred, got %v", busy, prepareErr)
 		}
 		if bound := readContractShapes(ctx, contractTableName)[busy].legacyBound; bound != nil {
 			t.Fatalf("%s is read, yet prepare added its legacy bound", busy)

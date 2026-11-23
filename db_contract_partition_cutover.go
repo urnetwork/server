@@ -178,7 +178,7 @@ func contractPartitionExecQuietRetry(ctx context.Context, scope *contractLockSco
 	}, attempts, wait, logf)
 }
 
-// A retry waits between one and three times its interval, at random, so that
+// A retry waits between one and two times its interval, at random, so that
 // attempts do not fall into step with periodic work that holds the tables,
 // such as the provider list's fill, which reads transfer_contract for up to
 // two minutes.
@@ -186,7 +186,7 @@ func contractRetryWait(interval time.Duration) time.Duration {
 	if interval <= 0 {
 		return interval
 	}
-	return interval + rand.N(2*interval)
+	return interval + rand.N(interval)
 }
 
 // Repeats the entire operation so each attempt can read authoritative state
@@ -863,7 +863,7 @@ func contractExternalForeignKeys(shapes map[string]*contractTableShape) (externa
 
 // The swap transaction with the default lock timeout.
 func contractSwapSql(shapes map[string]*contractTableShape, staged map[string]*contractTableShape, floor Id) (statements []string) {
-	return contractSwapSqlWithin(shapes, staged, floor, DefaultContractPartitionCutoverSettings().LockTimeout)
+	return contractSwapSqlWithin(shapes, staged, floor, DefaultContractPartitionCutoverSettings().SwapLockTimeout)
 }
 
 // The relations the swap locks: every table and its staged parent (with the
@@ -1053,15 +1053,15 @@ func finalizeContractPartitionCutoverWithDeadline(ctx context.Context, deadline 
 	}
 	logf("probed the swap: every parent index adopts a legacy index")
 
-	statements := contractSwapSqlWithin(shapes, staged, floor, settings.LockTimeout)
-	scope := &contractLockScope{relations: contractSwapLockRelations(shapes), request: contractLockAccessExclusive, settings: settings.LockSettings}
+	statements := contractSwapSqlWithin(shapes, staged, floor, settings.SwapLockTimeout)
+	scope := &contractLockScope{relations: contractSwapLockRelations(shapes), request: contractLockAccessExclusive, settings: settings.SwapLockSettings}
 	if dryRun {
 		if blockers, err := contractLockAdmission(ctx, scope); err != nil {
 			return err
 		} else if 0 < len(blockers) {
 			logf("the swap would wait now, without queueing, for: %s", strings.Join(blockers, "; "))
 		} else {
-			logf("the swap would be admitted now: no autovacuum and no transaction older than %s holds a lock on the contract tables", settings.LockSettings.MaxTransactionAge)
+			logf("the swap would be admitted now: no autovacuum and no transaction older than %s holds a lock on the contract tables", settings.SwapLockSettings.MaxTransactionAge)
 		}
 		logf("would swap in one transaction:\n%s", strings.Join(statements, ";\n"))
 		logf("would preserve extended statistics under the swap locks: rename originals for rollback, then copy their definitions and metadata to the published parents")

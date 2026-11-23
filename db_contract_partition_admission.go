@@ -29,15 +29,18 @@ import (
 // Settings of the cutover's prepare, finalize and abort steps. Rollback has
 // its own (ContractPartitionRollbackSettings).
 type ContractPartitionCutoverSettings struct {
-	// Admission before each lock request (MaxTransactionAge must be positive).
+	// Admission before each single-table lock request: the legacy bound's add
+	// and validation, and abort (MaxTransactionAge must be positive).
 	LockSettings ContractPartitionLockSettings
-	// Bounds each wait for an ACCESS EXCLUSIVE lock on a live contract table:
-	// adding the legacy bound, the swap and abort. Every application statement
-	// on the table queues behind the request, and a main-pool statement waits
-	// at most PgLockTimeout (2 s) for a lock before it fails with 55P03, which
-	// is not rerun. A queued statement also waits out the step's own work, so
-	// this stays well below PgLockTimeout, and a fifth of a second by default
-	// (contractExclusiveLockTimeout). At least a millisecond.
+	// Bounds each single-table wait for an ACCESS EXCLUSIVE lock on a live
+	// contract table: adding the legacy bound and abort. Every application
+	// statement on the table queues behind the request, and a main-pool
+	// statement waits at most PgLockTimeout (2 s) for a lock before it fails
+	// with 55P03, which is not rerun. A queued statement also waits out the
+	// step's own work, so this stays well below PgLockTimeout, and below
+	// deadlock_timeout (1 s on Main), so a lock cycle with an application
+	// transaction always ends this request, never the application's. At least
+	// a millisecond.
 	LockTimeout time.Duration
 	// Bounds the legacy bound validation's wait for its SHARE UPDATE EXCLUSIVE
 	// lock. Application statements do not queue behind it, but a waiting
@@ -49,6 +52,10 @@ type ContractPartitionCutoverSettings struct {
 	// transaction clears within them. At least 1.
 	StepAttempts      int
 	StepRetryInterval time.Duration
+	// The swap's admission and its wait for each of its ACCESS EXCLUSIVE
+	// locks, which it takes in one transaction across the six tables.
+	SwapLockSettings ContractPartitionLockSettings
+	SwapLockTimeout  time.Duration
 	// Attempts at the swap, each after its own admission. At least 1.
 	SwapAttempts      int
 	SwapRetryInterval time.Duration
@@ -58,17 +65,43 @@ type ContractPartitionCutoverSettings struct {
 	AbortRetryInterval time.Duration
 }
 
-// The ACCESS EXCLUSIVE steps (the legacy bound, the swap, abort and rollback)
-// wait briefly and try often. Main's busiest contract tables always have
-// transactions in flight, and some stay open for seconds between statements.
-// While an exclusive request waits, every new statement on the table queues
-// behind it. On 2026-11-23 prepare's attempts at the legacy bound waited their
-// full second behind transactions the admission let through (up to 5 s old),
-// three attempts a run: each run stalled contract traffic for seconds and
-// backed PgBouncer up past 500 waiting clients. Now a step requests its lock
-// only while no holder's transaction is older than half a second, waits at
-// most a fifth of a second, and otherwise tries again 1 to 3 s later
-// (contractRetryWait), dozens of times, to meet a quiet moment.
+// A single-table exclusive step (the legacy bound's add, abort, and the
+// maintenance task's abandonment of a stale prepare) waits out the
+// application's transactions but no long reader, and spaces its tries.
+//
+// On Main (2026-11-23) the contract tables always have holders: dozens of
+// application transactions idle in transaction for 0.5 to 2.6 s, on several of
+// the tables at once, and readers of 26 to 45 s (the provider list's fill, the
+// payout sweeps). A lock request is granted only once every holder it found
+// has ended, and until then every new statement on the table queues behind
+// it. So:
+//   - The admission skips a moment with a holder older than 3 s (a long
+//     reader); the application's transactions are younger.
+//   - The request waits at most 900 ms: below deadlock_timeout (1 s), so in a
+//     lock cycle with an application transaction this request is the one that
+//     ends, and well below PgLockTimeout (2 s), at which queued application
+//     statements fail.
+//   - The tries are 20 to 40 s apart (contractRetryWait), so each stall of at
+//     most 900 ms is alone: PgBouncer absorbed single 1 s waits that night,
+//     and backed up past 500 waiting clients when three came within seconds
+//     on two tables. A run of the maintenance task (a 10 minute budget, every
+//     15 minutes; its abandonment stops at the budget and resumes) makes
+//     about 20 tries.
+//
+// A rule of 500 ms and 200 ms (1cec91a1d) never admitted a step on those
+// tables: abort and the abandonment could never drop a stale prepare's legacy
+// bound, which refuses every contract from the cutover day.
+const (
+	contractStepMaxTransactionAge = 3 * time.Second
+	contractStepLockTimeout       = 900 * time.Millisecond
+	contractStepRetryInterval     = 20 * time.Second
+	contractStepAttempts          = 20
+)
+
+// The swap and rollback lock the six tables in one transaction. Until their
+// own bounded design, they keep the strict rule: admitted only while no
+// holder is older than 500 ms, at most 200 ms per lock, many tries 1 to 2 s
+// apart. On Main's workload of 2026-11-23 that defers rather than stalls.
 const (
 	contractExclusiveMaxTransactionAge = 500 * time.Millisecond
 	contractExclusiveLockTimeout       = 200 * time.Millisecond
@@ -77,20 +110,23 @@ const (
 
 func DefaultContractPartitionCutoverSettings() *ContractPartitionCutoverSettings {
 	return &ContractPartitionCutoverSettings{
-		LockSettings:        ContractPartitionLockSettings{MaxTransactionAge: contractExclusiveMaxTransactionAge},
-		LockTimeout:         contractExclusiveLockTimeout,
+		LockSettings:        ContractPartitionLockSettings{MaxTransactionAge: contractStepMaxTransactionAge},
+		LockTimeout:         contractStepLockTimeout,
 		ValidateLockTimeout: 5 * time.Second,
-		StepAttempts:        60,
-		StepRetryInterval:   contractExclusiveRetryInterval,
+		StepAttempts:        contractStepAttempts,
+		StepRetryInterval:   contractStepRetryInterval,
+		SwapLockSettings:    ContractPartitionLockSettings{MaxTransactionAge: contractExclusiveMaxTransactionAge},
+		SwapLockTimeout:     contractExclusiveLockTimeout,
 		SwapAttempts:        120,
 		SwapRetryInterval:   contractExclusiveRetryInterval,
-		AbortAttempts:       60,
-		AbortRetryInterval:  contractExclusiveRetryInterval,
+		AbortAttempts:       contractStepAttempts,
+		AbortRetryInterval:  contractStepRetryInterval,
 	}
 }
 
 func (self *ContractPartitionCutoverSettings) validate() error {
 	if self.LockSettings.MaxTransactionAge <= 0 || self.LockTimeout < time.Millisecond || self.ValidateLockTimeout < time.Millisecond ||
+		self.SwapLockSettings.MaxTransactionAge <= 0 || self.SwapLockTimeout < time.Millisecond ||
 		self.StepAttempts < 1 || self.SwapAttempts < 1 || self.AbortAttempts < 1 ||
 		self.StepRetryInterval < 0 || self.SwapRetryInterval < 0 || self.AbortRetryInterval < 0 {
 		return errors.New("the cutover requires a positive transaction age, lock timeouts of at least a millisecond, at least one attempt per step and non-negative retry intervals")
