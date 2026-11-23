@@ -59,7 +59,7 @@
 //     removal of the case (control_plane_concurrency_harness_test.go)
 //
 // A failure from a product bug stays failing, and the case runs on so one finding does not hide the next. The case's
-// findings, with their state as e2e-headers-final refreshed them (2026-11-23):
+// findings, with their state as e2e-headers-final refreshed them and e2e-flakes-final fixed the last (2026-11-23):
 //
 //   - fixed: as the case landed (e2e-control-plane-concurrency, 2026-11-22) it failed on two findings, which kept every
 //     team device but the Owner's and the Admin's out of it: a Member's own auth key refused 403 (finding A;
@@ -70,18 +70,19 @@
 //     raise of a rev/ object for a double spend before it counted raises (control_plane_concurrency_harness_test.go)
 //   - fixed: a reader starting cold at a base a later config writer signed refused the base as a fork (finding C,
 //     TestE2eControlPlaneConcurrencyColdGate's): config-replay-base-signer (sidecar 9ac79c88 to f5892c63, QD-1192)
-//   - open, in the case itself, with no fix track queued as this refresh was made: the churn's removal of a setup
-//     member races the other bursts' syncs. WorldTeam.RemoveMember denies the member at api first (POST
-//     /network/member-remove), which deactivates its untagged devices' clients at once, and only then retires those
-//     devices from the syncs (RevokeMember), while sidecart3's T3Network.Sync asks whether a device is retired only
-//     before it begins to wait on it. So a statement another burst files in that window, the Admin's last device's
-//     SidecarRevoke or an invite's MemberAdmit, waits on the leaving member's device, which follows nothing more, past
-//     its bound: "revoke the Admin's last device's step 0: team-member-1-0 did not follow team's log to 26: context
-//     deadline exceeded". Of six runs of the case in dns-scope-alias-edge-records' sitting (2026-11-22, with that
-//     track's change and without it), three failed so and on nothing else, one of them at an invite's admission,
-//     which landed while its step failed, so the members check also named that member as one the case did not keep.
-//     The fix is the harness's: retire a member's devices before its denial, and end a sync's wait on a device once
-//     it is retired. The churn load case's departures remove members by the same path
+//   - fixed, in the harness (e2e-flakes-final): the churn's removal of a setup member raced the other bursts' syncs.
+//     WorldTeam.RemoveMember denied the member at api first (POST /network/member-remove), which deactivates its
+//     untagged devices' clients at once, and only then retired those devices from the syncs (RevokeMember), while
+//     sidecart3's T3Network.Sync asked whether a device was retired only before it began to wait on it. So a statement
+//     another burst filed in that window, the Admin's last device's SidecarRevoke or an invite's MemberAdmit, waited on
+//     the leaving member's device, which followed nothing more, past its bound: "revoke the Admin's last device's step
+//     0: team-member-1-0 did not follow team's log to 26: context deadline exceeded". Of six runs of the case in
+//     dns-scope-alias-edge-records' sitting (2026-11-22), three failed so and on nothing else, one of them at an
+//     invite's admission, which landed while its step failed, so the members check also named that member as one the
+//     case did not keep. RemoveMember now retires the member's devices before the denial, and Sync ends its wait on a
+//     device once Retire takes it out of the syncs (sidecart3's TestT3NetworkSyncEndsItsWaitOnADeviceRetiredMeanwhile,
+//     which a Sync deaf to the retirement fails with that message). The churn load case's departures remove members
+//     by the same path
 //
 // e2e-headers-final's run passed all four cases (2026-11-23, server 9d7022daa on sidecar c88a64af): this one in 59 s,
 // the race not meeting it, the chaos in 31 s, the cold gate in 30 s and the quotas in 223 s.

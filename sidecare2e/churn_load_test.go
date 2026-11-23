@@ -161,6 +161,10 @@
 // converged after it. Every enrollment step landed, five bursts of two steps across the runs, so none met the 503 at
 // POST /network/config/delta the case's first sitting saw once.
 //
+// Its departures remove members by WorldTeam.RemoveMember, which raced the other bursts' syncs until e2e-flakes-final
+// (2026-11-23) retired a member's devices before api's denial and had a sync stop waiting on a device once it is
+// retired (the control-plane case's header has the race); no run of this case met it, as far as their logs show.
+//
 // Run it through the build's wrapper: -tags 'sidecar_e2e sidecar_pending sidecar_localstack' -run TestE2eChurnLoad.
 
 package sidecare2e
