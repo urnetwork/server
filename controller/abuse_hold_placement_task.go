@@ -18,7 +18,12 @@ import (
 // acknowledges only after the placement transaction and mirror have succeeded.
 var legalHoldDispatch atomic.Bool
 
-func InstallLegalHoldDispatch() { legalHoldDispatch.Store(true) }
+// Hands each hold's placement to the worker, in a process that serves the staff route (InstallApiRoutes). Answers
+// what puts the previous choice back.
+func InstallLegalHoldDispatch() (restore func()) {
+	previous := legalHoldDispatch.Swap(true)
+	return func() { legalHoldDispatch.Store(previous) }
+}
 
 type LegalHoldPlacementTaskArgs struct {
 	NetworkId server.Id `json:"network_id"`

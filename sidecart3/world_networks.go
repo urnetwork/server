@@ -9,7 +9,7 @@ package sidecart3
 //	          the world's hosts run on a copy of its ServiceHost on real time (Host), since server's api, exchange and
 //	          oauth keep real time and judge every token and proof by it
 //	api       T3Api over server's routes, with what api's process installs over its gate cache
-//	          (controller.InstallApiAuthorization and its projection part): server's sequencer over the Net's first
+//	          (controller.installApiAuthorization and its projection part): server's sequencer over the Net's first
 //	          metadata cluster (controller.NewHostedConfigLogSequencer), a gate cache over it, the exchange's scopes
 //	          from that cache (oauth.NewProjectionExchangeScopeSource), so a service token carries exactly what §8's
 //	          table grants at the log's newest state, the approval gate's states, the dns scopes' labels, the smtp
@@ -152,7 +152,7 @@ type T3WorldSettings struct {
 	// the config client's backoff from 10 s puts 70 s or 150 s after its first follow (e2e-world saw 124 s). 5 min.
 	KeyJoinTimeout time.Duration
 	// Whether api's sequencer and rev/ store spend on a write budget of api's own over the world's Redis
-	// (evsservice.NewWriteBudget on the world's host, as controller.InstallApiAuthorization builds api's), reporting its
+	// (evsservice.NewWriteBudget on the world's host, as controller.installApiAuthorization builds api's), reporting its
 	// spend beside every block's (ApiWriteBudget), rather than on the Net's fake budget: what a world of hosts runs
 	// (sidecare2e's World). false keeps the Net's fake, whose violations a test reads.
 	ApiWriteBudget bool
@@ -468,7 +468,7 @@ func NewT3World(t testing.TB, settings *T3WorldSettings) (world *T3World, return
 }
 
 // What api's process installs over its gate cache beside the sequencer and the exchange's scopes
-// (controller.InstallApiAuthorization, installApiProjection), on the world's host and its first cluster, until the
+// (controller.installApiAuthorization, installApiProjection), on the world's host and its first cluster, until the
 // returned pop: the approval gate's states, the dns scopes' labels, the smtp routes' §8 checks, the edge logins' source,
 // rev/'s store signing under the world's svc- key, the issuer's worker that claims its tasks (revocations, due ticks and
 // their hooks), and the contract gate when sidecar.yml's acl_contract_gate is on now, as the install reads the switch

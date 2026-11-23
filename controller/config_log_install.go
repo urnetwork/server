@@ -41,27 +41,39 @@ func runAuthorizationInstall(ctx context.Context, install *server.SidecarSwitchI
 	}
 }
 
-// Starts the issuer's authorization services before routes can be served.
-func InstallApiAuthorization(ctx context.Context, processHost *sidecar.ServiceHost) func() {
+// The first metadata cluster the issuer's services read and write, and what releases it: vault's
+// file-clusters-api.yml, through the MinIO user api's block holds, which reaches proj/, projrows/, rev/ and hold/
+// alone (§19.4's api row).
+func loadApiFileClusters(ctx context.Context) (sidecar.BlobStore, func(), error) {
+	clusters, err := server.LoadFileClusters(ctx, "api", nil)
+	if err != nil {
+		return nil, nil, errors.New("the API metadata cluster configuration is unavailable")
+	}
+	return clusters, clusters.Close, nil
+}
+
+// Starts the issuer's authorization services before routes can be served, on the clusters loadClusters gives
+// (loadApiFileClusters in each process that serves api's routes, through InstallApiRoutes).
+func installApiAuthorization(ctx context.Context, processHost *sidecar.ServiceHost, loadClusters func(context.Context) (sidecar.BlobStore, func(), error)) func() {
 	install := server.NewSidecarSwitchInstall("api-authorization", func() bool {
 		return server.SidecarMg1Linked() || server.SidecarMg2Linked()
 	}, func(ctx context.Context) (func(), error) {
 		// The issuer drains already claimed writes before closing these resources.
 		hostCtx := context.WithoutCancel(ctx)
-		clusters, err := server.LoadFileClusters(hostCtx, "api", nil)
+		clusters, closeClusters, err := loadClusters(hostCtx)
 		if err != nil {
-			return nil, errors.New("the API metadata cluster configuration is unavailable")
+			return nil, err
 		}
 		first, err := clusters.FirstCluster()
 		if err != nil {
-			clusters.Close()
+			closeClusters()
 			return nil, err
 		}
 		host := *processHost
 		host.Blobs = clusters
 		budget, err := evsservice.NewWriteBudget(hostCtx, &host, nil, nil)
 		if err != nil {
-			clusters.Close()
+			closeClusters()
 			return nil, err
 		}
 		host.Budget = budget
@@ -96,7 +108,7 @@ func InstallApiAuthorization(ctx context.Context, processHost *sidecar.ServiceHo
 			closeViews()
 			closeRevocations()
 			budget.Close()
-			clusters.Close()
+			closeClusters()
 		}, nil
 	}, nil)
 	return runAuthorizationInstall(ctx, install)

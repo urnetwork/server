@@ -187,9 +187,13 @@ func NewRedisDeviceAuthorizationStore(settings *DeviceGrantSettings) *RedisDevic
 }
 
 // Installs the Redis store for this process's device grant, with the grant's default settings, so POST
-// /oauth/device_authorization serves and the issuer's metadata names it (QD-830). api calls it at startup.
-func InstallDeviceAuthorizationStore() {
-	SetDeviceAuthorizationStore(NewRedisDeviceAuthorizationStore(DefaultDeviceGrantSettings()))
+// /oauth/device_authorization serves and the issuer's metadata names it (QD-830). Each process that serves api's
+// routes calls it at startup, api's and alt's (controller.InstallApiRoutes). Answers what puts the previous store
+// back.
+func InstallDeviceAuthorizationStore() (restore func()) {
+	var store DeviceAuthorizationStore = NewRedisDeviceAuthorizationStore(DefaultDeviceGrantSettings())
+	previous := deviceAuthorizationStore.Swap(&store)
+	return func() { deviceAuthorizationStore.Store(previous) }
 }
 
 // Replaces the store's clock for a test.

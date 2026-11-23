@@ -477,9 +477,10 @@ func TestAbuseMailboxMailEndsWithItsContext(t *testing.T) {
 }
 
 // A process mails records only once it installs the production mailer, which
-// api's and taskworker's startup alone do: before, the process's mailer
-// refuses each record as unavailable.
-func TestAbuseRecordMailerIsInstalledByApiAndTaskworkerAlone(t *testing.T) {
+// taskworker's startup and the install of api's route set alone do, the latter
+// called by api's and alt's startup alone, the two processes that serve that
+// set: before, the process's mailer refuses each record as unavailable.
+func TestAbuseRecordMailerIsInstalledByTheApiRouteProcessesAndTaskworkerAlone(t *testing.T) {
 	_, mailer, _ := currentAbuseActionDeps()
 	if err := mailer.MailAbuseRecord(context.Background(), testAbuseRecord()); !errors.Is(err, ErrAbuseRecordMailerUnavailable) {
 		t.Fatalf("a process that installed nothing mails: %v", err)
@@ -491,47 +492,55 @@ func TestAbuseRecordMailerIsInstalledByApiAndTaskworkerAlone(t *testing.T) {
 		t.Fatalf("installed %T in a binary that links MG5: %t", installed, server.SidecarMg5Linked())
 	}
 
-	// the module's callers of the install: exactly the two mains
+	// the module's callers of the install: taskworker's main and the route set's install, whose own callers are
+	// api's and alt's mains
 	moduleRoot, err := filepath.Abs("..")
 	if err != nil {
 		t.Fatal(err)
 	}
-	callers := []string{}
-	err = filepath.WalkDir(moduleRoot, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if entry.IsDir() {
-			if path != moduleRoot {
-				if _, statErr := os.Stat(filepath.Join(path, "go.mod")); statErr == nil {
+	// the module's non-test files that call name, its declaration aside
+	callersOf := func(name string) []string {
+		callers := []string{}
+		err := filepath.WalkDir(moduleRoot, func(path string, entry fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if entry.IsDir() {
+				if path != moduleRoot {
+					if _, statErr := os.Stat(filepath.Join(path, "go.mod")); statErr == nil {
+						return filepath.SkipDir
+					}
+				}
+				switch entry.Name() {
+				case "testdata", "node_modules", ".git":
 					return filepath.SkipDir
 				}
+				return nil
 			}
-			switch entry.Name() {
-			case "testdata", "node_modules", ".git":
-				return filepath.SkipDir
+			if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			source, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			if bytes.Contains(bytes.ReplaceAll(source, []byte("func "+name+"("), nil), []byte(name+"(")) {
+				rel, _ := filepath.Rel(moduleRoot, path)
+				callers = append(callers, filepath.ToSlash(rel))
 			}
 			return nil
-		}
-		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			return nil
-		}
-		source, err := os.ReadFile(path)
+		})
 		if err != nil {
-			return err
+			t.Fatal(err)
 		}
-		if bytes.Contains(bytes.ReplaceAll(source, []byte("func InstallAbuseRecordMailer()"), nil), []byte("InstallAbuseRecordMailer()")) {
-			rel, _ := filepath.Rel(moduleRoot, path)
-			callers = append(callers, filepath.ToSlash(rel))
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
+		slices.Sort(callers)
+		return callers
 	}
-	slices.Sort(callers)
-	if want := []string{"cli/api/main.go", "cli/taskworker/main.go"}; !slices.Equal(callers, want) {
+	if callers, want := callersOf("InstallAbuseRecordMailer"), []string{"cli/taskworker/main.go", "controller/api_routes_install.go"}; !slices.Equal(callers, want) {
 		t.Fatalf("InstallAbuseRecordMailer is called from %v, want %v", callers, want)
+	}
+	if callers, want := callersOf("InstallApiRoutes"), []string{"cli/alt/main.go", "cli/api/main.go"}; !slices.Equal(callers, want) {
+		t.Fatalf("InstallApiRoutes is called from %v, want %v", callers, want)
 	}
 }
 

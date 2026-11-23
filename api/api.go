@@ -40,6 +40,11 @@ func DefaultRouteSettings() *RouteSettings {
 // issuer is a separate hostname, which the load balancer routes to this
 // service; the routes themselves are path-matched, so they answer on either
 // host. The issuer published in the discovery documents is what clients use.
+//
+// What the routes run on, the gate cache and what reads it, §21's effects and
+// standing, the device grant and certs among it, a process installs before it
+// serves them, through controller.InstallApiRoutes, as api's and alt's mains
+// both do; the routes of a process that installs none answer closed.
 func Routes() []*router.Route {
 	return routesWithReservedAttemptUpload(nil, routeOwners{})
 }
@@ -507,8 +512,8 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		router.NewRoute("DELETE", "/mail/direct-mx", handlers.DeleteMailDirectMx),
 		// §14.14's smtpedge routes: a sidecar's DKIM selectors, the network's status and reports, and an admin's
 		// appeal of its halts; dark until MG9 (SMTP-M9-19). A publish's mail_send and the reports' read are §8's
-		// checks over api's gate cache, which controller.InstallApiAuthorization's projection installs
-		// (model.SmtpApiGateOf); a process without that install answers both 503
+		// checks over api's gate cache, which the projection installs (model.SmtpApiGateOf) in each process that
+		// serves this set, api's and alt's, through controller.InstallApiRoutes; a process without it answers both 503
 		router.NewRoute("POST", "/smtp/dkim-keys", handlers.SmtpDkimKeys),
 		router.NewRoute("GET", "/smtp/status", handlers.GetSmtpStatus),
 		router.NewRoute("GET", "/smtp/reports", handlers.GetSmtpReports),

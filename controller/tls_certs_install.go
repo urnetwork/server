@@ -193,13 +193,21 @@ func NewTlsCertsInstall(deps *TlsCertsInstallDeps, settings *TlsCertsInstallSett
 
 // Starts api's certs install: /tls routes serve while sidecar.yml's certs
 // switch is on and what they run on is there, and answer 503 otherwise. It
-// follows the switch until ctx ends, then removes what it installed.
-func InstallTlsCerts(ctx context.Context) *server.SidecarSwitchInstall {
+// follows the switch until ctx ends or the returned call, then removes what it
+// installed; the call returns once it has.
+func InstallTlsCerts(ctx context.Context) func() {
 	install := NewTlsCertsInstall(nil, nil)
-	go server.HandleError(func() {
-		install.Run(ctx)
+	runCtx, cancel := context.WithCancel(ctx)
+	var lifetime sync.WaitGroup
+	lifetime.Go(func() {
+		server.HandleError(func() {
+			install.Run(runCtx)
+		})
 	})
-	return install
+	return func() {
+		cancel()
+		lifetime.Wait()
+	}
 }
 
 // certs.yml's bytes from this process's config mount. An error names the file.

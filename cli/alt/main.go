@@ -11,6 +11,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/alt"
+	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/core"
 	"github.com/urnetwork/server/sidecarhost"
 )
@@ -86,9 +87,17 @@ Options:
 	// ServiceHost their own services fill, the db, Redis, metrics, the
 	// service token authenticator, sidecar.yml's gates and task scheduling,
 	// every other service refusing
-	if _, err := core.SetProcessEnv("alt", sidecarhost.NewServiceHost(ctx, &sidecarhost.ServiceHostOptions{Postgres: true})); err != nil {
+	host := sidecarhost.NewServiceHost(ctx, &sidecarhost.ServiceHostOptions{Postgres: true})
+	if _, err := core.SetProcessEnv("alt", host); err != nil {
 		panic(err)
 	}
+	// what api's route set runs on, which alt serves over HTTP/3, through the
+	// call api's main makes, so a route answers here as it does behind the
+	// lb: without it the smtp routes, the approval cancel, the authorization
+	// log, the exchange and the /tls routes answered 503 here, the device
+	// grant temporarily_unavailable, and no §21 suspension reached the
+	// contracts this process creates (controller/api_routes_install.go)
+	defer controller.InstallApiRoutes(ctx, host, nil)()
 	if err := alt.Run(ctx, alt.RunOptions{
 		Port:         port,
 		H3Port:       h3Port,

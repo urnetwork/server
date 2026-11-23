@@ -12,7 +12,6 @@ import (
 	"github.com/urnetwork/server/api"
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/core"
-	"github.com/urnetwork/server/oauth"
 	"github.com/urnetwork/server/sidecarhost"
 )
 
@@ -58,30 +57,15 @@ Options:
 	if _, err := core.SetProcessEnv("api", host); err != nil {
 		panic(err)
 	}
-	// §21's effects for the actions this process applies (ABUSE-M5-06), and
-	// the sealed off-site record of each, from abuse-mailbox.yml (QD-726); a
-	// binary that does not link MG5 installs neither
-	controller.InstallAbuseEffects()
-	controller.InstallAbuseRecordMailer()
-	controller.InstallLegalHoldRecordMailer()
-	controller.InstallLegalHoldDispatch()
-	// §21.8's notice pager: the monitor's webhook from monitor.yml under a
-	// retrying sink (QD-1070); none built leaves every notice's page owed
-	controller.InstallAbuseNoticePager()
-	// §21.7's standing and network_verified for this process's gates and
-	// routes, and the hard deny its control route's CreateContract reads
-	// (ABUSE-M5-07)
-	controller.InstallAbuseStanding(ctx)
-	defer controller.InstallApiAuthorization(ctx, host)()
-	// RFC 8628's device grant for ur-cli: device authorizations wait in
-	// Redis (QD-830), so POST /oauth/device_authorization serves and the
-	// issuer's metadata names it
-	oauth.InstallDeviceAuthorizationStore()
-	// §13.15's /tls routes (QD-846): certs' engine, store, authenticator and
-	// the subject read from the projection, installed only while sidecar.yml's
-	// certs switch is on; off, or with certs.yml or file-clusters-api.yml
-	// missing, every /tls route answers 503
-	controller.InstallTlsCerts(ctx)
+	// what the route set runs on, before it serves: §21's effects, records,
+	// hold dispatch, notice pager and standing, the issuer's rev/ store and
+	// worker, the projection's sequencer, gate cache and what reads it (the
+	// approval gate's states, the dns scopes, the smtp routes' checks, the
+	// edge logins, the contract gate and the exchange's scopes), ur-cli's
+	// device grant and the /tls routes. alt serves the same set and installs
+	// it through the same call, so the two answer every route alike
+	// (controller/api_routes_install.go)
+	defer controller.InstallApiRoutes(ctx, host, nil)()
 	if err := api.Run(ctx, api.RunOptions{Port: port}); err != nil {
 		panic(err)
 	}
