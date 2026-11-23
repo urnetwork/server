@@ -65,11 +65,23 @@
 //	fixed     server counted a sidecar's window clients against sidecar_clients (window-clients-limit, server
 //	          f8b013543): the case runs on the Community column again, where it ran on Pro before, and
 //	          TestE2eItBridgeLinksPastSidecarClients holds the count at a limit one past the sidecars
-//	open      §16.6's stock gate holds an exposure the document's standing rule covers for a person's decision
-//	          (approval-gate-standing-exposures, queued): the World's worldDeviceGate approves it
-//	          (it_bridge_world_test.go's header)
-//	open      no bootstrap draws a network's first bridge block (§17.4; bridge-block-bootstrap, queued): the owner
-//	          sets the block as an admin's act (ItBridgeWorld.setBlock)
+//	fixed     §16.6's stock gate held every exposure for a person's decision, even one the document's standing route or
+//	          dial rule covers (approval-gate-standing-exposures, sidecar 99d7f101 to e1c83b88): every filing device
+//	          runs the stock gate alone (World.InstallApprovalGate), where the World's worldDeviceGate approved the
+//	          exposures before, so an exposure the gate held for a person now fails its join
+//	fixed     no bootstrap drew a network's first bridge block (§17.4; bridge-block-bootstrap, sidecar 58fd1846 to
+//	          a49e3bff): each network runs on the block its bootstrap drew, which the case reads and holds every host's
+//	          claimed address and every device's compile to (it_bridge_world_test.go's readBlock), where its owner set
+//	          one as an admin's act before, which once the bootstrap drew replaced the draw, left it draining for 10
+//	          minutes, and was refused as the block itself in one draw of 62
+//
+// What the case got wrong in itself, fixed here: the churn's comeback probe picked any client the document grants a
+// destination's address, and a client no rule of a nested subnet's names reaches the campus there, so a subnet's
+// incarnation probed so was left to the random traffic; bridge-block-bootstrap's run at a49e3bff failed the liveness
+// row that way (subnet-3's incarnation 2, one granted attempt and no arrival in a 4 s window: the probe's campus answer
+// at once and JoinedHoldMin, opened as router-0's chaos restart ended, since a join is adopted once every bridge is,
+// router-0's restarted one among them). The probe now picks a client the target itself answers, and the liveness row
+// names each granted attempt of a window it fails.
 //
 // Run it through the build's wrapper: -tags 'sidecar_e2e sidecar_pending sidecar_localstack' -run TestE2eItBridge.
 
@@ -168,9 +180,10 @@ func TestE2eItBridgeRouteGrants(t *testing.T) {
 // accepts, X's owner activates the share as its preview showed it, and the alias tables are checked at both ends and in
 // each compile; while the share is in force Y's first client must reach each target through its alias, by every
 // protocol the target takes, and Y's second client never; once X revokes the share and Y releases its aliases, past
-// LeaveBound, nothing reaches X's targets from Y. Then a sweep of X, the oracle of both networks and their ledgers. The
-// case runs seven config bases, at one a minute (§7.9's config_bases_per_min), so its bound is past the conventions' 10
-// minutes.
+// LeaveBound, nothing reaches X's targets from Y. Then a sweep of X, the oracle of both networks and their ledgers. Past
+// their bootstraps' the networks publish five config bases, X's document and share grant and Y's two documents and its
+// share signer, each network at one a minute (§7.9's config_bases_per_min), so the case's bound is past the
+// conventions' 10 minutes.
 func TestE2eItBridgeShares(t *testing.T) {
 	e2eTestEnv().Run(t, func(t testing.TB) {
 		settings := DefaultItBridgeSettings()
@@ -213,7 +226,6 @@ func TestE2eItBridgeShares(t *testing.T) {
 		ySettings.ForwardHostCount = 0
 		ySettings.ClientCount = 2
 		ySettings.CampusPrefix = netip.Prefix{}
-		ySettings.Block = netip.MustParsePrefix("100.90.0.0/16")
 		ySettings.Pro = true
 		ySettings.Seed = settings.Seed + 1
 		y := x.AddPeer(t, ySettings)
@@ -476,6 +488,10 @@ func (self *ItBridgeWorld) Churn(ctx context.Context) {
 // Probes a subnet or forward the churn joined again from one client and protocol its rules grant, picked at random,
 // until an attempt reaches it or ComebackTryCount tries: the oracle's liveness row then judges each incarnation the
 // churn joins by attempts made for it, where the random traffic may pick another destination for the whole window.
+// Only a client the target itself answers is picked: one no rule of a nested subnet's names routes the subnet's
+// addresses by the campus's rule, so the campus answers its probe at once and the subnet's incarnation is left to the
+// random traffic, which is how subnet-3's incarnation 2 went unprobed when bridge-block-bootstrap's run saw its 4 s
+// window reached by nothing.
 func (self *ItBridgeWorld) probeComeback(ctx context.Context, target *itBridgeTarget, random *rand.Rand) {
 	type pair struct {
 		client   *itBridgeDevice
@@ -483,6 +499,9 @@ func (self *ItBridgeWorld) probeComeback(ctx context.Context, target *itBridgeTa
 	}
 	pairs := []pair{}
 	for _, client := range self.clients {
+		if self.answerer(client.clientIndex(), target) != target {
+			continue
+		}
 		for _, protocol := range target.protocols() {
 			if self.granted(client.clientIndex(), target, protocol) {
 				pairs = append(pairs, pair{client: client, protocol: protocol})
@@ -670,21 +689,23 @@ func (self *ItBridgeWorld) checkLiveness(t testing.TB) {
 				return !arrival.At.Before(incarnation.AdoptedAt) && arrival.At.Before(end)
 			})
 			if !reached {
-				attempts := 0
+				attempts := []string{}
 				for _, attempt := range self.Attempts() {
 					if attempt.Expected == target && attempt.Granted && !attempt.Start.Before(incarnation.AdoptedAt) && attempt.Start.Before(end) {
-						attempts += 1
+						attempts = append(attempts, fmt.Sprintf("%s's %s in %s to %s, %s to %s: %s", attempt.Client.name, attempt.Protocol, attempt.Phase,
+							attempt.Address, itBridgeTime(attempt.Start), itBridgeTime(attempt.End), attempt.Err))
 					}
 				}
 				// a window no granted attempt fell in has nothing to judge: the churn's probe gives every incarnation it
 				// joins its attempts, and the sweeps judge the ones joined before them
-				if attempts == 0 {
+				if len(attempts) == 0 {
 					t.Logf("%s's incarnation %d had no granted attempt in its stable window %s to %s",
 						target.name, incarnation.Number, incarnation.AdoptedAt.Format(time.RFC3339Nano), end.Format(time.RFC3339Nano))
 					continue
 				}
-				t.Errorf("%s's incarnation %d was reached by nothing in its stable window %s to %s, %d granted attempts there",
-					target.name, incarnation.Number, incarnation.AdoptedAt.Format(time.RFC3339Nano), end.Format(time.RFC3339Nano), attempts)
+				t.Errorf("%s's incarnation %d was reached by nothing in its stable window %s to %s, %d granted attempts there: %s",
+					target.name, incarnation.Number, incarnation.AdoptedAt.Format(time.RFC3339Nano), end.Format(time.RFC3339Nano), len(attempts),
+					strings.Join(attempts, "; "))
 			}
 		}
 	}
@@ -939,6 +960,7 @@ func (self *ItBridgeWorld) Summarize(t testing.TB) {
 	slices.SortFunc(keys, func(a key, b key) int {
 		return strings.Compare(fmt.Sprint(a), fmt.Sprint(b))
 	})
+	t.Logf("%s: block %s, its bootstrap's draw, host addresses %v", self.settings.NetworkName, self.block, self.hostAddresses)
 	for _, k := range keys {
 		t.Logf("attempts %s %s granted %t reached %t: %d", k.phase, k.protocol, k.granted, k.reached, counts[k])
 	}
@@ -983,11 +1005,6 @@ func (self *ItBridgeWorld) Summarize(t testing.TB) {
 				refused += 1
 			}
 		}
-		passed := int64(0)
-		if device.gate != nil {
-			passed = device.gate.ApprovedCount()
-		}
-		t.Logf("%s: %d wires, %d dials, %d refused, %d exposures the stock gate held for a person", device.name, device.WireCount(),
-			len(device.dialer.Dials()), refused, passed)
+		t.Logf("%s: %d wires, %d dials, %d refused", device.name, device.WireCount(), len(device.dialer.Dials()), refused)
 	}
 }
