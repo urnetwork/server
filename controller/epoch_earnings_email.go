@@ -3,12 +3,19 @@
 // share of the operator pool, its leaderboard rank, its Top 200 standing, and
 // — only once a Bittensor wallet is attached — the SN25α that is now
 // claimable. The claim itself happens between the app and the vault.
+//
+// A personal network's email goes to its admin's sign-in. A Team's admin is
+// an owner of record that never signs in (D-TEAM-2), so a Team's email goes to
+// its billing recipients, its Owners and Billing admins, one email per address
+// (QD-1222), as its failed-payment and missing-wallet mail do (QD-1219).
 package controller
 
 import (
 	"context"
 	"fmt"
+	"maps"
 	"math/big"
+	"slices"
 	"strconv"
 	"strings"
 	texttemplate "text/template"
@@ -20,9 +27,31 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-// pace sends so one finalized epoch does not burst past the SES send rate
-const stEpochEarningsSendInterval = 80 * time.Millisecond
-const stEpochEarningsSendTimeout = 2 * time.Hour
+// Tunables of the epoch earnings email (QD-702), from
+// defaultStEpochEarningsSettings.
+type stEpochEarningsSettings struct {
+	// The wait after each email: 80 ms, so one finalized epoch does not burst
+	// past the SES send rate. Each address is one email, so each of a Team's
+	// billing recipients waits its own interval. Non-positive sends without
+	// waiting.
+	SendInterval time.Duration
+	// How long one epoch's emails may take to send: 2 hours. The emails not
+	// sent by then are not sent, since the epoch's notification is claimed
+	// once. Non-positive sets no bound.
+	SendTimeout time.Duration
+	// The most networks whose recipients one read finds: 1,000, so each read's
+	// arrays stay small however many networks earned in the epoch.
+	// Non-positive reads every network's at once.
+	RecipientReadNetworkCount int
+}
+
+func defaultStEpochEarningsSettings() *stEpochEarningsSettings {
+	return &stEpochEarningsSettings{
+		SendInterval:              80 * time.Millisecond,
+		SendTimeout:               2 * time.Hour,
+		RecipientReadNetworkCount: 1000,
+	}
+}
 
 // EpochEarningsTemplate renders `subscription_epoch_earnings`.
 type EpochEarningsTemplate struct {
@@ -143,44 +172,109 @@ func StNotifyEpochEarnings(ctx context.Context, deploymentKey model.StDeployment
 	if !model.ClaimStEpochNotification(ctx, deploymentKey, epoch) {
 		return
 	}
+	settings := defaultStEpochEarningsSettings()
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				glog.Errorf("[st]epoch %d earnings email failed: %v\n", epoch, r)
 			}
 		}()
-		sendCtx, cancel := context.WithTimeout(context.Background(), stEpochEarningsSendTimeout)
+		var sendCtx context.Context
+		var cancel context.CancelFunc
+		if 0 < settings.SendTimeout {
+			sendCtx, cancel = context.WithTimeout(context.Background(), settings.SendTimeout)
+		} else {
+			sendCtx, cancel = context.WithCancel(context.Background())
+		}
 		defer cancel()
-		sent, skipped := stSendEpochEarnings(sendCtx, deploymentKey, epoch, GetAWSMessageSender())
+		sent, skipped := stSendEpochEarnings(sendCtx, deploymentKey, epoch, GetAWSMessageSender(), settings)
 		glog.Infof("[st]epoch %d earnings email: sent %d, skipped %d\n", epoch, sent, skipped)
 	}()
 }
 
-// stSendEpochEarnings builds and sends one email per recipient network.
-func stSendEpochEarnings(ctx context.Context, deploymentKey model.StDeploymentKey, epoch uint64, sender MessageSender) (sent int, skipped int) {
+// stSendEpochEarnings sends the epoch's earnings email to each recipient
+// network, in network id order, at the addresses stEpochEarningsRecipients
+// reads for it: one email per address, each followed by the settings'
+// SendInterval. sent counts the emails sent; skipped counts each network with
+// no address and each email whose send failed.
+func stSendEpochEarnings(
+	ctx context.Context,
+	deploymentKey model.StDeploymentKey,
+	epoch uint64,
+	sender MessageSender,
+	settings *stEpochEarningsSettings,
+) (sent int, skipped int) {
 	row := model.GetStEpoch(ctx, deploymentKey, epoch)
 	if row == nil {
 		return 0, 0
 	}
-	for networkId, template := range stEpochEarningsTemplates(ctx, deploymentKey, epoch, row) {
-		userAuth, err := model.GetUserAuth(ctx, networkId)
-		if err != nil || userAuth == "" {
-			skipped += 1
-			continue
-		}
-		if err := sender.SendAccountMessageTemplate(userAuth, template); err != nil {
-			glog.Warningf("[st]epoch %d earnings email to network %s failed: %s\n", epoch, networkId, err)
-			skipped += 1
-		} else {
-			sent += 1
-		}
-		select {
-		case <-ctx.Done():
-			return sent, skipped
-		case <-time.After(stEpochEarningsSendInterval):
+	templates := stEpochEarningsTemplates(ctx, deploymentKey, epoch, row)
+	networkIds := slices.SortedFunc(maps.Keys(templates), func(a server.Id, b server.Id) int {
+		return a.Cmp(b)
+	})
+	readNetworkCount := settings.RecipientReadNetworkCount
+	if readNetworkCount <= 0 {
+		readNetworkCount = max(len(networkIds), 1)
+	}
+	for readNetworkIds := range slices.Chunk(networkIds, readNetworkCount) {
+		networkIdUserAuths := stEpochEarningsRecipients(ctx, readNetworkIds)
+		for _, networkId := range readNetworkIds {
+			userAuths := networkIdUserAuths[networkId]
+			if len(userAuths) == 0 {
+				skipped += 1
+				continue
+			}
+			for i, userAuth := range userAuths {
+				if err := sender.SendAccountMessageTemplate(userAuth, templates[networkId]); err != nil {
+					glog.Warningf("[st]epoch %d earnings email %d of %d to network %s failed: %s\n", epoch, i+1, len(userAuths), networkId, err)
+					skipped += 1
+				} else {
+					sent += 1
+				}
+				if 0 < settings.SendInterval {
+					select {
+					case <-ctx.Done():
+						return sent, skipped
+					case <-time.After(settings.SendInterval):
+					}
+				} else if ctx.Err() != nil {
+					return sent, skipped
+				}
+			}
 		}
 	}
 	return sent, skipped
+}
+
+// The addresses the earnings email of each of the networks goes to, read in
+// one transaction. A Team's are its billing recipients
+// (model.GetTeamBillingRecipientsInTx, QD-1222): its Owners and Billing admins
+// at their sign-in email addresses, Owners first and within the bound on the
+// people a Team's mail reaches (QD-1218), and none for a Team none of whose
+// such members has one. An Admin holds no billing or payouts (§7.5) and is not
+// told. A personal network's is its admin's sign-in, email or phone, as it
+// always was (model.GetUserAuthsInTx). A network with none has no entry.
+func stEpochEarningsRecipients(ctx context.Context, networkIds []server.Id) map[server.Id][]string {
+	networkIdUserAuths := map[server.Id][]string{}
+	server.Tx(ctx, func(tx server.PgTx) {
+		teamNetworkIdRecipients := model.GetTeamBillingRecipientsInTx(ctx, tx, networkIds)
+		personalNetworkIds := []server.Id{}
+		for _, networkId := range networkIds {
+			if recipients, team := teamNetworkIdRecipients[networkId]; team {
+				if 0 < len(recipients) {
+					networkIdUserAuths[networkId] = recipients
+				}
+			} else {
+				personalNetworkIds = append(personalNetworkIds, networkId)
+			}
+		}
+		for networkId, userAuth := range model.GetUserAuthsInTx(ctx, tx, personalNetworkIds) {
+			if userAuth != "" {
+				networkIdUserAuths[networkId] = []string{userAuth}
+			}
+		}
+	})
+	return networkIdUserAuths
 }
 
 // stEpochPoolTotal reads the finalized pool total for (epoch, noId), or nil
