@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/urnetwork/sidecar/certsservice"
 	"github.com/urnetwork/sidecar/dnsservice"
@@ -25,9 +26,10 @@ const certsDnsTestBearer = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 // The dns api's two certs routes, answering what the test sets.
 type certsDnsTestApi struct {
 	stateLock sync.Mutex
-	// what the next call answers
-	status int
-	body   string
+	// what the next call answers, with its Retry-After when not empty
+	status     int
+	body       string
+	retryAfter string
 	// what the calls carried
 	calls []certsDnsTestCall
 }
@@ -55,15 +57,23 @@ func (self *certsDnsTestApi) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "http://127.0.0.1:1/elsewhere", http.StatusFound)
 		return
 	}
+	if self.retryAfter != "" {
+		w.Header().Set("Retry-After", self.retryAfter)
+	}
 	w.WriteHeader(self.status)
 	io.WriteString(w, self.body)
 }
 
 func (self *certsDnsTestApi) answer(status int, body string) {
+	self.answerRetryAfter(status, body, "")
+}
+
+func (self *certsDnsTestApi) answerRetryAfter(status int, body string, retryAfter string) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	self.status = status
 	self.body = body
+	self.retryAfter = retryAfter
 }
 
 func (self *certsDnsTestApi) lastCall(t *testing.T) certsDnsTestCall {
@@ -165,7 +175,7 @@ func TestCertsDnsClientWritesAndRemovesAChallenge(t *testing.T) {
 	for status, want := range map[int]error{
 		http.StatusServiceUnavailable: certsservice.ErrCertsDnsRestoring,
 		http.StatusBadRequest:         certsservice.ErrCertsDnsWriteRefused,
-		http.StatusTooManyRequests:    certsservice.ErrCertsDnsWriteRefused,
+		http.StatusTooManyRequests:    certsservice.ErrCertsDnsWriteRateLimited,
 		http.StatusForbidden:          ErrCertsDnsCredentialRefused,
 		http.StatusUnauthorized:       ErrCertsDnsCredentialRefused,
 	} {
@@ -184,6 +194,43 @@ func TestCertsDnsClientWritesAndRemovesAChallenge(t *testing.T) {
 	api.answer(http.StatusInternalServerError, "")
 	if _, err := client.WriteAcmeChallenge(ctx, "acme.root.example", []string{"one"}); err == nil || strings.Contains(err.Error(), certsDnsTestBearer) {
 		t.Fatalf("a 500 answered %v", err)
+	}
+}
+
+// dns's 429 on a challenge write is an error of its own (QD-1204): it names the name written and the 429's
+// Retry-After in delay seconds, none for a header that is absent or not delay seconds, and it is a refusal
+// of the path as a 400 is, while a 400 is not the cap's. Its text names neither the name nor the bearer.
+func TestCertsDnsClientAnswersTheCapAsARefusalOfItsOwn(t *testing.T) {
+	client, api := newCertsDnsTestClient(t)
+	ctx := context.Background()
+	name := "capped-name.root.example"
+	for _, c := range []struct {
+		retryAfter string
+		want       time.Duration
+	}{
+		{retryAfter: "1200", want: 1200 * time.Second},
+		{retryAfter: " 7 ", want: 7 * time.Second},
+		{retryAfter: "", want: 0},
+		{retryAfter: "Wed, 21 Oct 2026 07:28:00 GMT", want: 0},
+		{retryAfter: "-5", want: 0},
+		{retryAfter: "1.5", want: 0},
+	} {
+		api.answerRetryAfter(http.StatusTooManyRequests, "too many challenges", c.retryAfter)
+		_, err := client.WriteAcmeChallenge(ctx, name, []string{"one", "two"})
+		var rateLimit *certsservice.CertsDnsWriteRateLimitError
+		if !errors.As(err, &rateLimit) || !errors.Is(err, certsservice.ErrCertsDnsWriteRateLimited) || !errors.Is(err, certsservice.ErrCertsDnsWriteRefused) {
+			t.Fatalf("Retry-After %q: %v", c.retryAfter, err)
+		}
+		if rateLimit.Name != name || rateLimit.RetryAfter != c.want {
+			t.Errorf("Retry-After %q read as %q, %v", c.retryAfter, rateLimit.Name, rateLimit.RetryAfter)
+		}
+		if strings.Contains(err.Error(), name) || strings.Contains(err.Error(), certsDnsTestBearer) {
+			t.Errorf("the refusal's text names the name or the bearer: %v", err)
+		}
+	}
+	api.answer(http.StatusBadRequest, "challenge refused")
+	if _, err := client.WriteAcmeChallenge(ctx, name, []string{"one"}); !errors.Is(err, certsservice.ErrCertsDnsWriteRefused) || errors.Is(err, certsservice.ErrCertsDnsWriteRateLimited) {
+		t.Fatalf("a 400 answered %v", err)
 	}
 }
 

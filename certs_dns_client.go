@@ -14,9 +14,13 @@ package server
 // https, or http on loopback for the local stack, and never along a redirect.
 //
 // A 503 is the zone restoring, which the solver waits out
-// (certsservice.ErrCertsDnsRestoring); a 400 or 429 is a write the path
-// refused (ErrCertsDnsWriteRefused); anything else is an error whose text
-// names the status and never the bearer. Safe for concurrent use.
+// (certsservice.ErrCertsDnsRestoring); a 400 is a write the path refused
+// (ErrCertsDnsWriteRefused); a 429 is a write past the name's writes an hour,
+// an error of its own (QD-1204): a *certsservice.CertsDnsWriteRateLimitError
+// naming the name and the 429's Retry-After, on which certs holds the name's
+// orders, ErrCertsDnsWriteRateLimited and so ErrCertsDnsWriteRefused too;
+// anything else is an error whose text names the status and never the bearer.
+// No error's text names a challenge's name (I-13). Safe for concurrent use.
 
 import (
 	"bytes"
@@ -29,6 +33,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/urnetwork/sidecar/certsservice"
@@ -196,12 +201,26 @@ func (self *CertsDnsClient) call(ctx context.Context, timeout time.Duration, met
 		return answer, nil
 	case response.StatusCode == http.StatusServiceUnavailable:
 		return nil, certsservice.ErrCertsDnsRestoring
-	case response.StatusCode == http.StatusBadRequest || response.StatusCode == http.StatusTooManyRequests:
+	case response.StatusCode == http.StatusBadRequest:
 		return nil, fmt.Errorf("%w: status %d", certsservice.ErrCertsDnsWriteRefused, response.StatusCode)
+	case response.StatusCode == http.StatusTooManyRequests:
+		// the write's caller names the name (WriteAcmeChallenge)
+		return nil, &certsservice.CertsDnsWriteRateLimitError{RetryAfter: certsDnsRetryAfter(response.Header.Get("Retry-After"))}
 	case response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden:
 		return nil, fmt.Errorf("%w: status %d", ErrCertsDnsCredentialRefused, response.StatusCode)
 	}
 	return nil, fmt.Errorf("dns %s: status %d", path, response.StatusCode)
+}
+
+// A 429's Retry-After as dns's challenge route sends it, delay seconds (RFC
+// 9110 §10.2.3), zero for none. An HTTP date, which the route never sends,
+// reads as none too, and certs holds the name its NameWritesHold.
+func certsDnsRetryAfter(value string) time.Duration {
+	seconds, err := strconv.ParseUint(strings.TrimSpace(value), 10, 32)
+	if err != nil {
+		return 0
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 // Writes values at name's challenge, or removes it with none, and answers
@@ -228,6 +247,11 @@ func (self *CertsDnsClient) WriteAcmeChallenge(ctx context.Context, name string,
 		return 0, fmt.Errorf("%w: no values", certsservice.ErrCertsDnsWriteRefused)
 	}
 	serial, err := self.putChallenge(ctx, name, values)
+	var rateLimit *certsservice.CertsDnsWriteRateLimitError
+	if errors.As(err, &rateLimit) {
+		// the order's failure names the name dns refused, which certs holds (QD-1204)
+		return 0, &certsservice.CertsDnsWriteRateLimitError{Name: name, RetryAfter: rateLimit.RetryAfter}
+	}
 	if err != nil {
 		return 0, err
 	}
