@@ -16,6 +16,9 @@ package controller
 // stands then (nameAccountMessageNetwork), so a renamed network's pending
 // notice shows its current name and the outbox stores nothing new. The sign-in
 // method and password notices are about a person's own account, and name none.
+// §21.8's abuse action notice (abuse_action_controller.go), which reaches a
+// team's Owners and Admins too, names its network by the same naming
+// (QD-1225).
 
 import (
 	"context"
@@ -48,7 +51,8 @@ const (
 	securityNoticeUnknownWalletName = "Payout wallet"
 )
 
-// The network a notice is about, named at delivery. The name is never stored
+// The network a notice is about, named at delivery: a security notice's
+// (QD-1216) and the abuse action notice's (QD-1225). The name is never stored
 // with the notice: the field is unexported, so the outbox's json neither holds
 // nor reads it.
 type securityNoticeNetwork struct {
@@ -99,8 +103,9 @@ type accountMessageNetworkNamer interface {
 }
 
 // Names the row's network in a template that names one, reading the network's
-// name as it stands: a security notice's (QD-1216), and a billing or payout
-// mail's, which also reads whether the network is a Team (QD-1223,
+// name as it stands: a security notice's (QD-1216) or the abuse action
+// notice's (QD-1225), and a billing or payout mail's, which also reads whether
+// the network is a Team (QD-1223,
 // team_billing_mail_copy.go). A Team is a network with a network_team row,
 // which only team-create writes, so in a binary that does not link MG6, which
 // has no Teams, a billing mail reads nothing and goes out as a personal

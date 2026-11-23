@@ -360,7 +360,8 @@ const (
 // Owes the notice of an action or lift to each Owner and Admin, and its admin
 // event, in the action's own transaction, unless the case is barred or names
 // no network. The notice key is the action and the recipient, so a rerun owes
-// one notice each.
+// one notice each. Each message carries the network's id, by which the
+// delivery names the network in the notice (QD-1225).
 func oweAbuseActionNoticeInTx(
 	ctx context.Context,
 	tx server.PgTx,
@@ -500,6 +501,17 @@ func RetryOwedAbuseActions(ctx context.Context, now time.Time, settings *model.A
 // notice): category, target, case id and appeal link, never the reporter, the
 // report or a reviewer. Email only: a phone number gets no SMS, as only account
 // security goes by text.
+//
+// It names the network it is about, "your URnetwork network <name>", in its
+// subject, its preheader, its first line and its footer (owner decision 725,
+// QD-1225), as the security notices do (QD-1216): it reaches the network's
+// admin of record and each standing Owner and Admin of a Team at their own
+// addresses, each with a network of its own and perhaps in other Teams, and its
+// Target line, a host, a label or a sending domain, does not say which network
+// to look at or appeal for. The delivery reads the name of the outbox row's
+// network as it stands when the notice is sent (nameAccountMessageNetwork), so
+// a renamed network's waiting notice shows its current name and the outbox
+// stores no name. A personal network's notice names it too.
 type AbuseActionNoticeTemplate struct {
 	CaseId   string
 	Category string
@@ -513,6 +525,7 @@ type AbuseActionNoticeTemplate struct {
 	// the case's appeal link, empty when abuse.yml names none
 	AppealUrl string
 	BaseTemplate
+	securityNoticeNetwork
 }
 
 // The template's files under email_templates.
@@ -525,15 +538,16 @@ func (self *AbuseActionNoticeTemplate) Lift() bool {
 	return self.Kind == string(model.AbuseActionKindLift)
 }
 
-// The subject: what happened, with no target.
+// The subject: what happened, and in which network, with no target.
 func (self *AbuseActionNoticeTemplate) Subject() string {
+	network := self.Network()
 	if self.Lift() {
-		return "An abuse action on your URnetwork network was lifted"
+		return "An abuse action on " + network + " was lifted"
 	}
 	if self.Kind == string(model.AbuseActionKindNoticeForward) {
-		return "A copyright notice about your URnetwork network"
+		return "A copyright notice about " + network
 	}
-	return "An abuse action on your URnetwork network"
+	return "An abuse action on " + network
 }
 
 // The category in words.
@@ -606,12 +620,16 @@ func (self *AbuseActionNoticeTemplate) UntilText() string {
 	return self.UntilTime.UTC().Format("January 2, 2006, 15:04 UTC")
 }
 
-// The headline, in the html part's case.
+// The headline, in the html part's case: what happened, in a few words. The
+// layout sets a headline in capitals, two to four words (EMAIL1.md), so it
+// names no network, as no security notice's does: the subject, preheader,
+// first line and footer name it, and the headline no longer says "your
+// network" (QD-1225).
 func (self *AbuseActionNoticeTemplate) Headline() string {
 	if self.Lift() {
 		return "Abuse action lifted"
 	}
-	return "Abuse action on your network"
+	return "Abuse action taken"
 }
 
 // The headline in the text part's upper case.

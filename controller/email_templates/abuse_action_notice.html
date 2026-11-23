@@ -1,11 +1,11 @@
 {{define "title"}}{{.Headline}}{{end}}
-{{define "preheader"}}{{if .Lift}}An abuse action on your URnetwork network was lifted.{{else}}URnetwork took an abuse action on your network.{{end}}{{end}}
+{{define "preheader"}}{{if .Lift}}An abuse action on {{.Network}} was lifted.{{else}}URnetwork took an abuse action on {{.Network}}.{{end}}{{end}}
 {{define "eyebrow"}}Abuse{{end}}
 {{define "accent"}}#f4e4d6{{end}}
 {{define "headline"}}{{.Headline}}{{end}}
-{{define "why"}}Sent to the Owners and Admins of a URnetwork network when an abuse action is taken on it or lifted.{{end}}
+{{define "why"}}Sent to the Owners and Admins of {{.Network}} when an abuse action is taken on it or lifted.{{end}}
 {{define "content"}}
-<p class="ur-text" style="margin:16px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:16px; line-height:26px; color:#2b3036;">{{if .Lift}}An abuse action on your network has been lifted.{{else}}URnetwork took an abuse action on your network. It holds until a person reviews it, and you can appeal it.{{end}}</p>
+<p class="ur-text" style="margin:16px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:16px; line-height:26px; color:#2b3036;">{{if .Lift}}An abuse action on {{.Network}} has been lifted.{{else}}URnetwork took an abuse action on {{.Network}}. It holds until a person reviews it, and you can appeal it.{{end}}</p>
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:24px 0 0;"><tr>
 <td class="ur-rule ur-muted" style="padding:12px 0; border-bottom:1px solid #e1e5e9; border-top:1px solid #e1e5e9; padding-right:16px; font-family:Geist, Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:12px; line-height:18px; letter-spacing:0.08em; text-transform:uppercase; color:#5f6a74; vertical-align:top; white-space:nowrap;">Action</td>
 <td class="ur-rule ur-ink" align="right" style="padding:12px 0; border-bottom:1px solid #e1e5e9; border-top:1px solid #e1e5e9; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:15px; line-height:22px; color:#101010; text-align:right; word-break:break-word;">{{.ActionText}}</td>
