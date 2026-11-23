@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -579,6 +580,11 @@ type networkClientEnrollment struct {
 	// the membership's role must still hold the keys permission when the key
 	// is spent (QD-1199)
 	needsKeysPermission bool
+	// the key is tagged and its creator's member owned each of ownedTagIds
+	// under the network's tagOwners when the enrollment read the log, so a role
+	// holding keys for owned tags holds the key too (§7.5's Network admin)
+	tagsOwned   bool
+	ownedTagIds [][]byte
 	// what the client's token names when it is not the creator's sign-in the
 	// mint runs on: a team's tagged client is minted on the team's owner of
 	// record, with no member_id (QD-1194). nil for every other enrollment
@@ -593,9 +599,14 @@ type networkClientEnrollment struct {
 // and with the role mirror's write of its role: one that ended refuses the
 // key, as the removal ended the creator's keys (§7.10), and so does a role
 // that no longer holds the keys permission a tagged or pre-approved key needs
-// (QD-1199), each before the spend, so a refusal writes nothing. creator is
-// the creator's sign-in, never the owner of record a tagged client's token
-// names.
+// (QD-1199), or for a tagged key whose tags the creator owned, keys for owned
+// tags, each before the spend, so a refusal writes nothing. The tags' owners
+// are the log's, read before the mint and not again here, so a save taking
+// the creator off a tag's tagOwners between that read and the spend leaves
+// this one mint: its client is tagged, and admitted only under a tag owner's,
+// an admin's or a Delegation's signature, which the log judges (§7.9's scoped
+// row). creator is the creator's sign-in, never the owner of record a tagged
+// client's token names.
 func (self *networkClientEnrollment) consume(ctx context.Context, tx server.PgTx, creator *session.ByJwt) (*NetworkAuthKey, error) {
 	if self.memberId != nil {
 		rows, err := tx.Query(ctx, `SELECT role FROM network_member
@@ -612,7 +623,7 @@ func (self *networkClientEnrollment) consume(ctx context.Context, tx server.PgTx
 				role = NetworkMemberRole(roleText)
 			}
 		})
-		if !live || !networkEnrollCreatorRolePermits(self.needsKeysPermission, role) {
+		if !live || !networkEnrollCreatorRolePermits(self.needsKeysPermission, self.tagsOwned, role) {
 			return nil, ErrAuthKeyRefused
 		}
 	}
@@ -620,22 +631,28 @@ func (self *networkClientEnrollment) consume(ctx context.Context, tx server.PgTx
 	if err != nil {
 		return nil, err
 	}
-	// the role was checked for the marks read before the mint; a key's tags
-	// and pre-approval never change, so a difference rolls the spend back
+	// the role was checked for the marks read before the mint, and the owners
+	// for its tags; a key's tags and pre-approval never change, so a
+	// difference rolls the spend back
 	if (0 < len(authKey.TagIds) || authKey.PreApproved) != self.needsKeysPermission {
 		return nil, errors.New("an auth key changed its tags or pre-approval")
+	}
+	if self.tagsOwned && !slices.EqualFunc(authKey.TagIds, self.ownedTagIds, bytes.Equal) {
+		return nil, errors.New("an auth key changed its tags")
 	}
 	return authKey, nil
 }
 
 // Whether a team's key creator whose role is role, as network_member mirrors
 // it, still holds its key (QD-1199): one that needsKeysPermission, tagged or
-// pre-approved, only while the role holds RolePermissionKeys, which
-// authKeyReachOf asked at the key's creation, so a role this build does not
-// know holds none; an untagged one, which every role makes for its own
-// devices, whatever the role.
-func networkEnrollCreatorRolePermits(needsKeysPermission bool, role NetworkMemberRole) bool {
-	return !needsKeysPermission || role.Permits(RolePermissionKeys)
+// pre-approved, while the role holds RolePermissionKeys, which authKeyReachOf
+// asked at the key's creation, or, for a tagged key whose every tag the
+// creator's member owns under the network's tagOwners (tagsOwned, the log's
+// word), while it holds RolePermissionOwnedTagKeys (§7.5's Network admin),
+// so a role this build does not know holds none; an untagged one, which every
+// role makes for its own devices, whatever the role.
+func networkEnrollCreatorRolePermits(needsKeysPermission bool, tagsOwned bool, role NetworkMemberRole) bool {
+	return !needsKeysPermission || role.Permits(RolePermissionKeys) || tagsOwned && role.Permits(RolePermissionOwnedTagKeys)
 }
 
 // The owner row of the client the enrollment mints, from the key it spent.
@@ -685,14 +702,18 @@ type networkEnrollKey struct {
 	// tagged key's client is minted on (QD-1194). It never changes (D-TEAM-2)
 	ownerOfRecordUserId server.Id
 	creatorUserId       server.Id
-	tagged              bool
-	ephemeral           bool
-	preApproved         bool
+	// the key's opaque tag ids, none for an untagged key
+	tagIds      [][]byte
+	tagged      bool
+	ephemeral   bool
+	preApproved bool
 }
 
 // Whether the key reaches past its creator's own devices, tagged or
 // pre-approved: what only a creator whose role holds RolePermissionKeys
-// makes (authKeyReachOf), and holds while its role still does (QD-1199).
+// makes (authKeyReachOf), or for a tagged key one whose role holds keys for
+// owned tags and whose member owns each tag, and holds while its role still
+// does (QD-1199).
 func (self *networkEnrollKey) needsKeysPermission() bool {
 	return self.tagged || self.preApproved
 }
@@ -707,7 +728,7 @@ func readNetworkEnrollKey(ctx context.Context, authKeyId server.Id) (key *networ
 					network.network_name,
 					network.admin_user_id,
 					network_auth_key.creator_user_id,
-					0 < cardinality(network_auth_key.tag_ids),
+					network_auth_key.tag_ids,
 					network_auth_key.ephemeral,
 					network_auth_key.pre_approved
 				FROM network_auth_key
@@ -719,7 +740,8 @@ func readNetworkEnrollKey(ctx context.Context, authKeyId server.Id) (key *networ
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
 				key = &networkEnrollKey{}
-				server.Raise(result.Scan(&key.networkId, &key.networkName, &key.ownerOfRecordUserId, &key.creatorUserId, &key.tagged, &key.ephemeral, &key.preApproved))
+				server.Raise(result.Scan(&key.networkId, &key.networkName, &key.ownerOfRecordUserId, &key.creatorUserId, &key.tagIds, &key.ephemeral, &key.preApproved))
+				key.tagged = 0 < len(key.tagIds)
 			}
 		})
 	})
@@ -798,10 +820,23 @@ func enrollNetworkClientWithSettings(
 	if signIn == nil {
 		return nil, newNetworkEnrollRefusal(http.StatusUnauthorized, NetworkEnrollCodeAuthKeyInvalid, networkEnrollAuthKeyInvalidMessage)
 	}
+	// a tagged key whose creator's role holds keys for owned tags and not the
+	// keys permission (§7.5's Network admin) holds while the creator's member
+	// owns each of its tags under the network's tagOwners, at the log's newest
+	// verified state, read here with no Postgres connection held; a log that
+	// cannot be read refuses
+	tagsOwned := false
+	if signIn.MemberId != nil && key.tagged && !signIn.Role.Permits(RolePermissionKeys) && signIn.Role.Permits(RolePermissionOwnedTagKeys) {
+		owned, err := authKeyTagsOwnedBy(ctx, key.networkId, *signIn.MemberId, key.tagIds)
+		if err != nil {
+			return nil, newNetworkEnrollRefusal(http.StatusServiceUnavailable, NetworkEnrollCodeUnavailable, "The network's log is unavailable.")
+		}
+		tagsOwned = owned
+	}
 	// a team's tagged or pre-approved key reaches what its creator's role
 	// allows now (see the header): asked here, before an admission posts
 	// anything, and again in the mint's transaction (consume)
-	if signIn.MemberId != nil && !networkEnrollCreatorRolePermits(key.needsKeysPermission(), signIn.Role) {
+	if signIn.MemberId != nil && !networkEnrollCreatorRolePermits(key.needsKeysPermission(), tagsOwned, signIn.Role) {
 		return nil, newNetworkEnrollRefusal(http.StatusUnauthorized, NetworkEnrollCodeAuthKeyInvalid, networkEnrollAuthKeyInvalidMessage)
 	}
 	creator := NewNetworkSignInByJwt(signIn, false)
@@ -836,7 +871,11 @@ func enrollNetworkClientWithSettings(
 		declaresKey:         bytes.Clone(enroll.ClientPublicKey),
 		memberId:            creator.MemberId,
 		needsKeysPermission: key.needsKeysPermission(),
+		tagsOwned:           tagsOwned,
 		credential:          credential,
+	}
+	if tagsOwned {
+		enrollment.ownedTagIds = key.tagIds
 	}
 	result, err := authNetworkClientWithParentState(&AuthNetworkClientArgs{
 		DeviceSpec:       enroll.DeviceSpec,

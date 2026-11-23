@@ -24,8 +24,10 @@ import (
 // A team Member's network credential creates an untagged one-use key at POST /network/auth-keys, answered 200, and the
 // key enrolls at POST /network/enroll a device whose owner row names that Member: its user and its member_id, untagged,
 // with no sponsor. The Member is refused 403 a tagged key and a pre-approved one, which would enroll a tagged sidecar or
-// land whatever admission a Delegation signed, and is still refused the routes that list and revoke the network's keys;
-// none of it creates a key. An Admin's tagged, pre-approved key is unchanged, and the Member's one-use key enrolls once.
+// land whatever admission a Delegation signed, none of it creating a key. An Admin's tagged, pre-approved key is
+// unchanged, and the Member's one-use key enrolls once. Through GET /network/auth-keys and POST /network/auth-key-revoke
+// the Member lists its own key alone and revokes it, while the Admin's key answers it as no such key and stays, and
+// the Admin lists both.
 func TestTeamMemberAuthKeyEnrollsItsOwnDevice(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
@@ -107,15 +109,6 @@ func TestTeamMemberAuthKeyEnrollsItsOwnDevice(t *testing.T) {
 				t.Errorf("the Member's key %+v: %d %s", args, w.Code, w.Body.String())
 			}
 		}
-		if w := serve(http.MethodGet, "/network/auth-keys", memberToken, ""); w.Code != http.StatusForbidden ||
-			!strings.Contains(w.Body.String(), router.RolePermissionRefusedMessage) {
-			t.Errorf("the Member's listing: %d %s", w.Code, w.Body.String())
-		}
-		revokeBody := fmt.Sprintf(`{"auth_key_id":%q}`, own.AuthKeyId.String())
-		if w := serve(http.MethodPost, "/network/auth-key-revoke", memberToken, revokeBody); w.Code != http.StatusForbidden ||
-			!strings.Contains(w.Body.String(), router.RolePermissionRefusedMessage) {
-			t.Errorf("the Member's revoke: %d %s", w.Code, w.Body.String())
-		}
 		if count := keyCountOf(member.UserId); count != 1 {
 			t.Fatalf("the Member holds %d keys, want its one own", count)
 		}
@@ -126,6 +119,41 @@ func TestTeamMemberAuthKeyEnrollsItsOwnDevice(t *testing.T) {
 		}
 		if count := keyCountOf(admin.UserId); count != 1 {
 			t.Fatalf("the Admin holds %d keys", count)
+		}
+
+		listed := func(authorization string) []server.Id {
+			t.Helper()
+			w := serve(http.MethodGet, "/network/auth-keys", authorization, "")
+			result := &model.GetNetworkAuthKeysResult{}
+			if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), result) != nil {
+				t.Fatalf("a listing: %d %s", w.Code, w.Body.String())
+			}
+			authKeyIds := []server.Id{}
+			for _, authKey := range result.AuthKeys {
+				authKeyIds = append(authKeyIds, authKey.AuthKeyId)
+			}
+			return authKeyIds
+		}
+		revoke := func(authorization string, authKeyId server.Id) *model.RevokeAuthKeyResult {
+			t.Helper()
+			w := serve(http.MethodPost, "/network/auth-key-revoke", authorization, fmt.Sprintf(`{"auth_key_id":%q}`, authKeyId.String()))
+			result := &model.RevokeAuthKeyResult{}
+			if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), result) != nil {
+				t.Fatalf("a revoke: %d %s", w.Code, w.Body.String())
+			}
+			return result
+		}
+		if authKeyIds := listed(memberToken); len(authKeyIds) != 1 || authKeyIds[0] != *own.AuthKeyId {
+			t.Fatalf("the Member lists %v, want its own key %s alone", authKeyIds, own.AuthKeyId)
+		}
+		if result := revoke(memberToken, *adminKey.AuthKeyId); result.Error == nil || result.BundleStillAdmits {
+			t.Fatalf("the Member's revoke of the Admin's key answered %+v", result)
+		}
+		if count := keyCountOf(admin.UserId); count != 1 {
+			t.Fatalf("the Admin holds %d keys after the Member's revoke", count)
+		}
+		if authKeyIds := listed(adminToken); len(authKeyIds) != 2 {
+			t.Fatalf("the Admin lists %v, want both keys", authKeyIds)
 		}
 
 		enroll := func(authKey string) *httptest.ResponseRecorder {
@@ -172,6 +200,17 @@ func TestTeamMemberAuthKeyEnrollsItsOwnDevice(t *testing.T) {
 		// the one-use key is spent: a second device is refused and mints nothing
 		if w := enroll(own.AuthKey); w.Code != http.StatusUnauthorized || !strings.Contains(w.Body.String(), model.NetworkEnrollCodeAuthKeyInvalid) {
 			t.Fatalf("a second enrollment from the Member's one-use key: %d %s", w.Code, w.Body.String())
+		}
+
+		// and the Member revokes its own key
+		if result := revoke(memberToken, *own.AuthKeyId); result.Error != nil || result.BundleStillAdmits {
+			t.Fatalf("the Member's revoke of its own key answered %+v", result)
+		}
+		if count := keyCountOf(member.UserId); count != 0 {
+			t.Fatalf("the Member holds %d keys after revoking its own", count)
+		}
+		if authKeyIds := listed(memberToken); len(authKeyIds) != 0 {
+			t.Fatalf("the Member lists %v after revoking its own key", authKeyIds)
 		}
 	})
 }

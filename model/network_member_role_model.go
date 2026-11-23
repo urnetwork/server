@@ -23,15 +23,17 @@ package model
 // Every role holds RolePermissionOwnDevices, the Member's "own devices": every
 // member is a person whose devices enroll from an auth key its own credential
 // makes, its first one from its invite (§7.5) whatever role the invite names.
-// POST /network/auth-keys asks it, and the auth key model narrows a caller
-// whose role, cut by its scopes, lacks RolePermissionKeys to a key for its own
-// devices (network_auth_key_model.go's authKeyReachOf): untagged and not
-// pre-approved, so the device it enrolls is the caller's own. Untagged keys
-// (IT admin) are such keys. Keys for owned tags (Network admin) depend on the
-// network's tagOwners, which the route and the model do not read, so a tagged
-// key still needs RolePermissionKeys, and a Network admin's fails closed; so do
-// the routes that list and revoke the network's keys, which every role but an
-// Owner and an Admin is refused.
+// The three auth key routes ask it, and the auth key model narrows a caller
+// whose role, cut by its scopes, lacks RolePermissionKeys
+// (network_auth_key_model.go's authKeyReachOf): it creates a key for its own
+// devices, untagged and not pre-approved, so the device it enrolls is the
+// caller's own, and it lists and revokes only the keys it created. Untagged
+// keys (IT admin) are such keys. Keys for owned tags (Network admin) are
+// RolePermissionOwnedTagKeys: beside a key for its own devices, a tagged key,
+// pre-approved or not, whose every tag the network's tagOwners name the
+// caller's member an owner of at the newest verified state of its log, which
+// the model reads at the key's creation and again at each enrollment
+// (network_client_owner_model.go).
 //
 // Roles are signed in the config repo, AdminSet for the first four and
 // MemberAdmit for the rest, and network_member mirrors them from verified log
@@ -68,9 +70,13 @@ const (
 	RolePermissionPolicy RolePermission = "policy"
 	// auth keys, API keys and OAuth clients
 	RolePermissionKeys RolePermission = "keys"
+	// a tagged auth key, pre-approved or not, for tags the caller's member
+	// owns under the network's tagOwners (§7.5's Network admin: keys for owned
+	// tags); every role holding RolePermissionKeys holds it too
+	RolePermissionOwnedTagKeys RolePermission = "owned_tag_keys"
 	// an auth key for the caller's own devices: untagged and not pre-approved,
-	// so the device it enrolls is the caller's (§7.5's Member: own devices);
-	// every role holds it
+	// so the device it enrolls is the caller's (§7.5's Member: own devices),
+	// and the keys the caller created, to list and revoke; every role holds it
 	RolePermissionOwnDevices RolePermission = "own_devices"
 	// billing, payouts and wallets
 	RolePermissionBilling RolePermission = "billing"
@@ -89,6 +95,7 @@ var RolePermissions = []RolePermission{
 	RolePermissionDevices,
 	RolePermissionPolicy,
 	RolePermissionKeys,
+	RolePermissionOwnedTagKeys,
 	RolePermissionOwnDevices,
 	RolePermissionBilling,
 	RolePermissionRead,
@@ -98,32 +105,35 @@ var RolePermissions = []RolePermission{
 // §7.5's table as permissions.
 var networkMemberRolePermissions = map[NetworkMemberRole]map[RolePermission]bool{
 	NetworkMemberRoleOwner: {
-		RolePermissionOwner:      true,
-		RolePermissionMembers:    true,
-		RolePermissionAdmin:      true,
-		RolePermissionDevices:    true,
-		RolePermissionPolicy:     true,
-		RolePermissionKeys:       true,
-		RolePermissionOwnDevices: true,
-		RolePermissionBilling:    true,
-		RolePermissionRead:       true,
-		RolePermissionSelf:       true,
+		RolePermissionOwner:        true,
+		RolePermissionMembers:      true,
+		RolePermissionAdmin:        true,
+		RolePermissionDevices:      true,
+		RolePermissionPolicy:       true,
+		RolePermissionKeys:         true,
+		RolePermissionOwnedTagKeys: true,
+		RolePermissionOwnDevices:   true,
+		RolePermissionBilling:      true,
+		RolePermissionRead:         true,
+		RolePermissionSelf:         true,
 	},
 	NetworkMemberRoleAdmin: {
-		RolePermissionMembers:    true,
-		RolePermissionAdmin:      true,
-		RolePermissionDevices:    true,
-		RolePermissionPolicy:     true,
-		RolePermissionKeys:       true,
-		RolePermissionOwnDevices: true,
-		RolePermissionRead:       true,
-		RolePermissionSelf:       true,
+		RolePermissionMembers:      true,
+		RolePermissionAdmin:        true,
+		RolePermissionDevices:      true,
+		RolePermissionPolicy:       true,
+		RolePermissionKeys:         true,
+		RolePermissionOwnedTagKeys: true,
+		RolePermissionOwnDevices:   true,
+		RolePermissionRead:         true,
+		RolePermissionSelf:         true,
 	},
 	NetworkMemberRoleNetworkAdmin: {
-		RolePermissionPolicy:     true,
-		RolePermissionOwnDevices: true,
-		RolePermissionRead:       true,
-		RolePermissionSelf:       true,
+		RolePermissionPolicy:       true,
+		RolePermissionOwnedTagKeys: true,
+		RolePermissionOwnDevices:   true,
+		RolePermissionRead:         true,
+		RolePermissionSelf:         true,
 	},
 	NetworkMemberRoleItAdmin: {
 		RolePermissionDevices:    true,
@@ -156,9 +166,9 @@ func (self NetworkMemberRole) Permits(permission RolePermission) bool {
 
 // The permissions each of §7.8's scopes reaches, within its creator's role.
 // all reaches everything the role does. Only the scopes that reach
-// RolePermissionKeys reach RolePermissionOwnDevices, so moving POST
-// /network/auth-keys from the one to the other changed no scoped credential's
-// reach there.
+// RolePermissionKeys reach RolePermissionOwnDevices and
+// RolePermissionOwnedTagKeys, so moving the auth key routes from the one to
+// the others changed no scoped credential's reach there.
 var apiKeyScopePermissions = map[string]map[RolePermission]bool{
 	ApiKeyScopeDevicesCore: {
 		RolePermissionDevices: true,
@@ -166,9 +176,10 @@ var apiKeyScopePermissions = map[string]map[RolePermission]bool{
 		RolePermissionSelf:    true,
 	},
 	ApiKeyScopeAuthKeys: {
-		RolePermissionKeys:       true,
-		RolePermissionOwnDevices: true,
-		RolePermissionSelf:       true,
+		RolePermissionKeys:         true,
+		RolePermissionOwnedTagKeys: true,
+		RolePermissionOwnDevices:   true,
+		RolePermissionSelf:         true,
 	},
 	ApiKeyScopePolicyRead: {
 		RolePermissionRead: true,

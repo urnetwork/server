@@ -140,25 +140,33 @@ func (self *creatorRoleTeam) enroll(t testing.TB, bearer string, admission []byt
 }
 
 // Only a role that holds the keys permission, an Owner's or an Admin's, still holds a tagged or pre-approved key at
-// enrollment, and a role this build does not know holds none; every role still holds an untagged key, ephemeral or
-// not. A key needs the permission when it is tagged or pre-approved.
+// enrollment whatever its tags' owners, and a role this build does not know holds none; a Network admin's keys for
+// owned tags hold a tagged key, pre-approved or not, only while its member owns every tag of it, and no other role's
+// do; every role still holds an untagged key, ephemeral or not. A key needs the permission when it is tagged or
+// pre-approved.
 func TestEnrollmentAsksTheCreatorsRoleForTheKeysPermission(t *testing.T) {
-	roles := map[NetworkMemberRole]bool{
-		NetworkMemberRoleOwner:                    true,
-		NetworkMemberRoleAdmin:                    true,
-		NetworkMemberRoleNetworkAdmin:             false,
-		NetworkMemberRoleItAdmin:                  false,
-		NetworkMemberRoleBillingAdmin:             false,
-		NetworkMemberRoleAuditor:                  false,
-		NetworkMemberRoleMember:                   false,
-		NetworkMemberRole("synthetic-later-role"): false,
-		NetworkMemberRole(""):                     false,
+	roles := map[NetworkMemberRole]struct {
+		keeps      bool
+		keepsOwned bool
+	}{
+		NetworkMemberRoleOwner:                    {keeps: true, keepsOwned: true},
+		NetworkMemberRoleAdmin:                    {keeps: true, keepsOwned: true},
+		NetworkMemberRoleNetworkAdmin:             {keeps: false, keepsOwned: true},
+		NetworkMemberRoleItAdmin:                  {keeps: false, keepsOwned: false},
+		NetworkMemberRoleBillingAdmin:             {keeps: false, keepsOwned: false},
+		NetworkMemberRoleAuditor:                  {keeps: false, keepsOwned: false},
+		NetworkMemberRoleMember:                   {keeps: false, keepsOwned: false},
+		NetworkMemberRole("synthetic-later-role"): {keeps: false, keepsOwned: false},
+		NetworkMemberRole(""):                     {keeps: false, keepsOwned: false},
 	}
-	for role, keeps := range roles {
-		if networkEnrollCreatorRolePermits(true, role) != keeps {
-			t.Errorf("a %q creator keeps its tagged or pre-approved key: %t, want %t", role, !keeps, keeps)
+	for role, want := range roles {
+		if networkEnrollCreatorRolePermits(true, false, role) != want.keeps {
+			t.Errorf("a %q creator keeps its tagged or pre-approved key: %t, want %t", role, !want.keeps, want.keeps)
 		}
-		if !networkEnrollCreatorRolePermits(false, role) {
+		if networkEnrollCreatorRolePermits(true, true, role) != want.keepsOwned {
+			t.Errorf("a %q creator owning its key's tags keeps the key: %t, want %t", role, !want.keepsOwned, want.keepsOwned)
+		}
+		if !networkEnrollCreatorRolePermits(false, false, role) {
 			t.Errorf("a %q creator lost its untagged key", role)
 		}
 	}
