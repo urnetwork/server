@@ -9,11 +9,13 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-// An auth key change of each action: a single-use key created with the website,
-// and a pre-approved, ephemeral, tagged key revoked with an API key.
+// An auth key change of each action, in the sample network: a single-use key
+// created with the website, and a pre-approved, ephemeral, tagged key revoked
+// with an API key.
 func securityAuthKeyNoticeSample(actions ...string) *SecurityAuthKeyChangedTemplate {
 	changeTime := time.Date(2026, 11, 7, 14, 3, 7, 0, time.UTC)
 	notice := &SecurityAuthKeyChangedTemplate{}
+	notice.nameNetwork(securityNoticeSampleNetworkName)
 	for i, action := range actions {
 		change := &model.SecurityAuthKeyChange{
 			ChangeTime: changeTime.Add(time.Duration(i) * time.Second),
@@ -44,10 +46,11 @@ func TestSecurityAuthKeyNoticeSaysWhatChanged(t *testing.T) {
 		actions []string
 		subject string
 	}{
-		{[]string{model.SecurityAuthKeyCreated}, "An auth key was created for your URnetwork network"},
-		{[]string{model.SecurityAuthKeyRevoked}, "An auth key was revoked from your URnetwork network"},
-		{[]string{model.SecurityAuthKeyCreated, model.SecurityAuthKeyCreated}, "Auth keys were created for your URnetwork network"},
-		{[]string{model.SecurityAuthKeyCreated, model.SecurityAuthKeyRevoked}, "Your URnetwork auth keys were changed"},
+		{[]string{model.SecurityAuthKeyCreated}, "An auth key was created for your URnetwork network synthetic-sample-network"},
+		{[]string{model.SecurityAuthKeyRevoked}, "An auth key was revoked from your URnetwork network synthetic-sample-network"},
+		{[]string{model.SecurityAuthKeyCreated, model.SecurityAuthKeyCreated}, "Auth keys were created for your URnetwork network synthetic-sample-network"},
+		{[]string{model.SecurityAuthKeyRevoked, model.SecurityAuthKeyRevoked}, "Auth keys were revoked from your URnetwork network synthetic-sample-network"},
+		{[]string{model.SecurityAuthKeyCreated, model.SecurityAuthKeyRevoked}, "The auth keys of your URnetwork network synthetic-sample-network were changed"},
 	} {
 		notice := securityAuthKeyNoticeSample(c.actions...)
 		subject, bodyHtml, bodyText := securityNoticeText(t, notice)
@@ -57,6 +60,8 @@ func TestSecurityAuthKeyNoticeSaysWhatChanged(t *testing.T) {
 		for _, want := range []string{
 			c.subject + ".",
 			"When: November 7, 2026, 14:03:07 UTC",
+			// the footer says whose addresses it reached, and for which network
+			"of your URnetwork network synthetic-sample-network whenever an auth key is created for it or revoked\nfrom it.",
 			securityNoticeContactLine,
 			"To sign out every other device: " + securityNoticeOtherSessionsUrl,
 		} {
@@ -67,6 +72,7 @@ func TestSecurityAuthKeyNoticeSaysWhatChanged(t *testing.T) {
 		for _, want := range []string{
 			`contact <a class="ur-link" href="mailto:security@ur.io"`,
 			"November 7, 2026, 14:03:07 UTC",
+			"Sent to the sign-in email addresses of the owners and admins of your URnetwork network synthetic-sample-network whenever an auth key is created for it or revoked from it.",
 			`href="` + securityNoticeOtherSessionsUrl + `"`,
 		} {
 			if !strings.Contains(bodyHtml, want) {

@@ -327,12 +327,13 @@ func (self *accountMessageDelivery) retryDelay(attemptCount int) time.Duration {
 	return min(delay, self.settings.retryMaxDelay)
 }
 
-// Sends one claimed message and records the outcome. The record runs on a
-// context detached from the run's cancellation (a drain, the task's max time):
-// a send that went out must be recorded, or it is sent again when its lease
-// ends. A message claimed more often than the most attempts, each without a
-// recorded outcome (a process that keeps stopping in the send), is abandoned
-// unsent.
+// Sends one claimed message and records the outcome. A template about a network
+// is given its network's name first (nameAccountMessageNetwork). The record
+// runs on a context detached from the run's cancellation (a drain, the task's
+// max time): a send that went out must be recorded, or it is sent again when
+// its lease ends. A message claimed more often than the most attempts, each
+// without a recorded outcome (a process that keeps stopping in the send), is
+// abandoned unsent.
 func (self *accountMessageDelivery) deliver(message *model.AccountMessage) {
 	recordCtx, recordCancel := context.WithTimeout(context.WithoutCancel(self.ctx), self.settings.recordTimeout)
 	defer recordCancel()
@@ -353,6 +354,11 @@ func (self *accountMessageDelivery) deliver(message *model.AccountMessage) {
 		}
 		template, err := decodeAccountMessageTemplate(message.TemplateName, message.TemplateJson)
 		if err != nil {
+			// says nothing about the sender
+			return err
+		}
+		// a notice about a network names it as it stands now (QD-1216)
+		if err := nameAccountMessageNetwork(self.ctx, message.NetworkId, template); err != nil {
 			// says nothing about the sender
 			return err
 		}

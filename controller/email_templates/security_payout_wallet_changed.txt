@@ -1,8 +1,9 @@
 {{define "headline"}}PAYOUT WALLET CHANGED{{end}}
-{{define "why"}}Sent to the sign-in email addresses of your URnetwork account
-whenever the wallet its payouts go to changes.{{end}}
+{{define "why"}}Sent to the sign-in email addresses of the owners and billing
+admins of {{.Network}} whenever a wallet its payouts go to
+changes.{{end}}
 {{define "content"}}
-{{if .Several}}The wallets your URnetwork payouts go to were changed.{{else}}The wallet your URnetwork payouts go to was changed.{{end}}
+{{if .Several}}The wallets that the payouts of {{.Network}} go to were changed.{{else}}The wallet that the payouts of {{.Network}} go to was changed.{{end}}
 {{range .Rows}}
 When: {{.When}}
 Wallet: {{.Wallet}}

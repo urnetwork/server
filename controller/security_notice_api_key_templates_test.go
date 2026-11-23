@@ -11,12 +11,13 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-// An API key change of each action: a key created with the website, and a key
-// deleted with another API key.
+// An API key change of each action, in the sample network: a key created with
+// the website, and a key deleted with another API key.
 func securityApiKeyNoticeSample(actions ...string) *SecurityApiKeyChangedTemplate {
 	changeTime := time.Date(2026, 10, 29, 14, 3, 7, 0, time.UTC)
 	keyCreateTime := time.Date(2026, 9, 2, 8, 15, 0, 0, time.UTC)
 	notice := &SecurityApiKeyChangedTemplate{}
+	notice.nameNetwork(securityNoticeSampleNetworkName)
 	for i, action := range actions {
 		change := &model.SecurityApiKeyChange{
 			ChangeTime: changeTime.Add(time.Duration(i) * time.Second),
@@ -42,11 +43,11 @@ func TestSecurityApiKeyNoticeSaysWhatChanged(t *testing.T) {
 		subject  string
 		headline string
 	}{
-		{[]string{model.SecurityApiKeyCreated}, "An API key was created for your URnetwork account", "API KEY CREATED"},
-		{[]string{model.SecurityApiKeyDeleted}, "An API key was deleted from your URnetwork account", "API KEY DELETED"},
-		{[]string{model.SecurityApiKeyCreated, model.SecurityApiKeyCreated}, "API keys were created for your URnetwork account", "API KEYS CREATED"},
-		{[]string{model.SecurityApiKeyDeleted, model.SecurityApiKeyDeleted}, "API keys were deleted from your URnetwork account", "API KEYS DELETED"},
-		{[]string{model.SecurityApiKeyCreated, model.SecurityApiKeyDeleted}, "Your URnetwork API keys were changed", "API KEYS CHANGED"},
+		{[]string{model.SecurityApiKeyCreated}, "An API key was created for your URnetwork network synthetic-sample-network", "API KEY CREATED"},
+		{[]string{model.SecurityApiKeyDeleted}, "An API key was deleted from your URnetwork network synthetic-sample-network", "API KEY DELETED"},
+		{[]string{model.SecurityApiKeyCreated, model.SecurityApiKeyCreated}, "API keys were created for your URnetwork network synthetic-sample-network", "API KEYS CREATED"},
+		{[]string{model.SecurityApiKeyDeleted, model.SecurityApiKeyDeleted}, "API keys were deleted from your URnetwork network synthetic-sample-network", "API KEYS DELETED"},
+		{[]string{model.SecurityApiKeyCreated, model.SecurityApiKeyDeleted}, "The API keys of your URnetwork network synthetic-sample-network were changed", "API KEYS CHANGED"},
 	} {
 		notice := securityApiKeyNoticeSample(c.actions...)
 		subject, bodyHtml, bodyText := securityNoticeText(t, notice)
@@ -58,6 +59,8 @@ func TestSecurityApiKeyNoticeSaysWhatChanged(t *testing.T) {
 			c.subject + ".",
 			"When: October 29, 2026, 14:03:07 UTC",
 			"API key: “deploy-bot”",
+			// the footer says whose addresses it reached, and for which network
+			"of your URnetwork network synthetic-sample-network whenever an API key is created for it or deleted\nfrom it.",
 			securityNoticeContactLine,
 			// the ur.io app's API keys screen (owner decision 2026-10-29)
 			"To see or delete your API keys: https://ur.io/app/account/api-keys\n",
@@ -72,6 +75,7 @@ func TestSecurityApiKeyNoticeSaysWhatChanged(t *testing.T) {
 			"right away.</p>",
 			"October 29, 2026, 14:03:07 UTC",
 			"“deploy-bot”",
+			"Sent to the sign-in email addresses of the owners and admins of your URnetwork network synthetic-sample-network whenever an API key is created for it or deleted from it.",
 			`To see or delete your API keys, open <a class="ur-link" href="https://ur.io/app/account/api-keys"`,
 			`href="` + securityNoticeOtherSessionsUrl + `"`,
 		} {
@@ -82,6 +86,13 @@ func TestSecurityApiKeyNoticeSaysWhatChanged(t *testing.T) {
 		// the API reference is no longer linked
 		if strings.Contains(bodyText, "ur.io/docs") || strings.Contains(bodyHtml, "ur.io/docs") {
 			t.Errorf("%v: the notice still links the API reference", c.actions)
+		}
+		// a key is the network's, so the notice says network where it said
+		// account, which a team's Admin read as its own account (QD-1216)
+		for _, part := range []string{subject, bodyHtml, bodyText} {
+			if strings.Contains(part, "URnetwork account") {
+				t.Errorf("%v: the notice says the key is the account's: %q", c.actions, part)
+			}
 		}
 
 		created, deleted := 0, 0
@@ -107,7 +118,7 @@ func TestSecurityApiKeyNoticeSaysWhatChanged(t *testing.T) {
 			}
 		}
 		// what a key can do, only when one was created
-		const keyPower = "Anyone with an API key can use your URnetwork account until the key is deleted."
+		const keyPower = "Anyone with an API key can use your URnetwork network synthetic-sample-network until the key is deleted."
 		if strings.Contains(bodyText, keyPower) != (0 < created) || strings.Contains(bodyHtml, keyPower) != (0 < created) {
 			t.Errorf("%v: the line on what a key can do is shown %v, want %v", c.actions, strings.Contains(bodyText, keyPower), 0 < created)
 		}
