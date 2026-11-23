@@ -28,12 +28,13 @@
 //     cause REMOVE at a pin covering it (§10.5's event table), and no revoked or removed device may take a delivery of
 //     that generation or a later one
 //   - a late device: one device is cut off from gkm (its requests answered as the lb answers with no upstream) while
-//     the shared repo rotates OfflineRotationCount times and a partial repo is granted to it, every delivery a holder
-//     makes to it in that repo lost meanwhile; once back it catches up: it reads content sealed under the shared repo's
-//     newest generation, which takes the generations it missed (STAGED to it, its ReaderKey standing), and asks late
-//     for the partial repo's, which a writer delivers (§10.6's late wraps); its granting device, the owner, which
-//     signed its admission and the grant and so would deliver at once (DESIGN-DETAILS 6.2.4's may(c)), is away from
-//     gkm meanwhile, so another writer answers, after its LateDeliverJitter
+//     the shared repo rotates OfflineRotationCount times and a partial repo is granted to it, every delivery holders
+//     make to it in that repo lost from then until its own late ask reaches gkm; once back it catches up: it reads
+//     content sealed under the shared repo's newest generation, which takes the generations it missed (STAGED to it,
+//     its ReaderKey standing), and asks late for the partial repo's, which a writer delivers (§10.6's late wraps); its
+//     granting device, the owner, which signed its admission and the grant and so would deliver at once
+//     (DESIGN-DETAILS 6.2.4's may(c)), is away from gkm before it is back and while it is, so another writer answers,
+//     after its LateDeliverJitter
 //   - a device dies mid-delivery: one writer grants another device a partial repo it holds, and is closed while its
 //     own LATE delivery to that device, the granting device's, is in flight, the request lost; the recipient takes
 //     the key from another holder at its late ask
@@ -81,18 +82,36 @@
 // refusal was a revoked caller's or one whose grant had ended. It passed again in e2e-headers-final's run (2026-11-22,
 // 31 s, server e4a38cd64 on sidecar c88a64af).
 //
-// Open, with no fix track queued as this refresh was made: of the nine runs e2e-headers-final made of the case
-// (2026-11-22 and 2026-11-23), three failed, each on one check and each on a different one, on the sidecar before
-// gkm-commit-hint-new-group (c88a64af: one of five) and on it (a83454bd: two of four):
+// Of the nine runs e2e-headers-final made of the case (2026-11-22 and 2026-11-23), three failed, each on one check and
+// each on a different one, on the sidecar before gkm-commit-hint-new-group (c88a64af: one of five) and on it
+// (a83454bd: two of four). e2e-flakes-final (2026-11-23) found each one's cause, two the product's and one the case's:
 //
-//   - the shrink phase (c88a64af): gkm refused 403 a GET of a group's gen/ and of its wraps on tokens from log
-//     positions 15 and 20 whose scopes the callers' states, at 29, still gave them ("an unaccounted refusal"), which no
-//     refusal class of the case's names
-//   - the growth phase's exact rotation race (a83454bd), run beside the joins and the reader grants: in its third
-//     round two rotators, a-1 and a-3, answered ErrGkmWait, "gkm refused a staged delivery", gkm having answered 409 or
-//     403 to one of their staged wraps, where the race holds every rotator to the one generation gkm took
-//   - the late device's phase (a83454bd): the late device took the partial repo's key with no late ask recorded once
-//     it was back, a holder's delivery of the generation landing 2 ms after the case marked it back
+//   - the shrink phase (c88a64af), the product's: gkm refused 403 a GET of a group's gen/ and of its wraps on tokens
+//     from log positions 15 and 20 whose scopes the callers' states, at 29, still gave them ("an unaccounted
+//     refusal"), right after the mid-delivery chaos's restart, gkm's log naming no group for them. gkm resolved a
+//     group by asking the token's repos in order and stopped at the group's owner marker once it was known, so a
+//     marker another request read while this one asked a repo before the group's refused this one, which a restart's
+//     cold caches made likely. Fixed in sidecar's gkmservice: the marker's repo is asked in turn (gkmservice's
+//     TestGkmResolvesAGroupWhoseMarkerAnotherRequestReadMeanwhile). An unaccounted refusal now names the repo of the
+//     group or path it asked for and whether the token scoped it
+//   - the growth phase's exact rotation race (a83454bd), run beside the joins and the reader grants, the product's: in
+//     its third round two rotators, a-1 and a-3, answered ErrGkmWait, "gkm refused a staged delivery". Their staging
+//     began after another rotator's claim of the generation had landed, and gkm takes a STAGED delivery only while
+//     gen/<g> is absent (§10.6), so it answered 409, where §10.7's KF6 races rotations only on gen/<g+1>. Fixed in
+//     sidecar's key client: a rotation reads gen/ at a staging refusal and takes a standing claim as a 412's winner
+//     (TestGkmRotateTakesTheWinnerWhenItsStagingMeetsTheClaim)
+//   - the late device's phase (a83454bd), the case's own timing: the late device took the partial repo's key with no
+//     late ask once it was back. Each writer delivers to a new holder at its own sync of the grant, the granting device
+//     at once and the others at their syncs and pending hints, and the case lifted the cut on the deliveries with the
+//     device's own, so a-2's landed 2 ms after it was back, before it asked. The deliveries now stay lost until the
+//     device's own late ask reaches gkm, which ends that cut as it passes, the granting device is cut off before the
+//     device is back, and an ask counts once it reached gkm, whatever time the recorder stamped on it before its cut
+//     check
+//
+// e2e-flakes-final then ran the case ten times through the wrapper (2026-11-23, server a7e5f4b1f on sidecar c68f00ad,
+// its first run on 2841e9131, the same code): all ten passed, in 28 s to 74 s. In each the late device asked once
+// back and a-2, a writer that is not its granting device, answered 0.6 s to 2.9 s after it was back, and every gkm
+// refusal was a revoked caller's or one whose grant had ended.
 //
 // Each phase has PhaseTimeout and dumps the world's progress when it stalls; the case has the conventions' 10 minutes.
 // Run it through the build's wrapper: -tags 'sidecar_e2e sidecar_pending sidecar_localstack'.
@@ -1575,11 +1594,18 @@ func (self *gkmConcurrencyCase) latePhase() {
 	}
 	partialGroup := self.newestGeneration(partial)
 	sharedBefore := self.newestGeneration(self.shared)
-	// cut off from gkm, and every delivery to it in the partial repo lost while it is
+	// cut off from gkm; and every delivery holders make to it in the partial repo lost from then until its own late ask
+	// reaches gkm once it is back, which ends that cut as it passes: each writer delivers to a new holder at its own
+	// sync of the grant, the granting device at once and the others at their syncs and pending hints (sidecar's
+	// gkm_deliver.go: in KeyDelivery mode each sync answers too), so a cut lifted with the device's own let a delivery
+	// land 2 ms after it was back, before it asked (e2e-headers-final's gkm-new-run2.log)
 	_, removeCut := self.origin.cut("the late device", func(request *gkmConcurrencyRequest) bool {
 		return request.sidecarId == late.sidecarId
 	})
-	lostDeliveries, removeLost := self.origin.cut("the late device's deliveries", func(request *gkmConcurrencyRequest) bool {
+	lateAsk := func(request *gkmConcurrencyRequest) bool {
+		return request.sidecarId == late.sidecarId && request.lateAsk() && partialGroup != nil && request.groupId == partialGroup.groupId
+	}
+	lostDeliveries, removeLost := self.origin.cutUntil("the late device's deliveries", func(request *gkmConcurrencyRequest) bool {
 		if request.kind != gkmConcurrencyRequestDeliver || partialGroup == nil || request.groupId != partialGroup.groupId {
 			return false
 		}
@@ -1594,7 +1620,9 @@ func (self *gkmConcurrencyCase) latePhase() {
 			}
 		}
 		return true
-	})
+	}, lateAsk)
+	// the cut ends at the late ask; should no ask come, it ends with the phase
+	defer removeLost()
 	func() {
 		late.stateLock.Lock()
 		defer late.stateLock.Unlock()
@@ -1627,15 +1655,8 @@ func (self *gkmConcurrencyCase) latePhase() {
 	if lostCount == 0 {
 		self.t.Errorf("the late device's phase: no holder delivered %s's key of %s within %s of its grant, though the granting device delivers at its pending hint", late.name, partial.name, settings.convergenceBound(false))
 	}
-	removeLost()
-	removeCut()
-	func() {
-		late.stateLock.Lock()
-		defer late.stateLock.Unlock()
-		late.cutOff = false
-	}()
-	// and its granting device, the owner, which signed its admission and the grant, away from gkm while it is back, so
-	// its late ask must be answered by another writer, after its late jitter (DeliverLate)
+	// its granting device, the owner, which signed its admission and the grant, away from gkm before it is back and
+	// while it is, so its late ask must be answered by another writer, after its late jitter (DeliverLate)
 	_, removeOwnerCut := self.origin.cut("the granting device", func(request *gkmConcurrencyRequest) bool {
 		return request.sidecarId == self.owner.sidecarId
 	})
@@ -1650,7 +1671,14 @@ func (self *gkmConcurrencyCase) latePhase() {
 		defer self.owner.stateLock.Unlock()
 		self.owner.cutOff = false
 	}()
+	// back: its requests reach gkm from here on, while the deliveries to it stay lost until its own late ask does
 	backAt := time.Now()
+	removeCut()
+	func() {
+		late.stateLock.Lock()
+		defer late.stateLock.Unlock()
+		late.cutOff = false
+	}()
 
 	// it reads what a writer sealed under the shared repo's newest generation since: its read takes the generations it
 	// missed
@@ -1694,14 +1722,16 @@ func (self *gkmConcurrencyCase) latePhase() {
 	if err := self.awaitDeviceKey(ctx, late, partial, settings.convergenceBound(false)); err != nil {
 		self.t.Errorf("the late device's phase: %s's %s: %v", late.name, partial.name, err)
 	}
+	// an ask that reached gkm since the cut began came once it was back: while it was cut off none reached gkm, whatever
+	// time the recorder stamped on it before its cut check
 	asked := false
 	for _, ask := range self.origin.askList() {
-		if ask.sidecarId == late.sidecarId && partialGroup != nil && ask.groupId == partialGroup.groupId && !ask.time.Before(backAt) {
+		if ask.sidecarId == late.sidecarId && partialGroup != nil && ask.groupId == partialGroup.groupId && ask.reached && !ask.time.Before(cutAt) {
 			asked = true
 		}
 	}
 	if !asked {
-		self.t.Errorf("the late device's phase: %s took %s's key with no late ask once back, though every delivery to it was lost", late.name, partial.name)
+		self.t.Errorf("the late device's phase: %s took %s's key with no late ask reaching gkm once back, though every delivery to it was lost until it asked", late.name, partial.name)
 	}
 	for _, delivery := range self.origin.deliveryList() {
 		if delivery.recipient == late.sidecarId && partialGroup != nil && delivery.groupId == partialGroup.groupId && delivery.status == 201 && !delivery.time.Before(backAt) {
@@ -2155,7 +2185,7 @@ func (self *gkmConcurrencyCase) accountRefusals(phase string) {
 		line := fmt.Sprintf("gkm answered %s %d at %s: %s, presented by %s (%s)", request.route, refusal.status, request.time.Format("15:04:05.000"), token, refusal.device, refusal.body)
 		reason := self.refusalReason(request)
 		if reason == "" {
-			self.t.Errorf("%s: an unaccounted refusal: %s", phase, line)
+			self.t.Errorf("%s: an unaccounted refusal: %s, %s", phase, line, self.describeTarget(request))
 			continue
 		}
 		self.stateLock.Lock()
@@ -2209,6 +2239,32 @@ func (self *gkmConcurrencyCase) refusalReason(request *gkmConcurrencyRequest) st
 		break
 	}
 	return ""
+}
+
+// What a refused request asked for, by the case's record: the repo of its path's group, or its path's repo, and whether
+// the token scoped that repo, which tells gkm's refusal of a group its token reaches from one it does not.
+func (self *gkmConcurrencyCase) describeTarget(request *gkmConcurrencyRequest) string {
+	repo := self.repoOfGroup(request.groupId)
+	target := "no repo of the case's"
+	switch {
+	case repo != nil:
+		target = fmt.Sprintf("%s's group %s", repo.name, request.groupId)
+	case request.groupId != (sidecar.Id{}):
+		target = fmt.Sprintf("group %s, of no repo the case knows", request.groupId)
+	case request.repoId != (sidecar.Id{}):
+		repo = self.repoOf(request.repoId)
+		target = fmt.Sprintf("repo %s", self.repoName(request.repoId))
+	}
+	if repo == nil || request.claims == nil {
+		return "asking for " + target
+	}
+	scoped := false
+	for _, part := range strings.Fields(request.claims.Scope) {
+		if repoId, ok := evsConcurrencyScopeRepoId(part); ok && repoId == repo.repoId {
+			scoped = true
+		}
+	}
+	return fmt.Sprintf("asking for %s, which the token scopes: %t", target, scoped)
 }
 
 // A token's scopes, each repo by the case's name.
