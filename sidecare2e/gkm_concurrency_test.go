@@ -18,9 +18,10 @@
 //
 //   - growth and contention: JoinCount new devices enroll and are admitted, one after another; each partial repo is
 //     granted to GrowGrantCount more devices as readers; RotatorCount writers rotate the shared repo at once,
-//     RotationRoundCount rounds, each round one new generation that every rotator returns; and every writer writes
-//     every repo it writes. Nothing here shrinks a holder set, so nothing here may rotate with cause REMOVE, and an
-//     Add keeps the generation (§10.5: a joiner takes a LATE delivery, never a rotation)
+//     RotationRoundCount rounds, each round §10.7's KF6 race on gen/<g+1> from the newest generation g, which every
+//     rotator holds at the release; and every writer writes every repo it writes. Nothing here shrinks a holder set,
+//     so nothing here may rotate with cause REMOVE, and an Add keeps the generation (§10.5: a joiner takes a LATE
+//     delivery, never a rotation)
 //   - shrink and chaos: RevokeCount devices are revoked (SidecarRevoke, reason removed) and each partial repo's
 //     grant to ShrinkRevokeCount writers is revoked (RepoRevoke), while writers write and race rotations of a partial
 //     repo; gkm restarts on its stores twice, once with the next claim of a generation answered and its answer lost
@@ -47,6 +48,13 @@
 //     interval too, since a lost hint costs at most that (§6.8). gkm's late-ask widening (LateAskWidenAge, 15 min) is
 //     past every bound here, so every late ask must be answered by a writer, never by the widened hint
 //   - gkm took one commitment for each generation of each group, and every device holds that one: no fork
+//   - each round of the growth phase's race takes g+1, by one claim, and every rotator that raced for a generation
+//     (staged a delivery of it or claimed it) returns that one, a loser taking its race's winner and rotating no
+//     further (KF6). A generation past g+1 stands only where its claimer raced for nothing below it: a key client runs
+//     one flow of a repo at a time, so a rotator whose client was in another flow of the repo at the release (a late
+//     delivery to a joiner, a hint) begins its rotation once that flow ends, and where the flow took g+1, its
+//     rotation drafts g+2 from it (§10.5's Rotate: the newest generation held, gen/<g*+1> absent). A rotator that
+//     raced for nothing returns a generation the round took, and the phase's generations are exactly the races'
 //   - each shrink rotated: a generation of cause REMOVE at a pin at or past the shrink's entry in every repo the
 //     removed holder read
 //   - every delivery verifies under its signer's admitted identity key, is sealed to a ReaderKey its recipient
@@ -113,6 +121,20 @@
 // back and a-2, a writer that is not its granting device, answered 0.6 s to 2.9 s after it was back, and every gkm
 // refusal was a revoked caller's or one whose grant had ended.
 //
+// e2e-all-rerun (2026-11-23) ran it on server d02ee917d with sidecar f4398d17, where it passed in 26 s, and once more
+// once api-budget-spend-on-create had landed (server b12f5681f, sidecar 8ed5c00a), where the growth phase's race failed
+// on the case's own timing. In its second round, from generation 2, one rotator's claim took 3 while another's key
+// client was in a flow of the shared repo: the gkm block's log holds only two one-delivery batches from it between the
+// release and its staging of 4, a late delivery's shape, as every holder of the repo was sending one then beside the
+// joins. A key client runs one flow of a repo at a time, so that rotator's rotation began once the flow had taken 3,
+// and drafted and claimed 4 from it, as §10.5's Rotate drafts from the newest generation held. The round returned
+// [3 4], and the next, from 4, [4 5]: two rotators whose clients had not taken 4 yet found it standing at their first
+// pass and took it as a 412's winner. Each round now waits until every rotator holds gkm's newest generation before its
+// release, and gkmConcurrencyExactRace holds every rotator that raced for a generation to returning that one, a
+// generation past a round's first standing only where its claimer raced for nothing below it; the phase's generations
+// are exactly the races'. TestE2eGkmConcurrencyExactRaceHoldsEachRotatorToWhatItRacedFor checks each shape a round can
+// take against it (gkm_concurrency_race_check_test.go), a loser that rotates on past its race's winner among them.
+//
 // Each phase has PhaseTimeout and dumps the world's progress when it stalls; the case has the conventions' 10 minutes.
 // Run it through the build's wrapper: -tags 'sidecar_e2e sidecar_pending sidecar_localstack'.
 
@@ -128,6 +150,7 @@ import (
 	"math/rand/v2"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -439,6 +462,8 @@ type gkmConcurrencyCase struct {
 	writeCount      int
 	refusalAccounts map[string]int
 	retryCounts     map[string]int
+	// how many generations of each repo the exact races' rounds took (raceRotations), nil until one ran
+	repoRaceGenerationCounts map[*gkmConcurrencyRepo]int
 	// every acknowledged write
 	written []*gkmConcurrencyWrite
 }
@@ -1213,8 +1238,9 @@ func (self *gkmConcurrencyCase) awaitDeviceKey(ctx context.Context, device *gkmC
 }
 
 // RotatorCount devices rotate repo at once, released together: every rotator returns a generation gkm took, its key
-// that generation's, and where nothing else may rotate meanwhile (exact), every rotator returns the one generation
-// past the newest before the round.
+// that generation's. Where nothing else may rotate meanwhile (exact), the round is §10.7's KF6 race on gen/<g+1> from
+// gkm's newest generation g, which every rotator holds at the release, and gkmConcurrencyExactRace checks it; the
+// generations it took count toward the phase's (repoRaceGenerationCounts).
 func (self *gkmConcurrencyCase) raceRotations(ctx context.Context, repo *gkmConcurrencyRepo, rotators []*gkmConcurrencyDevice, exact bool) error {
 	// every rotator first follows the log to the newest position the owner holds, so a round races rotations rather
 	// than followers
@@ -1224,6 +1250,19 @@ func (self *gkmConcurrencyCase) raceRotations(ctx context.Context, repo *gkmConc
 	}
 	if err := gkmConcurrencySync(ctx, self.world, self.network, gkmConcurrencyStateVersion(self.owner.device), devices, self.settings.SyncTimeout); err != nil {
 		return fmt.Errorf("the rotators of %s did not follow the log before their round: %w", repo.name, err)
+	}
+	if exact {
+		// and holds gkm's newest generation of repo, so every rotation of the round drafts from that one: a key client
+		// the last round's hint had not reached yet would find it standing past its own and take it as a 412's winner,
+		// racing for nothing
+		for _, rotator := range rotators {
+			if newest := self.newestGeneration(repo); newest == nil || self.holdsNewest(ctx, rotator, repo, newest) == "" {
+				continue
+			}
+			if err := self.awaitDeviceKey(ctx, rotator, repo, self.settings.convergenceBound(false)); err != nil {
+				return fmt.Errorf("%s did not hold %s's newest generation before its round: %w", rotator.name, repo.name, err)
+			}
+		}
 	}
 	before := self.newestGeneration(repo)
 	release := make(chan struct{})
@@ -1236,11 +1275,14 @@ func (self *gkmConcurrencyCase) raceRotations(ctx context.Context, repo *gkmConc
 			keys[index], errs[index] = rotator.device.Gkm.RotateRepo(ctx, repo.repoId)
 		})
 	}
+	released := time.Now()
 	close(release)
 	group.Wait()
 	generations, _ := gkmConcurrencyGenerations(self.origin.claimList(), self.origin.formList())
 	problems := []string{}
 	returned := map[uint64][]byte{}
+	// each rotator's generation as the exact race reads it, 0 where it returned none the race counts
+	returnedGenerations := make([]uint64, len(rotators))
 	for index, rotator := range rotators {
 		if errs[index] != nil {
 			if !self.writesAt(repo, rotator, math.MaxUint64) || self.removalFiled(repo, rotator) {
@@ -1273,20 +1315,175 @@ func (self *gkmConcurrencyCase) raceRotations(ctx context.Context, repo *gkmConc
 			problems = append(problems, fmt.Sprintf("two rotators of %s returned generation %d under different commitments", repo.name, key.Generation()))
 		}
 		returned[key.Generation()] = key.Commitment()
+		if exact && before != nil && key.GroupId() != before.groupId {
+			problems = append(problems, fmt.Sprintf("%s's rotation returned generation %d of %s in group %s, not the race's group %s", rotator.name, key.Generation(), repo.name, key.GroupId(), before.groupId))
+			continue
+		}
+		returnedGenerations[index] = key.Generation()
 	}
-	if exact && before != nil && len(problems) == 0 {
-		want := before.rotate.GetGeneration() + 1
-		if len(returned) != 1 || returned[want] == nil {
-			problems = append(problems, fmt.Sprintf("the race on %s from generation %d returned generations %v, not %d alone", repo.name, before.rotate.GetGeneration(), slices.Sorted(maps.Keys(returned)), want))
+	if exact && before != nil {
+		round := &gkmConcurrencyExactRound{
+			repoName: repo.name, before: before, released: released, rotators: rotators, returnedGenerations: returnedGenerations,
+			generations: generations[before.groupId], claims: self.origin.claimList(), deliveries: self.origin.deliveryList(),
 		}
-		if newest := self.newestGeneration(repo); newest == nil || newest.rotate.GetGeneration() != want {
-			problems = append(problems, fmt.Sprintf("the race on %s left gkm's newest generation past %d", repo.name, want))
+		if newest := self.newestGeneration(repo); newest != nil && newest.groupId == before.groupId {
+			round.newest = newest.rotate.GetGeneration()
 		}
+		raceProblems, took, lates := gkmConcurrencyExactRace(round)
+		self.addRaceGenerations(repo, took)
+		for _, late := range lates {
+			self.t.Logf("%s", late)
+		}
+		problems = append(problems, raceProblems...)
 	}
 	if 0 < len(problems) {
 		return errors.New(strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+// One round of an exact race as raceRotations saw it, for gkmConcurrencyExactRace.
+type gkmConcurrencyExactRound struct {
+	repoName string
+	// gkm's newest generation of the repo at the release, which every rotator held
+	before *gkmConcurrencyGeneration
+	// just before the rotators were released: every request of the round reached gkm's origin at or after it
+	released time.Time
+	rotators []*gkmConcurrencyDevice
+	// each rotator's returned generation, 0 where it returned none the race counts (an error raceRotations accounted
+	// for, or a generation it already refused)
+	returnedGenerations []uint64
+	// the race's group's generations gkm took, by generation, and the newest after the round, 0 for none in the group
+	generations map[uint64]*gkmConcurrencyGeneration
+	newest      uint64
+	// every claim and delivery the recorder kept
+	claims     []*gkmConcurrencyClaim
+	deliveries []*gkmConcurrencyDelivery
+}
+
+// §10.7's KF6 over one round of an exact race from generation g (raceRotations): rotations race only on gen/<g+1>, and
+// the 409 or 412 loser takes the winner. What each rotator raced for is the lowest generation it staged a STAGED
+// delivery of or claimed, in the race's group, from the release on (the recorder's claims and deliveries). Every
+// rotator that raced for a generation returns that one: a loser takes its race's winner and rotates no further. The
+// round's generations are g+1 on, each one a rotator's claim of the round naming the one below as its parent, and
+// gkm's newest is the last. A generation past g+1 stands only where its claimer raced for nothing below it: a key
+// client runs one flow of a repo at a time (sidecar's gkmGroupManager.flowLock), so a rotator whose client was in
+// another flow of the repo at the release, a late delivery to a joiner or a hint, begins its rotation once that flow
+// ends, and where the flow took g+1, the rotation drafts g+2 from it, since §10.5's Rotate drafts from the newest
+// generation held (its pre: gen/<g*+1> absent); each such rotation answers a line. A rotator that raced for nothing
+// returns a generation the round took: it found one standing past its own at its first pass and took it as a 412's
+// winner. Answers the problems, how many generations the round took and the lines.
+func gkmConcurrencyExactRace(round *gkmConcurrencyExactRound) ([]string, int, []string) {
+	groupId := round.before.groupId
+	g := round.before.rotate.GetGeneration()
+	rotatorOf := map[sidecar.Id]*gkmConcurrencyDevice{}
+	for _, rotator := range round.rotators {
+		rotatorOf[rotator.sidecarId] = rotator
+	}
+	nameOf := func(sidecarId sidecar.Id) string {
+		if rotator := rotatorOf[sidecarId]; rotator != nil {
+			return rotator.name
+		}
+		return "sidecar " + sidecarId.String()
+	}
+	racedGenerations := map[sidecar.Id]uint64{}
+	race := func(sidecarId sidecar.Id, generation uint64) {
+		if held, ok := racedGenerations[sidecarId]; !ok || generation < held {
+			racedGenerations[sidecarId] = generation
+		}
+	}
+	for _, claim := range round.claims {
+		if claim.groupId == groupId && !claim.time.Before(round.released) && claim.rotate != nil {
+			race(claim.uploader, claim.rotate.GetGeneration())
+		}
+	}
+	for _, delivery := range round.deliveries {
+		if delivery.groupId == groupId && !delivery.time.Before(round.released) && delivery.body != nil &&
+			sidecar.GkmDeliveryKind(delivery.body.GetDeliveryKind()) == sidecar.GkmDeliveryStaged {
+			race(delivery.uploader, delivery.generation)
+		}
+	}
+
+	problems := []string{}
+	lates := []string{}
+	took := 0
+	below := round.before
+	for {
+		next := round.generations[below.rotate.GetGeneration()+1]
+		if next == nil {
+			break
+		}
+		generation := next.rotate.GetGeneration()
+		switch {
+		case rotatorOf[next.signerId] == nil || next.time.Before(round.released):
+			problems = append(problems, fmt.Sprintf("the race on %s from generation %d: gkm took generation %d from %s at %s, no rotator's claim of the round", round.repoName, g, generation, nameOf(next.signerId), next.time.Format("15:04:05.000")))
+		case !bytes.Equal(next.rotate.GetParentCommitment(), below.rotate.GetCommitment()):
+			problems = append(problems, fmt.Sprintf("the race on %s from generation %d: generation %d names a parent other than generation %d", round.repoName, g, generation, below.rotate.GetGeneration()))
+		case g+1 < generation:
+			switch racedGeneration, ok := racedGenerations[next.signerId]; {
+			case !ok:
+				problems = append(problems, fmt.Sprintf("the race on %s from generation %d took generation %d from %s, whose claim the recorder kept under no uploader of the round", round.repoName, g, generation, nameOf(next.signerId)))
+			case racedGeneration != generation:
+				problems = append(problems, fmt.Sprintf("the race on %s from generation %d took generation %d from %s, which raced for generation %d first: a rotation going on past its race's winner", round.repoName, g, generation, nameOf(next.signerId), racedGeneration))
+			default:
+				lates = append(lates, fmt.Sprintf("the race on %s from generation %d: %s raced for nothing below generation %d, its rotation beginning once its key client held %d, and gkm took it at %s", round.repoName, g, nameOf(next.signerId), generation, generation-1, next.time.Format("15:04:05.000")))
+			}
+		}
+		took += 1
+		below = next
+	}
+	if took == 0 {
+		problems = append(problems, fmt.Sprintf("the race on %s from generation %d took no generation", round.repoName, g))
+	}
+	if round.newest != g+uint64(took) {
+		problems = append(problems, fmt.Sprintf("the race on %s left gkm's newest generation at %d, where its rotators' claims of the round took it to %d", round.repoName, round.newest, g+uint64(took)))
+	}
+	for index, rotator := range round.rotators {
+		generation := round.returnedGenerations[index]
+		if generation == 0 {
+			continue
+		}
+		racedGeneration, raced := racedGenerations[rotator.sidecarId]
+		switch {
+		case raced && generation != racedGeneration:
+			problems = append(problems, fmt.Sprintf("%s raced for %s's generation %d and returned %d, where a loser takes its race's winner and rotates no further (§10.7's KF6)", rotator.name, round.repoName, racedGeneration, generation))
+		case !raced && (generation <= g || g+uint64(took) < generation):
+			problems = append(problems, fmt.Sprintf("%s raced for nothing and returned %s's generation %d, which the race from %d did not take", rotator.name, round.repoName, generation, g))
+		}
+	}
+	if 0 < len(problems) {
+		// what each rotator raced for and returned, for the report
+		lines := []string{}
+		for index, rotator := range round.rotators {
+			racedText, returnedText := "nothing", "none"
+			if racedGeneration, ok := racedGenerations[rotator.sidecarId]; ok {
+				racedText = strconv.FormatUint(racedGeneration, 10)
+			}
+			if generation := round.returnedGenerations[index]; generation != 0 {
+				returnedText = strconv.FormatUint(generation, 10)
+			}
+			lines = append(lines, fmt.Sprintf("%s raced for %s and returned %s", rotator.name, racedText, returnedText))
+		}
+		problems = append(problems, fmt.Sprintf("the race on %s from generation %d: %s", round.repoName, g, strings.Join(lines, ", ")))
+	}
+	return problems, took, lates
+}
+
+// Keeps how many generations of repo an exact race's round took.
+func (self *gkmConcurrencyCase) addRaceGenerations(repo *gkmConcurrencyRepo, count int) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if self.repoRaceGenerationCounts == nil {
+		self.repoRaceGenerationCounts = map[*gkmConcurrencyRepo]int{}
+	}
+	self.repoRaceGenerationCounts[repo] += count
+}
+
+// How many generations of repo the exact races' rounds took.
+func (self *gkmConcurrencyCase) raceGenerationCount(repo *gkmConcurrencyRepo) int {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.repoRaceGenerationCounts[repo]
 }
 
 // A burst that never ends at a step's failure: each failure is kept in the burst's errors and the next step runs, so
@@ -1424,10 +1621,9 @@ func (self *gkmConcurrencyCase) growthPhase() {
 		}
 	}
 	for _, repo := range self.repoList() {
-		want := before[repo]
-		if repo == self.shared {
-			want += uint64(settings.RotationRoundCount)
-		}
+		// the races' generations: one a round, and one more for each rotation that began from the round's generation
+		// (gkmConcurrencyExactRace), each a rotator's claim of its round
+		want := before[repo] + uint64(self.raceGenerationCount(repo))
 		if newest := self.newestGeneration(repo); newest == nil || newest.rotate.GetGeneration() != want {
 			self.t.Errorf("the growth phase moved %s from generation %d to %s, not to %d: an admission or a grant rotated", repo.name, before[repo], describeGkmConcurrencyGeneration(newest), want)
 		}
