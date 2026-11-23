@@ -8,7 +8,8 @@ package sidecart3
 //	                AddSidecarsWith (world_networks.go) enrolls a member's own devices under that member's credential,
 //	                or tagged devices under a tag owner's; and Follow has devices a test admitted by statements of
 //	                its own trust the genesis and follow the log, as Admit's second half does
-//	retired devices a device revoked, or whose member left, follows nothing more, so Retire takes it out of every Sync
+//	retired devices a device revoked, or whose member left, follows nothing more, so Retire takes it out of every Sync,
+//	                a wait one already has on it included
 //	device restart  T3Device.Restart ends a device's Sidecar and its instance, as a crash or a host restart ends a
 //	                daemon, and starts a new one on the same store and key store (T3Sidecar.Restart), with new key and
 //	                evs clients and a follower from its kept anchor
@@ -112,15 +113,21 @@ func (self *T3Network) Follow(ctx context.Context, devices []*T3Device) error {
 	return self.Sync(ctx, tip)
 }
 
-// Takes device out of every Sync from now on: a revoked device, or one whose member left, follows nothing more. It
-// keeps running until the world closes or the test closes it.
+// Takes device out of every Sync from now on, ending a wait a Sync has on it already: a revoked device, or one whose
+// member left, follows nothing more. It keeps running until the world closes or the test closes it.
 func (self *T3Network) Retire(device *T3Device) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
+	if self.retired[device] {
+		return
+	}
 	if self.retired == nil {
 		self.retired = map[*T3Device]bool{}
 	}
 	self.retired[device] = true
+	if retirement, ok := self.retirements[device]; ok {
+		close(retirement)
+	}
 }
 
 // Whether Retire took device out of the syncs.

@@ -837,6 +837,34 @@ type T3Network struct {
 	genesis   *[sha256.Size]byte
 	// the devices Sync no longer waits on (Retire)
 	retired map[*T3Device]bool
+	// each device's retirement as a Sync waiting on it reads it, closed once Retire takes it out of the syncs
+	retirements map[*T3Device]chan struct{}
+	// a test's look at each wait of Sync's, called just before it waits on device; nil for none
+	syncWaiting func(device *T3Device)
+}
+
+// What a Sync waiting on device reads: the channel Retire closes, closed already for a retired device, and the test's
+// look at the wait.
+func (self *T3Network) syncRetirement(device *T3Device) (<-chan struct{}, func(device *T3Device)) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.retirementWithLock(device), self.syncWaiting
+}
+
+// device's retirement channel, made at the first ask: closed once Retire took it out of the syncs.
+func (self *T3Network) retirementWithLock(device *T3Device) chan struct{} {
+	if self.retirements == nil {
+		self.retirements = map[*T3Device]chan struct{}{}
+	}
+	retirement, ok := self.retirements[device]
+	if !ok {
+		retirement = make(chan struct{})
+		if self.retired[device] {
+			close(retirement)
+		}
+		self.retirements[device] = retirement
+	}
+	return retirement
 }
 
 // The network's owner member: its owner user in a personal network (§7.5), a team's first Owner's member_id.
@@ -1244,7 +1272,9 @@ func (self *T3Network) Admit(ctx context.Context, devices []*T3Device) error {
 }
 
 // Waits until every gate of the world and every following device of the network hold its log at version or past
-// it, so each key client holds the state there (SidecarConfigFollowerArgs.Gkm). A retired device is not waited on.
+// it, so each key client holds the state there (SidecarConfigFollowerArgs.Gkm). A retired device is not waited on,
+// and a wait on a device ends once Retire takes it out of the syncs: a member removed while another statement's sync
+// waits on its device follows nothing more, since api's denial deactivates its client at once.
 func (self *T3Network) Sync(ctx context.Context, version uint64) error {
 	if err := self.world.SyncGates(ctx, self.NetworkId, version); err != nil {
 		return err
@@ -1253,10 +1283,38 @@ func (self *T3Network) Sync(ctx context.Context, version uint64) error {
 	defer cancel()
 	for _, device := range self.Devices() {
 		follower := device.Follower()
-		if follower == nil || self.Retired(device) {
+		if follower == nil {
 			continue
 		}
-		if _, err := follower.Client().WaitFor(ctx, version); err != nil {
+		retirement, waiting := self.syncRetirement(device)
+		select {
+		case <-retirement:
+			continue
+		default:
+		}
+		if waiting != nil {
+			waiting(device)
+		}
+		err := func() error {
+			waitCtx, waitCancel := context.WithCancel(ctx)
+			defer waitCancel()
+			go func() {
+				select {
+				case <-retirement:
+					waitCancel()
+				case <-waitCtx.Done():
+				}
+			}()
+			_, err := follower.Client().WaitFor(waitCtx, version)
+			return err
+		}()
+		if err != nil {
+			select {
+			case <-retirement:
+				// taken out of the syncs while this one waited on it
+				continue
+			default:
+			}
 			return fmt.Errorf("%s did not follow %s's log to %d: %w", device.Name, self.Name, version, err)
 		}
 	}

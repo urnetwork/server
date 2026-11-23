@@ -13,14 +13,22 @@ package model
 //	        write before the commit would void a removal that then rolled back
 //	write   GET the key; none: PUT If-None-Match; an object at or past this
 //	        not_before: done; an earlier one: PUT If-Match its ETag to raise
-//	        not_before, never lower it. A 412 or an unknown outcome reads again
+//	        not_before, never lower it. A 412 or an unknown outcome reads again,
+//	        and a read that finds this write's own bytes after an unknown outcome
+//	        is its create or raise landed, its answer lost
 //	sweep   LIST rev/ and DELETE each object whose last write is 20 minutes old,
 //	        HEADing it again just before, so a raise that landed since the LIST
 //	        stays
 //
 // rev/ writes are P0, never queued or shed (§11.13): with a write budget
-// installed (SetWriteBudget) each PUT is issued to it as P0 of kind revocation,
-// which never waits or refuses, and either way its bytes are counted. Holds no
+// installed (SetWriteBudget) each PUT carries P0, and each create or raise is
+// spent once as P0 of kind revocation, which never waits or refuses, once the
+// store shows it took effect (api_write_spend.go): a 412 and a PUT a read shows
+// never landed spend nothing, and one whose outcome stays unknown is spent as
+// issued, once. An object this write made keeps a not_before at or past its own
+// until the sweep, since no writer lowers one, so after an unknown outcome a
+// read that finds no object, or another's at or below this not_before, shows
+// the PUT never landed. Either way the bytes sent are counted. Holds no
 // Postgres connection across store I/O.
 //
 // What a removal owes is the rows that record it, network_client.deactivate_time
@@ -41,7 +49,6 @@ import (
 	"fmt"
 	"io"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -86,6 +93,20 @@ type SidecarRevSettings struct {
 	// Pages one sweep reads before it stops: the next sweep starts over, and
 	// objects deleted shrink the list it reads.
 	SweepPageLimit int
+	// The most bytes of a standing object a write reads before it compares
+	// not_before: the format's bound, sidecar.RevocationObjectMaxByteCount,
+	// which only a format change moves, since a write that reads less than an
+	// object holds replaces it and could lower its not_before. Non-positive
+	// refuses every write.
+	ObjectMaxByteCount int
+	// How many writes whose PUT's outcome stayed unknown, the read after it
+	// failing too, the writer remembers by key: each is spent as issued, once,
+	// and the write of its key that settles it spends nothing more
+	// (api_write_spend.go). Past it such a PUT is spent and not remembered, so
+	// the write that settles it spends again, one object over. 1,024: each needs
+	// the store to fail both a PUT and the read after it. Non-positive
+	// remembers none.
+	UnsettledWriteCount int
 	// The clock writes and the sweep read. nil is real time.
 	Clock sidecar.Clock
 }
@@ -102,6 +123,8 @@ func DefaultSidecarRevSettings() *SidecarRevSettings {
 		SweepMaxTime:             5 * time.Minute,
 		SweepPageCount:           1000,
 		SweepPageLimit:           100,
+		ObjectMaxByteCount:       sidecar.RevocationObjectMaxByteCount,
+		UnsettledWriteCount:      1024,
 	}
 }
 
@@ -109,7 +132,7 @@ var sidecarRevWriteCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "urnetwork",
 	Subsystem: "sidecar_rev",
 	Name:      "writes_total",
-	Help:      "rev/ object writes by outcome (§7.8): created, raised, current (an object at or past this not_before stood), failed",
+	Help:      "rev/ object writes by outcome (§7.8): created and raised, each create or raise that took effect, a lost answer's once a read finds its bytes; current (an object at or past this not_before stood); failed",
 }, []string{"outcome"})
 
 var sidecarRevP0ByteCounter = prometheus.NewCounter(prometheus.CounterOpts{
@@ -158,12 +181,8 @@ type SidecarRevStore struct {
 	sign     func(payload []byte) ([]byte, error)
 	settings *SidecarRevSettings
 	clock    sidecar.Clock
-
-	stateLock sync.Mutex
-	// the process's write budget, nil for none, and how it prices an object's
-	// create (§11.13's cost rows)
-	budget sidecar.WriteBudget
-	price  func(objectByteCount int64) int64
+	// the process's write budget's spend, P0 of kind revocation
+	spend *apiWriteSpend
 }
 
 // A writer on cluster, signing each object's payload with sign
@@ -181,35 +200,16 @@ func NewSidecarRevStore(cluster sidecar.BlobCluster, sign func(payload []byte) (
 		sign:     sign,
 		settings: settings,
 		clock:    clock,
+		spend:    newApiWriteSpend(cluster, sidecar.WriteP0KindRevocation, settings.UnsettledWriteCount),
 	}
 }
 
-// Issues every rev/ write to budget before it is sent, as P0 of kind
-// revocation, priced by price. OPS installs the process's budget with its first
-// metadata cluster. nil removes it.
+// Spends every rev/ create and raise that takes effect from budget, as P0 of
+// kind revocation, priced by price, and passes every PUT through it as P0 (see
+// the file header). OPS installs the process's budget with its first metadata
+// cluster. nil removes it.
 func (self *SidecarRevStore) SetWriteBudget(budget sidecar.WriteBudget, price func(objectByteCount int64) int64) {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	self.budget, self.price = budget, price
-}
-
-// ctx for one PUT of byteCount bytes: counted, and issued to the budget as P0
-// when one is installed.
-func (self *SidecarRevStore) issueP0(ctx context.Context, byteCount int) context.Context {
-	sidecarRevP0ByteCounter.Add(float64(byteCount))
-	budget, price := func() (sidecar.WriteBudget, func(int64) int64) {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		return self.budget, self.price
-	}()
-	if budget == nil {
-		return ctx
-	}
-	pricedByteCount := int64(byteCount)
-	if price != nil {
-		pricedByteCount = price(int64(byteCount))
-	}
-	return budget.IssueP0(ctx, self.cluster.ClusterId(), sidecar.WriteP0KindRevocation, pricedByteCount)
+	self.spend.setBudget(budget, price)
 }
 
 // The API issuer's writer or taskworker's expiry sweep on the process's own
@@ -253,29 +253,67 @@ var Testing_SidecarRevBeforePut func(key string)
 
 // Lands one object at or past revocation's not_before: creates it, raises it,
 // or finds it already there. An error leaves the outcome to the caller's retry,
-// which reads again.
+// which reads again. Each create or raise that took effect is spent once and
+// counted (see the file header).
 func (self *SidecarRevStore) Write(ctx context.Context, revocation *SidecarRevocation) error {
 	if self.sign == nil {
 		return errors.New("revocations are signed by the API issuer")
 	}
+	if self.settings.ObjectMaxByteCount <= 0 {
+		// a write that cannot read the standing object could lower its not_before
+		return errors.New("rev/ writes need a positive ObjectMaxByteCount")
+	}
 	key := revocation.key()
 	notBefore := sidecar.RevocationNotBefore(revocation.NotBefore)
+	// an object this write made keeps a not_before at or past its own until the
+	// sweep, 20 minutes on, since no writer lowers one: no object, or another's
+	// at or below this not_before, is a PUT of this write that never landed
+	neverLanded := func(found bool, body []byte, etag string) bool {
+		if !found {
+			return true
+		}
+		held, ok := sidecarRevHeldRecord(body)
+		return ok && !held.NotBefore.After(notBefore)
+	}
+	// this write's last PUT whose outcome was unknown, until a read settles it
+	var unknownPut *apiWrite
+	failed := func(err error) error {
+		if unknownPut != nil {
+			// no read told: spent as issued, once, for the write that settles it
+			self.spend.spendUnsettled(ctx, key, unknownPut)
+		}
+		sidecarRevWriteCounter.WithLabelValues("failed").Inc()
+		return err
+	}
 	for attempt := 0; attempt < self.settings.WriteAttemptCount; attempt += 1 {
+		found := false
+		var body []byte
 		var etag string
 		object, err := self.cluster.Get(ctx, key)
 		switch {
 		case errors.Is(err, sidecar.ErrBlobNotFound):
 		case err != nil:
-			sidecarRevWriteCounter.WithLabelValues("failed").Inc()
-			return err
+			return failed(err)
 		default:
-			body, readErr := io.ReadAll(io.LimitReader(object.Body, sidecar.RevocationObjectMaxByteCount+1))
+			body, err = io.ReadAll(io.LimitReader(object.Body, int64(self.settings.ObjectMaxByteCount)+1))
 			object.Body.Close()
-			if readErr != nil {
-				sidecarRevWriteCounter.WithLabelValues("failed").Inc()
-				return readErr
+			if err != nil {
+				return failed(err)
 			}
-			etag = object.Etag
+			found, etag = true, object.Etag
+		}
+		writeLanded, unsettledLanded := self.spend.settleRead(ctx, key, unknownPut, found, body, etag)
+		if unsettledLanded != nil {
+			// an earlier write's PUT, spent as issued, landed: its outcome is known now
+			sidecarRevWriteCounter.WithLabelValues(unsettledLanded.outcome).Inc()
+		}
+		if writeLanded {
+			// this write's PUT landed and its answer was lost
+			sidecarRevWriteCounter.WithLabelValues(unknownPut.outcome).Inc()
+			return nil
+		}
+		unknownPut = nil
+		if found {
 			if held, ok := sidecarRevHeldRecord(body); ok && !held.NotBefore.Before(notBefore) {
 				// never lowered: an object at or past this not_before voids at least as much
 				sidecarRevWriteCounter.WithLabelValues("current").Inc()
@@ -296,38 +334,40 @@ func (self *SidecarRevStore) Write(ctx context.Context, revocation *SidecarRevoc
 		}
 		signed, err := self.sign(payload)
 		if err != nil {
-			sidecarRevWriteCounter.WithLabelValues("failed").Inc()
-			return err
+			return failed(err)
 		}
 		if Testing_SidecarRevBeforePut != nil {
 			Testing_SidecarRevBeforePut(key)
 		}
-		putCtx := self.issueP0(ctx, len(signed))
-		if etag == "" {
+		sidecarRevP0ByteCounter.Add(float64(len(signed)))
+		putCtx := self.spend.p0Context(ctx)
+		outcome := "created"
+		if !found {
 			_, err = self.cluster.PutIfNoneMatch(putCtx, key, signed, nil)
 		} else {
+			outcome = "raised"
 			_, err = self.cluster.PutIfMatch(putCtx, key, etag, signed, nil)
 		}
 		var unknown *sidecar.BlobUnknownError
 		switch {
 		case err == nil:
-			if etag == "" {
-				sidecarRevWriteCounter.WithLabelValues("created").Inc()
-			} else {
-				sidecarRevWriteCounter.WithLabelValues("raised").Inc()
-			}
+			self.spend.spendWritten(ctx, key, len(signed))
+			sidecarRevWriteCounter.WithLabelValues(outcome).Inc()
 			return nil
-		case errors.Is(err, sidecar.ErrBlobPrecondition), errors.As(err, &unknown):
-			// another writer moved the key, or this PUT may have landed: the
-			// next read decides (§11.8's unknown row, D-OPS-20)
+		case errors.Is(err, sidecar.ErrBlobPrecondition):
+			// another writer moved the key first: this PUT wrote nothing and
+			// spends nothing, and the next read decides
+			continue
+		case errors.As(err, &unknown):
+			// this PUT may have landed: the next read decides (§11.8's unknown
+			// row, D-OPS-20)
+			unknownPut = newApiWrite(signed, outcome, neverLanded)
 			continue
 		default:
-			sidecarRevWriteCounter.WithLabelValues("failed").Inc()
-			return err
+			return failed(err)
 		}
 	}
-	sidecarRevWriteCounter.WithLabelValues("failed").Inc()
-	return fmt.Errorf("rev/ write did not land in %d attempts", self.settings.WriteAttemptCount)
+	return failed(fmt.Errorf("rev/ write did not land in %d attempts", self.settings.WriteAttemptCount))
 }
 
 // Deletes every object whose last write is DeleteAfter old, reading at most

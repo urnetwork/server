@@ -24,8 +24,8 @@
 //	          owner of record with no member_id (QD-1194), so it outlives its sponsor's membership; and an Owner's
 //	          device signs its SidecarAdmit with that tag id
 //	removal   POST /network/member-remove denies a member at api at once (its row, its untagged clients, its rev/
-//	          object), and an admin device signs its MemberRevoke (§7.10); a device revoked, or whose member left, is
-//	          retired from the network's syncs
+//	          object), and an admin device signs its MemberRevoke (§7.10); a device revoked, or whose member leaves, is
+//	          retired from the network's syncs first, before api's denial, and a sync already waiting on it stops
 //
 // What a person's credential is, the world signs with session's fixture signer, as its owners' credentials are
 // (world_owner_sign_test.go): a network credential naming the person's user, and in the team their member_id, as POST
@@ -781,8 +781,13 @@ func WorldAdmitTagged(ctx context.Context, network *sidecart3.T3Network, admin *
 }
 
 // remover, an Owner or Admin, removes member at api (DenyMember), then admin, an admin's device, signs its MemberRevoke
-// (RevokeMember). The MemberRevoke's pin.
+// (RevokeMember). The member's devices are retired from the syncs before the denial, which deactivates their clients
+// at api at once, so that a statement another burst files meanwhile never waits on a device that follows nothing more.
+// The MemberRevoke's pin.
 func (self *WorldTeam) RemoveMember(ctx context.Context, remover *WorldTeamMember, admin *sidecart3.T3Device, member *WorldTeamMember) (*bridge.AuthPin, error) {
+	for _, device := range member.Devices() {
+		self.Retire(device)
+	}
 	if err := self.DenyMember(ctx, remover, member); err != nil {
 		return nil, err
 	}
