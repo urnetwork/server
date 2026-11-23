@@ -153,7 +153,8 @@
 //     which api-budget-spend-on-create, queued, fixes
 //
 // On every fix, e2e-headers-final's run passed (2026-11-23, 276 s, server 9d7022daa on sidecar c88a64af), api's P0
-// exactly the price of the 89 log objects and 4 rev/ objects it wrote.
+// exactly the price of the 89 log objects and 4 rev/ objects it wrote, and passed again once mail-group-hint-watch
+// had landed (239 s, server 34d3472f2 on sidecar a30407d9), api's P0 exactly that of its 110 log and 4 rev/ objects.
 //
 // In two of e2e-control-plane-verify's runs api restarted after bases a later device signed, the team's second Owner
 // device's in both and b's second, third and fourth devices' in one, and every network loaded at api's gate and
