@@ -151,7 +151,8 @@ func TestCreateApiKeyRefusesNameTheColumnCannotStore(t *testing.T) {
 			return
 		}
 
-		tooLongMessage := fmt.Sprintf("Name is too long (limit %d characters).", MaxApiKeyNameLength)
+		nameMaxLength := DefaultAccountApiKeySettings().NameMaxLength
+		tooLongMessage := fmt.Sprintf("Name is too long (limit %d characters).", nameMaxLength)
 		for _, c := range []struct {
 			name    string
 			keyName string
@@ -159,12 +160,12 @@ func TestCreateApiKeyRefusesNameTheColumnCannotStore(t *testing.T) {
 		}{
 			{
 				name:    "129 ascii characters",
-				keyName: strings.Repeat("n", MaxApiKeyNameLength+1),
+				keyName: strings.Repeat("n", nameMaxLength+1),
 				message: tooLongMessage,
 			},
 			{
 				name:    "129 two-byte characters",
-				keyName: strings.Repeat("é", MaxApiKeyNameLength+1),
+				keyName: strings.Repeat("é", nameMaxLength+1),
 				message: tooLongMessage,
 			},
 			{
@@ -201,7 +202,7 @@ func TestCreateApiKeyRefusesNameTheColumnCannotStore(t *testing.T) {
 		connect.AssertEqual(t, apiKeyCount(), 0)
 
 		// the longest name the column stores, in two-byte characters
-		longestName := strings.Repeat("é", MaxApiKeyNameLength)
+		longestName := strings.Repeat("é", nameMaxLength)
 		userSession := session.Testing_CreateClientSession(ctx, byJwt)
 		result, err := CreateApiKey(&CreateApiKeyArgs{Name: longestName}, userSession)
 		connect.AssertEqual(t, err, nil)
@@ -232,7 +233,7 @@ func TestApiKeyNameLimitMatchesColumn(t *testing.T) {
 				`,
 			).Scan(&columnLength))
 		})
-		connect.AssertEqual(t, columnLength, MaxApiKeyNameLength)
+		connect.AssertEqual(t, columnLength, DefaultAccountApiKeySettings().NameMaxLength)
 	})
 }
 

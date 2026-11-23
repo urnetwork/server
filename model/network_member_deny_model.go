@@ -8,11 +8,9 @@ package model
 //
 //	row      the member's network_member row is deleted in the caller's
 //	         transaction, so every credential naming its member_id stops at
-//	         once: its network and admin tokens, and the reach of the API keys
-//	         and OAuth clients it created, which is their scopes ∩ a role it no
-//	         longer holds (TEAM-M6-02, TEAM-M6-03); an API key names its
-//	         creator by user, so a re-join's new role reaches it again
-//	         (questions/member-removal-ends-keys-api-keys-rejoin.md)
+//	         once: its network and admin tokens, and the reach of the OAuth
+//	         clients it created, which is their scopes ∩ a role it no longer
+//	         holds (TEAM-M6-02, TEAM-M6-03)
 //	clients  its untagged clients are deactivated through the deactivation
 //	         path, which runs §7.10's chain for each, tokens, keys, listeners,
 //	         publishes and certificates, and owes their rev/ objects; its tagged
@@ -27,24 +25,35 @@ package model
 //	         revoke does. Deleting a pre-approved key stops its bearer only: a
 //	         copy of its bundle still admits devices until its Delegation ends
 //	         (D-TEAM-31), which the removal's answer says (BundleStillAdmits)
+//	api keys every API key the member's user made in the network is deleted,
+//	         with the auth codes that descend from it, as a key's deletion
+//	         does (QD-1214): a key names its creator by user, and in a team
+//	         it acts as whatever membership that user holds now
+//	         (apikey.GetNetworkByApiKey), so a key that outlived the removal
+//	         would act again, with the new role's reach, once the same person
+//	         re-joined. The removal owes the API key notice once, listing
+//	         every key it deleted, and an api_key.delete admin event for each,
+//	         naming the removal's actor and request, after the auth keys'
+//	         events. The network tokens a key minted name it, so they end with
+//	         its row
 //	rev/     §7.10's chain on the member itself owes rev/<network>/member/
 //	         <member_id> (TEAM-M1-07), which voids its service tokens at evs and
 //	         gkm within their 15 minutes
 //	event    the removal's own admin event, member.remove or scim.deactivate,
 //	         recorded last
 //
-// A key made while its member is being removed is ended too. Its creation
-// reads the creator's membership under a share lock in its own transaction
-// (createAuthKeyAt), so a creation that reaches the row after the denial
-// locked it meets the deleted row and makes nothing, and the denial's lock
-// waits for a creation that locked the row first. Under read committed the
-// denial's delete then sees that key. Under repeatable read, server.Tx's
-// default, a creation that commits after the denial's snapshot is not in what
-// the delete sees, but it appended its auth_key.create event to the network's
-// admin event chain, and the denial's own events, which it always appends
-// after the delete, meet that event as a serialization failure
-// (network_admin_event_model.go), so server.Tx runs the denial again, and the
-// rerun deletes the key.
+// A key made while its member is being removed is ended too, an auth key or an
+// API key. Its creation reads the creator's membership under a share lock in
+// its own transaction (createAuthKeyAt, CreateApiKey), so a creation that
+// reaches the row after the denial locked it meets the deleted row and makes
+// nothing, and the denial's lock waits for a creation that locked the row
+// first. Under read committed the denial's delete then sees that key. Under
+// repeatable read, server.Tx's default, a creation that commits after the
+// denial's snapshot is not in what the delete sees, but it appended its
+// auth_key.create or api_key.create event to the network's admin event chain,
+// and the denial's own events, which it always appends after the deletes, meet
+// that event as a serialization failure (network_admin_event_model.go), so
+// server.Tx runs the denial again, and the rerun deletes the key.
 //
 // It changes no reader. The config repo still admits the member's devices and
 // members still encrypt to them until an admin device, or the indexer
@@ -58,10 +67,12 @@ package model
 // with no denial before it ends them too.
 //
 // Nothing here reads or writes network_member unless the binary links MG6, nor
-// network_auth_key unless it links MG1.
+// network_auth_key unless it links MG1, nor account_api_key's creators and
+// auth_code's keys unless it links MG0.
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -86,8 +97,9 @@ type NetworkMemberDenial struct {
 	Time time.Time
 	// the removal's own admin event of the network: member.remove from POST
 	// /network/member-remove, scim.deactivate from SCIM. The denial records it
-	// last, after an auth_key.revoke event for each auth key it ends, each
-	// naming this event's actor and request. A denial without one is refused.
+	// last, after an auth_key.revoke event for each auth key and an
+	// api_key.delete event for each API key it ends, each naming this event's
+	// actor and request. A denial without one is refused.
 	Event *AdminEvent
 }
 
@@ -101,6 +113,10 @@ type NetworkMemberDenied struct {
 	// the auth keys the member's user made in the network, which the denial
 	// deleted, in auth_key_id order, without their secrets
 	RevokedAuthKeys []*NetworkAuthKey
+	// the API keys the member's user made in the network, which the denial
+	// deleted with their auth codes, in api_key_id order, as the key listing
+	// shows them
+	DeletedApiKeys []*PublicAccountApiKey
 }
 
 // Whether a key the denial ended was pre-approved, so that a copy of its
@@ -116,8 +132,8 @@ func (self *NetworkMemberDenied) BundleStillAdmits() bool {
 var ErrNetworkMemberNotFound = errors.New("No such member of the team.")
 
 // Ends a member at the server in the caller's transaction (the file header):
-// its untagged clients deactivated, every auth key its user made in the
-// network deleted, §7.10's chain on the member, its network_member row
+// its untagged clients deactivated, every auth key and API key its user made
+// in the network deleted, §7.10's chain on the member, its network_member row
 // deleted, and the removal's own admin event recorded. ErrNetworkMemberNotFound
 // when the network holds no such membership, which a removal racing this one
 // also answers, after its commit. A binary that does not link MG6 refuses.
@@ -190,6 +206,7 @@ func DenyNetworkMemberInTx(ctx context.Context, tx server.PgTx, denial *NetworkM
 		}
 	}
 	denied.RevokedAuthKeys = endNetworkMemberAuthKeysInTx(ctx, tx, denial.NetworkId, member.UserId, denial.Event, denial.Time)
+	denied.DeletedApiKeys = endNetworkMemberApiKeysInTx(ctx, tx, denial.NetworkId, member.UserId, denial.Event, denial.Time)
 	if err := ApplyRemovalEffectsInTx(ctx, tx, &Removal{
 		Subjects: []*RemovalSubject{{NetworkId: denial.NetworkId, Kind: sidecar.RevocationKindMember, SubjectId: denial.MemberId}},
 		Reason:   sidecar.RevocationReasonRemoved,
@@ -290,6 +307,102 @@ func endNetworkMemberAuthKeysInTx(
 		})
 	}
 	return revoked
+}
+
+// Ends the API keys creatorUserId made in networkId, in tx, the removal's own
+// transaction (the file header's api keys row): every such row is deleted,
+// expired or not, with the auth codes that descend from it, as DeleteApiKey
+// deletes a key's, and the removal owes one API key notice listing each key as
+// deleted at the removal's time, and an api_key.delete admin event for each,
+// with removalEvent's actor and request. Answers the keys it deleted, in
+// api_key_id order; none in a binary that does not link MG0, whose keys name
+// no creator. The caller holds the membership's row locked, so a creation,
+// which reads that row under a share lock first, waits for the removal and is
+// refused, or the removal waits for it and its delete or its rerun takes the
+// key (the file header).
+func endNetworkMemberApiKeysInTx(
+	ctx context.Context,
+	tx server.PgTx,
+	networkId server.Id,
+	creatorUserId server.Id,
+	removalEvent *AdminEvent,
+	at time.Time,
+) []*PublicAccountApiKey {
+	deleted := []*PublicAccountApiKey{}
+	if !server.SidecarMg0Linked() {
+		return deleted
+	}
+	result, err := tx.Query(
+		ctx,
+		`
+			DELETE FROM account_api_key
+			WHERE network_id = $1 AND creator_user_id = $2
+			RETURNING
+				api_key_id,
+				name,
+				create_time,
+				scopes::text,
+				expire_time,
+				creator_user_id
+		`,
+		networkId,
+		creatorUserId,
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			apiKey := &PublicAccountApiKey{}
+			var scopesJson *string
+			server.Raise(result.Scan(
+				&apiKey.Id,
+				&apiKey.Name,
+				&apiKey.CreateTime,
+				&scopesJson,
+				&apiKey.ExpireTime,
+				&apiKey.Creator,
+			))
+			if scopesJson != nil {
+				// a column that does not parse lists no scope, as it reaches
+				// none; the key is deleted all the same
+				scopes := []string{}
+				if json.Unmarshal([]byte(*scopesJson), &scopes) != nil {
+					scopes = []string{}
+				}
+				apiKey.Scopes = scopes
+			}
+			deleted = append(deleted, apiKey)
+		}
+	})
+	if len(deleted) == 0 {
+		return deleted
+	}
+	slices.SortFunc(deleted, func(a *PublicAccountApiKey, b *PublicAccountApiKey) int {
+		return a.Id.Cmp(b.Id)
+	})
+	changes := make([]*SecurityApiKeyChange, 0, len(deleted))
+	for _, apiKey := range deleted {
+		// the key's auth codes die with it (§2.8 api-11)
+		removeApiKeyAuthCodesInTx(ctx, tx, apiKey.Id)
+		createTime := apiKey.CreateTime
+		change := newSecurityApiKeyChange(ctx, SecurityApiKeyDeleted, apiKey.Name, &createTime)
+		// the removal's time, which its auth key notice names too
+		change.ChangeTime = at.UTC()
+		changes = append(changes, change)
+	}
+	oweSecurityApiKeyNoticeInTx(ctx, tx, networkId, changes...)
+	for _, apiKey := range deleted {
+		apiKeyId := apiKey.Id
+		AddAdminEventInTx(ctx, tx, &AdminEvent{
+			NetworkId:  networkId,
+			ActorKind:  removalEvent.ActorKind,
+			ActorId:    removalEvent.ActorId,
+			Action:     AdminEventActionApiKeyDelete,
+			TargetKind: AdminEventTargetApiKey,
+			TargetId:   &apiKeyId,
+			Result:     AdminEventResultOk,
+			RequestId:  removalEvent.RequestId,
+		})
+	}
+	return deleted
 }
 
 // How many live Owners the team holds, read in tx: what a removal of an Owner

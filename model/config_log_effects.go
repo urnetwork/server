@@ -30,12 +30,14 @@ package model
 //	            member, its rev/ object, and its network_member row, where a
 //	            team has one, with every auth key the membership's user made in
 //	            the network, owing the auth key notice once and an
-//	            auth_key.revoke admin event for each key, named for the entry's
-//	            signer and request (QD-1211), so a MemberRevoke no server
-//	            denial came before ends the keys as a denial does; a membership
-//	            the server already denied has no row left, and a later
-//	            membership of the same person, under its own member_id, keeps
-//	            its keys
+//	            auth_key.revoke admin event for each key (QD-1211), and every
+//	            API key it made there with the auth codes that descend from it,
+//	            owing the API key notice once and an api_key.delete admin event
+//	            for each key (QD-1214), all named for the entry's signer and
+//	            request, so a MemberRevoke no server denial came before ends
+//	            the keys as a denial does; a membership the server already
+//	            denied has no row left, and a later membership of the same
+//	            person, under its own member_id, keeps its keys
 //	            a member whose role the entry set (an AdminSet, a MemberAdmit,
 //	            or a completed proposal of either): network_member's role,
 //	            mirrored from the log (TEAM-M6-03)
@@ -45,7 +47,8 @@ package model
 //	            Delegation is no new way to admit devices or sign people in,
 //	            so it owes none (QD-647)
 //	          and one admin event naming the entry (§7.11), beside the
-//	          auth_key.revoke events of the keys a removal ended
+//	          auth_key.revoke and api_key.delete events of the keys a removal
+//	          ended
 //	sponsors  each run that met a SponsorSet or a member's removal, and a
 //	          process's first run for a network, sets every tagged client's
 //	          network_client_owner.sponsor_user_id to its sidecar's sponsor at
@@ -498,9 +501,10 @@ func removeConfigSidecarInTx(ctx context.Context, tx server.PgTx, networkId serv
 	})
 }
 
-// Ends a member the log removed, in tx: every auth key its membership's user
-// made in the network, owed in the name of entryEvent's signer and request
-// (endNetworkMemberAuthKeysInTx, QD-1211), §7.10's chain on the member at the
+// Ends a member the log removed, in tx: every auth key and API key its
+// membership's user made in the network, owed in the name of entryEvent's
+// signer and request (endNetworkMemberAuthKeysInTx, QD-1211;
+// endNetworkMemberApiKeysInTx, QD-1214), §7.10's chain on the member at the
 // entry's time, and its network_member row where a team has one. Its devices
 // are the entry's revoked sidecars, ended beside it. A membership the server
 // denied before has no row left, its keys having ended with the denial, and a
@@ -509,7 +513,8 @@ func removeConfigSidecarInTx(ctx context.Context, tx server.PgTx, networkId serv
 func removeConfigMemberInTx(ctx context.Context, tx server.PgTx, networkId server.Id, memberId server.Id, at time.Time, entryEvent *AdminEvent) error {
 	if server.SidecarMg6Linked() {
 		// the membership's user, its row locked as a denial locks it, so an
-		// enrollment's spend, which reads the row first, waits for the removal
+		// enrollment's spend or a key's creation, which reads the row first,
+		// waits for the removal
 		var userId *server.Id
 		result, err := tx.Query(
 			ctx,
@@ -534,6 +539,7 @@ func removeConfigMemberInTx(ctx context.Context, tx server.PgTx, networkId serve
 		}
 		if userId != nil {
 			endNetworkMemberAuthKeysInTx(ctx, tx, networkId, *userId, entryEvent, at)
+			endNetworkMemberApiKeysInTx(ctx, tx, networkId, *userId, entryEvent, at)
 		}
 	}
 	if err := ApplyRemovalEffectsInTx(ctx, tx, &Removal{

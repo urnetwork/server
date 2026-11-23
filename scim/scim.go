@@ -11,7 +11,8 @@
 //	          reader (§7.6): POST /Users of a person who is no member queues a user_create for an admin device to
 //	          invite, its id the change's, and a member is never made here. active=false, by PATCH or PUT, or a
 //	          DELETE, denies the member at once (model.DenyNetworkMemberInTx: its row, its untagged clients, the
-//	          auth keys its user made in the team, its rev/ object; QD-1211) and queues its MemberRevoke, which is
+//	          auth keys and API keys its user made in the team, its rev/ object; QD-1211, QD-1214) and queues its
+//	          MemberRevoke, which is
 //	          the removal only once an admin device, or for a member outside the AdminSet the indexer
 //	          ServiceSettings.scim_signer names, signs it (D-TEAM-25); until then members still encrypt to its
 //	          devices, which the console lists. The deactivated user reads active=false while its queued change
@@ -534,7 +535,8 @@ func (self *scimRequest) targetUser(target *scimUserTarget) *scimUser {
 }
 
 // Denies a member at once and queues its MemberRevoke, in tx (the package header). The denial records the
-// deactivation's admin event, after the auth_key.revoke event of each key it ends, which name SCIM as their actor.
+// deactivation's admin event, after the auth_key.revoke or api_key.delete event of each key it ends, which name SCIM
+// as their actor.
 func (self *scimRequest) deactivateInTx(ctx context.Context, tx server.PgTx, member *model.NetworkMember) (*model.NetworkScimChange, error) {
 	now := self.service.now().UTC().Truncate(time.Microsecond)
 	memberId := member.MemberId

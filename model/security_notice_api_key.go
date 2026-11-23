@@ -11,14 +11,19 @@ package model
 // owner's sign-in email addresses, and in a team each standing Owner's and
 // Admin's member user's, never the team's owner of record, which never signs in
 // and has no address (D-TEAM-2). A team none of whose Owners and Admins has an
-// email owes nothing, counted as no_email.
+// email owes nothing, counted as no_email. A removal ends the member's keys
+// before it deletes the membership, so a removed Owner or Admin is still one
+// when the notice reads them, and hears of the keys its removal ends.
 //
-// Both ways to create or delete a key owe it: POST /account/api-key
-// (CreateApiKey) and POST /account/api-key/remove (DeleteApiKey). The only
-// other writer of account_api_key is apikey.Testing_CreateApiKey, a test
-// fixture. Like the other notices it is owed under the notice's savepoint, so
-// it never fails or rolls back the change, and repeats inside the coalescing
-// window join one email.
+// Every way to create or delete a key owes it: POST /account/api-key
+// (CreateApiKey), POST /account/api-key/remove (DeleteApiKey), and a team
+// member's removal, which deletes every key the member's user made in the team
+// and owes one notice listing each of them (network_member_deny_model.go,
+// QD-1214). Expiry is no change anyone made, and owes none
+// (RemoveExpiredApiKeys). The only other writer of account_api_key is
+// apikey.Testing_CreateApiKey, a test fixture. Like the other notices it is
+// owed under the notice's savepoint, so it never fails or rolls back the
+// change, and repeats inside the coalescing window join one email.
 //
 // The notice names a key by its name and its creation time. It never holds the
 // key: the secret is shown once, in the create answer, and only its hash is
@@ -42,17 +47,16 @@ const (
 
 // Tunables of the API key notice.
 type SecurityApiKeyNoticeSettings struct {
-	// The most characters of a key's name a notice shows: 64, so the name
-	// stays on one line of the notice, in quotes. A longer name is cut short
-	// of it and ends in an ellipsis. Below 1 counts as 1, which shows a longer
-	// name as the ellipsis alone.
-	MaxNameLength int
+	// The most characters of an API key's name a notice shows: 64, half of
+	// what a name holds (AccountApiKeySettings.NameMaxLength), so a change
+	// stays one short line. A longer name is cut short of it and ends in an
+	// ellipsis. Non-positive shows no name.
+	NameMaxLength int
 }
 
-// The defaults, a fresh value each call.
 func DefaultSecurityApiKeyNoticeSettings() *SecurityApiKeyNoticeSettings {
 	return &SecurityApiKeyNoticeSettings{
-		MaxNameLength: 64,
+		NameMaxLength: 64,
 	}
 }
 
@@ -83,20 +87,23 @@ func (self *SecurityApiKeyNotice) add(change *SecurityApiKeyChange) {
 	self.Changes, self.MoreCount = addSecurityNoticeChange(self.Changes, self.MoreCount, change)
 }
 
-// An API key's name as a notice shows it, under the default settings
-// (securityNoticeApiKeyNameOf).
+// An API key's name as a notice shows it. The name is free text that whoever
+// created the key chose, so a notice keeps it to one line in reading order:
+// control and format characters (line breaks, tabs, direction overrides,
+// zero-width marks) count as space, each run of space is one space, and the
+// ends are trimmed. A name longer than the settings' NameMaxLength characters
+// is cut short of it and ends in an ellipsis. Applying it again changes
+// nothing.
 func SecurityNoticeApiKeyName(name string) string {
-	return securityNoticeApiKeyNameOf(name, DefaultSecurityApiKeyNoticeSettings())
+	return securityNoticeApiKeyName(name, DefaultSecurityApiKeyNoticeSettings())
 }
 
-// An API key's name as a notice under the settings shows it. The name is free
-// text that whoever created the key chose, so a notice keeps it to one line in
-// reading order: control and format characters (line breaks, tabs, direction
-// overrides, zero-width marks) count as space, each run of space is one space,
-// and the ends are trimmed. A name longer than MaxNameLength characters is cut
-// short of it and ends in an ellipsis. Applying it again changes nothing.
-func securityNoticeApiKeyNameOf(name string, settings *SecurityApiKeyNoticeSettings) string {
-	maxNameLength := max(1, settings.MaxNameLength)
+// SecurityNoticeApiKeyName under the given settings.
+func securityNoticeApiKeyName(name string, settings *SecurityApiKeyNoticeSettings) string {
+	nameMaxLength := settings.NameMaxLength
+	if nameMaxLength <= 0 {
+		return ""
+	}
 	builder := strings.Builder{}
 	pendingSpace := false
 	for _, r := range name {
@@ -111,10 +118,10 @@ func securityNoticeApiKeyNameOf(name string, settings *SecurityApiKeyNoticeSetti
 		builder.WriteRune(r)
 	}
 	runes := []rune(builder.String())
-	if len(runes) <= maxNameLength {
+	if len(runes) <= nameMaxLength {
 		return string(runes)
 	}
-	return strings.TrimRight(string(runes[:maxNameLength-1]), " ") + "…"
+	return strings.TrimRight(string(runes[:nameMaxLength-1]), " ") + "…"
 }
 
 // A change of an API key, made by the request of ctx now. keyCreateTime is the
@@ -133,14 +140,18 @@ func newSecurityApiKeyChange(ctx context.Context, action string, name string, ke
 	return change
 }
 
-// Owes the API key notice for a key the caller's transaction created or deleted,
-// to the network's Owners and Admins (the file header). It never fails the
-// change (guardSecurityNoticeInTx).
-func oweSecurityApiKeyNoticeInTx(ctx context.Context, tx server.PgTx, networkId server.Id, change *SecurityApiKeyChange) {
+// Owes the API key notice for the keys the caller's transaction created or
+// deleted, one change each, in one notice, to the network's Owners and Admins
+// (the file header). No change owes nothing. It never fails the change
+// (guardSecurityNoticeInTx).
+func oweSecurityApiKeyNoticeInTx(ctx context.Context, tx server.PgTx, networkId server.Id, changes ...*SecurityApiKeyChange) {
+	if len(changes) == 0 {
+		return
+	}
 	guardSecurityNoticeInTx(ctx, tx, SecurityNoticeApiKey, func() string {
 		recipients := securityNoticeAuthorityRecipientsInTx(ctx, tx, networkId)
 		return oweSecurityNoticeInTx(ctx, tx, networkId, recipients, SecurityApiKeyTemplateName, func(templateJson string) (string, error) {
-			return applySecurityNoticeChanges(templateJson, (*SecurityApiKeyNotice).add, []*SecurityApiKeyChange{change})
+			return applySecurityNoticeChanges(templateJson, (*SecurityApiKeyNotice).add, changes)
 		})
 	})
 }
