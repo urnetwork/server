@@ -136,9 +136,9 @@
 //     internet sender's or a same-network send, before any chaos and after an api restart, answered delivered and
 //     never listed: deposits pushed on a state two bases behind the group's writer, whose own ACL saves landed those
 //     bases, judged at a pin its log no longer retained), which mail-group-ingest-loss classes at the installed state
-//     (sidecar 840e3738 to abfab622, QD-1196). A group repo's ingest still waits for the mail component's pass, 2 s in
-//     this world, rather than its hint; mail-group-hint-watch, running in the mail lane as this refresh was made, has
-//     it watch the hints
+//     (sidecar 840e3738 to abfab622, QD-1196). A group repo's ingest then still waited for the mail component's pass,
+//     2 s in this world, rather than its hint, until mail-group-hint-watch (sidecar 23f898c3 to a30407d9) had each
+//     group repo's hints watched
 //   - an evs writer's second write of a path refused 409 PATH_CONFLICT 48 ms after its first was answered, its plan
 //     read on evs's cache before its own push reached it (evs-write-update-stale-cache, sidecar af2e0136, 52848695);
 //     a plain read right after a device's own push sees that push too since evs-read-own-writes (sidecar 64074a84 to

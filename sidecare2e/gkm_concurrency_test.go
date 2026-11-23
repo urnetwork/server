@@ -79,9 +79,23 @@
 // its entry's sync, every holder converged within a second of each phase's last change, the late device's ask was
 // answered by a writer that was not its granting device about half a second after it came back, and every gkm
 // refusal was a revoked caller's or one whose grant had ended. It passed again in e2e-headers-final's run (2026-11-22,
-// 31 s, server e4a38cd64 on sidecar c88a64af). Each phase has PhaseTimeout and dumps the world's progress when it
-// stalls; the case has the conventions' 10 minutes. Run it through the build's wrapper:
-// -tags 'sidecar_e2e sidecar_pending sidecar_localstack'.
+// 31 s, server e4a38cd64 on sidecar c88a64af).
+//
+// Open, with no fix track queued as this refresh was made: of the nine runs e2e-headers-final made of the case
+// (2026-11-22 and 2026-11-23), three failed, each on one check and each on a different one, on the sidecar before
+// gkm-commit-hint-new-group (c88a64af: one of five) and on it (a83454bd: two of four):
+//
+//   - the shrink phase (c88a64af): gkm refused 403 a GET of a group's gen/ and of its wraps on tokens from log
+//     positions 15 and 20 whose scopes the callers' states, at 29, still gave them ("an unaccounted refusal"), which no
+//     refusal class of the case's names
+//   - the growth phase's exact rotation race (a83454bd), run beside the joins and the reader grants: in its third
+//     round two rotators, a-1 and a-3, answered ErrGkmWait, "gkm refused a staged delivery", gkm having answered 409 or
+//     403 to one of their staged wraps, where the race holds every rotator to the one generation gkm took
+//   - the late device's phase (a83454bd): the late device took the partial repo's key with no late ask recorded once
+//     it was back, a holder's delivery of the generation landing 2 ms after the case marked it back
+//
+// Each phase has PhaseTimeout and dumps the world's progress when it stalls; the case has the conventions' 10 minutes.
+// Run it through the build's wrapper: -tags 'sidecar_e2e sidecar_pending sidecar_localstack'.
 
 package sidecare2e
 
