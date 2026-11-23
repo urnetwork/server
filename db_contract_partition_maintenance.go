@@ -148,20 +148,32 @@ func maintainContractPartitions(ctx context.Context, now time.Time, cursor Contr
 		report.Analyzed, next.AnalyzedDay = analyzeContractPartitions(ctx, now, cursor.AnalyzedDay, deadline)
 		retireExpiredContractDays(ctx, now, settings, deadline, report)
 	} else if cutoverDay, prepared := preparedContractCutoverDay(ctx); prepared && !cutoverDay.IsZero() && !now.Before(cutoverDay.Add(-contractCutoverAbandonMargin)) {
-		glog.Errorf(
-			"[cp]abandoning the contract partition cutover prepared for %s: it was not finalized by %s, and its legacy bound would refuse every contract from that day\n",
-			cutoverDay.Format(time.DateOnly),
-			cutoverDay.Add(-contractCutoverAbandonMargin).Format(time.RFC3339),
-		)
-		if err := abortContractPartitionCutover(ctx, false, contractPartitionGlogf, DefaultContractPartitionCutoverSettings()); err != nil {
-			glog.Errorf("[cp]could not abandon the prepared cutover: %s\n", err)
-		} else {
-			report.AbandonedCutover = true
-		}
+		report.AbandonedCutover = abandonStaleContractCutover(ctx, cutoverDay, deadline, DefaultContractPartitionCutoverSettings(), contractPartitionGlogf)
 	}
 
 	report.AbandonedEvidenceCutover = abandonStaleCloseEvidenceCutover(ctx, now, DefaultCloseEvidencePartitionSettings(), contractPartitionGlogf)
 	return
+}
+
+// Drops a prepared cutover's staged parents and legacy bounds once its day is
+// within contractCutoverAbandonMargin, until the run's deadline. Abort spaces
+// its tries 20 to 40 s apart (DefaultContractPartitionCutoverSettings), so a
+// table that stays busy past the deadline is left to the next run, every 15
+// minutes: the margin of 6 hours holds about 24 runs before the bound would
+// refuse the day's contracts.
+func abandonStaleContractCutover(ctx context.Context, cutoverDay time.Time, deadline time.Time, settings *ContractPartitionCutoverSettings, logf func(string, ...any)) bool {
+	glog.Errorf(
+		"[cp]abandoning the contract partition cutover prepared for %s: it was not finalized by %s, and its legacy bound would refuse every contract from that day\n",
+		cutoverDay.Format(time.DateOnly),
+		cutoverDay.Add(-contractCutoverAbandonMargin).Format(time.RFC3339),
+	)
+	abortCtx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+	if err := abortContractPartitionCutover(abortCtx, false, logf, settings); err != nil {
+		glog.Errorf("[cp]could not abandon the prepared cutover (the next run continues): %s\n", err)
+		return false
+	}
+	return true
 }
 
 // Creates the missing partitions of the current day and the days ahead
