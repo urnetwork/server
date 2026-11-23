@@ -49,8 +49,19 @@ var (
 	ErrDnsSuspendReason = errors.New("dns suspension reason invalid")
 )
 
-// The longest reason a zone suspension keeps: network_dns_zone's column.
-const dnsSuspendReasonMaxLength = 64
+// What a suspension keeps (§12.9).
+type DnsSuspendSettings struct {
+	// The longest reason a zone suspension keeps, in bytes: network_dns_zone's
+	// suspend_reason column, 64 characters, which a longer value would fail.
+	// Non-positive refuses every reason.
+	ReasonMaxLength int
+}
+
+func DefaultDnsSuspendSettings() *DnsSuspendSettings {
+	return &DnsSuspendSettings{
+		ReasonMaxLength: 64,
+	}
+}
 
 // What a hook changes: the zone's suspension and the hosts it withholds.
 type dnsSuspension struct {
@@ -65,7 +76,7 @@ type dnsSuspension struct {
 // reason is an opaque word for staff, never content; until nil holds until a
 // lift. A zone already suspended takes the new reason and until.
 func SuspendZone(ctx context.Context, networkId server.Id, reason string, until *time.Time) error {
-	if reason == "" || dnsSuspendReasonMaxLength < len(reason) {
+	if reason == "" || DefaultDnsSuspendSettings().ReasonMaxLength < len(reason) {
 		return fmt.Errorf("%w: %d bytes", ErrDnsSuspendReason, len(reason))
 	}
 	return changeDnsSuspension(ctx, networkId, func(suspension *dnsSuspension) {
