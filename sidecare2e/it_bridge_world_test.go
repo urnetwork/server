@@ -43,8 +43,9 @@
 //
 // A network's block is the one its bootstrap drew into its first head (§17.4's first block row; the case set it as an
 // admin's act until bridge-block-bootstrap, sidecar 58fd1846 to a49e3bff, landed): the case reads it as a filer reads
-// the block in force (readBlock), and holds every host's claimed address to it and every device's compile to holding
-// it (checkCompiledBlock). A share's aliases are host bits of the accepting network's block, so its own drawn block too.
+// the block in force (readBlock), and holds every host's claimed address to §17.4's host address row in it
+// (checkHostAddress) and every device's compile to holding it (checkCompiledBlock). A share's aliases are host bits in
+// the accepting network's block, which is that network's own draw.
 //
 // The case keeps its World on FakeGkm (WorldSettings.FakeGkm), where a World runs real keys by default since
 // keys-late-delivery and gkm-repo-create-race landed: a filing seals its body under the config repo's key, which each
@@ -126,6 +127,8 @@ type ItBridgeSettings struct {
 	BlockBits       int
 	BlockRange      netip.Prefix
 	BlockExclusions []netip.Prefix
+	// The services range at the bottom of a block, which no host's address takes (§17.4's host address row): a /24.
+	BlockServicesBits int
 	// The grant matrix (the file's header).
 	SubnetGrantModulus   int
 	SubnetDeniedResidue  int
@@ -234,6 +237,7 @@ func DefaultItBridgeSettings() *ItBridgeSettings {
 		BlockBits:                  16,
 		BlockRange:                 netip.MustParsePrefix("100.64.0.0/10"),
 		BlockExclusions:            []netip.Prefix{netip.MustParsePrefix("100.64.0.0/16"), netip.MustParsePrefix("100.100.0.0/16")},
+		BlockServicesBits:          24,
 		SubnetGrantModulus:         4,
 		SubnetDeniedResidue:        3,
 		SubnetTcpOnlyResidue:       2,
@@ -761,10 +765,9 @@ func (self *ItBridgeWorld) build(ctx context.Context) error {
 			<-saved
 			return fmt.Errorf("%s's address: %w", host.name, err)
 		}
-		// §17.6's address plan draws a device's overlay address from the network's block
-		if !self.block.Contains(filing.Address) {
+		if err := self.checkHostAddress(filing.Address); err != nil {
 			<-saved
-			return fmt.Errorf("%s claimed %s, outside the network's block %s", host.name, filing.Address, self.block)
+			return fmt.Errorf("%s's address: %w", host.name, err)
 		}
 		self.hostAddresses = append(self.hostAddresses, filing.Address)
 		self.echoes[index].prefix = netip.PrefixFrom(filing.Address, 32)
@@ -794,9 +797,13 @@ func (self *ItBridgeWorld) readBlock(ctx context.Context) (netip.Prefix, error) 
 	if client == nil || client.State() == nil || client.State().Base() == nil {
 		return netip.Prefix{}, fmt.Errorf("%s's follower holds no base", self.owner.name)
 	}
+	heads := follower.Heads()
+	if heads == nil {
+		return netip.Prefix{}, fmt.Errorf("%s's follower reads no heads", self.owner.name)
+	}
 	state := client.State()
 	base := state.Base()
-	head, err := follower.Heads().ReadConfigHead(ctx, base.GetConfigVersion(), base.GetConfigHeadSha256())
+	head, err := heads.ReadConfigHead(ctx, base.GetConfigVersion(), base.GetConfigHeadSha256())
 	if err != nil {
 		return netip.Prefix{}, fmt.Errorf("the head base %d names: %w", base.GetVersion(), err)
 	}
@@ -818,6 +825,19 @@ func (self *ItBridgeWorld) readBlock(ctx context.Context) (netip.Prefix, error) 
 			block.GetPreviousPrefix())
 	}
 	return prefix, nil
+}
+
+// Whether address, one a host claimed with none chosen, is what §17.4's host address row draws in the network's block
+// while its lower /17 has room: a /32 of that lower /17 outside the services range at the block's bottom
+// (BlockServicesBits), never x.y.z.0 or x.y.z.255. The error says which it is not.
+func (self *ItBridgeWorld) checkHostAddress(address netip.Addr) error {
+	lower := netip.PrefixFrom(self.block.Masked().Addr(), self.block.Bits()+1)
+	services := netip.PrefixFrom(self.block.Masked().Addr(), self.settings.BlockServicesBits)
+	last := address.As4()[3]
+	if !lower.Contains(address) || services.Contains(address) || last == 0 || last == 255 {
+		return fmt.Errorf("%s, where the network's block %s draws a host's address from %s outside %s, never at .0 or .255", address, self.block, lower, services)
+	}
+	return nil
 }
 
 // Whether every device's bridge compiled the network's block (readBlock), as every reader of the heads takes it: an
