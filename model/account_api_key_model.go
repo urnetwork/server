@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -32,6 +33,9 @@ func DefaultAccountApiKeySettings() *AccountApiKeySettings {
 		NameMaxLength: 128,
 	}
 }
+
+// What a creation answers once the caller's membership of the team has ended.
+const apiKeyMemberEndedMessage = "You are no longer a member of this network."
 
 type CreateApiKeyArgs struct {
 	Name string `json:"name"`
@@ -93,6 +97,17 @@ func apiKeyScopes(scopes []string) ([]string, error) {
 //
 // A key created owes the API key security notice in the same transaction
 // (security_notice_api_key.go), with the key's name and never the key.
+//
+// In a team the caller's membership is read again in the key's transaction,
+// under a share lock, before anything is written, as an auth key's creation
+// reads it (authKeyCreatorMemberLiveInTx). A key names its creator by user, so
+// a key made after its creator's removal would act again once the same person
+// re-joined under a new membership. A removal that committed after the route's
+// role gate read the role refuses the creation 403; one that locked the row
+// first holds the creation until it commits, which then refuses it; and one
+// that waits on the creation's lock meets the key's api_key.create admin event
+// in the network's chain once the creation commits, and runs again, deleting
+// the key (network_member_deny_model.go, QD-1214).
 func CreateApiKey(createApiKey *CreateApiKeyArgs, session *session.ClientSession) (result *CreateApiKeyResult, err error) {
 	// the name is client input, so a name the column cannot store is a
 	// refusal, not a failed statement
@@ -153,8 +168,17 @@ func CreateApiKey(createApiKey *CreateApiKeyArgs, session *session.ClientSession
 
 	var apiKeyId server.Id
 	var apiKey string
+	var refusal error
 
 	server.Tx(session.Ctx, func(tx server.PgTx) {
+		refusal = nil
+		if memberId := session.ByJwt.MemberId; memberId != nil &&
+			!authKeyCreatorMemberLiveInTx(session.Ctx, tx, session.ByJwt.NetworkId, *memberId, session.ByJwt.UserId) {
+			// the caller's membership ended after the route's role gate read
+			// it: a removed member makes no key (the function's doc)
+			refusal = fmt.Errorf("%d %s", http.StatusForbidden, apiKeyMemberEndedMessage)
+			return
+		}
 		apiKeyId = server.NewId()
 
 		var keyErr error
@@ -225,6 +249,9 @@ func CreateApiKey(createApiKey *CreateApiKeyArgs, session *session.ClientSession
 		)
 	})
 
+	if refusal != nil {
+		return nil, refusal
+	}
 	if err != nil {
 		return nil, err
 	}

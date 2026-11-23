@@ -6,12 +6,15 @@ package model
 // change, so an owner notices a key they did not make. An API key is a full
 // network credential (AUTHZ1.md G3) that outlives every sign-in session.
 //
-// Both ways to create or delete a key owe it: POST /account/api-key
-// (CreateApiKey) and POST /account/api-key/remove (DeleteApiKey). The only
-// other writer of account_api_key is apikey.Testing_CreateApiKey, a test
-// fixture. Like the other notices it is owed under the notice's savepoint, so
-// it never fails or rolls back the change, and repeats inside the coalescing
-// window join one email.
+// Every way to create or delete a key owes it: POST /account/api-key
+// (CreateApiKey), POST /account/api-key/remove (DeleteApiKey), and a team
+// member's removal, which deletes every key the member's user made in the team
+// and owes one notice listing each of them (network_member_deny_model.go,
+// QD-1214). Expiry is no change anyone made, and owes none
+// (RemoveExpiredApiKeys). The only other writer of account_api_key is
+// apikey.Testing_CreateApiKey, a test fixture. Like the other notices it is
+// owed under the notice's savepoint, so it never fails or rolls back the
+// change, and repeats inside the coalescing window join one email.
 //
 // The notice names a key by its name and its creation time. It never holds the
 // key: the secret is shown once, in the create answer, and only its hash is
@@ -128,14 +131,18 @@ func newSecurityApiKeyChange(ctx context.Context, action string, name string, ke
 	return change
 }
 
-// Owes the API key notice for a key the caller's transaction created or deleted,
-// to the network admin's sign-in email addresses. It never fails the change
+// Owes the API key notice for the keys the caller's transaction created or
+// deleted, one change each, in one notice, to the network admin's sign-in
+// email addresses. No change owes nothing. It never fails the change
 // (guardSecurityNoticeInTx).
-func oweSecurityApiKeyNoticeInTx(ctx context.Context, tx server.PgTx, networkId server.Id, change *SecurityApiKeyChange) {
+func oweSecurityApiKeyNoticeInTx(ctx context.Context, tx server.PgTx, networkId server.Id, changes ...*SecurityApiKeyChange) {
+	if len(changes) == 0 {
+		return
+	}
 	guardSecurityNoticeInTx(ctx, tx, SecurityNoticeApiKey, func() string {
 		recipients := securityNoticeRecipientsInTx(ctx, tx, networkId)
 		return oweSecurityNoticeInTx(ctx, tx, networkId, recipients, SecurityApiKeyTemplateName, func(templateJson string) (string, error) {
-			return applySecurityNoticeChanges(templateJson, (*SecurityApiKeyNotice).add, []*SecurityApiKeyChange{change})
+			return applySecurityNoticeChanges(templateJson, (*SecurityApiKeyNotice).add, changes)
 		})
 	})
 }

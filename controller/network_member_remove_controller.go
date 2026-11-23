@@ -14,9 +14,11 @@ package controller
 //	         row, its untagged clients through the deactivation path, every
 //	         auth key the member's user made in the team (QD-1211), each with
 //	         its auth_key.revoke admin event and all of them in one auth key
-//	         notice, and the member's rev/ object; the removal's admin event,
-//	         member.remove; the network authority notice when the member was
-//	         in the AdminSet
+//	         notice, every API key it made there with its auth codes
+//	         (QD-1214), each with its api_key.delete admin event and all of
+//	         them in one API key notice, and the member's rev/ object; the
+//	         removal's admin event, member.remove; the network authority
+//	         notice when the member was in the AdminSet
 //	answer   the member, whether its MemberRevoke needs k of n, how many
 //	         clients and auth keys the denial ended, and signature_owed, always
 //	         set: the server's denial is not the removal (owner decisions 5,
