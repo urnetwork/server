@@ -184,7 +184,7 @@ func checkRuntimePackageLock(lock runtimePackageLock) error {
 			}
 		}
 	}
-	wantServices := map[string]string{"alt": "certificates", "api": "certificates", "connect": "certificates", "gossip": "certificates", "mcp": "certificates", "taskworker": "taskworker", "proxy": "proxy"}
+	wantServices := map[string]string{"api": "certificates", "connect": "certificates", "gossip": "certificates", "mcp": "certificates", "taskworker": "taskworker", "proxy": "proxy"}
 	if !reflect.DeepEqual(lock.Services, wantServices) {
 		return errors.New("service package coverage changed")
 	}

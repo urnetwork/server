@@ -8,9 +8,9 @@ import (
 )
 
 // Actual service entry points expose stale sibling APIs that module pins and
-// dependency-only tests cannot detect, including ALT's admission constructor.
+// dependency-only tests cannot detect.
 func TestReleaseSourceGraphBuildsRuntimeConsumers(t *testing.T) {
-	command := exec.CommandContext(t.Context(), "go", "build", "-mod=readonly", "-p", "2", "-trimpath", "-o", t.TempDir(), "./cli/api", "./cli/alt", "./cli/taskworker", "./cli/connect", "./cli/proxy", "./bringyourctl")
+	command := exec.CommandContext(t.Context(), "go", "build", "-mod=readonly", "-p", "2", "-trimpath", "-o", t.TempDir(), "./cli/api", "./cli/taskworker", "./cli/connect", "./cli/proxy", "./bringyourctl")
 	command.Dir = serverDirectory(t)
 	command.Env = append(os.Environ(), "GOWORK=off", "GOTOOLCHAIN=local", "GOENV=off", "CGO_ENABLED=0", "GOFLAGS=-mod=readonly", "GOPROXY=off", "GOSUMDB=off")
 	if output, err := command.CombinedOutput(); err != nil {
