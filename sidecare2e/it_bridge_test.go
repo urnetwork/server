@@ -75,6 +75,14 @@
 //	          one as an admin's act before, which once the bootstrap drew replaced the draw, left it draining for 10
 //	          minutes, and was refused as the block itself in one draw of 62
 //
+// What the case got wrong in itself, fixed here: the churn's comeback probe picked any client the document grants a
+// destination's address, and a client no rule of a nested subnet's names reaches the campus there, so a subnet's
+// incarnation probed so was left to the random traffic; bridge-block-bootstrap's run at a49e3bff failed the liveness
+// row that way (subnet-3's incarnation 2, one granted attempt and no arrival in a 4 s window: the probe's campus answer
+// at once and JoinedHoldMin, opened as router-0's chaos restart ended, since a join is adopted once every bridge is,
+// router-0's restarted one among them). The probe now picks a client the target itself answers, and the liveness row
+// names each granted attempt of a window it fails.
+//
 // Run it through the build's wrapper: -tags 'sidecar_e2e sidecar_pending sidecar_localstack' -run TestE2eItBridge.
 
 package sidecare2e
@@ -480,6 +488,10 @@ func (self *ItBridgeWorld) Churn(ctx context.Context) {
 // Probes a subnet or forward the churn joined again from one client and protocol its rules grant, picked at random,
 // until an attempt reaches it or ComebackTryCount tries: the oracle's liveness row then judges each incarnation the
 // churn joins by attempts made for it, where the random traffic may pick another destination for the whole window.
+// Only a client the target itself answers is picked: one no rule of a nested subnet's names routes the subnet's
+// addresses by the campus's rule, so the campus answers its probe at once and the subnet's incarnation is left to the
+// random traffic, which is how subnet-3's incarnation 2 went unprobed when bridge-block-bootstrap's run saw its 4 s
+// window reached by nothing.
 func (self *ItBridgeWorld) probeComeback(ctx context.Context, target *itBridgeTarget, random *rand.Rand) {
 	type pair struct {
 		client   *itBridgeDevice
@@ -487,6 +499,9 @@ func (self *ItBridgeWorld) probeComeback(ctx context.Context, target *itBridgeTa
 	}
 	pairs := []pair{}
 	for _, client := range self.clients {
+		if self.answerer(client.clientIndex(), target) != target {
+			continue
+		}
 		for _, protocol := range target.protocols() {
 			if self.granted(client.clientIndex(), target, protocol) {
 				pairs = append(pairs, pair{client: client, protocol: protocol})
@@ -674,21 +689,23 @@ func (self *ItBridgeWorld) checkLiveness(t testing.TB) {
 				return !arrival.At.Before(incarnation.AdoptedAt) && arrival.At.Before(end)
 			})
 			if !reached {
-				attempts := 0
+				attempts := []string{}
 				for _, attempt := range self.Attempts() {
 					if attempt.Expected == target && attempt.Granted && !attempt.Start.Before(incarnation.AdoptedAt) && attempt.Start.Before(end) {
-						attempts += 1
+						attempts = append(attempts, fmt.Sprintf("%s's %s in %s to %s, %s to %s: %s", attempt.Client.name, attempt.Protocol, attempt.Phase,
+							attempt.Address, itBridgeTime(attempt.Start), itBridgeTime(attempt.End), attempt.Err))
 					}
 				}
 				// a window no granted attempt fell in has nothing to judge: the churn's probe gives every incarnation it
 				// joins its attempts, and the sweeps judge the ones joined before them
-				if attempts == 0 {
+				if len(attempts) == 0 {
 					t.Logf("%s's incarnation %d had no granted attempt in its stable window %s to %s",
 						target.name, incarnation.Number, incarnation.AdoptedAt.Format(time.RFC3339Nano), end.Format(time.RFC3339Nano))
 					continue
 				}
-				t.Errorf("%s's incarnation %d was reached by nothing in its stable window %s to %s, %d granted attempts there",
-					target.name, incarnation.Number, incarnation.AdoptedAt.Format(time.RFC3339Nano), end.Format(time.RFC3339Nano), attempts)
+				t.Errorf("%s's incarnation %d was reached by nothing in its stable window %s to %s, %d granted attempts there: %s",
+					target.name, incarnation.Number, incarnation.AdoptedAt.Format(time.RFC3339Nano), end.Format(time.RFC3339Nano), len(attempts),
+					strings.Join(attempts, "; "))
 			}
 		}
 	}
