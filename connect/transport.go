@@ -415,7 +415,7 @@ func writeConnectH1UserReadyBatch(
 		}()
 	}
 
-	if err = writer.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
+	if err = setConnectH1WriteDeadline(writer, writeTimeout); err != nil {
 		return open, err
 	}
 	if framed {
@@ -1402,9 +1402,31 @@ func (self *ConnectHandler) WaitForIdle(ctx context.Context) bool {
 	}
 }
 
+// Sets the H1 connection's read deadline timeout from now, counted in the
+// timer census: on a socket whose read timer is pending or a zombie, a move.
+func setConnectH1ReadDeadline(ws connect.H1MessageConn, timeout time.Duration) error {
+	server.CountTimerDeadlineAfter(server.TimerCensusSiteH1ReadDeadline, timeout)
+	return ws.SetReadDeadline(time.Now().Add(timeout))
+}
+
+// Sets the H1 connection's write deadline timeout from now, counted in the
+// timer census.
+func setConnectH1WriteDeadline(writer interface{ SetWriteDeadline(time.Time) error }, timeout time.Duration) error {
+	server.CountTimerDeadlineAfter(server.TimerCensusSiteH1WriteDeadline, timeout)
+	return writer.SetWriteDeadline(time.Now().Add(timeout))
+}
+
+// Re-arms a transport writer's heartbeat timer for interval, counted at site in
+// the timer census. A select the writer woke from on a message left the timer
+// in its P's heap as a zombie, so the Reset may move it.
+func resetConnectPingTimer(pingTimer *time.Timer, interval time.Duration, site server.TimerCensusSite) {
+	server.CountTimerReset(site, interval)
+	pingTimer.Reset(interval)
+}
+
 // A rejected H1 deadline must stop the operation before the socket is read.
 func readConnectH1AuthWithDeadline(ws connect.H1MessageConn, timeout time.Duration) (int, []byte, error) {
-	if err := ws.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+	if err := setConnectH1ReadDeadline(ws, timeout); err != nil {
 		return 0, nil, err
 	}
 	return ws.ReadMessage()
@@ -1424,14 +1446,14 @@ func connectH1TransportDelayResponseHeader(enableTransportDelay bool, headerAuth
 }
 
 func echoConnectH1AuthWithDeadline(ws connect.H1MessageConn, timeout time.Duration, authFrameBytes []byte) error {
-	if err := ws.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
+	if err := setConnectH1WriteDeadline(ws, timeout); err != nil {
 		return err
 	}
 	return ws.WriteMessage(websocket.BinaryMessage, authFrameBytes)
 }
 
 func readConnectH1PooledWithDeadline(ws connect.H1MessageConn, timeout time.Duration, maximum int64) (int, []byte, error) {
-	if err := ws.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+	if err := setConnectH1ReadDeadline(ws, timeout); err != nil {
 		return 0, nil, err
 	}
 	return connect.ReadH1PooledMessage(ws, maximum)
@@ -1929,6 +1951,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 				clientId,
 				connectTransportH1,
 				&self.settings.ProviderIntentCheckSettings,
+				self.exchange.timerSweep,
 			)
 			if !providerIntentCheck.Start() {
 				h1Observation.close(connectH1CloseClientLimit)
@@ -2121,7 +2144,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 				if returnToPool {
 					defer connect.MessagePoolReturn(message)
 				}
-				err := ws.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
+				err := setConnectH1WriteDeadline(ws, self.settings.WriteTimeout)
 				if err == nil {
 					err = ws.WriteMessage(websocket.BinaryMessage, message)
 				}
@@ -2245,7 +2268,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 
-				pingTimer.Reset(self.settings.heartbeatInterval(pingTracker))
+				resetConnectPingTimer(pingTimer, self.settings.heartbeatInterval(pingTracker), server.TimerCensusSiteH1PingTimer)
 				select {
 				case <-handleCtx.Done():
 					return
@@ -2947,6 +2970,7 @@ func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier Resi
 				clientId,
 				connectTransportH3,
 				&self.settings.ProviderIntentCheckSettings,
+				self.exchange.timerSweep,
 			)
 			if !providerIntentCheck.Start() {
 				kickClientLimit(clientLimitKickCauseProviderIntent)
@@ -3306,7 +3330,7 @@ func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier Resi
 			pingTimer := time.NewTimer(0)
 			defer pingTimer.Stop()
 			resetPingTimer := func() {
-				pingTimer.Reset(self.settings.heartbeatInterval(pingTracker))
+				resetConnectPingTimer(pingTimer, self.settings.heartbeatInterval(pingTracker), server.TimerCensusSiteH3PingTimer)
 			}
 			resetPingTimer()
 			defer func() {

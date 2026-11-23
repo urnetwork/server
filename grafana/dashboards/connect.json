@@ -4589,6 +4589,183 @@
                     "legendFormat": "written {{format}}"
                 }
             ]
+        },
+        {
+            "id": 118,
+            "type": "row",
+            "title": "runtime timer changes (CPUOPT7 §11, timer_census.go)",
+            "collapsed": false,
+            "gridPos": {
+                "h": 1,
+                "w": 24,
+                "x": 0,
+                "y": 428
+            },
+            "panels": []
+        },
+        {
+            "id": 119,
+            "type": "timeseries",
+            "title": "timer changes / s by block and horizon",
+            "description": "Sampled one call in 64 and counted as 64 (timer_census.go). A call that may move a Go runtime timer in a P's heap, a Reset or a socket deadline, is counted at its site in the bucket of how far ahead the timer is then due. A P walks its whole timer heap (runtime.(*timers).adjust) when the earliest moved deadline on it arrives, so the walk rate is set by the frequent changes with the shortest horizons, not by their CPU: about 75 walks a second a P, the g2 excess of 11-23, needs a change due about every 13 ms on each of a process's 20 Ps. Compare g2 and g4 with g1 and g3 (CPUOPT7 §11). Stops and deadline clears, which leave zombies and set off no walk, are left out here.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 429
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "ops",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (block, horizon) (rate(urnetwork_connect_timer_modifications_total{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\",horizon!=\"stop\"}[$__rate_interval]))",
+                    "legendFormat": "{{block}} {{horizon}}"
+                }
+            ]
+        },
+        {
+            "id": 120,
+            "type": "timeseries",
+            "title": "timer changes due within 100 ms / s by block and site",
+            "description": "Sampled one call in 64 and counted as 64 (timer_census.go). A call that may move a Go runtime timer in a P's heap, a Reset or a socket deadline, is counted at its site in the bucket of how far ahead the timer is then due. A P walks its whole timer heap (runtime.(*timers).adjust) when the earliest moved deadline on it arrives, so the walk rate is set by the frequent changes with the shortest horizons, not by their CPU: about 75 walks a second a P, the g2 excess of 11-23, needs a change due about every 13 ms on each of a process's 20 Ps. Compare g2 and g4 with g1 and g3 (CPUOPT7 §11). Only the buckets under 100 ms (lt_1ms, 1ms_10ms, 10ms_100ms): the candidates for the trigger. The front_* sites count every deadline on a public TCP socket, the h1 transport's (h1_*) among them; client_* are the connect library's waits in residents' clients, quic_* and http3_* quic-go's.",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 429
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "ops",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (block, site, horizon) (rate(urnetwork_connect_timer_modifications_total{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\",horizon=~\"lt_1ms|1ms_10ms|10ms_100ms\"}[$__rate_interval]))",
+                    "legendFormat": "{{block}} {{site}} {{horizon}}"
+                }
+            ]
+        },
+        {
+            "id": 121,
+            "type": "timeseries",
+            "title": "timer changes / s by site, every horizon",
+            "description": "Sampled one call in 64 and counted as 64 (timer_census.go). A call that may move a Go runtime timer in a P's heap, a Reset or a socket deadline, is counted at its site in the bucket of how far ahead the timer is then due. A P walks its whole timer heap (runtime.(*timers).adjust) when the earliest moved deadline on it arrives, so the walk rate is set by the frequent changes with the shortest horizons, not by their CPU: about 75 walks a second a P, the g2 excess of 11-23, needs a change due about every 13 ms on each of a process's 20 Ps. Compare g2 and g4 with g1 and g3 (CPUOPT7 §11).",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 0,
+                "y": 437
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "ops",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (site, horizon) (rate(urnetwork_connect_timer_modifications_total{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\",horizon!=\"stop\"}[$__rate_interval]))",
+                    "legendFormat": "{{site}} {{horizon}}"
+                }
+            ]
+        },
+        {
+            "id": 122,
+            "type": "timeseries",
+            "title": "timer stops and deadline clears / s by site",
+            "description": "A stop, a deadline cleared, or a deadline set at or before now leaves a zombie in a P's heap, which a walk or the heap's head removes; it sets off no walk itself, but a socket deadline set again while the zombie is still there is a move. Sampled one call in 64 and counted as 64 (timer_census.go).",
+            "gridPos": {
+                "h": 8,
+                "w": 12,
+                "x": 12,
+                "y": 437
+            },
+            "datasource": {
+                "type": "prometheus",
+                "uid": "warp-mimir"
+            },
+            "fieldConfig": {
+                "defaults": {
+                    "unit": "ops",
+                    "min": 0
+                },
+                "overrides": []
+            },
+            "options": {
+                "legend": {
+                    "displayMode": "table",
+                    "placement": "bottom",
+                    "showLegend": true
+                },
+                "tooltip": {
+                    "mode": "multi",
+                    "sort": "desc"
+                }
+            },
+            "targets": [
+                {
+                    "refId": "A",
+                    "expr": "sum by (site) (rate(urnetwork_connect_timer_modifications_total{env=\"$env\",service=\"connect\",block=~\"$block\",host=~\"$host\",instance!=\"\",horizon=\"stop\"}[$__rate_interval]))",
+                    "legendFormat": "{{site}}"
+                }
+            ]
         }
     ]
 }

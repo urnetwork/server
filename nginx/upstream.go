@@ -52,6 +52,8 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/urnetwork/server"
 )
 
 // A service's blocks and their pools. Safe for concurrent use.
@@ -203,6 +205,7 @@ func (self *upstreamGroup) serveHttp(w http.ResponseWriter, r *http.Request, opt
 	ctx := r.Context()
 	responseController := http.NewResponseController(w)
 	setClientReadDeadline := func(deadline time.Time) error {
+		server.CountTimerDeadline(server.TimerCensusSiteFrontResponseDeadline, deadline)
 		return responseController.SetReadDeadline(deadline)
 	}
 
@@ -601,7 +604,10 @@ func (self *upstreamGroup) relay(w http.ResponseWriter, responseController *http
 func (self *upstreamGroup) copyToClient(w http.ResponseWriter, responseController *http.ResponseController, body io.Reader, bodyEnded func()) (clientErr error, upstreamErr error) {
 	sendTimeout := self.settings.Http.SendTimeout
 	if 0 < sendTimeout {
-		defer responseController.SetWriteDeadline(time.Time{})
+		defer func() {
+			server.CountTimerStop(server.TimerCensusSiteFrontResponseDeadline)
+			responseController.SetWriteDeadline(time.Time{})
+		}()
 	}
 	copyBuffer := self.copyBuffers.Get().(*[]byte)
 	defer self.copyBuffers.Put(copyBuffer)
@@ -612,6 +618,7 @@ func (self *upstreamGroup) copyToClient(w http.ResponseWriter, responseControlle
 		}
 		if 0 < n {
 			if 0 < sendTimeout {
+				server.CountTimerDeadlineAfter(server.TimerCensusSiteFrontResponseDeadline, sendTimeout)
 				responseController.SetWriteDeadline(time.Now().Add(sendTimeout))
 			}
 			if _, err := w.Write((*copyBuffer)[:n]); err != nil {
@@ -673,6 +680,7 @@ func (self *upstreamGroup) refuse(w http.ResponseWriter, r *http.Request, respon
 		if lingeringTimeout := self.settings.Http.LingeringTimeout; 0 < lingeringTimeout {
 			lingeringDeadline = time.Now().Add(lingeringTimeout)
 		}
+		server.CountTimerDeadline(server.TimerCensusSiteFrontResponseDeadline, lingeringDeadline)
 		responseController.SetReadDeadline(lingeringDeadline)
 	}
 	writeForwardError(w, refusal.status)

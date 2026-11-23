@@ -54,6 +54,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/router"
 )
 
@@ -881,6 +882,7 @@ func (self *routeHttpExchange) boundUnreadBody() {
 	if lingeringTimeout := self.front.settings.Http.LingeringTimeout; 0 < lingeringTimeout {
 		lingeringDeadline = time.Now().Add(lingeringTimeout)
 	}
+	server.CountTimerDeadline(server.TimerCensusSiteFrontResponseDeadline, lingeringDeadline)
 	http.NewResponseController(self.writer()).SetReadDeadline(lingeringDeadline)
 }
 

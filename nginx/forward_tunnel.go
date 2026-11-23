@@ -29,6 +29,8 @@ import (
 	"slices"
 	"sync"
 	"time"
+
+	"github.com/urnetwork/server"
 )
 
 // One tunnel's two connections.
@@ -95,6 +97,7 @@ func (self *upstreamGroup) tunnel(w http.ResponseWriter, responseController *htt
 	upstreamConn := exchange.conn
 	upstreamConn.readTimeout = 0
 	upstreamConn.writeTimeout = 0
+	server.CountTimerStop(server.TimerCensusSiteFrontUpstreamDeadline)
 	upstreamConn.conn.SetDeadline(time.Time{})
 
 	streamTimeout := self.settings.Forward.StreamTimeout
@@ -103,6 +106,7 @@ func (self *upstreamGroup) tunnel(w http.ResponseWriter, responseController *htt
 		if 0 < streamTimeout {
 			idleDeadline := time.Now().Add(streamTimeout)
 			clientConn.SetReadDeadline(idleDeadline)
+			server.CountTimerDeadlineAfter(server.TimerCensusSiteFrontUpstreamDeadline, streamTimeout)
 			upstreamConn.conn.SetReadDeadline(idleDeadline)
 		}
 	}
@@ -127,6 +131,9 @@ func (self *upstreamGroup) tunnel(w http.ResponseWriter, responseController *htt
 			if 0 < n {
 				extendIdle()
 				if 0 < writeTimeout {
+					if dst == upstreamConn.conn {
+						server.CountTimerDeadlineAfter(server.TimerCensusSiteFrontUpstreamDeadline, writeTimeout)
+					}
 					dst.SetWriteDeadline(time.Now().Add(writeTimeout))
 				}
 				if _, err := dst.Write((*copyBuffer)[:n]); err != nil {

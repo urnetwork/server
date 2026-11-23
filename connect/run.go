@@ -157,6 +157,17 @@ func runWithDependencies(
 		return fmt.Errorf("load the lb_alt front: %w", frontErr)
 	}
 	ConfigureMessagePools()
+	settings := exchangeSettingsForRun(options)
+	// counts the process's runtime timer changes by site and horizon
+	// (timer_census.go, CPUOPT7 §11) for its whole life, as the pprof
+	// listener below profiles it
+	stopTimerCensus, timerCensusErr := startTimerCensus(&settings.TimerCensus)
+	if timerCensusErr != nil {
+		// Optional diagnostics must not gate serving.
+		glog.Errorf("[connect]timer census unavailable (%s); continuing primary startup\n", timerCensusErr)
+	} else {
+		defer stopTimerCensus()
+	}
 	if options.LoopbackPprof {
 		// up before readiness, so a stuck start can be profiled, and closed
 		// last, after the drain
@@ -180,7 +191,6 @@ func runWithDependencies(
 	if err := readiness(runCtx); err != nil {
 		glog.Infof("[connect]not ready (%s)\n", err)
 	} else {
-		settings := exchangeSettingsForRun(options)
 		unregisterOwnerMetrics, err := registerTransferMemoryOwnerMetrics(prometheus.DefaultRegisterer, settings.MemoryOwnerLedger)
 		if err != nil {
 			return fmt.Errorf("register Connect transfer owner metrics: %w", err)

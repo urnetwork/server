@@ -1508,6 +1508,449 @@ a tenth of the fleet.
   - D71's per-block edge-2 rule stopped its roll twice this morning on swings of the kind §9.3 describes. Use the
     15-minute average or a 0.09 tolerance.
 
+## 11. C1: connect's timer-heap walks, the measurement and the backstop polls (11-23)
+
+The owner approved C1 (§10.5, rank 1) on 2026-11-23. It has two parts:
+- the measurement that finds what sets off the g2 blocks' heap walks (LBALTOPT2 R14(a));
+- the model's backstop polls, taken off the runtime's timer heaps.
+
+The trigger itself isn't fixed here. The fix depends on what production's counters show (§11.6).
+
+Everything is built, tested and committed on branches. Nothing is merged, built into an image or deployed:
+- server `feat/connect-timer-census-1123`, from main f09d3edd6;
+- connect `feat/timer-census-1123` 5487fcc6, from 3586f22e;
+- quic-go `feat/timer-census-1123` 0fb6192a, from 83a1e6f8.
+
+Nothing in production was touched.
+
+### 11.1 What's counted, and how
+
+**The mechanism** (LBALTOPT2 §3.4; `runtime/time.go` in go1.27.4):
+- A timer changed while it's in a P's heap is only marked. That covers a pending timer, and a zombie that a stop or an
+  abandoned select left there. The heap keeps the earliest such deadline (`timer.modify`, `minWhenModified`).
+- Once that deadline passes, the next timer check on the heap walks all of it (`timers.adjust`): about 60k timers at
+  5–7 ns each. The check can be the P's own or another P's while it steals.
+- So a heap walks about once per wait for its next change plus that change's horizon. For a source of rate `r` a heap
+  and horizon `h`, that's `1/(1/r + h)` walks a second.
+- The frequent changes with the shortest horizons set the rate, not the changes' CPU. That's why a profile can't name
+  the trigger.
+
+**What that means for the g2 excess:**
+- The excess is 5–11.5 points of an 8.5-core process: 0.4–1.0 cores.
+- At about 360 µs a walk, that's 1.1k–2.7k walks a second a process, or 55–135 a second on each of its 20 Ps
+  *(inferred)*.
+- A horizon of 10 ms can't make more than 100 walks a second a heap, whatever the rate. So the trigger must be due
+  within about 10–18 ms: in `lt_1ms` or `1ms_10ms`, or at the low edge of `10ms_100ms`.
+- At a 1 ms horizon it takes 60–150 changes a second a heap. That's about 1.2k–3k a second a process more on g2 than on
+  g1 and g3.
+
+**The counter:** `urnetwork_connect_timer_modifications_total{site, horizon}` (server `timer_census.go`).
+- **site** is a fixed set of 27 labels, one per place that can change a runtime timer on a connect hot path (table
+  below).
+- **horizon** is how far ahead the changed timer is then due: `lt_1ms`, `1ms_10ms`, `10ms_100ms`, `100ms_1s`,
+  `1s_10s`, `ge_10s`, and `stop`.
+  - The buckets under 100 ms are finer than R14(a)'s, since pacing, ACK compression, loss recovery and short
+    operation timeouts live there.
+  - A Reset due at once is `lt_1ms`.
+- **stop** counts a timer stopped, a deadline cleared, and a socket deadline set at or before now.
+  - `poll_runtime_pollSetDeadline` stops the descriptor's timer in all three cases.
+  - A stop leaves a zombie and sets off no walk itself. But a socket deadline set again while that zombie is still in
+    the heap is a move, so the stops show which sets are likely moves.
+- 27 sites times 7 horizons is 189 series a connect process. Every other service exports none: the series are made
+  only when the census starts, and only the connect service starts it.
+
+**What a count means.** Each counted call *may* move a timer in a heap. Whether it does depends on the timer's state,
+which user code can't see:
+- a socket deadline moves the descriptor's timer when that timer is pending or a zombie. It's an insert when the last
+  one fired;
+- a channel timer's Reset moves it when it's still in a heap. That's while a select waits on it, or while it's a zombie
+  the last select left when it woke on another case. Otherwise it's an insert, at the next select that blocks;
+- a func timer's Reset moves it when it's pending.
+
+So a count is an upper bound on moves at its horizon. The trigger is the site whose sub-100 ms rate differs between g2
+and the other blocks.
+
+**How it's sampled.** One call in `SamplePeriod` is counted, as `SamplePeriod` calls.
+- The period is 64 by default (`ExchangeSettings.TimerCensus`). It must be a power of two; non-positive leaves the
+  census off.
+- Off, a counted call costs one atomic load.
+- On, it draws from the calling thread's random source and checks a mask, with no lock and no allocation. The source is
+  `math/rand/v2`, the runtime's per-M ChaCha8.
+- Only a sampled call reads the clock, and only for an absolute deadline. It then adds to one of 189 counters, an
+  uncontended atomic add.
+- The connect service starts the census in `Run`, before readiness, as the pprof listener starts, so it covers the
+  process's life. If the start fails, `Run` logs it and serves on.
+
+**The libraries.** The connect library and quic-go can't import the server, so each has its own process-wide hook with
+the same sampling:
+- `connect.SetTimerCensus` (connect `timer_census.go`);
+- `quic.SetTimerCensus` (quic-go `urnetwork_timer_census.go`; URNETWORK.md, "A census of timer changes").
+
+Each samples its own calls and hands a sampled one to its `Record`, with the sample period as its count. connect's
+`startTimerCensus` maps their sites to the `client_*`, `quic_*` and `http3_*` labels.
+
+**The sites:**
+
+| Site | What it counts | Horizon at the defaults |
+|---|---|---|
+| `exchange_read_deadline`, `exchange_write_deadline` | `exchangeDeadline.refresh` before each exchange read, and before each write or writev batch | 30 s read, 15 s write |
+| `front_read_deadline`, `front_write_deadline` | every deadline set on a public TCP socket of the lb_alt front (`frontTrackedConn`): net/http's, h2's per-write `WriteByteTimeout`, TLS's close_notify, gorilla's and the h1 transport's | the front's `ClientHeaderTimeout` and `SendTimeout`; 15–30 s for the transport; 5 s for close_notify |
+| `front_write_bound` | the front's `SendTimeout` bound on a write its owner left without a deadline: set before the write, cleared after | `SendTimeout` |
+| `front_response_deadline` | the nginx front's `http.ResponseController` deadlines: each response write's `SendTimeout` and its clear, a streamed request body's read deadline, the lingering read. On h1 they're also the socket's (`front_*`); on h2 they move the stream's timer inside net/http; on h3 they're a stream field | `SendTimeout` 30 s, `LingeringTimeout` 5 s |
+| `front_upstream_deadline` | the nginx front's deadlines on its pooled connections to the api: each upstream read and write, and a tunnel's | `ProxyReadTimeout`, `ProxySendTimeout` 30 s, `StreamTimeout` 60 s |
+| `h1_read_deadline`, `h1_write_deadline` | the h1 transport's per-read and per-write deadlines (`setConnectH1ReadDeadline`, `setConnectH1WriteDeadline`). A session through the front is also counted at `front_*` | `ReadTimeout`, `WriteTimeout` |
+| `h1_ping_timer`, `h3_ping_timer` | the transport writers' heartbeat Reset as their queue goes idle (`resetConnectPingTimer`) | at least `MinPingTimeout`, 1 s |
+| `forward_write_timer` | `sendPooledMessage`'s Reset for a send into a full queue, by a forward's or a resident transport's writer | `WriteTimeout`, 15 s |
+| `redis_read_deadline`, `redis_write_deadline` | every deadline go-redis sets on a pooled socket. A wrapper on the pools' dial counts them (`redis_timer_census.go`) and keeps `syscall.Conn` for go-redis's socket check | the earlier of the command context's deadline and the pool's timeout: pools of 15 s, 2 s or 1 s; 150 ms–1 s contexts in connect's model calls. go-redis computes it from a clock it caches for up to 50 ms; the census reads the real one |
+| `pg_deadline` | every deadline pgx sets, through `pgWriteTrackedConn`, which already wraps every pooled socket under TLS | at once for a canceled query (a stop); 15 s for a close |
+| `client_timer` | the connect library's reused wait timer (`resetOrCreateTimer`) at the callers without a site of their own: the encryption idle timer, route reads, the client-side transports | the caller's |
+| `client_route_write_timer` | a route write's wait for a writable route | the send's remaining timeout |
+| `client_receive_handoff_timer`, `client_receive_delivery_timer` | a receive sequence's Pack handoff and delivery waits | the caller's; the idle and gap timeouts |
+| `client_ack_compress_timer` | a receive sequence's ACK compression wait, re-armed for each new deadline | 10 ms, and 1 ms for the quiet head |
+| `client_pack_wait_timer` | a send Pack call's admission waits (`sendPackWait.until`) | the send's timeout |
+| `client_window_pacing_timer` | a send sequence's pacing wait, re-armed every pass | the pacing wake |
+| `client_sequence_deadline_timer` | `sequenceDeadlineTimer`: stops only. It never moves a pending timer (R14) | stop |
+| `quic_stream_read_timer`, `quic_stream_write_timer` | quic-go's per-call deadline timer for a stream Read, Peek or Write: a Reset in its wait loop, and its stop while still pending | the stream's deadline |
+| `quic_conn_timer` | a connection's run loop timer: stops only. `resetTimer` stops the old timer and arms a new one | stop |
+| `http3_idle_timer` | an http3 server connection's idle timer: stopped as a request stream starts, Reset as its last one ends | `KeepaliveTimeout` |
+
+### 11.2 What isn't counted, and why
+
+- **New timers:** an insert never sets off a walk (`maybeAdd` lowers no modified deadline).
+- **The exchange's header deadlines** (`ExchangeBuffer.WriteHeader`, `ReadHeader`): set once per exchange connection,
+  and C2 is changing those functions.
+- **net/http's own h2 timers:** a stream's `ReadTimeout` and `WriteTimeout` timers (unset on the front), and the
+  connection's idle timer, Reset when its last stream ends. They belong to the standard library. The deadlines connect
+  sets through them are counted at `front_response_deadline`, and h2's socket writes at `front_write_deadline`.
+- **connect's private listener** (`/status`): its sockets aren't wrapped, and it carries no transport.
+- **The connect library:**
+  - a `resetOrCreateTimer` timer's stops, since its callers stop it directly;
+  - the zombie a channel timer becomes when a select wakes on another case (`unblockTimerChan`), which no hook sees;
+  - the client-side callers in the proxy lane's files (`ip_remote_multi_client*.go`, the framer,
+    `framed_message_conn.go`), which weren't edited. Their `resetOrCreateTimer` calls count under `client_timer`;
+  - the contract manager's pass timer and the contract stats epoch timer, which run once a pass and aren't hot.
+- **quic-go:** none of these is hot, and none is a move:
+  - the run loop timer's stop as a connection ends;
+  - a path probe's timer;
+  - a closed connection's retirement `AfterFunc`;
+  - a canceled dial's close wait;
+  - `ConnGroup`'s per-read timer;
+  - a transport's deadlines at close.
+- **Rare paths** count only at the front's socket: the refusal hold's write, the client-limit-exceeded write, the moved
+  close and the session notifications' writes.
+
+### 11.3 The cost per call
+
+`BenchmarkTimerCensusCount` (server root), one goroutine. It ran on an M1 Max shared with other sessions, at a load
+average of 48–79:
+
+| | A Reset | A deadline |
+|---|---|---|
+| census off | 2.3 ns | 2.4 ns |
+| on, not sampled (period 64) | 7.5 ns | 7.7 ns |
+| on, sampled | 10 ns | 28 ns, with the clock read |
+
+- At a period of 64 that's about 8 ns a counted call.
+- A busy connect process makes a few hundred thousand counted calls a second; the exchange reads lead (§11.5).
+- So the census costs about 2–4 ms of CPU a second, under 0.05% of a process *(inferred)*.
+
+### 11.4 The backstop polls on the sweep
+
+**The problem.** Three loops each took a fresh `time.After` on every pass:
+- `StreamHopListener.run` (`model/stream_model.go`);
+- `NetworkPeerListener.run` (`model/peer_model.go`);
+- `providerIntentCheck.Run` (`connect/provider_intent.go`), once per observation.
+
+A pass woken by a key event (a kick, a delta, a snapshot, a resync) left that runtime timer in a P's heap as a zombie.
+It stayed there until a walk or its deadline, 8–12 minutes out in production.
+
+**The change.** Each now waits on `internal/timersweep` (LBALTOPT2 §8.1), with one timer per owner:
+- **How they get the sweep:** as a constructor parameter, the way the exchange hands its sweep to its owners.
+  - A resident passes `Resident.timerSweep()`, which is the exchange's.
+  - The connect handler passes `exchange.timerSweep` to the provider intent check.
+  - A nil sweep, as tests build the owners, gives the timer a sweep of its own. There's no new global.
+- **The bound:** a poll comes at its deadline or at most one 100 ms tick after it, never before.
+- **What's unchanged:**
+  - the jittered intervals: ±20% around twice the corrective interval, so 8–12 minutes in production;
+  - the error backoff;
+  - a kick, a delta or a snapshot still leaves the deadline where it was, since the deadline is absolute;
+  - a resync's full read still stands for the poll and moves the deadline;
+  - the provider intent check still observes `ObserveInterval` after the end of each pass.
+- **Superseded fires:** a fire that a resync or a stop supersedes is discarded, as a Go 1.23 timer's is.
+- **Teardown:** the timer leaves the sweep as its owner returns.
+
+**`TestConnectionTimerCensus`** ran 64 simulated connections on the local stack. It now has network peers on, so each
+resident runs both listeners:
+
+| | LBALTOPT2 §8.1's branch | This branch |
+|---|---|---|
+| the converted owners' runtime timers, a connection | 0 (10 owners) | 0 (12 owners) |
+| their sweep timers, a connection | 10.00 | 12.00 |
+| every runtime timer the connections made, a connection | 3.27 | 2.33 |
+
+**In production:**
+- The heap snapshot of §10.3.1 counted about 210k of g2's 1.2M timers in `StreamHopListener.run`, and 22k in
+  `NetworkPeerListener.run`. That's about a fifth of the heaps, and every walk visits them.
+- They move to the sweep. Its ticks cost about 3–5 ns a timer a second (§8.1's benchmark), about 1 ms a second a
+  process for these timers *(inferred)*.
+
+### 11.5 The local evidence
+
+The perf harness reports the census when `CONNECT_PERF_TIMER_CENSUS` is set (`connect_perf_test.go`). It counts every
+call and prints `[perfcensus]` lines for each phase. There were two runs on the local stack.
+
+**Through the lb_alt front, one exchange** (`TestConnectPerformanceCarriersLbAlt`). Each span is about 10 s of ping-pong
+and blast; rates are per second:
+
+| Site, horizon | websocket | h1+ | quic | whodis |
+|---|---|---|---|---|
+| messages a second, best run | 69k | 83k | 6.1k | 19 |
+| `exchange_read_deadline`, ge_10s | 34.8k | 34.6k | 16.1k | 176 |
+| `front_read_deadline` and `h1_read_deadline` (equal), ge_10s | 11.6k | 11.5k | – | – |
+| `front_write_deadline` and `h1_write_deadline` (equal), ge_10s | 4.4k | 4.5k | – | – |
+| `exchange_write_deadline`, ge_10s | 3.9k | 4.4k | 2.9k | 176 |
+| `h1_ping_timer`, 1s_10s | 771 | 831 | – | – |
+| `h3_ping_timer`, 1s_10s | – | – | 1.9 | 2.0 |
+| `quic_conn_timer`, stop | – | – | 4.2k | 268 |
+| `client_ack_compress_timer`, lt_1ms / 1ms_10ms | 299 / 95 | 298 / 96 | 0.3 / 104 | – |
+| `client_route_write_timer`, 100ms_1s / ge_10s | 55 / 49 | 48 / 43 | 35 at 1s_10s | 0.6 / 0.8 |
+| `client_timer`, lt_1ms / 1ms_10ms | – | – | – | 24 / 215 |
+| `redis_*`, any bucket | 2 or fewer each | 2 or fewer | 2 or fewer | 2 or fewer |
+
+**Two exchange hosts, contracts, h1+ without the front** (`TestConnectPerformance`). Each blast is 6 s:
+
+| Site, horizon | tput64 | tput1024 | tput2048 | noack1024 | bidi1024 |
+|---|---|---|---|---|---|
+| messages a second | 247k | 81k | 31k | 59k | 45k + 48k |
+| `exchange_read_deadline`, ge_10s | 96.6k | 43.5k | 36.0k | 158.9k | 56.2k |
+| `h1_read_deadline`, ge_10s | 32.2k | 14.5k | 12.0k | 57.6k | 18.7k |
+| `exchange_write_deadline`, ge_10s | 20.8k | 6.4k | 3.9k | 3.7k | 6.1k |
+| `h1_write_deadline`, ge_10s | 5.1k | 5.8k | 4.5k | 4.8k | 6.7k |
+| `h1_ping_timer`, 1s_10s | 4.7k | 1.2k | 724 | 327 | 1.2k |
+| `client_ack_compress_timer`, lt_1ms / 1ms_10ms | 823 / 105 | 438 / 79 | 267 / 93 | 0 / 0.2 | 509 / 166 |
+| `client_route_write_timer`, 100ms_1s / ge_10s | 32 / 14 | 15 / 43 | 58 / 52 | 10 / 450 | 39 / 93 |
+| `redis_*`, largest bucket | 14 (stop) | 16 (stop) | 11 (stop) | 12 (stop) | 31 (stop) |
+| `forward_write_timer`, ge_10s | – | – | – | 0.8 | – |
+
+**Caveats:**
+- The two clients run in the test process, so the `client_*` counts are theirs as well as their residents'. In
+  production `client_*` counts only residents' clients. The whodis `client_timer` counts are the test client's own
+  DNS-carried transport.
+- The local heaps are small. These runs say which changes are frequent and short, not what they cost.
+
+**What they show:**
+- **Every server site is at 1 s or more.**
+  - Exchange reads (30 s) lead, at 16k–159k a second.
+  - The h1 and front deadlines are 15–30 s.
+  - The h1 heartbeat's Reset is 1–10 s.
+  - Redis is 100 ms and up, at a few a second.
+  - The forward write timer is 15 s and rare.
+  - At those horizons, no server site can make more than one walk a second a heap.
+- **The front's write bound never ran**, since the h1 transport's writes carry their own deadline. **quic-go's stream
+  timers never ran either.** The QUIC carrier ran in hybrid mode, where the server clears the stream's read deadline
+  and QUIC's idle timeout owns liveness, and its 1 KiB messages rode DATAGRAMs.
+- **The only frequent change due within 10 ms is the connect library's ACK compression timer.** It runs at about
+  300–820 a second under `lt_1ms` and 80–170 under `1ms_10ms` while one sequence receives a stream.
+  - Each one is a real move when the wait it re-arms woke on the quiet-head signal: the select left the channel timer
+    in the heap as a zombie.
+  - noack1024, with no ACKs, has none.
+- **quic-go's run loop stops its timer about 4k times a second** at 6k messages a second over QUIC. These are only
+  stops; the zombies leave from the heap's head within milliseconds.
+
+So locally, nothing on the server's own paths sets off frequent walks. The lead is the library's ACK compression in
+residents' clients, whose rate in production follows their control traffic. That fits the lead of §10.3.1
+*(inferred)*: the proxies' QUIC still lands on g2 and g4 by address. A hosted proxy's flows make contracts, and their
+control frames are what a resident's client receives and acknowledges.
+
+**The walks themselves**, measured two ways.
+
+1. **`BenchmarkTimerWalksByChangeHorizon`** (`internal/timersweep`). On one P, a source re-arms a channel timer after
+   each wait that another goroutine's message ended first, as the ACK compression wait does. It runs at 1.2–2.2M
+   changes a second, on a heap of 55,000 timers and on an empty one, at a load average of about 13:
+
+   | Horizon | CPU a change, 55k heap | CPU a change, empty heap | Walk CPU a change | Walk CPU a second |
+   |---|---|---|---|---|
+   | 500 µs | 819 ns | 480 ns | 339 ns | 0.41 s, 41% of the P |
+   | 5 ms | 507 ns | 447 ns | 60 ns | 0.10 s |
+   | 50 ms | 463 ns | 447 ns | 16 ns | 0.03 s |
+   | 500 ms | 453 ns | 465 ns | none (within noise) | – |
+   | 5 s | 465 ns | 462 ns | none | – |
+   | 50 s | 465 ns | 469 ns | none | – |
+
+   - At the same rate of changes, the walk cost falls about tenfold per tenfold of horizon, as `1/(1/r + h)` predicts.
+     From half a second up it's nothing.
+   - The 500 µs row implies about 2,000 walks a second at about 200 µs each on this machine; §8.1 measured 389 µs on a
+     busier one.
+
+2. **The perf harness with production-sized heaps.** `CONNECT_PERF_TIMER_BALLAST=60000` puts 60k far-off timers on each
+   of 10 Ps, each beside a filler allocation and with a random deadline, so a walk misses cache as a server's does. This
+   is contract mode, on a quiet machine (load average about 20):
+
+   | Phase | messages a second | ACK compression changes a second, lt_1ms + 1ms_10ms | exchange + h1 read deadlines a second, ge_10s | `timers.check` / `adjust` share of the process |
+   |---|---|---|---|---|
+   | tput64 | 218k | 775 + 119 | 85k + 29k | 1.0% / 0.5% |
+   | tput1024 | 62k | 336 + 114 | 35k + 12k | 2.7% / 1.3% |
+   | tput2048 | 29k | 240 + 94 | 33k + 11k | 4.6% / 3.0% |
+   | bidi1024 | 35k + 48k | 436 + 186 | 55k + 18k | 3.7% / 2.1% |
+   | noack1024 | 59k | 0 + 0.2 | 153k + 57k | none in the profile |
+
+   - The walks follow the ACK compression timer. noack1024 sets more long-horizon socket deadlines than any other phase
+     and doesn't walk, and every phase with ACK compression does.
+   - The shares also follow each phase's total CPU: tput64 burned 19 s of CPU in 6.6 s, tput2048 6 s.
+   - A first run under a load average of about 120 collapsed throughput fifteenfold. It pointed the same way (`adjust`
+     4.8–6.1% against 0.9%), but on too few samples to use.
+
+**What this means for production.** Every connect resident runs ACK compression for its client's control sequence.
+Locally it's the one source that sets off walks. Its rate in production is what the census will show.
+
+### 11.6 What to read in production, and how to decide the fix
+
+**Rolling it out.** The build carries the census, on at 1 in 64.
+1. Roll it to one g2 block first. connect's CPU should stay within noise, and the 189 series should appear.
+2. Then roll every block, since the decision compares g2 and g4 with g1 and g3.
+
+**Reading it,** at the morning load, from the connect dashboard's row "runtime timer changes":
+1. **"timer changes due within 100 ms / s by block and site":** for each site, compare the rate in `lt_1ms`, `1ms_10ms`
+   and `10ms_100ms` on g2 and g4 with g1 and g3. Divide by the processes in the block and by 20 (GOMAXPROCS) to get a
+   heap's rate `r`.
+2. **The model:** a site makes about `1/(1/r + h)` walks a second a heap, with `h` its bucket's upper edge (1 ms,
+   10 ms).
+   - The excess of §10.3.1 is 55–135 walks a second a heap.
+   - So look for a site whose sub-10 ms rate on g2 exceeds g1's and g3's by about 1.2k–3k a second a process.
+   - A site only in `10ms_100ms` can make at most 100 walks a second a heap, and only at its low edge.
+3. **Cross-check** with a CPU profile of the same g2 process. `timers.adjust`'s share should match the model's walks
+   times about 360 µs a walk.
+
+**The fix, by site.** Each keeps every deadline's instant.
+- **`client_ack_compress_timer`** (the local lead): R14's `armBy`, as `sequenceDeadlineTimer` does. In the connect
+  library, that's `transfer.go`'s `armAckCompressTimer`.
+  - For an earlier deadline, stop the pending timer and arm a new one. That's an insert, and the stopped one leaves at
+    its time.
+  - For a later one, keep the pending timer. The wait already treats an early fire as a recheck: it reads the clock
+    against the compression deadline and the quiet head, and arms again.
+- **`client_window_pacing_timer`:** don't Reset a timer still armed for the same wake, as `sendPackWait.until` already
+  doesn't, and use `armBy` for an earlier wake.
+- **`client_receive_delivery_timer`, `client_timer`:** `armBy` at the caller.
+- **`quic_stream_*`:** after a woken wait, arm a new timer instead of the Reset, as the run loop's `resetTimer` does.
+- **`redis_*` under 100 ms:** a model call with a short context.
+  - Find it: the horizon names the bucket, and the callers of `RedisWithDeadline` are few.
+  - Lengthen or drop its socket deadline only where the owner's rule allows. Socket deadlines otherwise stay native
+    (CPUOPT-KEEPALIVE).
+- **`front_*`, `h1_*`, `exchange_*` under 100 ms:** a timeout configured short in production, such as the route file's
+  `SendTimeout`. That's a config change, not code.
+- **No site differs:** the trigger is in what isn't counted (§11.2), most likely net/http's h2 timers. The next step
+  would be a runtime build that counts walks by the modifying caller, which isn't proposed.
+
+### 11.7 Tests
+
+Every changed path has a test. Each test below was run with its change faithfully reverted (the count call removed, the
+call site back to its plain Reset or deadline, the loop back on `time.After`), and failed; then it was restored and
+passed.
+
+**server root** (`timer_census_test.go`, `redis_timer_census_test.go`):
+- `TestTimerCensusLabelsAreAFixedSet`: the 27 sites and 7 horizons are a fixed list of unique snake_case values, and a
+  census makes all 189 series as it starts.
+- `TestTimerCensusHorizonBuckets`: each bucket is half-open at its edges, and a non-positive horizon is `lt_1ms`.
+- `TestTimerCensusCountsEachCallOnceInItsBucket`: every counting call adds exactly one in its bucket and nothing
+  elsewhere. A cleared or past deadline counts as `stop`, and a library's sampled record adds its count.
+- `TestTimerCensusSamplesOneCallInThePeriod`: at a period of 64 every count is a multiple of 64, and 262,144 calls count
+  within 10% of themselves (six standard deviations).
+- `TestTimerCensusOffCountsNothing`: no census counts nothing; a period of 0 starts none, and 48 is refused.
+- `TestTimerCensusStopLeavesALaterCensus`.
+- `TestRedisTimerCensusConnCountsEachDeadline`: each go-redis deadline counts once in its bucket. The socket keeps
+  `syscall.Conn` and `NetConn`; a pipe isn't given `syscall.Conn`; a failed dial passes through.
+- `TestRedisTimerCensusSocketsKeepGoRedisSocketCheck` (local Redis):
+  - the pool's sockets are the census's;
+  - go-redis's socket check peeks through their `syscall.Conn` at every one of 5 checkouts;
+  - the 5 GETs count exactly 5 write deadlines, 5 read deadlines and 5 clears of each.
+- `TestPgWriteTrackedConnCountsEachDeadline`.
+- The existing `TestRedisDeadPooledConnectionIsHandled` and `TestRedisPoolsSkipTheConnCheckOnlyWhereCommandsRetry` now
+  dial through the census's sockets and pass.
+
+**server connect** (`timer_census_sites_test.go`, `timer_census_transport_db_test.go`, `provider_intent_sweep_test.go`,
+`run_test.go`, `timer_census_db_test.go`):
+- `TestTimerCensusMapsEveryLibrarySiteToItsOwn`: every connect library and quic-go site maps to a distinct server site
+  under its prefix.
+- `TestStartTimerCensusRecordsQuicSites`: the service installs quic-go's hook, and its stop removes it.
+- `TestStartTimerCensusRecordsConnectLibrarySites`: the service installs the connect library's hook. A real route
+  writer that waits twice counts one Reset at `client_route_write_timer`.
+- `TestStartTimerCensusOffAndRefused`: the default period is 64.
+- `TestTimerCensusCountsTheExchangeDeadlines`: a write and a batch count 2, and three reads count 3, each in its
+  timeout's bucket.
+- `TestTimerCensusCountsTheForwardWriteTimer`: a send into a full queue counts one; a free queue counts none.
+- `TestTimerCensusCountsTheFrontDeadlines`, `TestTimerCensusCountsTheFrontBoundAnOwnersClearLeaves`: the bound's set and
+  clear, an owner's deadline and clear, read deadlines, `SetDeadline`'s pair, and an owner's clear under a bound.
+- `TestTimerCensusCountsTheH1Deadlines`, `TestTimerCensusCountsThePingTimerResets`.
+- `TestTimerCensusCountsTheTransportSites` (local stack): through the service's census, a real h1 session counts
+  heartbeat resets and read deadlines, and a real h3 session counts heartbeat resets and quic-go's stream read timer. The
+  heartbeat is an hour, so each reset counts in `ge_10s` and nowhere else.
+  - Each of the h1 heartbeat, h1 read and h3 heartbeat call sites was reverted on its own, and each revert failed it.
+- `TestRunCountsTimerChangesWhileItRuns`: `Run` runs the census while it serves, and stops it as it returns.
+- `TestProviderIntentCheckObservesWithinASweepTickOfEachInterval`: in a synctest bubble, with every deadline between two
+  ticks, three observations each come at the tick the sweep fires their deadline, never before. The timer is on the
+  sweep while the check runs, and leaves it when the check ends.
+- `TestConnectionTimerCensus` (local stack), extended to the listeners: no runtime timers for either poll, and 12.00
+  sweep timers a connection. With the listeners back on `time.After`, it fails.
+
+**server model** (`listener_timer_sweep_test.go`): `TestStreamHopListenerPollWaitsOnTheSweep` and
+`TestNetworkPeerListenerPollWaitsOnTheSweep`. In a synctest bubble, with deadlines between ticks:
+- each poll comes at its deadline's tick, never before;
+- a kick, a delta or a snapshot leaves the deadline, and a resync moves it, with no poll at the replaced deadline;
+- the timer is on the sweep while the listener runs, and leaves it when the listener ends.
+
+**server nginx** (`timer_census_test.go`):
+- the front's response write deadlines count 7 arms and 6 clears for three chunks, matching
+  `TestRouteHttpSendTimeoutBoundsEachWrite`'s count;
+- `copyToClient` counts its arms and clear;
+- an upstream connection counts its write and its reads, a read only once it's armed;
+- a forwarded request, a tunnel, a refusal's and an own answer's lingering reads, and a streamed body's read deadlines
+  each count at their site in their bucket.
+
+**The dashboard:** the whole `./grafana` suite passes with promtool 3.5.0,
+`TestInternalDashboardsCoverEveryApplicationMetric` included.
+
+**Suites run:**
+- in full: `./nginx`, `./grafana` and `./internal/timersweep`;
+- on the local stack: model's stream hop and network peer tests, the touched root tests (Redis, pg, randomness, the
+  dial guard), and connect's front, transport, exchange, provider intent, run, timer sweep and census tests;
+- `GOOS=linux go vet` on root, connect, model and nginx;
+- the connect library's focused suite (114 tests) and quic-go's `go test -short .` (765 of 768 pass, 3 Linux-only
+  skipped) and `./http3` (301), as each repo's commit records.
+
+### 11.8 Risks
+
+- **Every service's Redis sockets change type.** The census's wrapper is on the pools' dial in every service, not only
+  connect.
+  - It keeps `syscall.Conn` for go-redis's socket check and `NetConn` for its unwrap, and the go-redis tests pass
+    through it.
+  - Where the census is off, it adds an interface call and an atomic load per deadline set.
+  - A go-redis upgrade that asserts another interface on the socket would need the wrapper to keep that one too.
+- **The cost on the hottest sites.** It's about 8 ns a call at the default period, about 0.05% of a process
+  *(inferred)*.
+  - The period is a code default in `ExchangeSettings.TimerCensus`, not a warp setting. Turning the census off means a
+    build with a period of 0.
+  - If the canary shows a cost, raise the period. The counts keep their meaning at any power of two.
+- **What a count is.**
+  - A count is an upper bound on moves: an insert that the census can't tell from a move counts too. Examples are
+    window pacing's first Reset after `NewTimer(0)`, and a quic-go Read's Reset after a wait that never blocked.
+  - Sites at different layers overlap: `front_*` with `h1_*`, and `front_response_deadline` with `front_*` on h1.
+  - Neither changes which site's sub-10 ms rate differs between blocks, which is the reading.
+- **The libraries' hooks are process-wide.** A process with two exchanges would count both in one census. Only connect
+  starts it.
+- **The polls on the sweep.**
+  - The stream hop and network peer backstops, and the provider intent observation, come up to 100 ms later than
+    before, never earlier. That's against 8–12-minute backstops and a 2-minute observation interval, whose presence
+    lasts 6 minutes.
+  - The sweep takes on about 230k more timers per g2 process, about 1 ms a second of its ticks *(inferred)*.
+  - Key-event delivery, which carries the changes, is untouched.
+- **`Run` builds its exchange settings before readiness** to start the census there. `exchangeSettingsForRun` builds
+  settings and reads only the process's host and block, so nothing changes for a start that isn't ready.
+- **Merges:**
+  - C2 changes `connect/resident.go` in `ExchangeBuffer.WriteHeader` and `ReadHeader`, which this branch doesn't touch.
+    This branch's hunks there are `exchangeDeadline.refresh` and its three callers, `sendPooledMessage`, the listeners'
+    constructor calls, and `ExchangeSettings`.
+  - `CPUOPT7.md`'s §12, from another agent, will sit beside this §11 at the file's end.
+
 ## 12. C2: connect's id text and typed resident and exchange header records (11-23)
 
 On 2026-11-23 the owner approved C2 (§10.5, rank 4). This section records what was built on two branches, neither

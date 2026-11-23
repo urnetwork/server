@@ -60,6 +60,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/urnetwork/server"
 )
 
 // Lets a forwarder name the block that answered, for the metrics and the
@@ -290,6 +292,7 @@ func (self *responseState) armWriteDeadline() {
 	if sendTimeout <= 0 {
 		return
 	}
+	server.CountTimerDeadlineAfter(server.TimerCensusSiteFrontResponseDeadline, sendTimeout)
 	self.controller.SetWriteDeadline(time.Now().Add(sendTimeout))
 }
 
@@ -299,6 +302,7 @@ func (self *responseState) clearWriteDeadline() {
 	if self.front.settings.Http.SendTimeout <= 0 {
 		return
 	}
+	server.CountTimerStop(server.TimerCensusSiteFrontResponseDeadline)
 	self.controller.SetWriteDeadline(time.Time{})
 }
 

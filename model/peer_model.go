@@ -19,6 +19,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/internal/timersweep"
 	"github.com/urnetwork/server/session"
 )
 
@@ -2197,6 +2198,10 @@ type NetworkPeerListener struct {
 	callback      func(*NetworkPeerEvent)
 	pollInterval  time.Duration
 	fullReadEvery int
+	readPeers     func(context.Context, server.Id) (int64, []*NetworkPeer)
+	// the corrective poll's timer waits here, off the runtime's timer heaps
+	// (CPUOPT7 §11). Nil gives the timer a sweep of its own.
+	timerSweep *timersweep.Sweep
 
 	// key-event inputs (PEERSSTREAMS2.md). `deltas` carries per-peer key
 	// events; `resync` forces the next tick to full-read. Both are fed
@@ -2213,6 +2218,9 @@ type NetworkPeerListener struct {
 	// Nil outside package tests. The callback runs after the listener worker
 	// has joined and immediately before CloseAndWait returns.
 	afterCloseWaitForTest func()
+	// Nil outside package tests. Called with each deadline the poll timer is
+	// armed for, before the wait. Set at construction, before run reads it.
+	afterPollArmForTest func(deadline time.Time)
 }
 
 // NewNetworkPeerListener polls the network's peer version counter every
@@ -2220,13 +2228,32 @@ type NetworkPeerListener struct {
 // list whenever the counter moved (PEERS2.md). Every `fullReadEvery`-th tick
 // full-reads unconditionally as insurance against a missed bump. There are
 // no subscriptions and no standing connections: the reader polls at its own
-// rate, and a slow or failing reader accumulates no state anywhere.
+// rate, and a slow or failing reader accumulates no state anywhere. The
+// poll's timer waits on timerSweep, the process's sweep, and fires at its
+// deadline or at most one sweep tick after it, never before; a nil timerSweep
+// gives it a sweep of its own.
 func NewNetworkPeerListener(
 	ctx context.Context,
 	networkId server.Id,
 	callback func(*NetworkPeerEvent),
 	pollInterval time.Duration,
 	fullReadEvery int,
+	timerSweep *timersweep.Sweep,
+) *NetworkPeerListener {
+	return newNetworkPeerListener(ctx, networkId, callback, pollInterval, fullReadEvery, GetNetworkPeers, timerSweep, nil)
+}
+
+// Constructs a listener with an injectable full read, and an observer of each
+// poll deadline it arms, for deterministic lifecycle tests.
+func newNetworkPeerListener(
+	ctx context.Context,
+	networkId server.Id,
+	callback func(*NetworkPeerEvent),
+	pollInterval time.Duration,
+	fullReadEvery int,
+	readPeers func(context.Context, server.Id) (int64, []*NetworkPeer),
+	timerSweep *timersweep.Sweep,
+	afterPollArm func(deadline time.Time),
 ) *NetworkPeerListener {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
@@ -2238,9 +2265,13 @@ func NewNetworkPeerListener(
 		callback:      callback,
 		pollInterval:  pollInterval,
 		fullReadEvery: fullReadEvery,
+		readPeers:     readPeers,
+		timerSweep:    timerSweep,
 		deltas:        make(chan *NetworkPeerDelta, 32),
 		resync:        make(chan struct{}, 1),
 		snapshotReady: make(chan struct{}, 1),
+
+		afterPollArmForTest: afterPollArm,
 	}
 	go func() {
 		defer close(npl.done)
@@ -2352,7 +2383,7 @@ func (self *NetworkPeerListener) run() {
 		}
 	}
 	reset := func() {
-		resetEventId, resetPeers := GetNetworkPeers(self.ctx, self.networkId)
+		resetEventId, resetPeers := self.readPeers(self.ctx, self.networkId)
 		applyReset(PrepareNetworkPeerSnapshot(resetEventId, resetPeers))
 	}
 
@@ -2414,8 +2445,16 @@ func (self *NetworkPeerListener) run() {
 	consecutiveErrors := 0
 	tick := 0
 	// the poll deadline is absolute so a stream of deltas cannot starve the
-	// corrective poll (PEERSSTREAMS2.md §5.4)
+	// corrective poll (PEERSSTREAMS2.md §5.4). Its one timer waits on the
+	// sweep, which a delta or snapshot leaves armed: a time.After per pass
+	// left a runtime timer in a P's heap as a zombie after each one
+	// (CPUOPT7 §11).
 	nextPollTime := time.Now().Add(jitterInterval(0))
+	pollTimer := self.timerSweep.NewTimer(time.Until(nextPollTime))
+	defer pollTimer.Stop()
+	if self.afterPollArmForTest != nil {
+		self.afterPollArmForTest(nextPollTime)
+	}
 	for {
 		select {
 		case <-self.ctx.Done():
@@ -2445,7 +2484,7 @@ func (self *NetworkPeerListener) run() {
 			}
 			continue
 		case <-self.resync:
-		case <-time.After(time.Until(nextPollTime)):
+		case <-pollTimer.C:
 		}
 
 		tick += 1
@@ -2474,7 +2513,13 @@ func (self *NetworkPeerListener) run() {
 		} else {
 			consecutiveErrors = 0
 		}
+		// a resync's full read counts as the poll, so it moves the deadline
+		// too, and a fire not yet received is discarded
 		nextPollTime = time.Now().Add(jitterInterval(consecutiveErrors))
+		pollTimer.Reset(time.Until(nextPollTime))
+		if self.afterPollArmForTest != nil {
+			self.afterPollArmForTest(nextPollTime)
+		}
 	}
 }
 

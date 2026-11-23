@@ -645,6 +645,10 @@ type ExchangeSettings struct {
 
 	ExchangeStuckProviderRecycleSettings
 
+	// the process's census of its runtime timer changes (timer_census.go),
+	// which the connect service starts with its exchange
+	TimerCensus server.TimerCensusSettings
+
 	ExchangeRecordFormatSettings
 }
 
@@ -773,6 +777,8 @@ func DefaultExchangeSettingsWithBufferSize(bufferSize int) *ExchangeSettings {
 		ExchangeLocalTransportSettings: *DefaultExchangeLocalTransportSettings(),
 
 		ExchangeStuckProviderRecycleSettings: *DefaultExchangeStuckProviderRecycleSettings(),
+
+		TimerCensus: *server.DefaultTimerCensusSettings(),
 
 		ExchangeRecordFormatSettings: *DefaultExchangeRecordFormatSettings(),
 	}
@@ -2668,12 +2674,14 @@ type exchangeDeadline struct {
 }
 
 // Gives this operation its entire budget, retaining native I/O completion
-// semantics even if its goroutine resumes after the deadline.
-func (self *exchangeDeadline) refresh(conn net.Conn, timeout time.Duration, set func(time.Time) error) error {
+// semantics even if its goroutine resumes after the deadline. The deadline is
+// counted at site in the timer census.
+func (self *exchangeDeadline) refresh(conn net.Conn, timeout time.Duration, set func(time.Time) error, site server.TimerCensusSite) error {
 	deadline := time.Now().Add(timeout)
 	if self.conn == conn && self.deadline.Equal(deadline) {
 		return nil
 	}
+	server.CountTimerDeadlineAfter(site, timeout)
 	if err := set(deadline); err != nil {
 		return err
 	}
@@ -2904,7 +2912,7 @@ func (self *ExchangeBuffer) WriteMessage(conn net.Conn, transferFrameBytes []byt
 		}
 		self.writeStorage = make([]byte, storageByteCount)
 	}
-	if err := self.writeDeadline.refresh(conn, self.settings.WriteTimeout, conn.SetWriteDeadline); err != nil {
+	if err := self.writeDeadline.refresh(conn, self.settings.WriteTimeout, conn.SetWriteDeadline, server.TimerCensusSiteExchangeWriteDeadline); err != nil {
 		connect.MessagePoolReturn(transferFrameBytes)
 		return err
 	}
@@ -2958,7 +2966,7 @@ func (self *ExchangeBuffer) WriteMessages(conn net.Conn, transferFrameBytesBatch
 		}
 	}
 
-	if err := self.writeDeadline.refresh(conn, self.settings.WriteTimeout, conn.SetWriteDeadline); err != nil {
+	if err := self.writeDeadline.refresh(conn, self.settings.WriteTimeout, conn.SetWriteDeadline, server.TimerCensusSiteExchangeWriteDeadline); err != nil {
 		for _, message := range transferFrameBytesBatch {
 			connect.MessagePoolReturn(message)
 		}
@@ -3016,7 +3024,7 @@ func (self *ExchangeBuffer) writevFrames(conn net.Conn, transferFrameBytesBatch 
 }
 
 func (self *ExchangeBuffer) ReadMessage(conn net.Conn) ([]byte, error) {
-	if err := self.readDeadline.refresh(conn, self.settings.ExchangeReadTimeout, conn.SetReadDeadline); err != nil {
+	if err := self.readDeadline.refresh(conn, self.settings.ExchangeReadTimeout, conn.SetReadDeadline, server.TimerCensusSiteExchangeReadDeadline); err != nil {
 		return nil, err
 	}
 	transferFrameBytes, err := self.framer.Read(self.connReader(conn))
@@ -3660,6 +3668,9 @@ func sendPooledMessage(
 		return pooledMessageSendDone
 	}
 
+	// in a P's heap only while a send waits, so a Reset moves it when the last
+	// wait left it there as a zombie (timer census)
+	server.CountTimerReset(server.TimerCensusSiteForwardWriteTimer, timeout)
 	timer.Reset(timeout)
 	switch destination.sendWait(message, ctxDone, peerDone, timer.C) {
 	case messageQueueSent:
@@ -4976,7 +4987,7 @@ func (self *Resident) Run() {
 			default:
 			}
 		}
-	}, self.exchange.streamHopsPollInterval(), self.exchange.listenerFullReadEvery())
+	}, self.exchange.streamHopsPollInterval(), self.exchange.listenerFullReadEvery(), self.timerSweep())
 
 	if self.afterStreamHopListenerStartForTest != nil {
 		self.afterStreamHopListenerStartForTest(streamHopListener)
@@ -5042,6 +5053,7 @@ func (self *Resident) Run() {
 			self.handleNetworkPeerEvent,
 			self.exchange.networkPeersPollInterval(),
 			self.exchange.listenerFullReadEvery(),
+			self.timerSweep(),
 		)
 		defer networkPeerListener.CloseAndWait()
 		if self.exchange.keyEventSubscriber != nil {
