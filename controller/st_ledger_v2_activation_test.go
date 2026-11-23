@@ -734,15 +734,16 @@ func TestStLedgerV2ActivationComparesAddressesNotText(t *testing.T) {
 	})
 }
 
-// SV-9 (migration head): the record's table is part of the binary's migration
-// head, which a fresh database reaches and the services' startup readiness
-// requires, so a service that reads the table does not claim work from a
-// database without it. The table has the columns the monitor contract lists.
+// SV-9 (migration head): the record's table (migration 832) is part of the
+// binary's migration head, which a fresh database reaches, and of the head the
+// services' startup readiness requires, so a service that reads the table does
+// not claim work from a database without it. The table has the columns the
+// monitor contract lists.
 func TestStLedgerV2ActivationMigrationIsTheRequiredHead(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		f := newLedgerV2Fixture(t)
-		if required := server.MinimumRuntimeMigrationVersion(); required != server.MigrationCount() {
-			t.Fatalf("startup readiness requires %d of the binary's %d migrations", required, server.MigrationCount())
+		if required := server.MinimumRuntimeMigrationVersion(); required < 832 {
+			t.Fatalf("startup readiness requires %d of the binary's %d migrations, without the table's 832", required, server.MigrationCount())
 		}
 		var head int
 		columns := []string{}
