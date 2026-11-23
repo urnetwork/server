@@ -1505,3 +1505,361 @@ a tenth of the fleet.
   - idle in transaction is 358 s/s against 26.6 s/s active;
   - D71's per-block edge-2 rule stopped its roll twice this morning on swings of the kind §9.3 describes. Use the
     15-minute average or a 0.09 tolerance.
+
+## 12. C2: connect's id text and typed resident and exchange header records (11-23)
+
+On 2026-11-23 the owner approved C2 (§10.5, rank 4). This section records what was built on two branches, neither
+merged nor deployed:
+- server `feat/connect-typed-resident-1123`, from main `f09d3edd6`:
+  - `ac01d91ab`, the typed resident record;
+  - `85cbdb1c5`, the typed exchange header and `connect.yml`'s flags;
+  - `88d18ac2f`, the three key builders;
+  - `cfbc1ad30`, the dashboard panels;
+  - and this section;
+- connect `feat/encode-uuid-1123`, from main `3586f22e`: `8934d206`, `encodeUuid`.
+
+No production config was changed; §12.5 proposes the config change.
+
+**Owner rule (binding, as in CPUOPT4–8):** "We can't sacrifice correctness of performance timings for the cpu
+savings." No timer, deadline, timeout or bound moves. The id text and the Redis keys are byte for byte what they were.
+A typed record decodes to exactly what a gob encode and decode of the same value gives. With the flags off, every
+record and header is the same bytes as today.
+
+### Summary
+
+- **connect's `encodeUuid`** (connect `8934d206`) writes the id text into a fixed buffer, as the sdk's twin has since
+  §4.3. Per id: 197–281 ns, 184 B and 7 allocations before; 33 ns, 48 B and 1 after.
+- **Three Redis key builders without `fmt`** (server): `contractHoleKeys`, `streamAuthorityKey` and `residentKey`. They
+  are the builders the §10.3.1 profiles show formatting ids through `fmt.Sprintf` at a measurable share. The keys are
+  the same text.
+- **Typed resident records and exchange headers beside gob** (server), readers first, as CPUOPT8 did for score pages:
+  - every reader reads both formats, told apart by a first byte no gob stream starts with, then a version;
+  - the writers, both in connect, keep writing gob until a flag is on: `typed_resident_records` and
+    `typed_exchange_headers` in a new optional `connect.yml`, off by default (§12.3);
+  - decodes and encodes are counted by format and result, with two panels on the connect dashboard.
+- **Decode cost** (§12.7):
+  - a resident record: gob 19.8 µs, 9,024 B and 197 allocations; typed 0.17 µs, 184 B and 3;
+  - an exchange header: gob 12.8 µs, 9,792 B and 213 allocations; typed 0.06 µs, 96 B and 1.
+- **Expected saving** (§12.8): about 1.5–2.7 connect cores in all. About 0.7–1.3 come with the reader roll (the id text
+  and the keys), and 0.8–1.4 more once both flags are on *(inferred from measured shares)*. §10.5 estimated 1.3–2.
+- **The roll** (§12.5): connect, the api and the taskworker take the build with the flags off. Then one config release
+  turns both flags on, and a connect roll takes it.
+- **The rollback floor** (§12.6): no reader rolls back below this build while its record can still be typed.
+
+### 12.1 Evidence
+
+The six connect CPU profiles of §10.3.1 (07:58–08:04Z), and two of its allocation snapshots of one process, 8 minutes
+apart. Per process:
+
+| Path | CPU | Allocated bytes | Allocated objects |
+|---|---|---|---|
+| `connect.encodeUuid` (from `server.Id.String`) | 0.53–0.83% | 3.1% | 11.0% |
+| `model.contractHoleKeys` / without its `encodeUuid` | 0.37–0.54% / 0.18–0.21% | 1.8% | 3.3% |
+| `model.streamAuthorityKey` / without | 0.14–0.23% / 0.04–0.12% | 1.0% | 3.3% |
+| `model.residentKey` / without | 0.08–0.14% / 0.01–0.05% | 0.2% | 0.6% |
+| `model.loadResident` (a gob decoder per read) | 0.49–0.81% | 3.5% | 6.8% |
+| `(*ExchangeBuffer).ReadHeader` | 0.17–0.39% | 6.2%, of it gob 1.2% | 2.6% |
+| all gob in connect, almost all of it these two records | 0.70–1.08% | 5.2% | 9.7% |
+
+- **Where the id text comes from:** 88% of `Id.String`'s calls come from inside another `fmt` call
+  (`fmt.(*pp).handleMethods`), almost all of them Redis key builders.
+- **Gob in connect is these two records:** one profile's gob decodes were 73% `loadResident` and 27% `ReadHeader`,
+  and its encodes 71% `WriteHeader`, 26% `NominateResident` and 3% the network peer metadata. Gob's `compileDec` alone
+  was 0.49–0.76%.
+- **Not this change:** 80% of `ReadHeader`'s bytes are the connection's 64 KiB read buffer.
+- **The other key builders that format an id through `fmt`** were each at most about 0.06% of a process, their
+  `encodeUuid` share included: `connectionAuthorityKeys`, `revocationRecordShardKey`, `providerIntentKeys`, `provideModesKey`,
+  `clientCloseKey`, `SessionKey` and others. They keep `fmt` (§12.10). The `encodeUuid` fix takes most of their cost.
+
+### 12.2 The formats
+
+Both formats sit beside gob, in the same Redis key or exchange frame, and every reader detects the format by its first
+byte.
+
+- **Why that works:** a gob stream opens with the byte length of its first message. That's a byte below `0x80`, or a
+  negated byte count, `0xf8`–`0xff`, so `0x80`–`0xf7` never start gob.
+- **The bytes:** score pages (CPUOPT8) took `0xc5`, and these take `0xc6` and `0xc7`. Each is followed by its format
+  version, 1. A reader refuses any other version.
+
+**The resident record** (`model/network_client_resident_codec.go`), under `ncr_<client id>`:
+
+```
+record = 0xc6 0x01 id(ClientId) id(InstanceId) id(ResidentId)
+         uvarint(len(ResidentHost)) uvarint(len(ResidentService)) uvarint(len(ResidentBlock))
+         ResidentHost ResidentService ResidentBlock uvarint(ports) varint(port)*
+```
+
+**The exchange header** (`connect/exchange_header_codec.go`), the first frame of each exchange connection:
+
+```
+header = 0xc7 0x01 varint(Version) id(ClientId) id(ResidentId) byte(Op) byte(flags)
+         varint(UnreliableTransferMaxMessageByteCount) uvarint(ResidentMoveVersion)
+         byte(Carrier) byte(IpFamily) uvarint(len(client ip)) client ip
+flags  = UnreliableTransfer 1 | UnreliableFlowIsolation 2 | UnreliableFlowReserve 4 | ProvideIntent 8
+```
+
+- **Ids and addresses:** an id is its 16 bytes. The client ip is its `MarshalBinary` bytes, as gob sends it: none when
+  it's invalid, 4, 16, or 16 and a zone.
+- **Exactly gob's value:** an empty port list decodes as nil, as gob omits an empty slice. The client ip goes through
+  `MarshalBinary` and `UnmarshalBinary`, as gob's does. Every other field is the same value either way.
+- **Bounded:** every length and count is bounded by the bytes left before anything is allocated, so a malformed record
+  allocates no more than its own length allows. The decoder refuses:
+  - unknown flags;
+  - a resident move version past `uint32`;
+  - a client ip of a length `MarshalBinary` never writes;
+  - trailing bytes.
+- **Canonical:** every varint must be in its shortest form, so a record that decodes is exactly the encoding of what it
+  decodes to. Malformed input can't be read as another value.
+- **Sizes:** the tests' full resident record is 88 bytes typed and 334 as gob, since a gob stream carries its type
+  definition. A transport header is 47 bytes typed and 397 as gob.
+- **Allocations:** a typed record decodes into the struct, one string holding its three names, and its ports (3
+  allocations). A typed header decodes into the header alone (1).
+- **What does not change:**
+  - The gob writers are untouched and still write the same bytes. The tests pin the bytes captured from the encoders at
+    server `f09d3edd6`.
+  - The byte-level compare-and-set: `NominateResident`'s `RedisSetIfEqual` and the removals' `RedisRemoveIfEqual`
+    compare the exact bytes they read, whatever their format. So a record is replaced or removed only while it's still
+    the record that was read, and the same resident rewritten in the other format is a changed record, as a rewrite in
+    the same format is.
+
+### 12.3 The flags and their config home
+
+- **Home:** a new, optional `connect.yml` in the config release.
+  - No connect config file existed. The connect service reads only `connect_private_heap_profile.yml` (one
+    diagnostic) and the shared files.
+  - Both records are written only by connect, so the flags are connect's: `ExchangeRecordFormatSettings`, embedded in
+    `ExchangeSettings`, whose `DefaultExchangeRecordFormatSettings()` writes gob.
+- **Keys:**
+  - `typed_resident_records`: the exchange's nominations write the resident record typed
+    (`model.NominateResidentWithFormat`);
+  - `typed_exchange_headers`: dialers' headers and acceptors' echoes are written typed (`ExchangeBuffer.WriteHeader`).
+- **When it's read:** once, when the connect run builds its settings (`exchangeSettingsForRun`). A warp container sees
+  only the config version it was created with, so a change is a config release and a connect roll. The run logs
+  `resident records are gob|typed and exchange headers are gob|typed`.
+- **Failures:**
+  - a missing file or key is off;
+  - a file that can't be read, a value that isn't a bool, or a key given twice turns both off and logs why, since gob
+    is what every reader reads;
+  - an unknown key is ignored, so a later file is harmless to this build. Builds before this one don't read the file.
+- **Separate flags:** the reader sets differ (§12.4). The header's only reader is connect; the record has three.
+- **Other writers:**
+  - `model.NominateResident` still writes gob, for the callers other than the exchange's nomination (tests and tools);
+  - `all`, the operator's one-process build, runs connect's `Run`, so it reads `connect.yml` too;
+  - `alt` (retired 11-20) builds its exchange from the defaults, so it writes gob.
+
+### 12.4 Who reads and writes the records
+
+From the symbols linked into each service binary of this branch (`go tool nm`, linux/amd64):
+
+| Binary | Reads the resident record | Writes it | Exchange headers |
+|---|---|---|---|
+| connect | yes: forward and transport lookups, announce, the registration refresh, moves, nominations and removals | yes | reads and writes (dialer and acceptor) |
+| api | yes: the ACL group change (`applyNetworkClientAclGroupChange` reads and removes it) and the extender WebRTC activation probe | no | no |
+| taskworker | yes: the provider egress credentials' retirement (`CaptureResidentForClientRetirement`, `RemoveCapturedResidentForClient`) and the extender WebRTC uptime probe | no | no |
+| alt (retired), all | yes | yes | reads and writes |
+| proxy | no: it links only the resident move intent, another record | no | no |
+| mcp, gossip, monitor, bringyourctl, egress-prober, competition worker | no | no | no |
+
+- The monitor names the `ncr_<id>` key family in its Redis key census, but never reads a value. No other repository
+  (sdk, sn, proxy, xops) reads the record.
+- **So** the resident flag waits for connect, the api and the taskworker. The header flag waits for connect alone.
+
+### 12.5 Roll plan
+
+1. **Merge** server `feat/connect-typed-resident-1123` and connect `feat/encode-uuid-1123`, each `--no-ff`. They're
+   independent: the connect change is a pure function that every server binary and app links.
+2. **Readers first, with the flags off.** Roll connect (every block), the api and the taskworker to the build, in any
+   order, with no `connect.yml`.
+   - Nothing changes on the wire: with the flags off every record and header is gob, byte for byte today's.
+   - The id text and key savings start with each service's roll, connect's most of all.
+3. **Check every reader** before either flag:
+   - **Versions:** the version guard shows every connect, api and taskworker block on the build.
+   - **Series:** every process of the build exports the decode counters from its start, at zero until it reads, and a
+     process from before exports none. `count by (service) (urnetwork_network_client_resident_decodes_total{format="gob",result="ok"})`
+     must equal each service's process count for connect, the api and the taskworker, and
+     `count(urnetwork_connect_exchange_header_decodes_total{format="gob",result="ok"})` connect's.
+   - **Errors:** `sum by (service, format, result) (rate(urnetwork_network_client_resident_decodes_total[5m]))` shows
+     only `gob ok`, and the header's query the same.
+4. **The flags: one config release, then one connect roll.** Add to `connect.yml` in the main config:
+   ```yaml
+   typed_resident_records: true
+   typed_exchange_headers: true
+   ```
+   Ship a config release (CPUOPT8 §9.4's way) and roll connect so its containers take it.
+   - During the roll, processes with the flags on and off run side by side, and all of them read both formats. An
+     acceptor echoes the header in its own format, which the dialer reads whatever its own.
+   - Each connect roll is a full drain, so doing both flags together saves one. If the owner wants one record at a
+     time, the header flag can go first, since connect is its only reader.
+5. **Check after the flag roll:**
+   - **Writes:** `sum by (format) (rate(urnetwork_network_client_resident_encodes_total{service="connect"}[5m]))` and
+     `sum by (format) (rate(urnetwork_connect_exchange_header_encodes_total[5m]))`. Typed rises with each rolled
+     block, and gob reaches zero when the roll ends.
+   - **Reads:** step 3's queries show typed ok on connect, the api and the taskworker. Gob decodes fall as residents
+     re-nominate on rolled processes, and reach zero once every resident belongs to one. No errors, in either format,
+     in any service.
+   - **Panels:** the connect dashboard's two new panels show the same, once a grafana deploy publishes them. The roll
+     doesn't need it.
+   - **Profile:** a connect CPU profile shows `model.loadResident` and `ReadHeader`'s decode at about a hundredth of
+     their §12.1 shares, and `gob.(*Decoder).compileDec` gone.
+6. **Rolling back a flag:** set it false (or remove it), ship a config release and roll connect. Readers keep reading
+   both formats, so this is always safe.
+7. **Later** (no hidden settings): after a week on, make typed the code default and drop the keys. Keep the gob readers
+   at least `ExchangeResidentTtl` past the last gob writer, and keep the gob writer while a flag can still turn it back
+   on.
+
+### 12.6 Rollback floor
+
+**No reader rolls back below this build while its record can still be typed.**
+
+- **Why:** a build from before reads only gob.
+  - A **connect** from before treats a typed resident record as corrupt, and its nomination replaces it, so the
+    resident flaps between processes. It also fails every typed exchange header, and with it the connection.
+  - An **api** from before sees no resident in a typed record. The ACL group change doesn't retire the resident, and
+    the extender WebRTC probe reports the client not connected.
+  - A **taskworker** from before fails its retirement capture on a typed record.
+- **Exchange headers:** before connect rolls back below the build, `typed_exchange_headers` goes off (a config release)
+  and a connect roll completes with it off. A header lives for one handshake, so no typed header survives that roll.
+- **Resident records:** before connect, the api or the taskworker rolls back below the build:
+  1. `typed_resident_records` goes off (a config release) and a connect roll completes with it off. Each rolled
+     process's residents end with it and remove their records, and their clients' next nominations write gob.
+  2. Wait `ExchangeResidentTtl`. A typed record left by a process that died before removing it is no longer refreshed,
+     so it expires.
+  3. Check that `urnetwork_network_client_resident_decodes_total{format="typed"}` has stopped rising in every service,
+     and stays so for another `ExchangeResidentTtl`.
+- **An emergency connect rollback with a flag on** costs resident churn and failed exchange connections between old and
+  new processes until the roll ends. When there's time, take the flag-off roll first.
+- **A later format version** follows the same rule. A reader of version 1 refuses version 2 as unreadable, so version 2
+  waits until every reader reads it. `TestNominateResidentReplacesAnUnreadableRecord` pins what a reader does with a
+  record it can't read: any nomination replaces it.
+
+### 12.7 Measured decode costs
+
+On a laptop (Apple M1 Max) whose load average was about 100 from other work, so the times are noisy: medians of three
+runs. The allocations are exact. The record and header are the tests' full synthetic ones.
+
+| One operation | gob | typed | change |
+|---|---|---|---|
+| resident record decode (`loadResident`) | 19.8 µs, 9,024 B, 197 allocs | 0.17 µs, 184 B, 3 allocs | about 120× faster, −98% bytes |
+| resident record encode (a nomination) | 3.67 µs, 2,032 B, 21 allocs | 0.06 µs, 160 B, 1 alloc | about 65× faster |
+| exchange header decode (`ReadHeader`) | 12.8 µs, 9,792 B, 213 allocs | 0.06 µs, 96 B, 1 alloc | about 200× faster, −99% bytes |
+| exchange header encode (`WriteHeader`) | 4.22 µs, 3,052 B, 25 allocs | 0.04 µs, 96 B, 1 alloc | about 110× faster |
+
+| One operation | before | after |
+|---|---|---|
+| `Id.String` (connect `encodeUuid`) | 215 ns, 184 B, 7 allocs | 33 ns, 48 B, 1 alloc |
+| `contractHoleKeys` (with the new `encodeUuid`) | 883 ns, 864 B, 11 allocs | 398 ns, 832 B, 9 allocs |
+| `residentKey` (the same) | 230 ns, 112 B, 3 allocs | 65 ns, 96 B, 2 allocs |
+| `streamAuthorityKey` (the same) | 217 ns, 112 B, 3 allocs | 75 ns, 96 B, 2 allocs |
+
+The benchmarks:
+- server: `BenchmarkNetworkClientResident{Decode,Encode}{Gob,Typed}`,
+  `BenchmarkExchangeHeader{Decode,Encode}{Gob,Typed}`, `BenchmarkContractHoleKeys`, `BenchmarkResidentKey` and
+  `BenchmarkStreamAuthorityKey`;
+- connect: `BenchmarkEncodeUuid`.
+
+### 12.8 Expected saving
+
+Per connect process, from §12.1's shares and §12.7's ratios:
+
+- **The id text:** `encodeUuid` was 0.53–0.83% of a process. About 85% of it goes: 0.45–0.70%.
+- **The three key builders:** outside `encodeUuid` they were 0.23–0.38% of a process, and 60–85% of that goes:
+  0.15–0.26%.
+- **The two records' gob:** 0.70–1.08% of a process, and the typed formats cost about a hundredth of it: 0.69–1.06%
+  once both flags are on.
+- **Allocation:** about 20% fewer objects and 8% fewer bytes from connect, which its collector (3.0–3.4% of connect,
+  §10.3.1) follows. That isn't counted below.
+
+At connect's 113–135 cores (§10.2, night and morning), that's 0.7–1.3 cores from the reader roll and 0.8–1.4 more
+once both flags are on: **about 1.5–2.7 connect cores** in all *(inferred from measured shares)*. The api and the
+taskworker read resident records too, but rarely; they aren't counted.
+
+### 12.9 Tests
+
+Each changed path was reverted on its own, with everything else in place, and its tests run against it. Each failed as
+the last column says. The codecs are new code, so their checks were reverted one at a time instead:
+
+- **R1:** the writer ignores the format, and the three keys use `fmt` again;
+- **R2:** `loadResident` reads only gob;
+- **R3:** `ReadHeader` reads only gob, and the run doesn't read `connect.yml`;
+- **R4:** `WriteHeader` writes only gob, and the exchange's nomination writes gob;
+- **M1–M4:** each decoder accepts trailing bytes (M1) or varints not in their shortest form (M2), reads any version
+  (M3), or loses a bound: the record's port count, the header's unknown flags (M4).
+
+| Test | What it checks | Fails without |
+|---|---|---|
+| **connect** `encode_uuid_test.go` | | |
+| `TestEncodeUuidMatchesCanonicalFormat` | 10,003 ids (3 fixed, 10,000 seeded) equal the `fmt` form, through `encodeUuid` and `Id.String` | its reference is the `fmt` form, so the old code passes; an encoder reading one group from the wrong bytes fails it |
+| `TestEncodeUuidAllocatesOnlyTheString` | one allocation an id | the `fmt` version (7) |
+| **server model**, unit | | |
+| `TestNetworkClientResidentCodecCoversEveryField` | the field guard: every field of the struct is in the codec's list | a new field |
+| `TestNetworkClientResidentCodecMatchesGob` | 3,000 seeded records, every field drawn by reflection (zero and set ids; empty, long and non-UTF-8 names; nil, empty and long port lists; the int extremes): the typed decode equals gob's round trip field by field, through `loadResident` too | R2 |
+| `TestNetworkClientResidentCodecEdgeValues` | each case gob distinguishes | |
+| `TestNetworkClientResidentTypedRoundTrip` | 1,000 seeded records decode and encode back to the same bytes | |
+| `TestNetworkClientResidentReaderReadsGobRecords` | records captured from the encoder at `f09d3edd6` read as before, the gob writer still writes those bytes, and 500 seeded gob records read as the old reader reads them | (pins the unchanged gob path) |
+| `TestNetworkClientResidentOldReaderFailsTypedRecords` | a plain gob decode fails every typed record with an error | |
+| `TestNetworkClientResidentWriterFollowsFormat` | with the flag off the writer writes gob, which the old reader reads; on, typed; the counters count each | R1, R2 |
+| `TestNetworkClientResidentCodecRejectsMalformedRecords` | every truncation, other versions, every other non-gob first byte, lengths and counts past the record (refused before allocating 64 KiB), overlong and non-shortest varints, trailing bytes; any one changed byte fails or reads as the record it encodes | R2, M1, M2, M3, M4 |
+| `FuzzNetworkClientResidentDecode` | no panic, and a record that decodes is its own encoding | (30 s, 56,005 executions, no failure) |
+| `TestNetworkClientResidentTypedDecodeAllocations` | 3 allocations a typed decode, under a tenth of gob's | R1, R2 |
+| `TestResidentKeyTextIsFmtForm`, `TestContractHoleKeysTextIsFmtForm`, `TestStreamAuthorityKeyTextIsFmtForm` | each key equals its `fmt` form for 10,002 ids (both pair orders and the self pair) | the `fmt` forms are the reference |
+| `TestRedisKeyTextAllocations` | 2, 9 and 2 allocations | R1 (3, 11 and 3) |
+| **server model**, over Redis | | |
+| `TestNominateResidentWithFormatWritesTheFormat` | each format written as asked, read by every reader, gob also by the old reader | R2 |
+| `TestNominateResidentReplacesAcrossFormats` | a nomination replaces a record of the other format exactly as one of its own: never another instance's resident it doesn't name, always the one it names | R2 |
+| `TestNominateResidentMixedFormatsAgree` | 64 racing nominations of both formats, over 8 generations, agree on one resident | R2 |
+| `TestNominateResidentReplacesAnUnreadableRecord` | a record of a later version is replaced by any nomination (the floor's reason) | (pins existing behavior) |
+| `TestRemoveResidentForClientAcrossFormats` | removal by another resident's id keeps a record of either format, by its own removes it, with and without a deadline | R2 |
+| `TestResidentRetirementAcrossFormats` | a retirement removes the record it captured, in either format, and not the same resident rewritten in the other | R2 |
+| **server connect**, unit | | |
+| `TestExchangeHeaderCodecCoversEveryField`, `…MatchesGob` (3,000 seeded; client ips none, IPv4, IPv6, mapped, unspecified, zoned), `…EdgeValues`, `…TypedRoundTrip` (1,000, and the ip length is `MarshalBinary`'s), `…ReaderReadsGobHeaders` (3 captured, 500 seeded), `…OldReaderFailsTypedHeaders` | as the record's | |
+| `TestExchangeHeaderCodecRejectsMalformedHeaders` | as the record's, plus unknown flags, a move version past `uint32`, client ip lengths 1, 5 and 15, and an ip past the header | M1, M2, M3, M4 |
+| `FuzzExchangeHeaderDecode` | as the record's | (30 s, 24,298 executions, no failure) |
+| `TestExchangeHeaderTypedDecodeAllocations` | 1 allocation a typed decode, under a fiftieth of gob's | |
+| `TestExchangeBufferWritesTheHeaderFormatOfItsSettings` | the frame on the socket is gob, which the old reader reads, unless `TypedExchangeHeaders`; `ReadHeader` reads both | R3, R4 |
+| `TestExchangeHandshakeAcrossHeaderFormats` | through `handleExchangeConnection`, for each of the four dialer and acceptor format pairs: the acceptor reads the header and echoes it in its own format, the dialer reads it, and the forward runs (its first ping) | R3, R4 |
+| `TestExchangeRecordFormatSettingsFromConfig` | `connect.yml`'s keys, a missing file, an unknown key, and the failures that turn both off | |
+| `TestExchangeSettingsForRunReadsRecordFormats` | the defaults write gob, and the run takes `connect.yml` | R3 |
+| **server connect**, over Redis | | |
+| `TestExchangeNominationWritesTheResidentRecordFormatOfItsSettings` | the exchange's nomination writes gob (which the old reader reads) unless `TypedResidentRecords` | R4 |
+
+**Also run, passing:**
+- model: `TestNominateResident`, `TestResidentTtl`, the four `TestResidentRetirement…`, `TestNetworkClientAclGroupAuth`,
+  `TestNetworkClientAclGroupPeerExclusion`;
+- taskworker/work: the five provider egress retirement tests;
+- connect: the 61 tests of the exchange I/O, deadline, generation, ping timer, drain gate, observation, forward
+  storage, dial seam, session setup, writev, transfer carrier and move test files, which write and read headers;
+- `./grafana` with promtool 3.5.0, its application metric coverage test included;
+- `GOOS=linux go vet` of server `model` and `connect` and the connect module, and `gofmt`.
+
+### 12.10 Risks, what's left, and the owner's decisions
+
+**Risks:**
+- **A flag before its readers.** Turning a flag on before every reader of its record runs the build causes resident
+  churn and failed exchange connections (connect), and missed retirements (the api, the taskworker). The version
+  guard and step 3's series are the check; §12.6 is the floor.
+- **New fields.** Gob carried a field added to either struct through older readers in one roll, since gob skips fields
+  it doesn't know: the transfer carrier and MOVE fields shipped that way. With a flag on, a new field is a new format
+  version, which waits for its readers as this one does. The field guards fail until the codec writes the field. The
+  gob writer is the way through: turn the flag off, ship the field and a reader of the next version, then turn it back
+  on.
+- **Merging with C1.** C1 changes deadline and timer sites in `connect/resident.go`. This branch touches that file only
+  in the settings embed and defaults, `WriteHeader`'s encode and `ReadHeader`'s decode lines (beside their deadline
+  calls), and the nomination's call. A textual conflict there is mechanical.
+- **The benchmarks** ran on a loaded laptop. The ratios are far larger than the noise, and the allocation counts are
+  exact.
+
+**Left as they are:**
+- **The other key builders that format ids through `fmt`:** each was at most about 0.06% of a process, `encodeUuid`
+  share included (§12.1).
+- **`Id.MarshalJSON` and `ParseId`:** neither uses `fmt` on its success path (a `bytes.Buffer`, string concatenation),
+  and `MarshalJSON` was 0.03% of a process. `fmt` remains only in `ParseId`'s and `UnmarshalJSON`'s errors.
+- **`ReadHeader`'s 64 KiB read buffer** per connection (80% of its bytes) is not C2.
+- **R4** (one `GETEX` in the resident read, §10.5 rank 21) is a separate item.
+- **`model.NominateResident`** still writes gob, for tests and tools.
+
+**The owner's decisions:**
+1. **The config home:** a new `connect.yml`, since connect had no config file of its own. The alternative is a Redis
+   runtime control, which switches without a roll. It wasn't chosen, because C2 asked for a config flag like
+   `typed_score_pages`.
+2. **The flag roll:** both flags in one release and one connect roll, or the header's first.
+3. **The bake-in** a week after (§12.5 step 7).
