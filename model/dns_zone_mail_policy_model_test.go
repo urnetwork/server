@@ -6,8 +6,9 @@ package model
 // getDnsZoneMailPolicyInTx and ReconcileNetworkZoneMailPolicy) on Postgres: an unverified network with mail on
 // publishes none; the refresh that verifies it publishes the record, the refresh that clears it takes the record
 // away, each in one journal row holding only it; a verified network's record is as DNS-M8-01 wrote it; the
-// payment path's refresh on the writer's own connection does the same for a paid balance; a Team scope's record
-// follows the network's; a suspended zone waits for Restore; and a refresh makes no zone for a network with none.
+// payment path's refresh on the writer's own connection does the same for a paid balance; a Team scope publishes
+// none whichever way the network's verification goes (QD-1206); a suspended zone waits for Restore; and a refresh
+// makes no zone for a network with none.
 
 import (
 	"context"
@@ -223,10 +224,12 @@ func TestDnsMtaStsFollowsAPaidBalanceThroughThePaymentRefresh(t *testing.T) {
 	})
 }
 
-// A Team scope's _mta-sts follows the network's verification as the zone's does: none while unverified, the
-// zone's and the mail scope's published at the refresh that verifies, the scope's set then DnsScopeRecords' for
-// its state, and both gone at the refresh that clears. A scope with mail off takes none.
-func TestDnsMtaStsScopeFollowsVerification(t *testing.T) {
+// A Team scope publishes no _mta-sts whichever way its network's verification goes, since no receiver serves a
+// scope's policy (QD-1206): none while unverified; at the refresh that verifies, the zone's alone, the mail scope's
+// set DnsScopeRecords' for its state, its mail standing, after which the zone reads current and the next refresh
+// writes nothing; and none at the refresh that clears, which takes the zone's away. A scope with mail off takes none
+// either.
+func TestDnsMtaStsScopePublishesNoneAtAnyVerification(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		root := testDnsRoot(t, ctx)
@@ -248,25 +251,36 @@ func TestDnsMtaStsScopeFollowsVerification(t *testing.T) {
 		testAddPasswordAuth(t, ctx, adminUserId, UserAuthTypePhone, true)
 		UpdateNetworkVerified(ctx, networkId)
 		engApex := "eng." + apex
-		want := map[string]string{
-			dnsMtaStsLabel + "." + apex:    testDnsMtaStsValue(apex),
-			dnsMtaStsLabel + "." + engApex: testDnsMtaStsValue(engApex),
-		}
+		want := map[string]string{dnsMtaStsLabel + "." + apex: testDnsMtaStsValue(apex)}
 		if rows := testDnsMtaStsRows(t, ctx, root, networkId); !maps.Equal(rows, want) {
-			t.Fatalf("verified, _mta-sts %v, want %v", rows, want)
+			t.Fatalf("verified, _mta-sts %v, want the zone's alone %v", rows, want)
 		}
 		state := &DnsScopeState{Root: root, Apex: apex, Scope: "eng", Mail: true}
 		server.Tx(ctx, func(tx server.PgTx) {
 			state.MailPolicy = getDnsZoneMailPolicyInTx(ctx, tx, root, networkId)
 		})
+		if state.MailPolicy.MtaSts == nil {
+			t.Fatal("the verified network's policy carries no MTA-STS policy")
+		}
 		wantScope, err := DnsScopeRecords(state, dnsZoneTtl())
 		if err != nil {
 			t.Fatal(err)
 		}
-		wantScopeLines := testDnsWithCopyLines(dnsSystemRecordLines(wantScope), "_dmarc."+engApex, "b."+engApex, dnsMtaStsLabel+"."+engApex)
+		// _dmarc and b keep *.<scope>'s records through copies; no _mta-sts takes one
+		wantScopeLines := testDnsWithCopyLines(dnsSystemRecordLines(wantScope), "_dmarc."+engApex, "b."+engApex)
 		if got := testDnsZoneLinesBelow(t, ctx, root, networkId, engApex); !slices.Equal(got, wantScopeLines) {
 			t.Fatalf("the scope's rows\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(wantScopeLines, "\n"))
 		}
+		stale := true
+		server.Tx(ctx, func(tx server.PgTx) {
+			stale = isDnsZoneMailPolicyStaleInTx(ctx, tx, root, networkId, server.NowUtc())
+		}, server.TxReadCommitted)
+		if stale {
+			t.Fatal("a verified network whose mail scope holds no _mta-sts read stale")
+		}
+		verifiedSerial := testDnsSerialNow(t, ctx, root)
+		UpdateNetworkVerified(ctx, networkId)
+		requireDnsSerial(t, ctx, root, verifiedSerial)
 
 		testDnsSetPasswordAuthVerified(t, ctx, adminUserId, false)
 		UpdateNetworkVerified(ctx, networkId)

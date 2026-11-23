@@ -415,23 +415,46 @@ func TestDnsSystemRecordsRefuseReportsIntoTheRoot(t *testing.T) {
 	}
 }
 
-// A Team scope's set is the network's function at the scope's apex, for every state, its mail set included.
+// A Team scope's set is the network's function at the scope's apex, for every state, its mail set included, but
+// for _mta-sts, which it never holds, though its policy carries the network's MTA-STS policy and the network's set
+// at the same state publishes one (QD-1206): its report records stand, and the caller's policy is left whole.
 func TestDnsScopeRecordsAreTheNetworksFunction(t *testing.T) {
 	ttl := dnsservice.DefaultDnsSettings().Ttl
 	root := "zone.example."
 	apex := "abcdefghij.zone.example."
+	scopeApex := "eng." + apex
+	holds := func(sets []dnsservice.DnsRecordSet, owner string) bool {
+		return slices.ContainsFunc(sets, func(set dnsservice.DnsRecordSet) bool { return set.Owner == owner })
+	}
 	for _, flags := range [][3]bool{{false, false, false}, {true, false, false}, {false, true, false}, {false, false, true}, {true, true, true}} {
 		scope := &DnsScopeState{Root: root, Apex: apex, Scope: "eng", EdgeWildcard: flags[0], EdgeApex: flags[1], Mail: flags[2], MailPolicy: dnsTestMailPolicy()}
 		got, err := DnsScopeRecords(scope, &ttl)
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := testDnsSystemRecords(t, &DnsZoneState{Root: root, Apex: "eng." + apex, EdgeWildcard: flags[0], EdgeApex: flags[1], Mail: flags[2], MailPolicy: dnsTestMailPolicy()}, &ttl)
-		if !slices.Equal(dnsSystemRecordLines(got), dnsSystemRecordLines(want)) {
-			t.Errorf("%v: the scope's set is not the network's at its apex", flags)
+		if scope.MailPolicy.MtaSts == nil {
+			t.Errorf("%v: the caller's policy lost its MTA-STS policy", flags)
 		}
-		if flags[2] && !slices.Contains(dnsSystemRecordLines(got), "mx.eng.abcdefghij.zone.example. A router ") {
-			t.Errorf("%v: no mx.<scope> host", flags)
+		noMtaSts := dnsTestMailPolicy()
+		noMtaSts.MtaSts = nil
+		want := testDnsSystemRecords(t, &DnsZoneState{Root: root, Apex: scopeApex, EdgeWildcard: flags[0], EdgeApex: flags[1], Mail: flags[2], MailPolicy: noMtaSts}, &ttl)
+		if !slices.Equal(dnsSystemRecordLines(got), dnsSystemRecordLines(want)) {
+			t.Errorf("%v: the scope's set is not the network's at its apex less _mta-sts", flags)
+		}
+		if holds(got, dnsMtaStsLabel+"."+scopeApex) {
+			t.Errorf("%v: the scope's set holds _mta-sts", flags)
+		}
+		if flags[2] {
+			if !slices.Contains(dnsSystemRecordLines(got), "mx.eng.abcdefghij.zone.example. A router ") {
+				t.Errorf("%v: no mx.<scope> host", flags)
+			}
+			if !holds(got, dnsTlsRptOwnerPrefix+scopeApex) {
+				t.Errorf("%v: no _smtp._tls.<scope>", flags)
+			}
+			network := testDnsSystemRecords(t, &DnsZoneState{Root: root, Apex: scopeApex, EdgeWildcard: flags[0], EdgeApex: flags[1], Mail: flags[2], MailPolicy: dnsTestMailPolicy()}, &ttl)
+			if !holds(network, dnsMtaStsLabel+"."+scopeApex) {
+				t.Errorf("%v: the network's set at the scope's apex holds no _mta-sts", flags)
+			}
 		}
 		if err := dnsservice.LintZoneWrite(root, nil, got); err != nil {
 			t.Errorf("%v: %v", flags, err)
