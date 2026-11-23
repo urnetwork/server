@@ -1,5 +1,5 @@
 // The usage archive's close time floor (db_provider_usage_archive_export.go,
-// usagearchive/eligibility.go): 42 days before the database's clock, rolling
+// usagearchive/eligibility.go): 25 days before the database's clock, rolling
 // when the control sets no date, and never past a week before the window of
 // the earliest SN epoch not yet recorded. These run against PostgreSQL.
 package server
@@ -179,17 +179,18 @@ func TestProviderUsageArchiveSnFloor(t *testing.T) {
 	})
 }
 
-// A week that ended more than 42 days ago drops once its export holds it,
-// under a dated floor past it and under rolling, which sets no date; the 70
-// days before 2026-11-21 kept such a week another four weeks. A week that
-// ended within 42 days stays, rolling or not.
-func TestProviderUsageArchiveExportDropsWeeksPast42Days(t *testing.T) {
+// A week that ended more than 25 days ago drops once its export holds it,
+// under a dated floor past it and under rolling, which sets no date; the 42
+// days of 2026-11-21 to 11-23 kept the two weeks here, which ended 28 to 42
+// days ago, up to two weeks more, and the 70 days before them six more. A
+// week that ended within 25 days stays, rolling or not.
+func TestProviderUsageArchiveExportDropsWeeksPast25Days(t *testing.T) {
 	DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		family := providerUsageArchivePartitionFamily
 		now := NowUtc()
-		// ended 56 to 63 days ago, 49 to 56, and 28 to 35
-		older, old, recent := family.RangeAt(now.Add(-9*testArchiveWeek)), family.RangeAt(now.Add(-8*testArchiveWeek)), family.RangeAt(now.Add(-5*testArchiveWeek))
+		// ended 35 to 42 days ago, 28 to 35, and 14 to 21
+		older, old, recent := family.RangeAt(now.Add(-6*testArchiveWeek)), family.RangeAt(now.Add(-5*testArchiveWeek)), family.RangeAt(now.Add(-3*testArchiveWeek))
 		dir := t.TempDir()
 		clock := testExportClock()
 		for _, r := range []PartitionRange{older, old, recent} {
@@ -211,13 +212,13 @@ func TestProviderUsageArchiveExportDropsWeeksPast42Days(t *testing.T) {
 			return report
 		}
 
-		// a dated floor of tomorrow: 42 days before now binds it
+		// a dated floor of tomorrow: 25 days before now binds it
 		report := pass(map[string]string{"mode": "on", "closeTimeFloor": now.Add(24 * time.Hour).Format(time.DateOnly), "maxWeeksPerPass": "1"})
 		connect.AssertEqual(t, report.Dropped, []string{family.LeafName(testArchiveTable, older)})
 		connect.AssertEqual(t, leafExists(older), false)
 		connect.AssertEqual(t, leafExists(old), true)
 
-		// rolling: the next week past 42 days drops; the recent one stays
+		// rolling: the next week past 25 days drops; the recent one stays
 		report = pass(map[string]string{"mode": "on", "closeTimeFloor": "rolling", "maxWeeksPerPass": "4"})
 		connect.AssertEqual(t, report.Dropped, []string{family.LeafName(testArchiveTable, old)})
 		if blocker := report.Blocked[family.LeafName(testArchiveTable, recent)]; blocker != "" {
@@ -230,7 +231,7 @@ func TestProviderUsageArchiveExportDropsWeeksPast42Days(t *testing.T) {
 		rolling := NarrowProviderUsageArchiveExportControl(map[string]string{"mode": "on", "closeTimeFloor": "rolling"}, settings)
 		_, err := family.DropRange(WithProviderUsageArchiveExportControlValue(ctx, rolling), recent)
 		if err == nil || !strings.Contains(err.Error(), "ends after the export's close time floor") {
-			t.Fatalf("the fence admitted a week within 42 days: %v", err)
+			t.Fatalf("the fence admitted a week within 25 days: %v", err)
 		}
 		connect.AssertEqual(t, leafExists(recent), true)
 		connect.AssertEqual(t, testContractPartitionScalar[int64](t, ctx, `SELECT count(*) FROM st_provider_usage_archive_export WHERE dropped_time IS NOT NULL`), int64(2))
@@ -248,7 +249,8 @@ func TestProviderUsageArchiveExportHoldsTheFloorBeforeUnrecordedSnEpochs(t *test
 		ctx := t.Context()
 		family := providerUsageArchivePartitionFamily
 		now := NowUtc()
-		// ended 70 to 77 days ago: past 42 days, and past the 70 before them
+		// ended 70 to 77 days ago: past 25 days, and past the 42 and 70 before
+		// them
 		week := family.RangeAt(now.Add(-11 * testArchiveWeek))
 		_, err := family.EnsureRangeFor(ctx, week.Lower)
 		connect.AssertEqual(t, err, nil)

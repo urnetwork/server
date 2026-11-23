@@ -207,7 +207,7 @@ server-wide, so no plain vacuum returns space to the filesystem.
 | contract_close_report | 325 | Deleted with its contract; prober retention (119/s) | Same defect | pkey 38 GiB reclaimable |
 | network_client | 262 | Retired hosted children hard-deleted after 1 day, removed proxies after 2, others after 30; prober | Yes (279–334 deletes/s against 364–387 inserts/s) | Indexes regrowing after O2 |
 | network_client_location_reliability | 187 | 15-minute batched delete, 31 days after last seen | Yes | Reused |
-| st_provider_usage_archive | 160 (16 weeks + DEFAULT) | Capture on every contract delete (SN25 proof); O1 export to edge-6 and early drop under a rolling floor (close age 42 days since 2026-11-21, 70 before); otherwise 52 weeks | Yes. Grows with the reaper's deletes | Returned by the weekly drop |
+| st_provider_usage_archive | 160 (16 weeks + DEFAULT) | Capture on every contract delete (SN25 proof); O1 export to edge-6 and early drop under a rolling floor (close age 25 days since 2026-11-23 for the C1 transition, 42 from 2026-11-21, 70 before); otherwise 52 weeks | Yes. Grows with the reaper's deletes | Returned by the weekly drop |
 | provide_key | 138 | Deleted at deactivation; prober | Yes | Heap: 69 GiB free, reused |
 | provider_egress_health_history | 76 | Daily partitions, 7 days | Yes | Returned by the drop |
 | audit_device_event | 73 | Hourly row delete at 180 days | **First delete 2027-02-06**; grows about 6 GiB/day | Reused |
@@ -364,7 +364,7 @@ inflow, and the other families keep growing.
 | contract_close_report | settlement, SN close originals, the reapers; billing of one-sided closes at the sender's count (owner 11-11) | as long as its contract: it is deleted with it |
 | contract_close_report_evidence | admission (exact retries, refusing a reused report id) and the SN epoch census (windows of at most 32,768 closed contracts); not settlement, disputes or payouts | 35 days, the guard's floor (owner 11-01). An open dispute keeps its contract unresolved, and unresolved contracts keep their evidence at any age |
 | transfer_escrow_sweep | payout history, operator block points, leaderboard, SN reconcile, reimbursements | with its contract once discharged; unchanged |
-| st_provider_usage_archive | SN25 subnet usage proof, read by the epoch usage statement | on Main until O1 exports a week past the floor (close age 42 days since 2026-11-21, 70 before); exported weeks live on edge-6 |
+| st_provider_usage_archive | SN25 subnet usage proof, read by the epoch usage statement | on Main until O1 exports a week past the floor (close age 25 days since 2026-11-23, 42 from 2026-11-21, 70 before); exported weeks live on edge-6 |
 | st_client_key_history | original-close verification, SN epoch key overlay | 30 days after the client is gone |
 
 Nothing here argues for shorter windows on its own. The windows are the owner's, and

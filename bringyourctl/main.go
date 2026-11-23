@@ -264,7 +264,7 @@ Options:
                    floor (YYYY-MM-DD, UTC), or rolling for none: a week leaves
                    early only when it ends by the floor and every row closed
                    before it. Whatever is set, the floor in force is never
-                   later than 42 days ago, nor than a week before the window
+                   later than 25 days ago, nor than a week before the window
                    of an SN epoch not yet recorded; with rolling it is the
                    earlier of the two.
     --max-weeks-per-pass=<n>  With db usage-archive-export, the early drops
