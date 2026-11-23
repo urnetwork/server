@@ -43,12 +43,27 @@
 //     every byte the network's visitors were sent through it.
 //
 // The case runs on the World's stand-ins alone (the World's header). The two it carried past at first are gone with
-// their fixes: §16.6's stock gate takes each writer's listen under the standing publish (listen-approval-effect), and a
-// label's draw takes its zone's serial (dns-label-serial-order), which the publish checks.
+// their fixes, which e2e-world-standins-out (server 5c610d50d to 57fdd5307) took them out for: §16.6's stock gate takes
+// each writer's listen under the standing publish (listen-approval-effect, sidecar 5ebb9793 to 92218796), and a
+// label's draw takes its zone's serial (dns-label-serial-order, server 7053ee91e, 8ab46f105, QD-1175), which the
+// publish checks.
 //
 // Its sub-case, TestE2eBloggerChangeAfterTheReadersOwnRead (blogger_changes_test.go), runs the cache clearing's
 // change path alone: a commit must reach the other writer's change listener whether or not that writer's client read
 // the path first.
+//
+// A failure from a product bug stays failing. What the case found as it landed (2026-11-21), each fixed since:
+//
+//   - a repo's change listener missed every change another call of its client had verified first, so a webserver
+//     whose own read had raised its pin across a commit served the stale article on, and some commits reached no
+//     subscriber at all, a hint's map tick holding the evs component's queue and racing the subscriber's read (in the
+//     sub-case's first run every reading round missed its change): evs-subscribe-changes (sidecar 49b1ae1a, 91fe1c7e,
+//     191fe0db) raises a subscribed ref's change for every statement past the client's pin, whichever call verified
+//     it, and runs the tick on the mapper's own loop
+//   - no visitor got through a tlsedge restarted in place for two minutes, the listeners' contracts to its reused
+//     edge client ids, signed for the earlier process, failing verification at the new one: tlsedge-restart-contracts
+//     (sidecar de3dec40, b0ab56a9, server 02b4eab04 to e40ff5925, QD-1174) gives each edge client the connect identity
+//     it had in every earlier process of its slot, derived from the edge bearer
 //
 // Each phase has its bound and dumps the world's and the blogs' progress when it stalls; the case has the conventions'
 // 10 minutes. Run it through the build's wrapper: -tags 'sidecar_e2e sidecar_pending sidecar_localstack'.

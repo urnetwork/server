@@ -63,13 +63,16 @@
 //   - every chaos took its request, and the claim whose answer was lost stands once, at the commitment its rotator
 //     sent, never a second generation for it
 //
-// Not here, each for the reason given: EvsShares, since the world's networks are personal and admit only their owner
-// member's untagged devices, every one a consented reader of every owner-bound repo, so a share names no new holder;
-// a restart of a device keeping its keychain, since sidecart3 starts a T3Sidecar on a memory instance of its own and
-// offers no restart on it, so a device here can only die; and admissions beside revocations, since T3Network.Admit
-// syncs on every device that follows, a revoked one's included, so the case admits in the growth phase and revokes in
-// the shrink phase, filing its own statements with a sync that waits on no revoked or closed device. A re-form under contention and a personal network's
-// new second device are cases of their own below (TestE2eGkmConcurrencyReform, TestE2eGkmConcurrencySecondDevice).
+// Not here, each for the reason given: EvsShares, since the case's network is personal and admits only its owner
+// member's untagged devices, every one a consented reader of every owner-bound repo, so a share names no new holder
+// (the control-plane case shares a team Owner's vault with an Admin's device and revokes the share, on the World's
+// team network); a restart of a device keeping its keychain, which sidecart3 offered no way to run when the case was
+// built, so a device here can only die (T3Device.Restart, which the control-plane and churn cases run, came later);
+// and admissions beside revocations, since T3Network.Admit synced on every device that followed, a revoked one's
+// included, so the case admits in the growth phase and revokes in the shrink phase, filing its own statements with a
+// sync that waits on no revoked or closed device (T3Network.Retire, which takes a device out of the syncs, came later
+// too). A re-form under contention and a personal network's new second device are cases of their own
+// (gkm_concurrency_reform_test.go's TestE2eGkmConcurrencyReform and TestE2eGkmConcurrencySecondDevice).
 //
 // A failure from a product bug stays failing; the case reports it with its evidence and runs on, so one finding does
 // not hide the next. As it landed (2026-11-22) it passed: every shrink rotated with cause REMOVE within about 1.4 s of

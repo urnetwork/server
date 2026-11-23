@@ -23,27 +23,37 @@
 //     late ask: an Add keeps the generation (§10.5), so nothing may rotate
 //
 // A failure from a product bug stays failing; each case reports it with the recorder's evidence. As they landed
-// (2026-11-22) both fail, on these, every other check passing:
+// (2026-11-22) both failed, on these, every other check passing; each is fixed since:
 //
-//   - the contended repo, in some runs: gkm takes a rotation of the old group made after the new form stands, so the
-//     repo holds a generation in each group at one number; the rotator pins the old group's, refuses the new group by
+//   - the contended repo, in some runs: gkm took a rotation of the old group made after the new form stood, so the
+//     repo held a generation in each group at one number; the rotator pinned the old group's, refused the new group by
 //     §10.8's members row (its pin never falls) with gkm refused alarms at every resync and evs tamper alarms, and its
-//     writes are refused 412 GATE_CLOSED. §10.6's check reads the forms and then creates gen/<g> under the old
-//     group's prefix with nothing conditioning both; QD-1186 (question e2e-gkm-concurrency-reform-old-group-claim)
-//     decided gkm fences the old group at a re-form. In the other runs gkm refuses the claim 403, which the case
-//     accounts for
-//   - both repos: the re-former's first generation in the new group is staged to every holder but the owner's device,
-//     the network's first, which has published no ReaderKey yet: its upkeep's first pass ran before it held any repo
-//     scope ("gkm: no repo scope to present") and nothing runs it again before its first resync. Its late ask, which
-//     publishes the key first (gkm-pending-hint-delay), is then answered by no holder within the bound: no delivery
-//     to it of the new group's generation is ever made, so it reads and writes nothing sealed past the re-form
-//   - the resumed repo: after the reseed and the resume, evs refuses every member's write 503 EVS_REFUSAL_UNAVAILABLE
-//     (gkm_reform.go's header leaves evs's resolution of gen/<g> through the newest GroupForm to evs)
-//   - the second device: api's token exchange refuses every scope its key client asks for the vault ("the projection
+//     writes were refused 412 GATE_CLOSED. §10.6's check read the forms and then created gen/<g> under the old group's
+//     prefix with nothing conditioning both. QD-1186 (question e2e-gkm-concurrency-reform-old-group-claim) has gkm
+//     fence the old group at a re-form, and gkm-reform-old-group-fence (sidecar 980f84f3 to d8ab25dd, with QD-1187 and
+//     QD-1188) built it: the re-form's closing marker in the old group fences its claims, wraps and commits, which gkm
+//     answers 409, so the rotator's claim there is refused and it rotates no key. In the runs where gkm refused the
+//     claim 403 instead, the case accounts for it as a request to a group a re-form replaced (§10.6's checks row)
+//   - both repos: the re-former's first generation in the new group was staged to every holder but the owner's
+//     device, the network's first, which had published no ReaderKey yet: its upkeep's first pass ran before it held
+//     any repo scope ("gkm: no repo scope to present") and nothing ran it again before its first resync, and its late
+//     ask, which publishes the key first (gkm-pending-hint-delay), was answered by no holder within the bound, so it
+//     read and wrote nothing sealed past the re-form. gkm-reader-key-upload-retry (sidecar 92aef6ed to 84b6dfc7) has
+//     the upkeep try a failed upload again within seconds, at once when a state first gives the device a scope, and a
+//     late ask asked again each LateAskInterval while its generation stays unopened
+//   - the resumed repo: after the reseed and the resume, evs refused every member's write 503 EVS_REFUSAL_UNAVAILABLE,
+//     reading the re-formed group's ladder copies as malformed. evs-after-reform-resume (sidecar c58bb25c, 3b2ee4df)
+//     resolves gen/<g> through the repo's GroupForms, and has a re-former the fence refuses 409 re-form again at the
+//     newer generation
+//   - the second device: api's token exchange refused every scope its key client asked for the vault ("the projection
 //     grants none of the scopes", 400 invalid_scope), though §8.5's scoped clause makes it a consented device of the
 //     vault's member (the owner's genesis device signed its admission) and its own verified state gives it a role
-//     there, so it never takes the vault's key; the general repo and the group inbox each reach it by one LATE
-//     delivery its admission's signer makes at its first late ask
+//     there, so it never took the vault's key; the general repo and the group inbox each reached it by one LATE
+//     delivery its admission's signer made at its first late ask. exchange-second-device-scopes (sidecar 9c2b9e25 to
+//     f4557d83, server 9ba67c4f1, a662f0499) lists each newly consented device in its owner's owner-bound repos
+//
+// With those fixes both pass: gkm-reader-key-upload-retry's last two runs passed the re-form case (2026-11-22), the
+// second device's case beside it in one.
 //
 // Each runs inside the conventions' 10 minutes. Run them through the build's wrapper: -tags 'sidecar_e2e
 // sidecar_pending sidecar_localstack'.

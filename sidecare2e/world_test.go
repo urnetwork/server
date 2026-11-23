@@ -70,9 +70,12 @@
 //     DANE anchor is the world's above, its own DoH, which TL2's and TL3's lookups and DKIM's answers take, asks the
 //     world's dns edge, since public resolvers know no .example name, and its DKIM keys' keychain is a map in the
 //     test, since a Sidecar's keychain is not reachable outside its package;
-//   - a person's approval (worldDeviceGate): §16.6's stock gate holds an alias's creation, a mail send to another
-//     network and a bridge exposure for a person's decision on another approval-capable device, and the world composes
-//     no approver, so a stand-in in front of the stock gate runs the one use as that decision would, counted;
+//   - a person's approval (worldDeviceGate): §16.6's stock gate holds an alias's creation and a mail send to another
+//     network for a person's decision on another approval-capable device, and the world composes no approver, so a
+//     stand-in in front of the stock gate runs the one use as that decision would, counted. A bridge exposure is not
+//     among them: the stock gate passes a route or map the document's standing rule covers
+//     (approval-gate-standing-exposures, sidecar 99d7f101 to e1c83b88), and since e2e-it-bridge-standins-out (server
+//     364e538cd to 6ec049aca) every bridge filer runs the stock gate alone;
 //   - a receiver's lookups (World.StartMail): its reception-time checks (SPF, DKIM, DMARC, PTR) and mail.strict's
 //     chain ask the world's DNS above through MailReceiveSettings.ResolverFactory, under the same anchor, where
 //     production's receiver asks public resolvers over a DohCache of its own, which a receiver in a test binary refuses
@@ -96,11 +99,11 @@
 // answered only once its router interface's banner probe passed, which the mail step's resolution reads; api's
 // sequencer and rev/ store spend on api's own write budget; and gkm's hint writer resolves sidecar ids through api's
 // internal route on the block's gkm bearer, as production's block does (WorldSettings.GkmHintResolver). A device's
-// §16.6 approval gate is the stock one (World.InstallApprovalGate), which takes a tls/ or smtp/ listen under a standing
-// grant with nothing filed; a device's socket component runs for the world's life, whatever step started it
-// (StartSockets); a network's label takes its zone's serial when it is drawn, so tlsedge routes it from the map; a
-// member's consented device deposits in its member's mailbox, which its write there implies (QD-1173); and a mailbox's
-// reader ingests each deposit at the deposit's hint, nothing waking its ingest.
+// §16.6 approval gate is the stock one (World.InstallApprovalGate), which takes a tls/ or smtp/ listen, and a bridge
+// route or map, under a standing grant with nothing filed; a device's socket component runs for the world's life,
+// whatever step started it (StartSockets); a network's label takes its zone's serial when it is drawn, so tlsedge
+// routes it from the map; a member's consented device deposits in its member's mailbox, which its write there implies
+// (QD-1173); and a mailbox's reader ingests each deposit at the deposit's hint, nothing waking its ingest.
 //
 // Process-wide state, so one world runs at a time and its Close puts each back: the T3World's (sidecar.yml, pro.yml's
 // limits, oauth's issuer and keys, WARP_DOMAIN, api's installs, the smtp routes' §8 checks among them), pro.yml's pro:

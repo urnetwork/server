@@ -75,28 +75,27 @@
 // the engine issued, so the case has no count of a block's spend to hold its reports to; it holds each evs run to the
 // report its budget wrote as it closed, and per-object attribution of the blocks' spend waits for the review phase.
 //
-// A failure from a product bug stays failing; the case reports it with its evidence. As it landed (2026-11-22) the case
-// failed on five findings, each fixed since and run again here (e2e-evs-verify): the disjoint first creations refused
-// 409 PATH_CONFLICT for all but one writer (evs-dir-creation-conflict, sidecar b9e302b2, 05ec181f); every read of a
-// path untouched since two bases, and every write whose plan read one, refused "config pin before what the reader
-// retains" (QD-1178, evs-unretained-pin-reads, sidecar aeca8de8, a9e7bb50); writes beside the races refused 403 by gkm
-// on a token for a stronger role than gkm's state gave the writer (QD-1179, gkm-stale-scope-retry, sidecar 22a842c3:
-// the client now tries such a call again under its own repo's scope); an evs run's spend since its last report lost as
-// it closed (write-budget-close-report, sidecar 5736a959, ea5593b0); and a commit answered just before the block's
-// drain losing its step 8, its stored-byte delta, hints and a DROP's table append (evs-drain-step8, sidecar 75f66a56),
-// which the drop's listing no longer covers with a fresh read of its path.
+// A failure from a product bug stays failing; the case reports it with its evidence. Every finding it met is fixed:
 //
-// On those fixes it fails, in one run of six (e2e-evs-verify's, 2026-11-22), on one more:
-//
-//   - a read beside the races, or a write whose plan reads the head, refused by the device's own verifier "config pin
-//     ahead of the state: gkm auth pin ahead of the state: 13 above 12", at the base the first race round's save had
-//     just published: another writer, whose follower held that base, pushed to the ref under it, and the reader's
-//     follower was still a position behind. EvsVerifier.VerifyStatement answers ErrConfigPinAhead, whose doc says to
-//     wait until the log reaches the pin, as §10.9's judged row has a reader do with a pin above its tip, but nothing
-//     on the read path waits, so the read fails. QD-1202 (question e2e-evs-verify-statement-pin-ahead-of-reader) has
-//     the reader wait for its log to reach the pin, within a bound, and withhold the statement only past it; the fix
-//     has not landed. Run 2 refused a-7's read of files2/a-0.txt, and evs-drain-step8's runs met it on two writes. Each
-//     refusal's message says when it came back and where the device's follower and the newest one stood (pinAheadNote).
+//   - as it landed (2026-11-22), five: the disjoint first creations refused 409 PATH_CONFLICT for all but one writer
+//     (evs-dir-creation-conflict, sidecar b9e302b2, 05ec181f); every read of a path untouched since two bases, and
+//     every write whose plan read one, refused "config pin before what the reader retains" (QD-1178,
+//     evs-unretained-pin-reads, sidecar aeca8de8, a9e7bb50); writes beside the races refused 403 by gkm on a token for
+//     a stronger role than gkm's state gave the writer (QD-1179, gkm-stale-scope-retry, sidecar 22a842c3: the client
+//     now tries such a call again under its own repo's scope); an evs run's spend since its last report lost as it
+//     closed (write-budget-close-report, sidecar 5736a959, ea5593b0); and a commit answered just before the block's
+//     drain losing its step 8, its stored-byte delta, hints and a DROP's table append (evs-drain-step8, sidecar
+//     75f66a56), which the drop's listing no longer covers with a fresh read of its path;
+//   - on those five fixes, in one run of six (e2e-evs-verify's, 2026-11-22), one more: a read beside the races, or a
+//     write whose plan reads the head, refused by the device's own verifier "config pin ahead of the state: gkm auth
+//     pin ahead of the state: 13 above 12", at the base the first race round's save had just published, under which
+//     another writer whose follower held that base had pushed while the reader's follower was still a position behind
+//     (run 2 refused a-7's read of files2/a-0.txt, and evs-drain-step8's runs met it on two writes). QD-1202 (question
+//     e2e-evs-verify-statement-pin-ahead-of-reader) has the reader wait, and evs-read-wait-pin-ahead (sidecar 9e99861c
+//     to 0c66baa8) built it: EvsVerifier.VerifyStatement waits for the device's config log to reach a pin above its
+//     state, within EvsSettings.AuthPinWaitTimeout (60 s) and the caller's ctx, and judges the statement at its own
+//     pin, withholding it with ErrConfigPinAhead only past that bound. A refusal of that kind still says when it came
+//     back and where the device's follower and the newest one stood (pinAheadNote).
 //
 // Each phase has PhaseTimeout and dumps the world's progress when it stalls; the case has the conventions' 10 minutes.
 // Run it through the build's wrapper: -tags 'sidecar_e2e sidecar_pending sidecar_localstack'.
@@ -766,10 +765,11 @@ func (self *evsConcurrencyCase) read(ctx context.Context, device *evsConcurrency
 	}
 }
 
-// For a refusal of a statement pinned past what device's state has reached (sidecar.ErrGkmAuthAhead): when it came
-// back, and the log position device's config follower held then beside the newest any device of the case held, so the
-// failure reads as what it refused (question e2e-evs-verify-statement-pin-ahead-of-reader); "" for any other error.
-// Safe for concurrent use once setUp is done.
+// For a refusal of a statement pinned past what device's state has reached (sidecar.ErrGkmAuthAhead), which evs's
+// verifier gives since QD-1202 only once its wait for the device's log to reach the pin has run out
+// (EvsSettings.AuthPinWaitTimeout): when it came back, and the log position device's config follower held then beside
+// the newest any device of the case held, so the failure reads as what it refused (question
+// e2e-evs-verify-statement-pin-ahead-of-reader); "" for any other error. Safe for concurrent use once setUp is done.
 func (self *evsConcurrencyCase) pinAheadNote(device *sidecart3.T3Device, err error) string {
 	if !errors.Is(err, sidecar.ErrGkmAuthAhead) {
 		return ""

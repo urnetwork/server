@@ -49,11 +49,25 @@
 //     meters hold, never overdrawn, and its mx and smtp meters hold at least the bytes of the mail it took through
 //     mxedge and sent through smtpedge
 //
-// A failure from a product bug stays failing (the e2e conventions). One stands today: the groups' mailboxes list none of
-// their mail, since ingest takes the deposits of a device that reads a group without writing it, as each of the member's
-// devices but the group's creator does, for read receipts and leaves them standing (question
-// personal-group-deposit-group-deposits-classed-receipts). Run it through the build's wrapper:
-// -tags 'sidecar_e2e sidecar_pending sidecar_localstack'.
+// A failure from a product bug stays failing (the e2e conventions). The case's findings, each fixed since:
+//
+//   - as it landed (2026-11-22), the groups' mailboxes listed none of their mail: the member's readers held no key of
+//     a group repo ("gkm unavailable: no generation of the repo is held") until a writer's hourly resync, since the
+//     network's first device made its first ReaderKey upload before gkm could load the network's state, so no holder
+//     could seal it the group's late delivery; gkm-pending-hint-delay (sidecar 61be60ee to 4a803f0c, server f42425473,
+//     3d47ad55c) has a reader gkm serves no ReaderKey for publish one before its late ask. Same-network sends to a
+//     network's own group stayed off (OwnGroupSends) until group-create granted a personal network's group its deposit
+//     to the member's devices (QD-1177, QD-1180; personal-group-deposit, sidecar 27e157b4, 20fc0e65, server 5284737b1
+//     to 6b6b2f201), and the case has sent them since
+//   - on those, the groups' mailboxes still listed none of their mail: ingest took the deposits of a device that reads
+//     a group without writing it, as each of the member's devices but the group's creator does, for read receipts and
+//     left them standing (question personal-group-deposit-group-deposits-classed-receipts, QD-1181).
+//     ingest-receipts-owner-bound (sidecar 6fdaa49c, 05687327) classes such a depositor as a read receipt's only in an
+//     owner-bound repo, and the case passed in full on it (2026-11-22), its group mailboxes included
+//
+// The churn case met one more loss in a group mailbox, under racing ingest pushes, which mail-group-ingest-loss fixed
+// (churn_load_test.go's header). Run it through the build's wrapper: -tags 'sidecar_e2e sidecar_pending
+// sidecar_localstack'.
 
 package sidecare2e
 

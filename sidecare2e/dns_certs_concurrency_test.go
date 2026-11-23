@@ -121,6 +121,26 @@
 // dns_challenges_per_name_hour's window, which each network's name is then written to and refused at exactly; api's
 // write budget against the objects api's process wrote; and Pebble's nonce refusals, counted, with no nonce replayed.
 //
+// A failure from a product bug stays failing. What the case found in the product (e2e-dns-certs-concurrency and
+// e2e-dns-star-addresses, 2026-11-22), each fixed since:
+//
+//   - two devices of a network ordering their set's certificates in one certs pass met at the set's one challenge
+//     name, which holds two values and takes ten writes an hour: each order wrote its two values in two writes, and the
+//     second order was refused at the name and ordered at the next pass, which the case took as it landed. QD-1189
+//     (question e2e-dns-certs-concurrency-one-order-a-set-a-pass) has certs admit one order of a set at a time, and
+//     certs-one-order-per-set (sidecar 20ec8e47 to da9ee07a, with QD-1203's hold by challenge name) built it, an
+//     order's two values in one write, so the renewals race renews every publisher since (server dee62b4ac);
+//     certs-admission-name-holds (sidecar 9c1bf80f to 33a90b1d, server 76a4a2b2e to afb141d4a, QD-1204) then has certs
+//     hold a name's orders while dns refuses its writes at the hourly cap, until its 429's Retry-After
+//   - a user record at a published host, a TXT set at web.<label>.<root> as the case writes, hid the host's
+//     addresses, RFC 4592 stopping * at an owner that exists (QD-1190, question
+//     e2e-dns-certs-concurrency-user-records-hide-edge-addresses): dns-copy-rows-user-records (sidecar 74b2fb66 to
+//     66f26680, server 500127017 to 984a33bf9) plans a copy row of *'s records at such an owner
+//   - no published name answered an address, since model.DnsSyncEdgeRecords, which writes §12.7's * and @ edge
+//     records from a network's edge grants, had no caller: e2e-dns-star-addresses (server c4b5afead to dee62b4ac)
+//     syncs a network's zone at api after each accepted entry and in an hourly pass, and holds the case to the edge's
+//     A and AAAA it had only logged; its three runs passed (2026-11-22, about 280 s each)
+//
 // Each phase has PhaseTimeout and dumps the world's progress when it stalls. Run it through the build's wrapper:
 // -tags 'sidecar_e2e sidecar_pending sidecar_localstack'.
 

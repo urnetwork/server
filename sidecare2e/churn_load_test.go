@@ -108,48 +108,54 @@
 // every mailbox's copies (mailCheckMailbox, mailCheckInternetMx, mailCheckOutbox); and once every check that reads a
 // device has run and the blocks drained, the bridge's oracle over every attempt the case made, its sidecar clients and
 // its ledger (ItBridgeWorld's Check, CheckSidecarClients and Reconcile, which closes every network and must read its
-// contracts' relay rows in the debit journal before a ledger read's flush applies them), then the case's own ledgers. Nothing is left in flight: no send unended, no certificate row unissued,
-// no budget in flight. Each phase has its bound and a progress dump on a stall (World.FailProgress), and the whole
-// case is bounded by CaseTimeout, 10 minutes by default.
+// contracts' relay rows in the debit journal before a ledger read's flush applies them), then the case's own ledgers.
+// Nothing is left in flight: no send unended, no certificate row unissued, no budget in flight. Each phase has its
+// bound and a progress dump on a stall (World.FailProgress), and the whole case is bounded by CaseTimeout, 10 minutes
+// by default.
 //
 // Not here, each for its reason: a restart of a mail, dns, blog or bridge device (above; the bridge's own device and
 // handler restarts are its case's), nor of a member's own device or a tagged sidecar, which device chaos leaves to the
 // Owner's; and an exact count of the blocks' own write budget spend against the objects they wrote, which no harness
 // attributes yet, so the blocks are held to a report a run and nothing in flight.
 //
-// The findings this case met as it landed (e2e-churn-load, 2026-11-22, runs of four to six minutes), with their fixes'
-// state as e2e-control-plane-verify refreshed them (2026-11-22); a failure from a product bug stays failing, reported
-// with its evidence where it shows:
+// The findings this case met as it landed (e2e-churn-load, 2026-11-22, runs of four to six minutes) and as
+// e2e-control-plane-verify ran it, with their fixes' state as e2e-headers-final refreshed them (2026-11-23); a failure
+// from a product bug stays failing, reported with its evidence where it shows. Every one has landed:
 //
-//   - landed: an evs run's spend since its last report lost at close (write-budget-close-report, sidecar 5736a959); a
+//   - an evs run's spend since its last report lost at close (write-budget-close-report, sidecar 5736a959); a
 //     network's first device publishing its ReaderKey late (gkm-reader-key-upload-retry, sidecar 92aef6ed, 96cdf1ca,
 //     0b53b292); writes refused 503 after a resumed re-form (evs-after-reform-resume, sidecar c58bb25c, 3b2ee4df);
-//     after an api restart a network whose base a second device signed not loading at api's gate
+//     and a commit answered just before a drain losing its stored-byte delta (evs-drain-step8, sidecar 75f66a56)
+//   - after an api restart, a network whose base a second device signed not loading at api's gate
 //     (config-replay-base-signer, sidecar 9ac79c88 to f5892c63, QD-1192), which kept each network's documents to its
-//     first device until this refresh raised the savers back to every device; a team's tagged enrollment answered 500
-//     (team-tagged-enroll, server c730a0441 to e9b9598d1) and a Member's own auth key refused 403
+//     first device until e2e-control-plane-verify raised the savers back to every device; a team's tagged enrollment
+//     answered 500 (team-tagged-enroll, server c730a0441 to e9b9598d1) and a Member's own auth key refused 403
 //     (team-member-own-auth-key, server c5579f826 to 927a07e0d), which kept tagged sidecars and members' own devices
-//     out of the churn until they landed; a group mailbox's message lost, in three runs of five (a message to a
-//     personal network's group "team", the internet sender's or a same-network send, before any chaos and after an api
-//     restart, answered delivered and never listed: deposits pushed on a state two bases behind the group's writer,
-//     whose own ACL saves landed those bases, judged at a pin its log no longer retained), which mail-group-ingest-loss
-//     classes at the installed state (sidecar 840e3738 to abfab622, QD-1196; a group repo's ingest still waits for the
-//     mail component's pass, 2 s in this world, which mail-group-hint-watch, queued, watches hints for); and an evs
-//     writer's second write of a path refused 409 PATH_CONFLICT 48 ms after its first was answered, its plan read on
-//     evs's cache before its own push reached it (evs-write-update-stale-cache, sidecar af2e0136, 52848695; plain reads
-//     right after a device's own push wait on evs-read-own-writes, queued); and a commit answered just before a drain
-//     losing its stored-byte delta (evs-drain-step8, sidecar 75f66a56, landed as this refresh's last runs ended)
-//   - queued: api's write budget one log object's price (9216 B) past the objects api wrote, in every run with the it
-//     bridge network and in none without it (api-budget-p0-double-spend: model's ConfigLogSequencer issues P0 before
-//     each PUT, so a base whose rows equal an earlier base's spends on a projrows/ PutImmutable that makes nothing, or
-//     an append whose outcome was unknown and which landed spends twice)
+//     out of the churn until they landed
+//   - a group mailbox's message lost, in three runs of five (a message to a personal network's group "team", the
+//     internet sender's or a same-network send, before any chaos and after an api restart, answered delivered and
+//     never listed: deposits pushed on a state two bases behind the group's writer, whose own ACL saves landed those
+//     bases, judged at a pin its log no longer retained), which mail-group-ingest-loss classes at the installed state
+//     (sidecar 840e3738 to abfab622, QD-1196). A group repo's ingest still waits for the mail component's pass, 2 s in
+//     this world, rather than its hint; mail-group-hint-watch, running in the mail lane as this refresh was made, has
+//     it watch the hints
+//   - an evs writer's second write of a path refused 409 PATH_CONFLICT 48 ms after its first was answered, its plan
+//     read on evs's cache before its own push reached it (evs-write-update-stale-cache, sidecar af2e0136, 52848695);
+//     a plain read right after a device's own push sees that push too since evs-read-own-writes (sidecar 64074a84 to
+//     575c7019)
+//   - api's write budget one log object's price (9216 B) past the objects api wrote, in every run with the it bridge
+//     network and in none without it, each of e2e-control-plane-verify's four runs (server 3a453b5dd and c8ce7dea9 on
+//     sidecar 2463dbb4 and ac737277) failing on it alone: model's ConfigLogSequencer issued P0 before each PUT, so a
+//     base whose rows equal an earlier base's spent on a projrows/ PutImmutable that made nothing, and an append whose
+//     outcome was unknown and which landed spent twice. api-budget-p0-double-spend (server 75b0309a9 to 1f91ab551)
+//     spends each object once the store shows its create took effect, and the case passed on it (its track's run,
+//     2026-11-22, 283 s). Its report names the same spend before a PUT in rev/'s store and the abuse holds' store,
+//     which api-budget-spend-on-create, queued, fixes
 //
-// As e2e-control-plane-verify ran it (2026-11-22, four runs of four and a half minutes, server 3a453b5dd and
-// c8ce7dea9 on sidecar 2463dbb4 and ac737277, with every device saving and the members' own devices), each run failed
-// on api-budget-p0-double-spend's 9216 B alone, every other check passing. In two of them api restarted after bases a
-// later device signed, the team's second Owner device's in both and b's second, third and fourth devices' in one, and
-// every network loaded at api's gate and converged after it. Every enrollment step landed, five bursts of two steps
-// across the runs, so none met the 503 at POST /network/config/delta the case's first sitting saw once.
+// In two of e2e-control-plane-verify's runs api restarted after bases a later device signed, the team's second Owner
+// device's in both and b's second, third and fourth devices' in one, and every network loaded at api's gate and
+// converged after it. Every enrollment step landed, five bursts of two steps across the runs, so none met the 503 at
+// POST /network/config/delta the case's first sitting saw once.
 //
 // Run it through the build's wrapper: -tags 'sidecar_e2e sidecar_pending sidecar_localstack' -run TestE2eChurnLoad.
 
@@ -279,7 +285,8 @@ type churnLoadSettings struct {
 	// first admitted by the inviting device with the invited mark (§7.5) and the rest by that first.
 	MemberDeviceCount int
 	// The certs worker's renewals the case runs across its rounds, the certs renewal kind's bursts past it doing
-	// nothing: each order writes its name's challenge twice, under §12.7's ten an hour (dns_challenges_per_name_hour).
+	// nothing: each order writes its name's challenge once since certs-one-order-per-set (QD-1189), twice before it,
+	// under §12.7's ten an hour (dns_challenges_per_name_hour).
 	CertRenewalCount int
 	// The devices of a, from its first, that order its certificate at setup.
 	CertDeviceCount int
