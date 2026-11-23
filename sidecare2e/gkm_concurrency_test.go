@@ -1591,9 +1591,9 @@ func (self *gkmConcurrencyCase) latePhase() {
 	sharedBefore := self.newestGeneration(self.shared)
 	// cut off from gkm; and every delivery holders make to it in the partial repo lost from then until its own late ask
 	// reaches gkm once it is back, which ends that cut as it passes: each writer delivers to a new holder at its own
-	// sync of the grant, the granting device at once and the others at their syncs and pending hints (gkm_deliver.go's
-	// syncs row), so a cut lifted with the device's own let a delivery land 2 ms after it was back, before it asked
-	// (e2e-headers-final's gkm-new-run2.log)
+	// sync of the grant, the granting device at once and the others at their syncs and pending hints (sidecar's
+	// gkm_deliver.go: in KeyDelivery mode each sync answers too), so a cut lifted with the device's own let a delivery
+	// land 2 ms after it was back, before it asked (e2e-headers-final's gkm-new-run2.log)
 	_, removeCut := self.origin.cut("the late device", func(request *gkmConcurrencyRequest) bool {
 		return request.sidecarId == late.sidecarId
 	})
