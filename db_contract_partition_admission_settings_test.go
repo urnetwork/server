@@ -106,3 +106,65 @@ func TestContractPartitionCutoverSettingsValidate(t *testing.T) {
 		}
 	}
 }
+
+// On 2026-11-23 the legacy bound's ACCESS EXCLUSIVE requests on Main waited
+// their full second behind transactions up to 5 s old, three attempts a run,
+// and every new statement on transfer_contract queued behind each one:
+// PgBouncer backed up past 500 waiting clients. The exclusive steps wait at
+// most a quarter second, only behind transactions under half a second old, and
+// try dozens of times, 1 to 3 s apart.
+func TestContractExclusiveStepsWaitBrieflyAndTryOften(t *testing.T) {
+	const maxLockWait = 250 * time.Millisecond
+	const maxTransactionAge = 500 * time.Millisecond
+	cutover := DefaultContractPartitionCutoverSettings()
+	rollback := DefaultContractPartitionRollbackSettings()
+	shapes := map[string]*contractTableShape{}
+	staged := map[string]*contractTableShape{}
+	for _, table := range ContractPartitionTables {
+		shapes[table] = &contractTableShape{table: table, relkind: "r"}
+		staged[table] = &contractTableShape{table: contractStagedParentName(table), relkind: "p"}
+	}
+	swap := testContractLockTimeoutOf(t, contractSwapSql(shapes, staged, ContractIdFloor(time.Date(2026, 11, 25, 0, 0, 0, 0, time.UTC)))[0])
+	for name, wait := range map[string]time.Duration{"prepare and abort": cutover.LockTimeout, "the swap": swap, "rollback": rollback.LockTimeout} {
+		if maxLockWait < wait {
+			t.Errorf("%s waits up to %s for an exclusive lock; at most %s", name, wait, maxLockWait)
+		}
+	}
+	for name, age := range map[string]time.Duration{"the cutover": cutover.LockSettings.MaxTransactionAge, "rollback": rollback.LockSettings.MaxTransactionAge} {
+		if age <= 0 || maxTransactionAge < age {
+			t.Errorf("%s requests its exclusive locks behind transactions up to %s old; at most %s", name, age, maxTransactionAge)
+		}
+	}
+	for name, attempts := range map[string]int{"a step": cutover.StepAttempts, "the swap": cutover.SwapAttempts, "abort": cutover.AbortAttempts, "rollback": rollback.MaxAttempts} {
+		if attempts < 60 {
+			t.Errorf("%s tries %d times a run; at least 60", name, attempts)
+		}
+	}
+	for name, interval := range map[string]time.Duration{"a step": cutover.StepRetryInterval, "the swap": cutover.SwapRetryInterval, "abort": cutover.AbortRetryInterval, "rollback": rollback.RetryInterval} {
+		if interval <= 0 || time.Second < interval {
+			t.Errorf("%s retries %s apart before jitter; at most a second", name, interval)
+		}
+	}
+	if err := cutover.validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Retries wait 1 to 3 intervals at random, so that they do not fall into step
+// with periodic work on the tables.
+func TestContractRetryWaitIsJittered(t *testing.T) {
+	waits := map[time.Duration]bool{}
+	for range 1000 {
+		wait := contractRetryWait(time.Second)
+		if wait < time.Second || 3*time.Second <= wait {
+			t.Fatalf("a retry after a 1 s interval waits %s; want 1 to 3 s", wait)
+		}
+		waits[wait] = true
+	}
+	if len(waits) < 100 {
+		t.Fatalf("retries after a 1 s interval waited only %d distinct times in 1000", len(waits))
+	}
+	if wait := contractRetryWait(0); wait != 0 {
+		t.Fatalf("a zero interval waits %s", wait)
+	}
+}

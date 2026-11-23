@@ -199,7 +199,8 @@ func TestContractPartitionPrepareDefersABusyTable(t *testing.T) {
 			}
 		}
 		defer releaseHolder()
-		age := DefaultContractPartitionLockSettings().MaxTransactionAge + time.Second
+		settings := DefaultContractPartitionCutoverSettings()
+		age := settings.LockSettings.MaxTransactionAge + time.Second
 		MaintenanceDb(ctx, func(conn PgConn) {
 			for {
 				var old bool
@@ -211,11 +212,14 @@ func TestContractPartitionPrepareDefersABusyTable(t *testing.T) {
 			}
 		})
 
+		// a few quick attempts: the default tries for minutes to meet a quiet moment
+		settings.StepAttempts = 3
+		settings.StepRetryInterval = 100 * time.Millisecond
 		prepareCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 		defer cancel()
 		var err error
 		if failure := testContractPartitionRecover(func() {
-			err = MigrateContractsToPartitions(prepareCtx, ContractPartitionMigrateOptions{CutoverDay: cutoverDay, Logf: logf})
+			err = MigrateContractsToPartitions(prepareCtx, ContractPartitionMigrateOptions{CutoverDay: cutoverDay, Logf: logf, CutoverSettings: settings})
 		}); failure != nil {
 			err = fmt.Errorf("%v", failure)
 		}
@@ -247,6 +251,116 @@ func TestContractPartitionPrepareDefersABusyTable(t *testing.T) {
 				t.Fatalf("%s is not prepared after the second run: %+v", table, bound)
 			}
 		}
+		if err := MigrateContractsToPartitions(ctx, ContractPartitionMigrateOptions{Abort: true, Logf: logf}); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+// On 2026-11-23 prepare's admission let the legacy bound's ACCESS EXCLUSIVE
+// request through behind transactions up to 5 s old, and each request waited
+// its full second behind them while every new statement on the table queued
+// behind it. A reader of transfer_contract whose transaction is a second old,
+// as an application transaction between its statements often is on Main, must
+// defer the bound without any lock request.
+func TestContractPartitionPrepareDoesNotQueueBehindASecondOldReader(t *testing.T) {
+	DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		if IsContractPartitioned(ctx) {
+			t.Skip("prepare starts from plain contract tables")
+		}
+		logf := testContractPartitionLogf(t)
+		cutoverDay := ContractPartitionDayStart(NowUtc()).AddDate(0, 0, 2)
+		busy := "transfer_contract"
+
+		holderPid := make(chan uint32, 1)
+		release := make(chan struct{})
+		holderDone := make(chan error, 1)
+		go func() {
+			holderDone <- contractPartitionTx(ctx, func(tx PgTx) {
+				RaisePgResult(tx.Exec(ctx, fmt.Sprintf(`LOCK TABLE public.%s IN ACCESS SHARE MODE`, quoteIdentifier(busy))))
+				holderPid <- tx.Conn().PgConn().PID()
+				select {
+				case <-release:
+				case <-ctx.Done():
+				}
+			})
+		}()
+		var pid uint32
+		select {
+		case pid = <-holderPid:
+		case err := <-holderDone:
+			t.Fatalf("the reader failed: %v", err)
+		}
+		released := false
+		releaseHolder := func() {
+			if !released {
+				released = true
+				close(release)
+				if err := <-holderDone; err != nil {
+					t.Fatalf("the reader failed: %v", err)
+				}
+			}
+		}
+		defer releaseHolder()
+		// a second old by the database clock: past the admission age, and well
+		// under the 5 s that the build of 2026-11-23 admitted
+		MaintenanceDb(ctx, func(conn PgConn) {
+			for {
+				var old bool
+				Raise(conn.QueryRow(ctx, `SELECT clock_timestamp() - xact_start > interval '1 second' FROM pg_stat_activity WHERE pid = $1`, pid).Scan(&old))
+				if old {
+					return
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
+		})
+
+		// the default lock wait and admission age; a few quick attempts
+		settings := DefaultContractPartitionCutoverSettings()
+		settings.StepAttempts = 3
+		settings.StepRetryInterval = 100 * time.Millisecond
+		prepareDone := make(chan error, 1)
+		go func() {
+			var err error
+			if failure := testContractPartitionRecover(func() {
+				err = MigrateContractsToPartitions(ctx, ContractPartitionMigrateOptions{CutoverDay: cutoverDay, Logf: logf, CutoverSettings: settings})
+			}); failure != nil {
+				err = fmt.Errorf("%v", failure)
+			}
+			prepareDone <- err
+		}()
+
+		// Until prepare returns, no exclusive request on the table may wait.
+		queued := false
+		var prepareErr error
+		MaintenanceDb(ctx, func(conn PgConn) {
+			for {
+				select {
+				case prepareErr = <-prepareDone:
+					return
+				default:
+				}
+				var waiting bool
+				Raise(conn.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'relation' AND relation = to_regclass($1) AND mode = 'AccessExclusiveLock' AND NOT granted)`, "public."+busy).Scan(&waiting))
+				if waiting {
+					queued = true
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+		})
+		if queued {
+			t.Fatalf("prepare queued an exclusive request on %s behind a reader a second old (it then returned %v)", busy, prepareErr)
+		}
+		if prepareErr == nil || !strings.Contains(prepareErr.Error(), busy) {
+			t.Fatalf("prepare with %s read for a second must report it deferred, got %v", busy, prepareErr)
+		}
+		if bound := readContractShapes(ctx, contractTableName)[busy].legacyBound; bound != nil {
+			t.Fatalf("%s is read, yet prepare added its legacy bound", busy)
+		}
+
+		releaseHolder()
 		if err := MigrateContractsToPartitions(ctx, ContractPartitionMigrateOptions{Abort: true, Logf: logf}); err != nil {
 			t.Fatal(err)
 		}

@@ -30,12 +30,13 @@ type ContractPartitionRollbackSettings struct {
 	ValidationRetryInterval time.Duration
 }
 
-// Preserves the existing operator rollback budgets without process-wide state.
+// Rollback's exclusive locks follow the cutover's rule (contractExclusiveLockTimeout):
+// a short admission age, a short lock wait and many jittered attempts.
 func DefaultContractPartitionRollbackSettings() *ContractPartitionRollbackSettings {
 	return &ContractPartitionRollbackSettings{
-		LockSettings: *DefaultContractPartitionLockSettings(),
-		LockTimeout:  time.Second, StatementTimeout: 30 * time.Second,
-		MaxAttempts: 60, RetryInterval: 10 * time.Second,
+		LockSettings: ContractPartitionLockSettings{MaxTransactionAge: contractExclusiveMaxTransactionAge},
+		LockTimeout:  contractExclusiveLockTimeout, StatementTimeout: 30 * time.Second,
+		MaxAttempts: 120, RetryInterval: contractExclusiveRetryInterval,
 		ValidationLockTimeout: 15 * time.Second, ValidationMaxAttempts: 10,
 		ValidationRetryInterval: 10 * time.Second,
 	}

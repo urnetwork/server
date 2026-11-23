@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"regexp"
 	"slices"
@@ -177,6 +178,17 @@ func contractPartitionExecQuietRetry(ctx context.Context, scope *contractLockSco
 	}, attempts, wait, logf)
 }
 
+// A retry waits between one and three times its interval, at random, so that
+// attempts do not fall into step with periodic work that holds the tables,
+// such as the provider list's fill, which reads transfer_contract for up to
+// two minutes.
+func contractRetryWait(interval time.Duration) time.Duration {
+	if interval <= 0 {
+		return interval
+	}
+	return interval + rand.N(2*interval)
+}
+
 // Repeats the entire operation so each attempt can read authoritative state
 // after taking its locks, rather than reusing a previously checked catalog.
 // With a scope, each attempt first reads the scope's admission and waits while
@@ -199,7 +211,7 @@ func contractPartitionRetryWhen(ctx context.Context, scope *contractLockScope, r
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(wait):
+			case <-time.After(contractRetryWait(wait)):
 			}
 			continue
 		}
@@ -214,7 +226,7 @@ func contractPartitionRetryWhen(ctx context.Context, scope *contractLockScope, r
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(wait):
+		case <-time.After(contractRetryWait(wait)):
 		}
 	}
 	return
