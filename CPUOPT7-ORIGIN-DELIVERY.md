@@ -1,15 +1,138 @@
-# CPUOPT7-ORIGIN-DELIVERY: contract-origin edges only to their waiters (design for review, 2026-11-23)
+# CPUOPT7-ORIGIN-DELIVERY: contract-origin edges only to their waiters (design 2026-11-23, approved and built)
 
 CPUOPT7 §10.5 ranked this item second (X1). On 2026-11-23 at about 14:15Z the owner chose "Top 5 minus #2": items 1
 and 3–5 go ahead, and this one waits for a design review. This document is that design.
 
-Nothing here is built, and nothing in production was changed to write it. The code is server main at f09d3edd6. The
+The design (§1–§5) was written before anything was built, and nothing in production was changed to write it; §Status
+below records the owner's choices and what was built. The design's code is server main at f09d3edd6. The
 measurements are Mimir reads from 14:20–14:40Z on 11-23: 10-minute and 24-hour rates, and 7-day increases for the
 failure counters (Appendix).
 
 **Owner rule (binding, as in CPUOPT4–8):** "We can't sacrifice correctness of performance timings for the cpu
 savings." The companion-origin wait keeps its bounds (100 ms first retry, 500 ms fallback, 3 s deadline) and its event
 wake. The refusal ring keeps its fence. §4.2 argues both.
+
+## Status (11-23, built)
+
+The owner approved X1 "as designed" on 11-23 at about 14:55Z: option E, and the proposed answer to every question of §5.
+It was built in four steps, each on its own branch cut from server main:
+
+| Step | Branch | Merge on main | State |
+|---|---|---|---|
+| §1.7, the watch outlives the record | `fix/cpuopt7-x1-watch-until-recorded-1123` | 2a3984171 | merged; ships with the next deploy |
+| Stage 0, the edge counters | `perf/cpuopt7-x1-stage0-counters-1123` | 5c4091fe8 | merged; ships with the next deploy |
+| Build A, both paths | `perf/cpuopt7-x1-build-a-1123` | 878cf20b8 | merged; needs its own roll (§4.4) |
+| Build B, the pair channels only | `perf/cpuopt7-x1-build-b-1123` | not merged (tip e5e8d744f) | waits for its gate (below) |
+
+**The owner's choices (§5), as recorded:**
+1. **E**, a channel per pair, subscribed after a miss.
+2. **The Stream-fallback miss stays exact,** at one extra read: an unfenced miss subscribes, waits up to 100 ms for the
+   acknowledgement, and re-reads once; only that fenced read stores the refusal. Without the acknowledgement in time the
+   refusal is answered and not stored.
+3. **Non-terminal destination refusals subscribe at `put`.**
+4. **The cap is 8,192 held pairs per owner.** Over it a missing-origin refusal is answered and not stored. The doc
+   proposed nothing for the other holders; the build follows its bounded-state reasoning: a destination refusal that would
+   need a hold over the cap is not stored either (it is re-read, as before the ring existed), and a wait that cannot hold
+   polls, as a declined watch does. `pair_cap` counts each.
+5. **Two builds, no flag.**
+6. **Stage 0's counters ride the next routine deploy. B1 (idle buckets close) ships inside Build A.**
+7. **§1.7 is fixed now, on its own.**
+8. **The `registration` wake label is added**, and the same source on `urnetwork_connect_companion_origin_lookups_total`.
+
+**Where the build refines §4.1:**
+- **A fenced read holds its pair.** `Update` takes a hold when it reports a fenced read, so the pair stays subscribed from
+  the arm until the watch closes, after the refusal has taken its own hold. Without it, another holder could release the
+  pair between a Stream fallback's fenced read and its `put`, and an edge in that gap would be lost: §4.2's case 4, which
+  covered only the wait's own hold, now covers every fenced read.
+- **The fenced-only rule for missing-origin refusals is the controller's.** `CreateContract` is the only production
+  caller; it records a missing-origin verdict only from a fenced read and counts any other as `unstored`.
+  `RecordRouteRejection` keeps its signature, and every ring refusal holds its pair whoever stores it.
+- **A pair's missing hint ends with its last watch.** A pair kept by holds (a refusal, an unsubscribe not yet answered)
+  outlives its watches now, so the last watch's close invalidates the hint: the next watch starts afresh, as before.
+- **An unrequested acknowledgement of the bucket channel on the live socket replaces the socket.** What its pair channels
+  carry is then unknown; a fresh socket resubscribes every held pair and each acknowledgement resyncs its pair.
+- **One manager goroutine per bucket** opens the socket, writes the subscriptions, keeps the acknowledgement deadlines and
+  the idle timer, and runs the held refusals' expiry pass (at most once a second per owner). A reader goroutine runs only
+  while the bucket's socket is open. An idle owner keeps the 18 goroutines it had (16 bucket goroutines, 2 publishers).
+- **Settings.** `MaxHeldPairs` 8,192, `RegistrationRecheckTimeout` 100 ms, `IdleBucketTimeout` 60 s,
+  `HeldPairExpiryInterval` 1 s, `SubscribeBatchSize` 256. The sockets' detection bounds (2 s acknowledgement, 2 s
+  incoming, 1 s receive, 1 s reconnect) and the 1 s publish timeout moved from constants into
+  `ContractOriginNotificationSettings`, unchanged (CODESTYLE: tunables live in settings). The wait's own bounds (100 ms,
+  500 ms, 3 s) stay the controller's named constants: they are the owner's fixed rule, not tunables.
+- **`registration` replaces a wake, it adds none.** A continued wait's first wake is now `registration` instead of
+  `fallback` (both run the read at 100 ms), so per request `fallback` falls by about the `registration` rate and
+  `fallback + registration` is unchanged. A Stream-fallback re-check counts one `registration` wake and lookup.
+- **A slow acknowledgement** (after the 100 ms read) shifts the 500 ms polls by up to 100 ms, as an event wake does
+  today. While acknowledgements take under 100 ms, the reads are exactly today's (test 3 pins it for every ordering).
+
+**Tests (§4.3).** All are deterministic: `testing/synctest` and barriers, with an in-memory shard broker
+(`internal/redisshardtest`) that answers subscribes with Redis 8's notices and counts. Root cause: test 2 failed before the
+§1.7 fix (the stale refusal was stored) and passes after it. Test 1 checks what today's code cannot do: owners that
+waited once in a bucket receive nothing after it idles, and the holder receives only its pair's edges on the pair
+channel; with the idle close or the per-pair delivery removed it fails. Each safeguard (the per-pair resync, the idle
+close, the count check, the release of refusal holds, the fenced read's hold, the overdue acknowledgement) was removed
+in turn, and a test failed each time. Test 14 ran against a disposable three-node Redis 8.10.3 cluster inside a
+container with no network, so nothing reached a shared or production Redis.
+BenchmarkContractOriginDelivery, 40 owners on one broker: an edge on the bucket channel costs 31.6 µs of wall time for
+its 40 deliveries, one on a held pair's channel 0.73 µs for its one.
+
+**Build A in a mixed fleet, and its rollback.** Every A publisher sends the bucket channel and the pair channel in one
+pipeline to one node, and every A owner keeps the bucket channel subscribed while any watch or held pair is in the
+bucket (B1 closes only idle buckets). So:
+- a pre-A owner receives every A publisher's bucket-channel edge, as today;
+- an A owner receives every pre-A publisher's edge on its bucket channel, and its fenced reads stay fenced by it, as
+  today's are: the pair is watched or held, so the edge bumps its version and removes its refusals; its pair channel
+  simply hears nothing from that publisher;
+- A with A carries both, and the shadow counters compare them.
+Nothing persists outside a process: no keys, no TTLs; a subscription ends with its socket. Rolling back from A to pre-A
+is therefore one more mixed fleet of the same two kinds, safe at any point while no B process runs. Pinned by
+TestContractOriginMixedVersions and the publisher kinds of TestContractOriginSubscribeAfterMissOrderings.
+
+**Every process that runs origin delivery or the origin wait** (checked 11-23):
+- **api**: one owner per process (api/run.go), bound to `/connect/control`; publishes and waits.
+- **alt**: mounts the api router, so the same owner and paths.
+- **proxy**: one owner per device manager, shared with its hosted local authorities (localclient); publishes and waits.
+- **connect**: one owner per exchange (connect/resident.go), for the in-band resident controller, which runs
+  `CreateContract`; it can publish and wait.
+- **taskworker**: one owner per provider-egress pass; publishes and waits.
+- **mcp**: none. It builds no owner and creates no contract.
+
+**Build B may merge only when all of these hold:**
+1. Build A (878cf20b8 or later) has run for at least 24 hours on every api, alt, proxy, connect and taskworker process, and
+   no process of those services runs a pre-A build anywhere: canaries, hotfix images and the builder's own deploys
+   included.
+2. Over those 24 hours `v1_for_acknowledged_pair` equals `v2_received` (summed per service), `subscribe_failed` and
+   `pair_cap` are near 0, and the §4.4 wait, outcome and timing signals are flat against the days before Build A.
+3. The deploy version guard states that once a B build runs, no pre-A build of api, alt, proxy, connect or taskworker
+   may be deployed (rollback goes to A only).
+Connect's leg of Build A is a connect roll in its own lane, and connect goes last in A's order (§4.4).
+
+**Expected savings, per step** (24-hour means of §1.6; warm means every proxy bucket started):
+- §1.7 and Stage 0: none; correctness and counters.
+- Build A: the proxy's deliveries go, because its buckets close when idle: proxy 0.15–0.34 cores (0.31–0.69 warm), Redis
+  0.35–0.56 (0.71–1.12 warm), less the second SPUBLISH, about +0.1–0.15 Redis cores: **about 0.4–0.8 cores, up to 1.6
+  warm.** The api still receives every bucket-channel edge.
+- Build B: the api's deliveries go and the second SPUBLISH with them: api 1.16–1.95 cores, Redis 0.68–1.07, plus
+  0.1–0.15: **about 1.9–3.2 cores more.** A and B together: 2.3–3.9 cores (2.5–4.3 warm), less under 0.05 of new work.
+
+**What each deploy needs:**
+- **§1.7 and Stage 0:** nothing of their own; they ride whichever routine deploy comes next, in any order, because
+  nothing on the wire changes. Check `matched_waiter`, `matched_refusal` and `unmatched` appear, with `unmatched` at
+  99.9% or more of `received` (else revisit before Build A rolls), and the refusal stored and hit rates flat.
+- **Build A:** a roll of api, then alt if it runs, then proxy, then taskworker, then connect (server-0c's lane), under the
+  usual gates. The order is for observation, not correctness: any order is safe, connect first included (above). The
+  gates: the validator-idle gate, and the proxy's canary block and 30-minute hold. No migration. Watch, canary
+  against control: the §4.4 wait signals per request (`event`, `deadline`, and `fallback + registration`); the companion
+  origin outcomes and the `companion_origin` stage seconds per completion; the refusal stored and hit rates;
+  `urnetwork_redis_shard_subscriptions_total` and the owner's `reconnected` and `subscription_failed` (no rise);
+  `subscribed_pair`, `pair_acknowledged`, `pair_released` (about 50 holds a second fleet-wide), `subscribe_failed` and
+  `pair_cap` (near 0), `urnetwork_contract_origin_held_pairs` (about 150 per api process); the proxy's `received` falling
+  to its own waits' and `bucket_closed` rising; Redis `spublish` doubled, `ssubscribe`/`sunsubscribe` at about 100–150 a
+  second, `redis_pubsubshard_channels` at the anchors plus the held pairs. Then the 24-hour soak; read the shadow pair
+  only once every publisher runs A.
+- **Build B:** only after its gate. Proxy first; one api block for at least 2 hours against the other blocks on the same
+  hosts; the rest of the api and alt; taskworker; connect. The §4.4 table's signals; stop and roll back to A (never
+  further) on any of its stop conditions.
 
 ## Summary
 
@@ -206,6 +329,9 @@ The companion wait's final missing-origin verdict can be stored stale for up to 
 **Size.** The window is one metric update long, so the effect today is tiny, and only on the process that stored it.
 The design closes the window by moving the watch's close after the record, with the refusal taking its own hold first
 (§4.1). It needs its own root-cause test (§4.3, test 2), and it can ship on its own (§5, question 7).
+
+**Fixed** in 2a3984171 (§Status): `newContract` hands the watch to `CreateContract`, which closes it after the record.
+TestCreateContractCompanionRefusalKeepsItsWatchUntilRecorded failed before the change and passes after it.
 
 ## 2. What any change must keep
 
@@ -609,7 +735,7 @@ Signals, canary against control:
 |---|---|---|
 | deliveries | `urnetwork_contract_origin_notifications_total{event="received"}` per process | Build B: about 1.7k a second → matched only, a few a second |
 | holds | new `subscribed_pair`, `pair_acknowledged`, `pair_released`, `subscribe_failed`, `pair_cap` events; a held-pair gauge | about 50 holds a second fleet-wide; about 150 held per api process; failures and cap near 0 |
-| correctness, waits | `urnetwork_connect_companion_origin_wait_wakes_total{source}`, `…lookups_total{source}` and `…lookups_per_request`, per request | `event` per request unchanged; `fallback` and `deadline` per request unchanged; `registration` ≈ continued waits plus Stream-fallback misses |
+| correctness, waits | `urnetwork_connect_companion_origin_wait_wakes_total{source}`, `…lookups_total{source}` and `…lookups_per_request`, per request | `event` and `deadline` per request unchanged; `fallback + registration` per request unchanged (`registration` replaces a continued wait's first `fallback`); `registration` ≈ continued waits plus Stream-fallback misses |
 | correctness, outcomes | `urnetwork_contract_creation_companion_origin_outcomes_total{outcome}`, `urnetwork_contract_creation_completed_total` | `origin_ready` and `missing_origin` shares unchanged |
 | timing | `urnetwork_contract_creation_completed_stage_seconds_total{stage="companion_origin"}` per completion | unchanged; Build B ±5% against control |
 | refusals | `urnetwork_connect_contract_route_rejection_cache_total{cause,result}`, `urnetwork_connect_control_refusal_replays_total{cause}` | missing-origin stored and hit rates per request unchanged within the Stream-fallback re-check's effect; `unstored` near 0 |
@@ -625,6 +751,8 @@ Signals, canary against control:
 - subscribe failures persist.
 
 ## 5. Open questions for the owner
+
+Answered on 11-23: the proposal to each, as §Status records.
 
 1. **E or A?** E is per-pair channels: Redis's own subscription table is the registry and no keys expire. A is a
    registry with process inboxes: today's reader is untouched, at the cost of keys, TTLs and a read before each
