@@ -30,13 +30,25 @@ type ContractPartitionRollbackSettings struct {
 	ValidationRetryInterval time.Duration
 }
 
-// Rollback's exclusive locks follow the cutover's rule (contractExclusiveLockTimeout):
-// a short admission age, a short lock wait and many jittered attempts.
+// The LOCK TABLE statement waits at most LockTimeout as a whole (each queued
+// application statement gives up after PgLockTimeout); the rollback's own
+// statements then have StatementTimeout.
+func contractRollbackLockSql(tableNames []string, settings *ContractPartitionRollbackSettings) []string {
+	return []string{
+		contractLockTimeoutSql(settings.LockTimeout),
+		contractStatementTimeoutSql(settings.LockTimeout),
+		fmt.Sprintf("LOCK TABLE %s IN ACCESS EXCLUSIVE MODE", strings.Join(tableNames, ", ")),
+		contractStatementTimeoutSql(settings.StatementTimeout),
+	}
+}
+
+// Rollback's exclusive locks follow the swap's bounded blip (contractSwapLockWait):
+// its LOCK TABLE statement waits at most LockTimeout as a whole.
 func DefaultContractPartitionRollbackSettings() *ContractPartitionRollbackSettings {
 	return &ContractPartitionRollbackSettings{
-		LockSettings: ContractPartitionLockSettings{MaxTransactionAge: contractExclusiveMaxTransactionAge},
-		LockTimeout:  contractExclusiveLockTimeout, StatementTimeout: 30 * time.Second,
-		MaxAttempts: 120, RetryInterval: contractExclusiveRetryInterval,
+		LockSettings: ContractPartitionLockSettings{MaxTransactionAge: contractSwapMaxTransactionAge},
+		LockTimeout:  contractSwapLockWait, StatementTimeout: 30 * time.Second,
+		MaxAttempts: contractSwapAttempts, RetryInterval: contractSwapRetryInterval,
 		ValidationLockTimeout: 15 * time.Second, ValidationMaxAttempts: 10,
 		ValidationRetryInterval: 10 * time.Second,
 	}
@@ -60,11 +72,7 @@ func rollbackContractPartitionCutover(ctx context.Context, dryRun bool, logf fun
 	for _, table := range ContractPartitionTables {
 		tableNames = append(tableNames, "public."+quoteIdentifier(table))
 	}
-	lockStatements := []string{
-		fmt.Sprintf("SET LOCAL lock_timeout = '%dms'", settings.LockTimeout.Milliseconds()),
-		fmt.Sprintf("SET LOCAL statement_timeout = '%dms'", settings.StatementTimeout.Milliseconds()),
-		fmt.Sprintf("LOCK TABLE %s IN ACCESS EXCLUSIVE MODE", strings.Join(tableNames, ", ")),
-	}
+	lockStatements := contractRollbackLockSql(tableNames, settings)
 	if dryRun {
 		var statements []string
 		var err error
@@ -85,7 +93,11 @@ func rollbackContractPartitionCutover(ctx context.Context, dryRun bool, logf fun
 	err := contractPartitionRetryWhen(ctx, scope, func() error {
 		return contractPartitionTx(ctx, func(tx PgTx) {
 			for _, statement := range lockStatements {
-				RaisePgResult(tx.Exec(ctx, statement))
+				if strings.HasPrefix(statement, "LOCK TABLE ") {
+					contractExecLockStatement(ctx, tx, statement)
+				} else {
+					RaisePgResult(tx.Exec(ctx, statement))
+				}
 			}
 			// Read committed takes these snapshots after lock acquisition, including
 			// writers and partition attachments that committed while we waited.

@@ -33,9 +33,11 @@ func testContractLockTimeoutOf(t testing.TB, statement string) time.Duration {
 
 // Every main-pool statement waits at most PgLockTimeout for a lock and then
 // fails (55P03), not rerun. Statements queued behind the swap's or rollback's
-// ACCESS EXCLUSIVE request wait out that request's lock wait and then its
-// work, so each of those lock waits must stay well below PgLockTimeout. The
-// build of 2026-10-23 waited up to 3 s.
+// ACCESS EXCLUSIVE requests wait out the LOCK TABLE statement and then the
+// step's work, so the LOCK TABLE statement as a whole (statement_timeout, and
+// lock_timeout for each lock) stays at least 400 ms under PgLockTimeout. The
+// build of 2026-10-23 waited up to 3 s, and bounded each lock, not the
+// statement.
 func TestContractCutoverLockTimeoutsStayBelowTheApplicationLockBound(t *testing.T) {
 	shapes := map[string]*contractTableShape{}
 	staged := map[string]*contractTableShape{}
@@ -43,13 +45,27 @@ func TestContractCutoverLockTimeoutsStayBelowTheApplicationLockBound(t *testing.
 		shapes[table] = &contractTableShape{table: table, relkind: "r"}
 		staged[table] = &contractTableShape{table: contractStagedParentName(table), relkind: "p"}
 	}
-	statements := contractSwapSql(shapes, staged, ContractIdFloor(time.Date(2026, 11, 23, 0, 0, 0, 0, time.UTC)))
-	if swap := testContractLockTimeoutOf(t, statements[0]); PgLockTimeout/2 < swap {
-		t.Errorf("the swap waits up to %s for each lock; application statements queued behind it give up after %s", swap, PgLockTimeout)
+	limit := PgLockTimeout - 400*time.Millisecond
+	check := func(name string, statements []string) {
+		if len(statements) < 4 {
+			t.Fatalf("%s: %d statements", name, len(statements))
+		}
+		lock := testContractLockTimeoutOf(t, statements[0])
+		if limit < lock {
+			t.Errorf("%s waits up to %s for each lock; at most %s, as application statements queued behind it give up after %s", name, lock, limit, PgLockTimeout)
+		}
+		if statements[1] != contractStatementTimeoutSql(lock) {
+			t.Errorf("%s does not bound its LOCK TABLE statement as a whole by %s: %s", name, lock, statements[1])
+		}
+		if !strings.HasPrefix(statements[2], "LOCK TABLE ") {
+			t.Errorf("%s's third statement is not its LOCK TABLE: %s", name, statements[2])
+		}
+		if !strings.HasPrefix(statements[3], "SET LOCAL statement_timeout = ") || statements[3] == statements[1] {
+			t.Errorf("%s keeps the LOCK TABLE statement's timeout for its work: %s", name, statements[3])
+		}
 	}
-	if rollback := DefaultContractPartitionRollbackSettings().LockTimeout; PgLockTimeout/2 < rollback {
-		t.Errorf("rollback waits up to %s for each lock; application statements queued behind it give up after %s", rollback, PgLockTimeout)
-	}
+	check("the swap", contractSwapSql(shapes, staged, ContractIdFloor(time.Date(2026, 11, 23, 0, 0, 0, 0, time.UTC))))
+	check("rollback", contractRollbackLockSql([]string{"public.transfer_contract"}, DefaultContractPartitionRollbackSettings()))
 }
 
 // Once the tables are partitioned, their vacuums run on the leaves, and the

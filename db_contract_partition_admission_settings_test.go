@@ -114,7 +114,9 @@ func TestContractPartitionCutoverSettingsValidate(t *testing.T) {
 // and space their tries; on Main's workload of 2026-11-23 a rule of 500 ms
 // and 200 ms (1cec91a1d) never admitted them, and a wait of 1 s three times
 // within seconds (9d6650a97) backed PgBouncer up past 500 waiting clients.
-// The swap and rollback keep the strict rule until their own design.
+// The swap and rollback, which lock the six tables in one transaction, are a
+// bounded blip: their LOCK TABLE statement waits long enough to drain the
+// application's transactions and short enough that no queued statement fails.
 func TestContractExclusiveStepsWaitOutTransactionsButNotLongReaders(t *testing.T) {
 	const deadlockTimeout = time.Second
 	cutover := DefaultContractPartitionCutoverSettings()
@@ -138,22 +140,26 @@ func TestContractExclusiveStepsWaitOutTransactionsButNotLongReaders(t *testing.T
 		}
 	}
 
-	// the swap and rollback
-	shapes := map[string]*contractTableShape{}
-	staged := map[string]*contractTableShape{}
-	for _, table := range ContractPartitionTables {
-		shapes[table] = &contractTableShape{table: table, relkind: "r"}
-		staged[table] = &contractTableShape{table: contractStagedParentName(table), relkind: "p"}
-	}
-	swap := testContractLockTimeoutOf(t, contractSwapSql(shapes, staged, ContractIdFloor(time.Date(2026, 11, 25, 0, 0, 0, 0, time.UTC)))[0])
-	for name, wait := range map[string]time.Duration{"the swap": swap, "the swap's settings": cutover.SwapLockTimeout, "rollback": rollback.LockTimeout} {
-		if 250*time.Millisecond < wait {
-			t.Errorf("%s waits up to %s for each lock; at most 250 ms", name, wait)
+	// the swap and rollback: a bounded blip, a few times
+	rollbackSql := contractRollbackLockSql([]string{"public.transfer_contract"}, rollback)
+	for name, wait := range map[string]time.Duration{"the swap": cutover.SwapLockTimeout, "rollback": rollback.LockTimeout, "rollback's statements": testContractLockTimeoutOf(t, rollbackSql[0])} {
+		if wait < time.Second || PgLockTimeout-400*time.Millisecond < wait {
+			t.Errorf("%s waits up to %s for its locks; want 1 s to %s: long enough to drain the application's transactions, short enough that no queued statement reaches PgLockTimeout", name, wait, PgLockTimeout-400*time.Millisecond)
 		}
 	}
 	for name, age := range map[string]time.Duration{"the swap": cutover.SwapLockSettings.MaxTransactionAge, "rollback": rollback.LockSettings.MaxTransactionAge} {
-		if age <= 0 || 500*time.Millisecond < age {
-			t.Errorf("%s is admitted behind transactions up to %s old; at most 500 ms", name, age)
+		if age < 2*time.Second || 3*time.Second < age {
+			t.Errorf("%s is admitted behind transactions up to %s old; want 2 to 3 s", name, age)
+		}
+	}
+	for name, attempts := range map[string]int{"the swap": cutover.SwapAttempts, "rollback": rollback.MaxAttempts} {
+		if attempts < 3 || 10 < attempts {
+			t.Errorf("%s tries %d times a run; want 3 to 10 blips at most", name, attempts)
+		}
+	}
+	for name, interval := range map[string]time.Duration{"the swap": cutover.SwapRetryInterval, "rollback": rollback.RetryInterval} {
+		if interval < 2*time.Minute {
+			t.Errorf("%s retries %s apart before jitter; at least 2 minutes, so each blip is alone", name, interval)
 		}
 	}
 	if err := cutover.validate(); err != nil {

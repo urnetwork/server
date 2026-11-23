@@ -125,7 +125,33 @@ func contractPartitionExec(ctx context.Context, statements []string) error {
 // A lock wait that timed out or lost a deadlock can succeed on a later try.
 func contractPartitionLockBusy(err error) bool {
 	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && (pgErr.Code == "55P03" || pgErr.Code == "40P01")
+	var lockStatementTimeout *contractLockStatementTimeoutError
+	return errors.As(err, &lockStatementTimeout) || errors.As(err, &pgErr) && (pgErr.Code == "55P03" || pgErr.Code == "40P01")
+}
+
+// The swap's or rollback's LOCK TABLE statement ran out of its bound as a
+// whole (its statement_timeout): as busy as a lock timeout, and retried.
+type contractLockStatementTimeoutError struct {
+	err error
+}
+
+func (self *contractLockStatementTimeoutError) Error() string {
+	return fmt.Sprintf("the LOCK TABLE statement ran out of its bound: %v", self.err)
+}
+
+func (self *contractLockStatementTimeoutError) Unwrap() error {
+	return self.err
+}
+
+// Runs a LOCK TABLE statement bounded by a statement_timeout: a timeout is a
+// busy table (contractLockStatementTimeoutError), not a failure.
+func contractExecLockStatement(ctx context.Context, tx PgTx, statement string) {
+	tag, err := tx.Exec(ctx, statement)
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "57014" {
+		err = &contractLockStatementTimeoutError{err: err}
+	}
+	RaisePgResult(tag, err)
 }
 
 // Admission policy for operations that take exclusive contract table locks.
@@ -882,10 +908,11 @@ func contractSwapLockRelations(shapes map[string]*contractTableShape) (relations
 // The swap transaction. Every table is locked first, in table order, so the
 // renames and attaches see no concurrent statement.
 func contractSwapSqlWithin(shapes map[string]*contractTableShape, staged map[string]*contractTableShape, floor Id, lockTimeout time.Duration) (statements []string) {
-	// catalog work only: a statement that would scan or build is cut short,
-	// and each lock wait queues application statements, which give up after
-	// PgLockTimeout, for at most lockTimeout
-	statements = append(statements, contractLockTimeoutSql(lockTimeout), `SET LOCAL statement_timeout = '30s'`)
+	// The LOCK TABLE statement waits at most lockTimeout as a whole: while it
+	// waits, application statements on the tables queue behind it and give up
+	// after PgLockTimeout. After it, catalog work only: a statement that would
+	// scan or build is cut short.
+	statements = append(statements, contractLockTimeoutSql(lockTimeout), contractStatementTimeoutSql(lockTimeout))
 	external, internal := contractExternalForeignKeys(shapes)
 	locked := []string{}
 	for _, table := range ContractPartitionTables {
@@ -894,7 +921,7 @@ func contractSwapSqlWithin(shapes map[string]*contractTableShape, staged map[str
 	for _, foreignKey := range external {
 		locked = append(locked, "public."+quoteIdentifier(foreignKey.table))
 	}
-	statements = append(statements, fmt.Sprintf("LOCK TABLE %s IN ACCESS EXCLUSIVE MODE", strings.Join(locked, ", ")))
+	statements = append(statements, fmt.Sprintf("LOCK TABLE %s IN ACCESS EXCLUSIVE MODE", strings.Join(locked, ", ")), `SET LOCAL statement_timeout = '30s'`)
 	for _, foreignKey := range append(internal, external...) {
 		statements = append(statements, fmt.Sprintf(
 			"ALTER TABLE public.%s DROP CONSTRAINT %s",

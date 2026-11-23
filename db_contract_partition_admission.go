@@ -52,8 +52,9 @@ type ContractPartitionCutoverSettings struct {
 	// transaction clears within them. At least 1.
 	StepAttempts      int
 	StepRetryInterval time.Duration
-	// The swap's admission and its wait for each of its ACCESS EXCLUSIVE
-	// locks, which it takes in one transaction across the six tables.
+	// The swap's admission, and the bound on its LOCK TABLE statement as a
+	// whole (statement_timeout) and on each lock in it (lock_timeout): it takes
+	// the six tables' ACCESS EXCLUSIVE locks in one transaction.
 	SwapLockSettings ContractPartitionLockSettings
 	SwapLockTimeout  time.Duration
 	// Attempts at the swap, each after its own admission. At least 1.
@@ -98,14 +99,31 @@ const (
 	contractStepAttempts          = 20
 )
 
-// The swap and rollback lock the six tables in one transaction. Until their
-// own bounded design, they keep the strict rule: admitted only while no
-// holder is older than 500 ms, at most 200 ms per lock, many tries 1 to 2 s
-// apart. On Main's workload of 2026-11-23 that defers rather than stalls.
+// The swap and rollback take the six tables' ACCESS EXCLUSIVE locks in one
+// transaction: a bounded blip of contract traffic, a few times at most.
+//   - The admission skips a moment with a holder older than 3 s, as the
+//     single-table steps do.
+//   - The LOCK TABLE statement as a whole waits at most 1.6 s
+//     (statement_timeout, and lock_timeout for each lock in it): with the
+//     swap's own catalog work (about 0.1 to 0.3 s from Main's network) a
+//     queued application statement waits under PgLockTimeout (2 s), so none
+//     fails with 55P03. On 2026-11-23 the six tables' holders all ended
+//     within 1.5 s at 9 to 17% of moments, and none within 0.2 s.
+//   - The tables are locked in ContractPartitionTables order: transfer_contract
+//     first, which every application path but settlement touches first. A
+//     settlement that read transfer_escrow and waits for transfer_contract
+//     behind the swap waited first, so its deadlock check ends it (40P01);
+//     settlement is not rerun and completes on the next report or deadline.
+//   - At most 10 tries, 2 to 4 minutes apart (contractRetryWait), so each
+//     blip is alone; a run lasts at most about 40 minutes.
+//
+// A rule of 500 ms and 200 ms (1cec91a1d) never admitted the swap on Main's
+// workload of 2026-11-23.
 const (
-	contractExclusiveMaxTransactionAge = 500 * time.Millisecond
-	contractExclusiveLockTimeout       = 200 * time.Millisecond
-	contractExclusiveRetryInterval     = time.Second
+	contractSwapMaxTransactionAge = 3 * time.Second
+	contractSwapLockWait          = 1600 * time.Millisecond
+	contractSwapRetryInterval     = 2 * time.Minute
+	contractSwapAttempts          = 10
 )
 
 func DefaultContractPartitionCutoverSettings() *ContractPartitionCutoverSettings {
@@ -115,10 +133,10 @@ func DefaultContractPartitionCutoverSettings() *ContractPartitionCutoverSettings
 		ValidateLockTimeout: 5 * time.Second,
 		StepAttempts:        contractStepAttempts,
 		StepRetryInterval:   contractStepRetryInterval,
-		SwapLockSettings:    ContractPartitionLockSettings{MaxTransactionAge: contractExclusiveMaxTransactionAge},
-		SwapLockTimeout:     contractExclusiveLockTimeout,
-		SwapAttempts:        120,
-		SwapRetryInterval:   contractExclusiveRetryInterval,
+		SwapLockSettings:    ContractPartitionLockSettings{MaxTransactionAge: contractSwapMaxTransactionAge},
+		SwapLockTimeout:     contractSwapLockWait,
+		SwapAttempts:        contractSwapAttempts,
+		SwapRetryInterval:   contractSwapRetryInterval,
 		AbortAttempts:       contractStepAttempts,
 		AbortRetryInterval:  contractStepRetryInterval,
 	}
