@@ -40,7 +40,7 @@ var ContractPartitionTables = []string{
 // The retention horizon (owner decision 2026-10-23): the longest a day's
 // partitions are kept past its end, the retention with the contract horizon
 // reaper's mode off (ContractDayRetention). Close evidence keeps at most the
-// same 91 days, and as little as the contract horizon (CloseEvidenceRetention).
+// same 91 days, and as little as its own window (CloseEvidenceRetention).
 const ContractRetention = 13 * 7 * 24 * time.Hour
 
 // The contract partitions divide contract ids by the UTC day of their creation

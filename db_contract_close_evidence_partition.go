@@ -20,8 +20,8 @@
 //     weeks, from a clock far ahead or far behind, so no report is ever
 //     refused. Never dropped; the row deletes empty it.
 //
-// A week drops once its upper bound is past the evidence retention, the
-// contract horizon (CloseEvidenceRetention: 35 to 91 days), and every row in it
+// A week drops once its upper bound is past the evidence retention, its own
+// window (CloseEvidenceRetention: 7 to 91 days), and every row in it
 // meets the retention's rule: accepted longer ago than the retention, its
 // contract resolved or gone (closeEvidenceWeekBlocker). The drop bypasses the
 // evidence guard, so only the retention task drops, under the guard's opt-in
@@ -148,7 +148,7 @@ func newCloseEvidencePartitionFamily() *PartitionFamily {
 		Granularity: PartitionGranularityWeekly,
 		AheadRanges: closeEvidenceAheadWeeks,
 		// the longest retention, which the monitor judges blocked weeks by;
-		// a week expires at the contract horizon (closeEvidenceRangeExpired)
+		// a week expires at the evidence window (closeEvidenceRangeExpired)
 		Retention: ContractRetention,
 		// clocks outside the created weeks
 		DefaultPartition: true,
@@ -161,7 +161,7 @@ func newCloseEvidencePartitionFamily() *PartitionFamily {
 		// A client clock behind by days keeps its weeks that much longer,
 		// by design: the week waits for its stragglers' retention. A quarter
 		// past the longest retention is worth a look. The monitor does not
-		// read the horizon, so at a 35-day horizon a stuck week is reported
+		// read the window, so at a 7-day window a stuck week is reported
 		// only this long after the 91 days, not after its own retention.
 		MonitorRetentionGrace: ContractRetention,
 		Settings: &PartitionFamilySettings{
@@ -404,8 +404,8 @@ func createCloseEvidenceLeaf(ctx context.Context, table string, r PartitionRange
 }
 
 // Whether the week r has expired at now (the family's RangeExpired): its upper
-// bound is past ctx's evidence retention, the contract horizon. Never later
-// than the family's Retention, which is the longest retention.
+// bound is past ctx's evidence retention, its window. Never later than the
+// family's Retention, which is the longest retention.
 func closeEvidenceRangeExpired(ctx context.Context, now time.Time, r PartitionRange) bool {
 	return !now.Before(r.Upper.Add(CloseEvidenceRetention(ctx)))
 }

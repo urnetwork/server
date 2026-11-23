@@ -36,8 +36,8 @@ func ContractCloseEvidenceMoveGuardMigrationVersion() int {
 	return sqlMigrationVersion(contractCloseReportEvidenceMoveGuardSql)
 }
 
-// The close evidence guard whose retention floor is the shortest contract
-// horizon, 35 days.
+// The close evidence guard whose retention floor was the shortest contract
+// horizon when it was published, 35 days.
 func ContractCloseEvidenceHorizonGuardBodySql() string {
 	return strings.Split(contractCloseReportEvidenceHorizonGuardSql, "$close_report_guard$")[1]
 }
@@ -46,6 +46,18 @@ func ContractCloseEvidenceHorizonGuardBodySql() string {
 // SQL as the move guard's is. Zero when the list lacks it.
 func ContractCloseEvidenceHorizonGuardMigrationVersion() int {
 	return sqlMigrationVersion(contractCloseReportEvidenceHorizonGuardSql)
+}
+
+// The close evidence guard whose retention floor is the evidence's own
+// window, 7 days (CloseEvidenceRetentionFloor).
+func ContractCloseEvidenceWindowGuardBodySql() string {
+	return strings.Split(contractCloseReportEvidenceWindowGuardSql, "$close_report_guard$")[1]
+}
+
+// The version of the migration that publishes the window guard, found by its
+// SQL as the horizon guard's is. Zero when the list lacks it.
+func ContractCloseEvidenceWindowGuardMigrationVersion() int {
+	return sqlMigrationVersion(contractCloseReportEvidenceWindowGuardSql)
 }
 
 // The version (slice index plus one) of the plain SQL migration whose SQL is

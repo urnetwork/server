@@ -115,7 +115,8 @@ func TestCloseEvidenceWeekLeafSql(t *testing.T) {
 // The drop precondition is one statement over the week's own leaf: the day
 // after retention, the late index's presence and newest entry, then the few
 // old unresolved contracts looked up in the week. Every age it reads is the
-// retention it is given: 91 days without a horizon, 35 at the shortest.
+// retention it is given: 91 days without a window, 35 under the horizon
+// guard, 7 at the shortest.
 func TestCloseEvidenceWeekBlockerSql(t *testing.T) {
 	week := PartitionGranularityWeekly.RangeOf(time.Date(2026, 11, 4, 0, 0, 0, 0, time.UTC))
 	for _, retention := range []struct {
@@ -123,7 +124,8 @@ func TestCloseEvidenceWeekBlockerSql(t *testing.T) {
 		interval  string
 	}{
 		{ContractRetention, "interval '7862400 seconds'"},
-		{CloseEvidenceRetentionFloor, "interval '3024000 seconds'"},
+		{closeEvidenceHorizonGuardFloor, "interval '3024000 seconds'"},
+		{CloseEvidenceRetentionFloor, "interval '604800 seconds'"},
 	} {
 		sql := strings.Join(strings.Fields(closeEvidenceWeekBlockerSql("contract_close_report_evidence_w20261102", week, retention.retention)), " ")
 		for _, want := range []string{

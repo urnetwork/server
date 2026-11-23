@@ -51,7 +51,7 @@ func TestCloseEvidenceRetentionDashboardPanels(t *testing.T) {
 		deleted.Targets[0].Expr != "sum(rate(urnetwork_close_evidence_retention_removed_rows_total{"+contractHorizonTaskworkerFilter+"}[$__rate_interval]))" {
 		t.Errorf("deleted rows panel lost its rate: %+v", deleted.Targets)
 	}
-	for _, part := range []string{"{close_evidence_retention}control", "maxRowsPerSecond", "1,000", "5,000", "bringyourctl db close-evidence-retention", "ctid", "never reads the brake"} {
+	for _, part := range []string{"{close_evidence_retention}control", "maxRowsPerSecond", "1,000", "5,000", "bringyourctl db close-evidence-retention", "ctid", "remove_expired_close_evidence", "reads only the brake's mode"} {
 		if !strings.Contains(deleted.Description, part) {
 			t.Errorf("deleted rows panel does not explain %s", part)
 		}
@@ -62,7 +62,7 @@ func TestCloseEvidenceRetentionDashboardPanels(t *testing.T) {
 		retention.Targets[0].LegendFormat != "{{instance}}" {
 		t.Errorf("retention panel lost its days by taskworker: %+v", retention.Targets)
 	}
-	for _, part := range []string{"horizonDays", "35 days", "91", "dry run", "permanently"} {
+	for _, part := range []string{"7 days", "window guard", "35 under the horizon guard", "91", "brake", "horizonDays, no longer moves it", "permanently"} {
 		if !strings.Contains(retention.Description, part) {
 			t.Errorf("retention panel does not explain %s", part)
 		}

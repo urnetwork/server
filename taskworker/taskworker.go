@@ -220,6 +220,8 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleRollupTransferAuditEvents(clientSession, tx)
 		work.ScheduleRemoveOldClientReliabilityStats(clientSession, tx)
 		work.ScheduleMaintainContractPartitions(clientSession, tx)
+		// the close evidence row retention, its own chain since 2026-11-23
+		work.ScheduleRemoveExpiredCloseEvidence(clientSession, tx)
 		// the partition registry's runway and retention chains (server/db_partition_registry.go)
 		work.ScheduleMaintainPartitionRunway(clientSession, tx)
 		work.ScheduleMaintainPartitionRetention(clientSession, tx)
@@ -704,6 +706,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.MaintainContractPartitions,
 			work.MaintainContractPartitionsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.RemoveExpiredCloseEvidence,
+			work.RemoveExpiredCloseEvidencePost,
 		),
 		task.NewTaskTargetWithPost(
 			work.MaintainPartitionRunway,

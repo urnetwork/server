@@ -886,9 +886,10 @@ var migrationCurrentSuffixContracts = migrationCurrentSuffixContractsInVersionOr
 	// the index diet's drops; each version follows its migration's position
 	indexDietMigrationContracts,
 	[]snMainnetMigrationContract{
-		// after the index diet's drops, as in the migration list
+		// after the index diet's drops, as in the migration list; the window
+		// guard replaces the guard body and republishes the rest
 		migrationCurrentSuffix(contractCloseEvidenceHorizonGuardMigrationVersion, "close evidence custody with retention at the contract horizon",
-			contractCloseEvidenceHorizonArtifactQuery),
+			contractCloseEvidenceHorizonArtifactQuery).removedAt(contractCloseEvidenceWindowGuardMigrationVersion),
 		// the legacy drop guard replaces the drop guard body and republishes the
 		// rest
 		migrationCurrentSuffix(server.ProviderWorkSessionEventHorizonDropGuardMigrationVersion(), "provider session custody with drops at the contract horizon",
@@ -1108,6 +1109,10 @@ var migrationCurrentSuffixContracts = migrationCurrentSuffixContractsInVersionOr
 	// what decided each purchase intent's price tier, versioned by its
 	// position
 	[]snMainnetMigrationContract{priceTierEvidenceMigrationContract},
+	// close evidence custody with retention at its own window, 7 days
+	// (owner, 2026-11-23), versioned by its position
+	[]snMainnetMigrationContract{migrationCurrentSuffix(contractCloseEvidenceWindowGuardMigrationVersion, "close evidence custody with retention at its own window",
+		contractCloseEvidenceWindowArtifactQuery)},
 ))
 
 // Free space a table keeps on every page it writes, so an update of an

@@ -1,5 +1,7 @@
-// Close evidence follows the contract horizon (owner, 2026-11-01; see
-// server/db_contract_close_evidence_horizon.go for the rule and its readers).
+// The contract horizon a task carries from the reaper's runtime control. Close
+// evidence followed it from 2026-11-01 and keeps its own window since
+// 2026-11-23 (server/db_contract_close_evidence_horizon.go); the contract days
+// (S1) and the provider work session journal still follow it.
 package model
 
 import (
@@ -10,18 +12,19 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// ctx carrying the contract horizon (server.WithContractHorizon), which close
-// evidence retention follows: the horizon reaper's, as its runtime control sets
-// it now (GetContractHorizonControl with the reaper task's settings), while the
+// ctx carrying the contract horizon (server.WithContractHorizon), which the
+// contract days' retirement and the provider work session journal follow: the
+// horizon reaper's, as its runtime control sets it now
+// (GetContractHorizonControl with the reaper task's settings), while the
 // reaper's mode is on. One bounded Redis read. With the mode off or in a dry
-// run, or when the control cannot be read, ctx is returned as is, so the
-// evidence keeps server.ContractRetention: the reaper's brake stops the
-// evidence deletes below 91 days too, from the next run. Call it once per task
-// run, before any transaction.
+// run, or when the control cannot be read, ctx is returned as is, so they keep
+// server.ContractRetention. Close evidence does not read it
+// (server.WithCloseEvidenceRetentionControl). Call it once per task run,
+// before any transaction.
 func WithContractHorizonControl(ctx context.Context) context.Context {
 	control, err := GetContractHorizonControl(ctx, DefaultContractHorizonSettings())
 	if err != nil {
-		glog.V(1).Infof("[cp]contract horizon control unread, close evidence keeps %s: %s\n", server.ContractRetention, err)
+		glog.V(1).Infof("[cp]contract horizon control unread, the contract days keep %s: %s\n", server.ContractRetention, err)
 		return ctx
 	}
 	if control.Mode != ContractHorizonModeOn {

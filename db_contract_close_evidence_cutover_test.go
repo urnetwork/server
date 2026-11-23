@@ -484,13 +484,16 @@ func TestCloseEvidenceCutoverAbandonedBeforeItsWeek(t *testing.T) {
 		connect.AssertEqual(t, testCloseEvidenceChecksum(t, ctx), seeded)
 		connect.AssertEqual(t, testCloseEvidencePlainCount(t, ctx), int64(4))
 
-		// the maintenance task does the same on its run, and still deletes the
-		// expired evidence (the report accepted 100 days ago)
+		// the maintenance task does the same on its run, and leaves the
+		// expired evidence (the report accepted 100 days ago) to the evidence
+		// task, which deletes it from the plain table
 		testCloseEvidenceNoError(t, testCloseEvidenceMigrate(t, ctx, settings, CloseEvidencePartitionMigrateOptions{CutoverWeek: cutoverWeek}))
 		report, _ := MaintainContractPartitions(ctx, cutoverWeek.Add(-time.Hour), ContractRetentionCursor{}, time.Minute)
 		connect.AssertEqual(t, report.AbandonedEvidenceCutover, true)
-		connect.AssertEqual(t, report.EvidenceRemoved, int64(1))
 		connect.AssertEqual(t, testCloseEvidenceExists(ctx, closeEvidenceStagedParentName()), false)
+		connect.AssertEqual(t, testCloseEvidencePlainCount(t, ctx), int64(4))
+		removal, _, _ := RemoveExpiredCloseEvidence(ctx, cutoverWeek.Add(-time.Hour), CloseEvidenceRemovalCursor{}, time.Now().Add(time.Minute))
+		connect.AssertEqual(t, removal.Removed, int64(1))
 		connect.AssertEqual(t, testCloseEvidencePlainCount(t, ctx), int64(3))
 		connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, ahead), closeEvidenceTable)
 		connect.AssertEqual(t, testCloseEvidencePartitionOf(t, ctx, farAhead), closeEvidenceTable)
