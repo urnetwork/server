@@ -13,7 +13,6 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -51,14 +50,15 @@ type runtimePackage struct {
 	IndexIds     []string `json:"index_ids"`
 }
 
-// Resolve checked-in inputs independently of the command's current directory.
+// Resolve checked-in inputs from the package directory, where go test runs; the
+// caller's path is the module path under -trimpath, which names no directory.
 func loadRuntimePackageLock(t *testing.T) (string, runtimePackageLock) {
 	t.Helper()
-	_, filename, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("cannot locate runtime package contract")
+	directory, err := os.Getwd()
+	if err != nil {
+		t.Fatal("cannot locate runtime package contract: ", err)
 	}
-	cli := filepath.Clean(filepath.Join(filepath.Dir(filename), "..", "..", "cli"))
+	cli := filepath.Clean(filepath.Join(directory, "..", "..", "cli"))
 	raw, err := os.ReadFile(filepath.Join(cli, "runtime-packages.lock.json"))
 	if err != nil {
 		t.Fatal(err)
