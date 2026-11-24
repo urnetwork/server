@@ -9,7 +9,6 @@ import (
 	"github.com/docopt/docopt-go"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/core"
 	"github.com/urnetwork/server/sidecarhost"
 	"github.com/urnetwork/server/taskworker"
@@ -78,29 +77,15 @@ Options:
 	if _, err := core.SetProcessEnv("taskworker", sidecarhost.NewServiceHost(ctx, &sidecarhost.ServiceHostOptions{Postgres: true, Tasks: taskworker.SidecarTasks()})); err != nil {
 		panic(err)
 	}
-	// §21's effects and sealed off-site records for the owed actions the
-	// abuse pass finishes (ABUSE-M5-06, QD-726); a binary that does not link
-	// MG5 installs neither
-	controller.InstallAbuseEffects()
-	controller.InstallAbuseRecordMailer()
-	controller.InstallLegalHoldRecordMailer()
-	// §21.8's notice pager: the monitor's webhook from monitor.yml under a
-	// retrying sink (QD-1070); none built leaves every notice's page owed
-	controller.InstallAbuseNoticePager()
-	// §21.5's breakers' outside measures (QD-1069): <root> and the sending
-	// addresses from smtpedge.yml, Postmaster Tools and SNDS from their vault
-	// files, and the listing over this host's copy of the feed mirror; each
-	// missing one stays unknown and holds the breakers
+	// what the tasks run on, before the worker runs them: §21's effects,
+	// sealed off-site records, notice pager and standing (a binary that does
+	// not link MG5 installs none of them), §21.5's breakers' outside measures
+	// over this host's copy of the feed mirror, and certs' chains while
+	// sidecar.yml's certs switch is on. all runs the worker beside api and
+	// connect and installs the same parts, each once
+	// (taskworker/work/taskworker_tasks_install.go)
 	feedDir, _ := opts.String("--feed_dir")
-	work.InstallMailBreakerSources(&work.MailBreakerSourcesArgs{FeedDirectory: feedDir})
-	// §21.7's standing and network_verified for the reports, record writes and
-	// grant activations this process runs (ABUSE-M5-07)
-	controller.InstallAbuseStanding(ctx)
-	// certs' order, renewal and revocation chains (QD-846): the engine with
-	// its DNS client, ACME client and hint writer, installed only while
-	// sidecar.yml's certs switch is on and certs.yml, its account files and
-	// internal-certs.yml are there; otherwise each chain runs empty passes
-	work.InstallTlsCertChains(ctx)
+	defer work.InstallTaskworkerTasks(ctx, &work.TaskworkerTasksInstallArgs{FeedDirectory: feedDir})()
 	if err := taskworker.Run(ctx, taskworker.RunOptions{Port: port, Count: count, BatchSize: batchSize}); err != nil {
 		panic(err)
 	}

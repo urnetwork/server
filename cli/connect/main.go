@@ -69,10 +69,12 @@ Options:
 	if _, err := core.SetProcessEnv("connect", host); err != nil {
 		panic(err)
 	}
-	// §21's hard deny for the residents' CreateContract (ABUSE-M5-07); a binary
-	// that does not link MG5 installs none
-	defer controller.InstallAbuseHardDeny(ctx)()
-	defer controller.InstallConnectAuthorization(ctx, host)()
+	// what the exchange runs on, before it serves: §21's hard deny for the
+	// residents' CreateContract (ABUSE-M5-07; a binary that does not link MG5
+	// installs none) and the contract gate over api's internal gate surface.
+	// all runs the exchange beside api and taskworker and installs the same
+	// parts (controller/connect_exchange_install.go)
+	defer controller.InstallConnectExchange(ctx, host)()
 	if err := connectserver.Run(ctx, connectserver.RunOptions{Port: port, MemoryOwnerLedger: memoryOwnerLedger, PrivateHeapProfileTarget: privateHeapTarget}); err != nil {
 		panic(err)
 	}
