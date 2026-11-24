@@ -255,6 +255,15 @@ func TestUrlProbeE2eEvidenceValidation(t *testing.T) {
 		{name: "sealed without a group", e2e: UrlProbeE2eEvidence{Pq: UrlProbePqUnmeasured, SealedBeforeRequest: true, Window: UrlProbeWindowFixed}},
 		{name: "group name too long", e2e: UrlProbeE2eEvidence{Pq: UrlProbePqUnmeasured, KeyExchange: strings.Repeat("x", 65), Window: UrlProbeWindowFixed}},
 		{name: "group name not utf-8", e2e: UrlProbeE2eEvidence{Pq: UrlProbePqUnmeasured, KeyExchange: "\xff", Window: UrlProbeWindowFixed}},
+		// sealed without a request (owner, 2026-11-24): only the unmeasured
+		// reading of a post-quantum session that had no request to seal
+		{name: "unmeasured post-quantum sealed without a request", e2e: UrlProbeE2eEvidence{Pq: UrlProbePqUnmeasured, KeyExchange: "X25519MLKEM768", Window: UrlProbeWindowResizable, Sealed: true}, pass: true},
+		{name: "unmeasured post-quantum sealed without a request, fixed window", e2e: UrlProbeE2eEvidence{Pq: UrlProbePqUnmeasured, KeyExchange: "X25519MLKEM768", Window: UrlProbeWindowFixed, Sealed: true}, pass: true},
+		{name: "positive sealed without a request", e2e: UrlProbeE2eEvidence{Pq: UrlProbePqPositive, KeyExchange: "X25519MLKEM768", SealedBeforeRequest: true, Window: UrlProbeWindowResizable, Sealed: true}},
+		{name: "negative sealed without a request", e2e: UrlProbeE2eEvidence{Pq: UrlProbePqNegative, KeyExchange: "X25519MLKEM768", Window: UrlProbeWindowResizable, Sealed: true}},
+		{name: "classical sealed without a request", e2e: UrlProbeE2eEvidence{Pq: UrlProbePqUnmeasured, KeyExchange: "X25519", Window: UrlProbeWindowFixed, Sealed: true}},
+		{name: "sealed without a request or a group", e2e: UrlProbeE2eEvidence{Pq: UrlProbePqUnmeasured, Window: UrlProbeWindowFixed, Sealed: true}},
+		{name: "sealed before a request and without one", e2e: UrlProbeE2eEvidence{Pq: UrlProbePqUnmeasured, KeyExchange: "X25519MLKEM768", SealedBeforeRequest: true, Window: UrlProbeWindowResizable, Sealed: true}},
 	} {
 		evidence := urlEvidenceTestSuccess()
 		e2e := c.e2e
