@@ -86,3 +86,57 @@ func TestSnReservedAttemptUploadExpiredRetainedAuthorityAnswersRetryably(t *test
 		}
 	})
 }
+
+// While the permit census is unavailable, discovery follows only admitted
+// hotkeys, so a validator not admitted before is not looked for. This instance
+// cannot judge it; a sibling with a census can admit it.
+func TestSnReservedAttemptUploadUndiscoveredWithoutCensusAnswersRetryably(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
+		authority := newSnReservedAttemptAuthority(tb)
+		authority.refuseCensus.Store(true)
+		owner := authority.start(tb, 1)
+		endpoint := newSnReservedAttemptEndpointWithLane(tb, authority, 1, owner)
+		data := []byte("{\"authority\":\"undiscovered\"}\n")
+		header := snReservedAttemptIntentHeader(tb, authority, endpoint, data)
+		status, body := snReservedAttemptResponse(tb, endpoint.origin, endpoint.api.GetByJwt(), header, "metadata", data)
+		requireDeclaredAnswer(tb, status, body, http.StatusServiceUnavailable, "Validator staging authority is not current on this instance.", "census", "not admitted")
+		if endpoint.reads.Load() != 0 || endpoint.stores.Load() != 0 {
+			tb.Fatal("an instance without current authority reached body or storage")
+		}
+	})
+}
+
+// A refresh whose current eligibility read fails keeps the admitted entry
+// only to its own expiry, while the admission publishes a later one. Past
+// the entry's expiry this instance cannot judge the validator.
+func TestSnReservedAttemptUploadExpiredRetainedEntryAnswersRetryably(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
+		authority := newSnReservedAttemptAuthority(tb)
+		// The first publish is five seconds from its expiry.
+		authority.now = time.Now().Truncate(time.Second).Add(-55 * time.Second)
+		expiry := authority.now.Add(60 * time.Second)
+		owner := authority.start(tb, 1)
+		// The next refresh sees a current chain, so the admission publishes
+		// a later expiry, but its eligibility read for the entry fails.
+		current := time.Now()
+		authority.chainClock.Store(&current)
+		authority.refuseMetagraph.Store(true)
+		endpoint := newSnReservedAttemptEndpointWithLane(tb, authority, 1, owner)
+		for time.Now().Before(expiry.Add(500*time.Millisecond)) || authority.refusedMetagraphCalls.Load() == 0 {
+			if time.Now().After(expiry.Add(20 * time.Second)) {
+				tb.Fatal("prerequisite: no refresh read the entry's eligibility")
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		if err := owner.WaitReady(tb.Context()); err != nil {
+			tb.Fatalf("prerequisite: the admission as a whole is current: %v", err)
+		}
+		data := []byte("{\"authority\":\"retained\"}\n")
+		header := snReservedAttemptIntentHeader(tb, authority, endpoint, data)
+		status, body := snReservedAttemptResponse(tb, endpoint.origin, endpoint.api.GetByJwt(), header, "metadata", data)
+		requireDeclaredAnswer(tb, status, body, http.StatusServiceUnavailable, "Validator staging authority is not current on this instance.", "metagraph", "eligibility")
+		if endpoint.reads.Load() != 0 || endpoint.stores.Load() != 0 {
+			tb.Fatal("an instance without current authority reached body or storage")
+		}
+	})
+}

@@ -48,6 +48,8 @@ func TestGrantWritersRecordGrantKind(t *testing.T) {
 		connect.AssertEqual(t, err, nil)
 		referralCode := CreateNetworkReferralCode(ctx, referrerNetworkId)
 		connect.AssertNotEqual(t, CreateNetworkReferral(ctx, refereeNetworkId, referralCode.ReferralCode), nil)
+		// a link made under the referral terms pays once its referee uses the app
+		Testing_QualifyReferralReferee(ctx, refereeNetworkId, now)
 
 		// the three grant tasks; the Pro grant is the network's cycle grant
 		freeStartTime, freeEndTime := FreeGrantWindow(now)

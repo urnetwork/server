@@ -61,6 +61,10 @@ func (self *testIdentifyRequest) identify(r *http.Request, upstream NameClass) (
 	case strings.HasPrefix(token, "network-"):
 		name = strings.TrimPrefix(token, "network-")
 		identity.Network = true
+	case strings.HasPrefix(token, "validator-"):
+		// a client whose verified validator class token names it
+		name = strings.TrimPrefix(token, "validator-")
+		identity.Validator = true
 	default:
 		return LimitIdentity{}, false
 	}

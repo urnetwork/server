@@ -644,6 +644,15 @@ func (self *routeHttpHandler) serveLocation(exchange *routeHttpExchange, r *http
 		}
 		identity := self.identify(r, location)
 		release, outcome, wait := self.front.limits.acquireRequest(self.frontInterface.limits, request.clientAddrPort.Addr(), routeZone, identity)
+		rateClass := limitRateClassDefault
+		if identity.Validator && routeZone == nil && self.frontInterface.limits.identityEnabled() && !self.frontInterface.limits.excluded(normalizeLimitAddr(request.clientAddrPort.Addr())) {
+			rateClass = limitRateClassValidator
+			validatorOutcome := "admitted"
+			if outcome != limitOutcomeAdmitted {
+				validatorOutcome = "refused"
+			}
+			self.front.metrics.validatorClassRequests.WithLabelValues(validatorOutcome).Inc()
+		}
 		if outcome != limitOutcomeAdmitted {
 			// the zone the request was charged to, whichever limit refused it:
 			// the location's, from the route table, or the identity's; and
@@ -652,7 +661,7 @@ func (self *routeHttpHandler) serveLocation(exchange *routeHttpExchange, r *http
 			if request.hostMatched {
 				nameClass = request.hostMatch.class
 			}
-			self.front.metrics.limitRefusals.WithLabelValues(outcome.String(), limitRefusalZoneLabel(routeZone, outcome), nameClass.String()).Inc()
+			self.front.metrics.limitRefusals.WithLabelValues(outcome.String(), limitRefusalZoneLabel(routeZone, outcome), nameClass.String(), rateClass).Inc()
 			exchange.respondLimited(wait)
 			return
 		}

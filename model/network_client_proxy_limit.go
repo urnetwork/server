@@ -12,8 +12,9 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// The hosted proxy limits (owner, 2026-11-05). Every network has two:
-//   - a cap on its active hosted proxies: free 5, Pro 1000, or its Embed plan
+// The hosted proxy limits (owner, 2026-11-05; the free cap lowered to 1 on
+// 2026-11-24). Every network has two:
+//   - a cap on its active hosted proxies: free 1, Pro 1000, or its Embed plan
 //     row's limit when it has one (bringyourctl network client-limit);
 //   - a rate on its hosted proxy creates: free 5, Pro 20 a minute, counted in
 //     one redis key per network and minute.
@@ -21,8 +22,8 @@ import (
 // Both apply to every hosted proxy create, top-level or derived, and always:
 // they do not wait for enforce_concurrent_clients, which turns the rest of the
 // client limits on with the app release. Only a new proxy is refused. A
-// network's existing proxies keep working, and removing one makes room for
-// the next.
+// network's existing proxies keep working, those over a lowered cap too, and
+// the network creates again once it holds fewer than its cap.
 //
 // Why: on 2026-11-04/05 the two proxy hosts ran at 99.6% CPU with 91,000
 // installed hosted devices. Every live hosted proxy is a device on a proxy
@@ -31,15 +32,19 @@ import (
 // removed them within minutes, so a cap on active proxies alone never refused
 // it.
 //
-// Free is 5 for now, not lower: browser extensions up to the current release
-// create 5 hosted proxies per connect (src/utils/connection-manager.ts
-// MULTI_IP_POOL_SIZE = 5, used only as an ordered failover list). The next
-// extension release creates 1; lower free once it is out. The free tier's
-// pro.yml concurrent_clients (2) is the dark device limit and is not used here.
+// Free is 1 since 2026-11-24 (owner: free plan, 1 hosted proxy per network;
+// block new creates only). It was 5 while the browser extensions created 5
+// hosted proxies per connect as an ordered failover list (MULTI_IP_POOL_SIZE
+// in src/utils/connection-manager.ts); the extension now keeps one hosted
+// proxy per install, and an older one connects with the proxies it gets.
+// Lowering the cap removes nothing: a free network that holds more than 1
+// keeps every one of them working, and is refused a new one until it holds
+// none. The free tier's pro.yml concurrent_clients (2) is the dark device
+// limit and is not used here.
 //
 // Variables only so tests can change them; 0 or less means no limit.
 var (
-	freeProxyClientLimit = 5
+	freeProxyClientLimit = 1
 	proProxyClientLimit  = 1000
 
 	freeProxyClientCreatesPerMinute = 5
@@ -205,12 +210,19 @@ func countNetworkRecentProxyClientsInTx(ctx context.Context, tx server.PgTx, net
 const proxyClientLimitProxiesPageUrl = "https://ur.io/app/proxies"
 
 // proxyClientLimitMessage is the cap refusal's message: the limit, where to
-// remove a proxy, and the upgrade when one lifts the limit.
+// remove proxies, and the upgrade when one lifts the limit. It asks to remove
+// proxies, not one proxy: a network keeps the proxies it held over a lowered
+// cap (free 5 to 1, 2026-11-24), and creates again only once it holds fewer
+// than the cap.
 func proxyClientLimitMessage(limit int, isPro bool) string {
-	if isPro {
-		return fmt.Sprintf("Your plan's limit of %d active proxies is reached. Remove a proxy you no longer use at %s to create another.", limit, proxyClientLimitProxiesPageUrl)
+	proxies := "proxies"
+	if limit == 1 {
+		proxies = "proxy"
 	}
-	return fmt.Sprintf("Your plan's limit of %d active proxies is reached. Remove a proxy you no longer use at %s to create another, or upgrade to UR Pro for more.", limit, proxyClientLimitProxiesPageUrl)
+	if isPro {
+		return fmt.Sprintf("Your plan's limit of %d active %s is reached. Remove proxies you no longer use at %s to create another.", limit, proxies, proxyClientLimitProxiesPageUrl)
+	}
+	return fmt.Sprintf("Your plan's limit of %d active %s is reached. Remove proxies you no longer use at %s to create another, or upgrade to UR Pro for more.", limit, proxies, proxyClientLimitProxiesPageUrl)
 }
 
 // The create rate counts every hosted proxy create attempt in a redis counter

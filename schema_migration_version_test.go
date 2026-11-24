@@ -37,6 +37,7 @@ func TestSchemaMigrationVersionsNameTheirMigrations(t *testing.T) {
 		{name: "App Store subscriptions moved from deleted accounts", sql: appleSubscriptionMoveSchemaSql, version: AppleSubscriptionMoveSchemaMigrationVersion},
 		{name: "accounts deleted before their record, backfilled", sql: DeletedNetworkBackfillSql, version: DeletedNetworkBackfillMigrationVersion},
 		{name: "price tier evidence on the purchase intents", sql: priceTierEvidenceSchemaSql, version: PriceTierEvidenceSchemaMigrationVersion},
+		{name: "referral terms", sql: networkReferralTermsSchemaSql, version: NetworkReferralTermsSchemaMigrationVersion},
 	} {
 		registered := 0
 		for _, migration := range migrations {

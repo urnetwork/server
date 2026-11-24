@@ -164,7 +164,10 @@ func (self *apiServer) httpConfiguration() (http.Handler, server.HttpServerOptio
 	// than on the forward-proxy listener.
 	deviceRpc := NewDeviceRpcHandler(self.proxyDeviceManager, self.settings)
 	flowTrace := flowTraceHandler{
-		auth: authHeaderProxyId, open: self.proxyDeviceManager.OpenProxyDevice,
+		auth: authHeaderProxyId,
+		open: func(proxyId server.Id) (*ProxyDevice, error) {
+			return self.proxyDeviceManager.openProxyDeviceFor(proxyDeviceCaller{path: proxyDevicePathFlowTrace}, proxyId)
+		},
 		lookup: self.proxyDeviceManager.flowTraceDevice,
 	}
 
@@ -229,7 +232,12 @@ func (self *apiServer) HandleWarmup(w http.ResponseWriter, r *http.Request) {
 	}
 	// else use the default object
 
-	proxyDevice, err := self.proxyDeviceManager.OpenProxyDevice(proxyId)
+	// the api is its own ingress (router.NewIngressHandler), so the remote
+	// address is the caller's connection
+	proxyDevice, err := self.proxyDeviceManager.openProxyDeviceFor(
+		proxyDeviceCaller{path: proxyDevicePathWarmup, addr: proxyCallerAddr(r.RemoteAddr)},
+		proxyId,
+	)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

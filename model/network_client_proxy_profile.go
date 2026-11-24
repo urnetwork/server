@@ -85,6 +85,48 @@ func connectPerformanceProfile(performanceProfile *sdk.PerformanceProfile) *conn
 	}
 }
 
+// The initial performance profile of a hosted device of a network on the free
+// plan: the stored profile with a fixed window held to at most windowSizeMax
+// exits, the free device's whole window (proxy
+// ProxyDeviceSettings.FreeQualityWindowSize and FreeSpeedWindowSize). A fixed
+// window carries every flow alone, so without the bound a stored profile would
+// size a free device past its plan. No profile, auto, and a fixed window
+// already within the bound, such as a fixed ip's one exit, are returned as
+// they are: the device sizes its auto windows for the plan itself.
+// Nonpositive windowSizeMax changes nothing. The stored profile is not
+// written; a bounded one is a copy.
+func FreeProxyPerformanceProfile(performanceProfile *sdk.PerformanceProfile, windowSizeMax int) *sdk.PerformanceProfile {
+	if performanceProfile == nil || windowSizeMax <= 0 {
+		return performanceProfile
+	}
+	switch performanceProfile.WindowType {
+	case sdk.WindowTypeQuality, sdk.WindowTypeSpeed:
+	default:
+		return performanceProfile
+	}
+	windowSize := performanceProfile.WindowSize
+	// no size is connect's default fixed window, which holds one exit
+	if windowSize == nil {
+		return performanceProfile
+	}
+	if windowSize.WindowSizeMax <= windowSizeMax &&
+		0 < windowSize.WindowSizeHardMax && windowSize.WindowSizeHardMax <= windowSizeMax {
+		return performanceProfile
+	}
+	bounded := *windowSize
+	bounded.WindowSizeMin = min(bounded.WindowSizeMin, windowSizeMax)
+	bounded.WindowSizeMinP2pOnly = min(bounded.WindowSizeMinP2pOnly, windowSizeMax)
+	bounded.WindowSizeMax = min(bounded.WindowSizeMax, windowSizeMax)
+	// a nonpositive hard max is none
+	if bounded.WindowSizeHardMax <= 0 || windowSizeMax < bounded.WindowSizeHardMax {
+		bounded.WindowSizeHardMax = windowSizeMax
+	}
+	bounded.KeepHealthiestCount = min(bounded.KeepHealthiestCount, windowSizeMax)
+	boundedProfile := *performanceProfile
+	boundedProfile.WindowSize = &bounded
+	return &boundedProfile
+}
+
 // Reads back the stored initial performance profile. Before auth-client refused
 // them, a client could store a profile that connect refuses. Such a profile
 // reads back in auto, keeping its direct and post-quantum choices, the way the
