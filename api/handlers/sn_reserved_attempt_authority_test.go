@@ -54,6 +54,20 @@ type snReservedAttemptAuthority struct {
 	// in flight at its event scan, after the dial has succeeded.
 	refuseEventScan atomic.Bool
 	holdEventScan   atomic.Pointer[chan struct{}]
+	// The next event scans that fail as a node's query timeout does, and the
+	// scans that have reached the hold.
+	transientEventScans atomic.Int32
+	heldEventScans      atomic.Int32
+	// When set, the chain's time for later refreshes; now is the first's.
+	chainClock atomic.Pointer[time.Time]
+}
+
+// The finalized heads' time: now, until a test moves the chain on.
+func (self *snReservedAttemptAuthority) chainNow() time.Time {
+	if at := self.chainClock.Load(); at != nil {
+		return *at
+	}
+	return self.now
 }
 
 // A native block's hash is the Blake2b-256 of its complete SCALE header, which
@@ -274,7 +288,7 @@ func (self *snReservedAttemptAuthority) result(method string, args []json.RawMes
 	}
 	knownNative := func(hash string) bool { _, known := self.headers[hash]; return known }
 	block := func(number uint64) map[string]any {
-		return map[string]any{"number": hexutil.EncodeUint64(number), "hash": common.BigToHash(new(big.Int).SetUint64(number)), "timestamp": hexutil.EncodeUint64(uint64(self.now.Unix()))}
+		return map[string]any{"number": hexutil.EncodeUint64(number), "hash": common.BigToHash(new(big.Int).SetUint64(number)), "timestamp": hexutil.EncodeUint64(uint64(self.chainNow().Unix()))}
 	}
 	switch method {
 	case "eth_chainId":
@@ -307,7 +321,13 @@ func (self *snReservedAttemptAuthority) result(method string, args []json.RawMes
 		}
 		return hexutil.Bytes{0x60, 0, 0}, nil
 	case "eth_getLogs":
+		for pending := self.transientEventScans.Load(); pending > 0; pending = self.transientEventScans.Load() {
+			if self.transientEventScans.CompareAndSwap(pending, pending-1) {
+				return nil, errors.New("query timeout of 10 seconds exceeded")
+			}
+		}
 		if hold := self.holdEventScan.Load(); hold != nil {
+			self.heldEventScans.Add(1)
 			<-*hold
 		}
 		if self.refuseEventScan.Load() {
@@ -390,7 +410,7 @@ func (self *snReservedAttemptAuthority) result(method string, args []json.RawMes
 			if argument(1) != self.finalized.Hex() {
 				break
 			}
-			return "0x" + hex.EncodeToString(binary.LittleEndian.AppendUint64(nil, uint64(self.now.UnixMilli()))), nil
+			return "0x" + hex.EncodeToString(binary.LittleEndian.AppendUint64(nil, uint64(self.chainNow().UnixMilli()))), nil
 		}
 		return value, nil
 	case "state_call":
