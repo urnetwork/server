@@ -65,7 +65,8 @@ func GetNetworkMembers(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /network/member-remove: denies a team's member at once, its MemberRevoke
-// owed to an admin device's signature (TEAM-M6-11).
+// owed to an admin device's signature (TEAM-M6-11). The answer counts the
+// clients, auth keys and API keys the denial ended (owner decision 717).
 func RemoveNetworkMember(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(controller.RemoveNetworkMember, w, r)
 }

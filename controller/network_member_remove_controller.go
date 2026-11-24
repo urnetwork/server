@@ -20,16 +20,19 @@ package controller
 //	         removal's admin event, member.remove; the network authority
 //	         notice when the member was in the AdminSet
 //	answer   the member, whether its MemberRevoke needs k of n, how many
-//	         clients and auth keys the denial ended, and signature_owed, always
-//	         set: the server's denial is not the removal (owner decisions 5,
-//	         59). Until an admin device signs the MemberRevoke, an authority
-//	         statement for an AdminSet member, with its presence
-//	         countersignature where §7.9's presence row asks, members still
-//	         encrypt to the member's devices; `ur admin members remove` signs
-//	         it beside this call. When an ended key was pre-approved,
-//	         bundle_still_admits and its note say that a copy of its bundle
-//	         still admits devices until its Delegation ends, as a key's revoke
-//	         answers (D-TEAM-31)
+//	         clients, auth keys and API keys the denial ended, and
+//	         signature_owed, always set: the server's denial is not the
+//	         removal (owner decisions 5, 59). Until an admin device signs the
+//	         MemberRevoke, an authority statement for an AdminSet member, with
+//	         its presence countersignature where §7.9's presence row asks,
+//	         members still encrypt to the member's devices; `ur admin members
+//	         remove` signs it beside this call. When an ended auth key was
+//	         pre-approved, bundle_still_admits and its note say that a copy of
+//	         its bundle still admits devices until its Delegation ends, as a
+//	         key's revoke answers (D-TEAM-31). The answer counts the API keys
+//	         beside the auth keys §7.10 names, since owner decision 717 ends
+//	         both, so the remover learns what automation stopped; an API key
+//	         has no bundle, so nothing of a deleted one still admits
 //
 // A refusal names no member it did not find.
 
@@ -88,6 +91,10 @@ type RemoveNetworkMemberResult struct {
 	// the auth keys the member's user made in the team, which the denial
 	// revoked: their bearers enroll nothing more
 	RevokedAuthKeyCount int64 `json:"revoked_auth_key_count,omitempty"`
+	// the API keys the member's user made in the team, which the denial
+	// deleted with their auth codes: they authenticate nothing more, and the
+	// network tokens they minted end with them (QD-1214)
+	DeletedApiKeyCount int64 `json:"deleted_api_key_count,omitempty"`
 	// a revoked key was pre-approved: a copy of its bundle keeps admitting
 	// devices until its Delegation ends (D-TEAM-31)
 	BundleStillAdmits bool `json:"bundle_still_admits,omitempty"`
@@ -196,6 +203,7 @@ func (self *networkMemberRemovals) remove(args *RemoveNetworkMemberArgs, clientS
 					AdminSet:               adminSet,
 					DeactivatedClientCount: denied.DeactivatedClientCount,
 					RevokedAuthKeyCount:    int64(len(denied.RevokedAuthKeys)),
+					DeletedApiKeyCount:     int64(len(denied.DeletedApiKeys)),
 					SignatureOwed:          true,
 				}
 				if denied.BundleStillAdmits() {
