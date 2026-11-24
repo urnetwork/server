@@ -14,8 +14,8 @@ import (
 // epoch one. Qualification supplies exact future image and binary identities.
 // All workload, resource, significance and submission-clock settings are kept.
 // Without a source graph the future epochs keep the current policy's; an
-// explicit sidecar/1 moves them to the eleven repositories (QD-769), and no
-// value moves a graph back to the ten.
+// explicit sidecar/1 moves them to the twelve repositories (QD-769, QD-1393),
+// and no value moves a graph back to the ten.
 type CompetitionFutureEpochPolicy struct {
 	WorkCoveragePolicy          *model.CompetitionWorkCoveragePolicy        `yaml:"work_coverage_policy,omitempty"`
 	DistributedEvaluationPolicy *CompetitionDistributedEvaluationPolicy     `yaml:"distributed_evaluation_policy,omitempty"`
@@ -79,7 +79,7 @@ func (self *Settings) validateFutureEpochPolicy() error {
 		return err
 	}
 	// An evaluator image holds the checkouts of exactly one graph, so the image
-	// of the ten cannot be relabeled as the image of the eleven.
+	// of the ten cannot be relabeled as the image of the twelve.
 	if self.futureSourceGraphPolicy() != self.EvaluationPolicy.SourceGraphPolicy && (p.EvaluatorImageDigest == "" || p.EvaluatorImageDigest == self.EvaluatorImageDigest) {
 		return errors.New("a future source graph requires its own evaluator image")
 	}

@@ -27,10 +27,15 @@ package sidecart3
 
 import (
 	"context"
+	"crypto/tls"
+	"errors"
 	"fmt"
+	"io"
+	"net"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -84,6 +89,25 @@ type Settings struct {
 	AclExchangeTier *AclExchangeTierSettings
 	// The evs tier each Net names (evs_tier.go). nil: its defaults.
 	EvsTier *EvsTierSettings
+	// How many times more each of the Net's setup calls on its stores is sent after a transport failure, a request
+	// that got no answer (a connection reset, refused or closed, or no answer in time): the MakeBucket of each bucket,
+	// and the clusters' first admin read. Under load the local stack's MinIO, behind Docker's port forward, resets new
+	// connections, which says nothing of the row a Net is built for (QD-1395). A refusal, such as AccessDenied, or any
+	// other answer is never sent again, and nor is a call once ctx has ended. 5: on a stack that is truly down,
+	// refusing every dial, an admin read reports about five SetupRetryWaits later than with none, under the same
+	// message, and a MakeBucket about 25 s later, as minio-go sends each of its requests up to ten times itself, with
+	// about 4 s of backoff in all. Non-positive: no call is sent again.
+	SetupRetryCount int
+	// How long the setup waits before sending a call again, in real time, the stores' own: 1 s (QD-1395), so a call's
+	// tries span at least five seconds more than one try does. Non-positive: at once.
+	SetupRetryWait time.Duration
+	// How far the Net's clock moves past the last reread of the clusters' admin info before a request reads it again
+	// (faults.go's faultBlobs): the file clusters' CheckInterval, 30 s, how often their own checks read it, well inside
+	// CheckStaleAfter. So a clock that follows real time in small steps rereads about once in 30 s, not before every
+	// request after a step (QD-1395), while a schedule's jump past it still rereads before its next request. It stays
+	// below FileClusters.CheckStaleAfter, or a request after a move just short of it would find admin info stale: a Net
+	// whose threshold reaches CheckStaleAfter is not built. Non-positive: every move rereads.
+	AdminInfoRereadAfter time.Duration
 
 	// What this package's tests see of each Net's catch-ups with its clock: the admin info reread (faults.go) and
 	// the store clock's aging (clock.go). nil: nothing.
@@ -91,19 +115,23 @@ type Settings struct {
 }
 
 func DefaultSettings() *Settings {
+	fileClusters := server.DefaultFileClusterSettings()
 	return &Settings{
-		Net:             sidecartest.DefaultNetSettings(),
-		MinioEndpoint:   "127.0.0.1:59000",
-		MinioAccessKey:  "sidecar-local-test",
-		MinioSecretKey:  "sidecar-local-test-only",
-		MinioRegion:     "us-east-1",
-		FileClusters:    server.DefaultFileClusterSettings(),
-		Redis:           sidecarhost.DefaultRedisSettings(),
-		CrossslotCalls:  NewCrossslotCalls(),
-		Exchange:        DefaultExchangeSettings(),
-		ClusterFaults:   DefaultClusterFaultSettings(),
-		Store:           sidecar.RealClock{},
-		AclExchangeTier: DefaultAclExchangeTierSettings(),
+		Net:                  sidecartest.DefaultNetSettings(),
+		MinioEndpoint:        "127.0.0.1:59000",
+		MinioAccessKey:       "sidecar-local-test",
+		MinioSecretKey:       "sidecar-local-test-only",
+		MinioRegion:          "us-east-1",
+		FileClusters:         fileClusters,
+		Redis:                sidecarhost.DefaultRedisSettings(),
+		CrossslotCalls:       NewCrossslotCalls(),
+		Exchange:             DefaultExchangeSettings(),
+		ClusterFaults:        DefaultClusterFaultSettings(),
+		Store:                sidecar.RealClock{},
+		AclExchangeTier:      DefaultAclExchangeTierSettings(),
+		SetupRetryCount:      5,
+		SetupRetryWait:       time.Second,
+		AdminInfoRereadAfter: fileClusters.CheckInterval,
 	}
 }
 
@@ -169,6 +197,9 @@ func NewNet(t testing.TB, settings *Settings) *sidecartest.Net {
 
 // The host of one T3 Net, and what closes it.
 func newHost(ctx context.Context, t testing.TB, net *sidecartest.Net, settings *Settings, clockWitness func()) (*sidecar.ServiceHost, func(), error) {
+	if 0 < settings.AdminInfoRereadAfter && settings.FileClusters.CheckStaleAfter <= settings.AdminInfoRereadAfter {
+		return nil, nil, fmt.Errorf("AdminInfoRereadAfter %s is not below the file clusters' CheckStaleAfter %s, so a request could find admin info stale", settings.AdminInfoRereadAfter, settings.FileClusters.CheckStaleAfter)
+	}
 	var layoutFaults *clusterFaults
 	if settings.Layout != nil {
 		if err := checkLayoutUp(ctx, settings.Layout, settings.ClusterFaults); err != nil {
@@ -190,19 +221,10 @@ func newHost(ctx context.Context, t testing.TB, net *sidecartest.Net, settings *
 		buckets.remove()
 		return nil, nil, err
 	}
-	clusters.Check(ctx)
-	for _, clusterId := range buckets.clusterIds() {
-		cluster, err := clusters.Cluster(clusterId)
-		if err != nil {
-			clusters.Close()
-			buckets.remove()
-			return nil, nil, err
-		}
-		if cluster.(*server.FileCluster).LastAdminInfo() == nil {
-			clusters.Close()
-			buckets.remove()
-			return nil, nil, fmt.Errorf("%s gave no admin info for %s", buckets.where(), clusterId)
-		}
+	if err := firstAdminRead(ctx, clusters, buckets, settings); err != nil {
+		clusters.Close()
+		buckets.remove()
+		return nil, nil, err
 	}
 	clocks := &netClocks{store: settings.Store}
 	var blobs sidecar.BlobStore = clusters
@@ -218,7 +240,7 @@ func newHost(ctx context.Context, t testing.TB, net *sidecartest.Net, settings *
 	fakes := net.Fakes()
 	host := sidecarhost.NewServiceHost(ctx, &sidecarhost.ServiceHostOptions{
 		Postgres:      true,
-		Blobs:         newFaultBlobs(blobs, clusters.Check, net, layoutFaults, settings.catchUpHooks),
+		Blobs:         newFaultBlobs(blobs, clusters.Check, net, layoutFaults, settings.AdminInfoRereadAfter, settings.catchUpHooks),
 		Push:          fakes.Push,
 		Quota:         fakes.Quota,
 		ServiceClient: fakes.ServiceClient,
@@ -344,14 +366,91 @@ func newBuckets(ctx context.Context, settings *Settings) (*buckets, error) {
 		cluster.client = client
 	}
 	for _, cluster := range self.clusters {
-		err := cluster.client.MakeBucket(ctx, cluster.bucket, minio.MakeBucketOptions{Region: cluster.region})
-		// the name is this Net's alone, so one this user already owns is the create minio-go retried
-		if err != nil && minio.ToErrorResponse(err).Code != "BucketAlreadyOwnedByYou" {
+		err := retrySetup(ctx, settings, func() error {
+			err := cluster.client.MakeBucket(ctx, cluster.bucket, minio.MakeBucketOptions{Region: cluster.region})
+			// the name is this Net's alone, so one this user already owns is a create sent again, by minio-go or by
+			// retrySetup, after a reset lost the answer to one the store carried out
+			if err != nil && minio.ToErrorResponse(err).Code != "BucketAlreadyOwnedByYou" {
+				return err
+			}
+			return nil
+		})
+		if err != nil {
 			self.remove()
 			return nil, fmt.Errorf("%s made no bucket %s: %w", self.where(), cluster.bucket, err)
 		}
 	}
 	return self, nil
+}
+
+// What the clusters' first admin read returns when Check kept no admin info for a cluster that answered the read
+// after it: Check's read met a transport failure, whose error it logs and keeps nothing of, so retrySetup sends the
+// read again as it would after a reset.
+var errAdminInfoUnkept = errors.New("the check kept no admin info, and the store answered the read after it")
+
+// The clusters' first admin read, which leaves every cluster of the Net with admin info kept before any request, as
+// a cluster refuses a write without it: clusters.Check, sent again as retrySetup sends a setup call while a cluster
+// has none after a transport failure. Check logs a failed read and keeps nothing of it, so a cluster it left
+// without admin info is read once more through ReadAdminInfo, whose error tells a reset from a refusal: a refusal,
+// or any other answer that is not admin info, fails the Net at once. That read answering means Check's met a
+// transport failure (errAdminInfoUnkept), and Check is sent again.
+func firstAdminRead(ctx context.Context, clusters *server.FileClusters, buckets *buckets, settings *Settings) error {
+	return retrySetup(ctx, settings, func() error {
+		clusters.Check(ctx)
+		for _, clusterId := range buckets.clusterIds() {
+			cluster, err := clusters.Cluster(clusterId)
+			if err != nil {
+				return err
+			}
+			if cluster.(*server.FileCluster).LastAdminInfo() != nil {
+				continue
+			}
+			if _, err := clusters.ReadAdminInfo(ctx, clusterId); err != nil {
+				return fmt.Errorf("%s gave no admin info for %s: %w", buckets.where(), clusterId, err)
+			}
+			return fmt.Errorf("%s gave no admin info for %s: %w", buckets.where(), clusterId, errAdminInfoUnkept)
+		}
+		return nil
+	})
+}
+
+// Calls call, one of the Net's setup calls on its stores, and while it fails on a transport failure sends it again
+// after SetupRetryWait, at most SetupRetryCount times more (QD-1395): a stack resetting connections under load fails
+// no Net, while a refusal or any other answer the store gave returns at once, as does ctx's end. What it returns is
+// call's last error.
+//
+// A transport failure is a request that got no answer: a connection reset, refused or closed before an answer, or
+// none in time, which net/http reports as a *url.Error and minio-go passes on as one, an EOF included (its
+// "Connection closed by foreign host"); a body cut off mid-read; and errAdminInfoUnkept. Not one: an answer, such as
+// minio-go's ErrorResponse (AccessDenied, NoSuchBucket) or an admin read's status, size or parse failure; a
+// certificate the store showed, the same each time; and a failure once ctx has ended, a deadline of its own included.
+func retrySetup(ctx context.Context, settings *Settings, call func() error) error {
+	transportFailure := func(err error) bool {
+		if ctx.Err() != nil {
+			return false
+		}
+		if errors.Is(err, errAdminInfoUnkept) {
+			return true
+		}
+		var certificateError *tls.CertificateVerificationError
+		if errors.As(err, &certificateError) {
+			return false
+		}
+		// *url.Error, *net.OpError, a syscall's errno and a timeout are each a net.Error
+		var netError net.Error
+		return errors.As(err, &netError) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+	}
+	for retry := 0; ; retry += 1 {
+		err := call()
+		if err == nil || settings.SetupRetryCount <= retry || !transportFailure(err) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(settings.SetupRetryWait):
+		}
+	}
 }
 
 // What a failure names as the stores a Net's buckets are on.

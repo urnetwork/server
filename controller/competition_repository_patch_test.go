@@ -125,26 +125,28 @@ func TestCompetitionRepositoryPromotionUsesFrozenScopeAndCompleteGraph(t *testin
 	}
 }
 
-// Sidecar joining a graph of the ten, or leaving one, is a dependency change:
-// the frozen broad policy admits it and legacy approval never does, even beside
-// a server change, so no legacy review brings in a repository it did not see.
+// Sidecar and operator-core joining a graph of the ten, or leaving one, is a
+// dependency change: the frozen broad policy admits it and legacy approval
+// never does, even beside a server change, so no legacy review brings in a
+// repository it did not see. Neither joins or leaves alone.
 func TestCompetitionRepositoryPromotionTreatsSidecarAsADependencyChange(t *testing.T) {
 	ten := map[string]string{}
 	for _, repository := range model.CompetitionSourceRepositoryNamesBeforeSidecar() {
 		ten[repository] = strings.Repeat("a", 40)
 	}
-	eleven := map[string]string{}
+	twelve := map[string]string{}
 	for name, commit := range ten {
-		eleven[name] = commit
+		twelve[name] = commit
 	}
-	eleven["sidecar"] = strings.Repeat("b", 40)
-	for _, direction := range [][2]map[string]string{{ten, eleven}, {eleven, ten}} {
+	twelve["sidecar"] = strings.Repeat("b", 40)
+	twelve["operator-core"] = strings.Repeat("d", 40)
+	for _, direction := range [][2]map[string]string{{ten, twelve}, {twelve, ten}} {
 		previous, next := direction[0], direction[1]
 		if err := validateCompetitionRepositoryPromotion(previous, next, competitionRepositoryTestPolicy()); err != nil {
-			t.Fatalf("broad reviewed sidecar change refused: %v", err)
+			t.Fatalf("broad reviewed sidecar and operator-core change refused: %v", err)
 		}
 		if err := validateCompetitionRepositoryPromotion(previous, next, PatchPolicy{}); err == nil || !strings.Contains(err.Error(), "legacy promotion cannot change dependency commits") {
-			t.Fatalf("legacy scope admitted a sidecar change: %v", err)
+			t.Fatalf("legacy scope admitted a sidecar and operator-core change: %v", err)
 		}
 		withServer := map[string]string{}
 		for name, commit := range next {
@@ -152,7 +154,21 @@ func TestCompetitionRepositoryPromotionTreatsSidecarAsADependencyChange(t *testi
 		}
 		withServer["server"] = strings.Repeat("c", 40)
 		if err := validateCompetitionRepositoryPromotion(previous, withServer, PatchPolicy{}); err == nil || !strings.Contains(err.Error(), "legacy promotion cannot change dependency commits") {
-			t.Fatalf("legacy scope admitted a sidecar change beside a server change: %v", err)
+			t.Fatalf("legacy scope admitted a sidecar and operator-core change beside a server change: %v", err)
+		}
+	}
+	// the eleven of either of the two alone, from or to the ten or the twelve
+	for _, name := range []string{"sidecar", "operator-core"} {
+		eleven := map[string]string{}
+		for repository, commit := range twelve {
+			if repository != name {
+				eleven[repository] = commit
+			}
+		}
+		for _, direction := range [][2]map[string]string{{ten, eleven}, {eleven, ten}, {twelve, eleven}, {eleven, twelve}} {
+			if err := validateCompetitionRepositoryPromotion(direction[0], direction[1], competitionRepositoryTestPolicy()); err == nil {
+				t.Fatalf("a graph lacking %s was promoted from or to", name)
+			}
 		}
 	}
 	unknown := map[string]string{}

@@ -281,7 +281,7 @@ func executeLaunchPreflight(ctx context.Context, config *launchPreflightConfig) 
 	imageId, imageErr := inspectEvaluatorImage(ctx, config.EvaluatorImageDigest)
 	record("evaluator_image", map[string]any{"image_id": imageId}, imageErr)
 
-	openApiEvidence, openApiErr := inspectEvidenceFile(config.OpenApiPath, maximumSourceConfigBytes)
+	openApiEvidence, openApiErr := inspectEvidenceFile(config.OpenApiPath, int64(defaultSourceEpochSettings().MaximumSourceConfigBytes))
 	if openApiErr == nil {
 		result.OpenApiSha256 = openApiEvidence.Sha256
 	}
@@ -400,7 +400,7 @@ func verifyRemoteSourceEpochModeContext(
 			return err
 		}
 		configureLaunchSourceCommand(command, waitDelay)
-		output := &sourceBoundedWriter{limit: maximumSourceConfigBytes}
+		output := &sourceBoundedWriter{limit: defaultSourceEpochSettings().MaximumSourceConfigBytes}
 		command.Stdout, command.Stderr = output, output
 		if err := command.Run(); err != nil {
 			return fmt.Errorf("clone repository %s competition branch: %w", repositoryName, errors.Join(ctx.Err(), err))
@@ -449,7 +449,7 @@ func launchSourceGitText(ctx context.Context, waitDelay time.Duration, repositor
 		return "", err
 	}
 	configureLaunchSourceCommand(command, waitDelay)
-	output := &sourceBoundedWriter{limit: maximumSourceConfigBytes}
+	output := &sourceBoundedWriter{limit: defaultSourceEpochSettings().MaximumSourceConfigBytes}
 	command.Stdout, command.Stderr = output, &sourceBoundedWriter{limit: 4096}
 	if err := command.Run(); err != nil {
 		return "", fmt.Errorf("launch source Git command failed: %w", errors.Join(ctx.Err(), err))
@@ -465,7 +465,7 @@ func launchSourceGitNetworkText(ctx context.Context, waitDelay time.Duration, re
 		return "", err
 	}
 	configureLaunchSourceCommand(command, waitDelay)
-	output := &sourceBoundedWriter{limit: maximumSourceConfigBytes}
+	output := &sourceBoundedWriter{limit: defaultSourceEpochSettings().MaximumSourceConfigBytes}
 	command.Stdout, command.Stderr = output, &sourceBoundedWriter{limit: 4096}
 	if err := command.Run(); err != nil {
 		return "", fmt.Errorf("launch source Git transport failed: %w", errors.Join(ctx.Err(), err))
@@ -964,11 +964,11 @@ func buildLaunchHandoffManifest(
 	if err != nil {
 		return nil, err
 	}
-	sourceEvidence, err := inspectEvidenceFile(sourceConfigPath, maximumSourceConfigBytes)
+	sourceEvidence, err := inspectEvidenceFile(sourceConfigPath, int64(defaultSourceEpochSettings().MaximumSourceConfigBytes))
 	if err != nil {
 		return nil, err
 	}
-	openApiEvidence, err := inspectEvidenceFile(openApiPath, maximumSourceConfigBytes)
+	openApiEvidence, err := inspectEvidenceFile(openApiPath, int64(defaultSourceEpochSettings().MaximumSourceConfigBytes))
 	if err != nil {
 		return nil, err
 	}

@@ -40,7 +40,7 @@ func stagingSourceTestManifest(t *testing.T) *sourceManifest {
 // Six staging rounds carry the separately frozen zero-margin source unchanged.
 func TestStagingSourceManifestCarriesIndependentBaseline(t *testing.T) {
 	manifest := stagingSourceTestManifest(t)
-	for epoch := 2; epoch <= maximumCompetitionEpoch; epoch++ {
+	for epoch := 2; epoch <= defaultSourceEpochSettings().MaximumCompetitionEpoch; epoch++ {
 		round := manifest.EvaluationSource.Rounds[0]
 		round.Epoch, round.ActivationGeneration = epoch, int64(epoch)
 		round.Reason, round.RewardDecisionDigest = "review_pending", strings.Repeat("d", 64)
@@ -230,7 +230,7 @@ func TestStagingSourceConfigPreservesHistoricalProductionManifest(t *testing.T) 
 	if err != nil || parent != remoteHead {
 		t.Fatalf("staging config: %s %s %v", parent, commit, err)
 	}
-	content, err := sourceGitBytes(context.Background(), stagedRoot, maximumSourceConfigBytes, "show", commit+":main/sim-latency.yml")
+	content, err := sourceGitBytes(context.Background(), stagedRoot, defaultSourceEpochSettings().MaximumSourceConfigBytes, "show", commit+":main/sim-latency.yml")
 	if err != nil || string(content) != string(production) {
 		t.Fatal("staging changed historical production manifest")
 	}

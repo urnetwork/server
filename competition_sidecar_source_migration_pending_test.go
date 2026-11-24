@@ -15,9 +15,9 @@ import (
 	"testing"
 )
 
-// The competition's permissive step in MG0 (QD-128, QD-752), on a private
-// database: what the registered guards admit they still admit once it applies,
-// and the one graph it adds is the ten with sidecar.
+// The competition's permissive step in MG0 (QD-128, QD-752, QD-1393), on a
+// private database: what the registered guards admit they still admit once it
+// applies, and the one graph it adds is the ten with sidecar and operator-core.
 
 var competitionSidecarTestRepositoryNames = []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "warp", "gvisor"}
 
@@ -40,7 +40,8 @@ type competitionSidecarGraphCase struct {
 	permissive bool
 }
 
-// Graphs around the two that pass: the ten, and the ten with sidecar.
+// Graphs around the two that pass: the ten, and the ten with sidecar and
+// operator-core.
 func competitionSidecarGraphCases(t testing.TB) []competitionSidecarGraphCase {
 	t.Helper()
 	encode := func(commits any) string {
@@ -56,20 +57,34 @@ func competitionSidecarGraphCases(t testing.TB) []competitionSidecarGraphCase {
 		return commits
 	}
 	ten := competitionSidecarTestCommits(competitionSidecarTestRepositoryNames...)
-	eleven := competitionSidecarTestCommits(append(slices.Clone(competitionSidecarTestRepositoryNames), "sidecar")...)
+	twelve := competitionSidecarTestCommits(append(slices.Clone(competitionSidecarTestRepositoryNames), "sidecar", "operator-core")...)
+	both := func(base map[string]any) map[string]any {
+		return with(with(base, "sidecar", twelve["sidecar"]), "operator-core", twelve["operator-core"])
+	}
 	cases := []competitionSidecarGraphCase{
 		{name: "the ten", commits: encode(ten), registered: true, permissive: true},
-		{name: "the ten with sidecar", commits: encode(eleven), permissive: true},
-		{name: "the ten with an unknown eleventh", commits: encode(with(ten, "synthetic-unknown", eleven["sidecar"]))},
-		{name: "the ten with the retired operator-proxy", commits: encode(with(ten, "operator-proxy", eleven["sidecar"]))},
-		{name: "the ten with sidecar and an unknown twelfth", commits: encode(with(eleven, "synthetic-unknown", eleven["sidecar"]))},
+		{name: "the ten with sidecar and operator-core", commits: encode(twelve), permissive: true},
+		// the eleven sidecar/1 named before operator-core, which no release builds
+		{name: "the ten with sidecar", commits: encode(with(ten, "sidecar", twelve["sidecar"]))},
+		{name: "the ten with operator-core", commits: encode(with(ten, "operator-core", twelve["operator-core"]))},
+		{name: "the ten with an unknown eleventh", commits: encode(with(ten, "synthetic-unknown", twelve["sidecar"]))},
+		{name: "the ten with the retired operator-proxy", commits: encode(with(ten, "operator-proxy", twelve["sidecar"]))},
+		{name: "the ten with sidecar and an unknown twelfth", commits: encode(with(with(ten, "sidecar", twelve["sidecar"]), "synthetic-unknown", twelve["sidecar"]))},
+		{name: "the ten with operator-core and an unknown twelfth", commits: encode(with(with(ten, "operator-core", twelve["operator-core"]), "synthetic-unknown", twelve["sidecar"]))},
+		{name: "the ten with sidecar and the retired operator-proxy", commits: encode(with(with(ten, "sidecar", twelve["sidecar"]), "operator-proxy", twelve["sidecar"]))},
+		{name: "the ten with the two and an unknown thirteenth", commits: encode(with(twelve, "synthetic-unknown", twelve["sidecar"]))},
 		{name: "the ten with a malformed commit", commits: encode(with(ten, "gvisor", "invalid-commit"))},
-		{name: "the ten with a malformed sidecar commit", commits: encode(with(ten, "sidecar", "invalid-commit"))},
-		{name: "the ten with a short sidecar commit", commits: encode(with(ten, "sidecar", strings.Repeat("a", 39)))},
-		{name: "the ten with a null sidecar commit", commits: encode(with(ten, "sidecar", nil))},
+		{name: "the twelve with a malformed gvisor commit", commits: encode(with(twelve, "gvisor", "invalid-commit"))},
+		{name: "the twelve with a malformed sidecar commit", commits: encode(with(twelve, "sidecar", "invalid-commit"))},
+		{name: "the twelve with a short sidecar commit", commits: encode(with(twelve, "sidecar", strings.Repeat("a", 39)))},
+		{name: "the twelve with a null sidecar commit", commits: encode(with(twelve, "sidecar", nil))},
+		{name: "the twelve with a malformed operator-core commit", commits: encode(with(twelve, "operator-core", "invalid-commit"))},
+		{name: "the twelve with a short operator-core commit", commits: encode(with(twelve, "operator-core", strings.Repeat("a", 39)))},
+		{name: "the twelve with a null operator-core commit", commits: encode(with(twelve, "operator-core", nil))},
 		{name: "sidecar alone", commits: encode(competitionSidecarTestCommits("sidecar"))},
+		{name: "sidecar and operator-core alone", commits: encode(competitionSidecarTestCommits("sidecar", "operator-core"))},
 		{name: "no repository", commits: `{}`},
-		{name: "a list of the eleven", commits: encode(append(slices.Clone(competitionSidecarTestRepositoryNames), "sidecar"))},
+		{name: "a list of the twelve", commits: encode(append(slices.Clone(competitionSidecarTestRepositoryNames), "sidecar", "operator-core"))},
 		{name: "a JSON null", commits: `null`},
 	}
 	for _, name := range competitionSidecarTestRepositoryNames {
@@ -78,8 +93,12 @@ func competitionSidecarGraphCases(t testing.TB) []competitionSidecarGraphCase {
 		cases = append(cases,
 			competitionSidecarGraphCase{name: "the ten without " + name, commits: encode(without)},
 			// ten keys again, with sidecar standing in for a live repository
-			competitionSidecarGraphCase{name: "sidecar in place of " + name, commits: encode(with(without, "sidecar", eleven["sidecar"]))},
-			competitionSidecarGraphCase{name: "sidecar and an unknown in place of " + name, commits: encode(with(with(without, "sidecar", eleven["sidecar"]), "synthetic-unknown", eleven["sidecar"]))},
+			competitionSidecarGraphCase{name: "sidecar in place of " + name, commits: encode(with(without, "sidecar", twelve["sidecar"]))},
+			competitionSidecarGraphCase{name: "operator-core in place of " + name, commits: encode(with(without, "operator-core", twelve["operator-core"]))},
+			// eleven keys, the two beside nine of the ten
+			competitionSidecarGraphCase{name: "the two in place of " + name, commits: encode(both(without))},
+			// twelve keys, the twelve's count, with an unknown standing in
+			competitionSidecarGraphCase{name: "the two and an unknown in place of " + name, commits: encode(with(both(without), "synthetic-unknown", twelve["sidecar"]))},
 		)
 	}
 	return cases
@@ -139,11 +158,12 @@ func TestCompetitionSidecarSourceMigrationIsInMg0(t *testing.T) {
 	}
 }
 
-// The registered graph guard refuses every graph with a sidecar key, which is
-// the condition the permissive step changes it under
-// (sidecarGroupRefusedConditions). Once MG0 applies, every graph it admitted
-// still passes, in both modes, and the only graph added is the ten with sidecar.
-// The cleanup step's guard, which requires sidecar, fails the same comparison.
+// The registered graph guard refuses every graph with a sidecar or operator-core
+// key, so every graph that holds both, the condition the permissive step changes
+// it under (sidecarGroupRefusedConditions). Once MG0 applies, every graph it
+// admitted still passes, in both modes, and the only graph added is the ten with
+// sidecar and operator-core. The cleanup step's guard, which requires the
+// twelve, fails the same comparison.
 func TestCompetitionSidecarSourceGraphOnlyWidens(t *testing.T) {
 	(&TestEnv{ApplyDbMigrations: false, RerunCount: 0}).Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -160,8 +180,10 @@ func TestCompetitionSidecarSourceGraphOnlyWidens(t *testing.T) {
 				}
 				var graph map[string]any
 				if json.Unmarshal([]byte(c.commits), &graph) == nil {
-					if _, sidecar := graph["sidecar"]; sidecar && registered[name] {
-						t.Errorf("the registered guard admits a graph with a sidecar key: %s", name)
+					_, sidecar := graph["sidecar"]
+					_, operatorCore := graph["operator-core"]
+					if (sidecar || operatorCore) && registered[name] {
+						t.Errorf("the registered guard admits a graph with a sidecar or operator-core key: %s", name)
 					}
 				}
 			}
@@ -187,15 +209,15 @@ func TestCompetitionSidecarSourceGraphOnlyWidens(t *testing.T) {
 		// the cleanup step's guard, under another name so the database keeps MG0's
 		cleanup := strings.NewReplacer(
 			"competition_v2_source_graph_valid", "competition_test_cleanup_source_graph_valid",
-			"jsonb_object_keys(commits))=10", "jsonb_object_keys(commits))=11",
-			"'warp','gvisor']", "'warp','gvisor','sidecar']",
+			"jsonb_object_keys(commits))=10", "jsonb_object_keys(commits))=12",
+			"'warp','gvisor']", "'warp','gvisor','sidecar','operator-core']",
 		).Replace(competitionSourceRetirementGraph)
 		MaintenanceTx(ctx, func(tx PgTx) {
 			RaisePgResult(tx.Exec(ctx, cleanup))
 		})
 		required := competitionSidecarGraphAnswers(t, ctx, "competition_test_cleanup_source_graph_valid", cases)
-		if !required["the ten with sidecar, staging false"] || !required["the ten with sidecar, staging true"] {
-			t.Fatal("the cleanup guard refuses the eleven")
+		if !required["the ten with sidecar and operator-core, staging false"] || !required["the ten with sidecar and operator-core, staging true"] {
+			t.Fatal("the cleanup guard refuses the twelve")
 		}
 		narrowed := competitionSidecarNarrowedCases(registered, required)
 		if !slices.Equal(narrowed, []string{"the ten, staging false", "the ten, staging true"}) {
@@ -286,16 +308,21 @@ func competitionSidecarAuthorize(t testing.TB, ctx context.Context, intent strin
 }
 
 // The source authorization admits a baseline of the ten before and after MG0. A
-// baseline of the ten with sidecar is refused by the registered guard, at its
-// graph, and admitted after MG0 with a git ref for sidecar and for nothing else.
+// baseline of the ten with sidecar and operator-core is refused by the
+// registered guard, at its graph, and admitted after MG0 with a git ref for each
+// of the two and for nothing else. The eleven of sidecar alone is refused at
+// its graph before and after.
 func TestCompetitionSidecarSourceAuthorizationOnlyWidens(t *testing.T) {
 	(&TestEnv{ApplyDbMigrations: false, RerunCount: 0}).Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		tenNames := competitionSidecarTestRepositoryNames
 		elevenNames := append(slices.Clone(tenNames), "sidecar")
+		twelveNames := append(slices.Clone(tenNames), "sidecar", "operator-core")
 		ten := competitionSidecarTestCommits(tenNames...)
 		eleven := competitionSidecarTestCommits(elevenNames...)
+		twelve := competitionSidecarTestCommits(twelveNames...)
 		unknown := competitionSidecarTestCommits(append(slices.Clone(tenNames), "synthetic-unknown")...)
+		sidecarAndUnknown := competitionSidecarTestCommits(append(slices.Clone(elevenNames), "synthetic-unknown")...)
 
 		graphRefusal := "v2 source mode repository graph disagrees with its explicit staging flag"
 		referenceRefusal := "v2 source content or publication recovery identity is invalid"
@@ -307,10 +334,13 @@ func TestCompetitionSidecarSourceAuthorizationOnlyWidens(t *testing.T) {
 			permissive string
 		}{
 			{name: "the ten", commits: ten, refs: tenNames},
-			{name: "the ten with sidecar", commits: eleven, refs: elevenNames, registered: graphRefusal},
-			{name: "the ten with sidecar and no sidecar ref", commits: eleven, refs: tenNames, registered: graphRefusal, permissive: referenceRefusal},
-			{name: "the ten with a sidecar ref", commits: ten, refs: elevenNames, registered: referenceRefusal, permissive: referenceRefusal},
-			{name: "the ten with sidecar and one more ref", commits: eleven, refs: append(slices.Clone(elevenNames), "synthetic-unknown"), registered: graphRefusal, permissive: referenceRefusal},
+			{name: "the ten with sidecar and operator-core", commits: twelve, refs: twelveNames, registered: graphRefusal},
+			{name: "the ten with the two and no operator-core ref", commits: twelve, refs: elevenNames, registered: graphRefusal, permissive: referenceRefusal},
+			{name: "the ten with the two and no ref for either", commits: twelve, refs: tenNames, registered: graphRefusal, permissive: referenceRefusal},
+			{name: "the ten with refs for the two", commits: ten, refs: twelveNames, registered: referenceRefusal, permissive: referenceRefusal},
+			{name: "the ten with the two and one more ref", commits: twelve, refs: append(slices.Clone(twelveNames), "synthetic-unknown"), registered: graphRefusal, permissive: referenceRefusal},
+			{name: "the ten with sidecar", commits: eleven, refs: elevenNames, registered: graphRefusal, permissive: graphRefusal},
+			{name: "the ten with sidecar and an unknown twelfth", commits: sidecarAndUnknown, refs: append(slices.Clone(elevenNames), "synthetic-unknown"), registered: graphRefusal, permissive: graphRefusal},
 			{name: "the ten with an unknown eleventh", commits: unknown, refs: append(slices.Clone(tenNames), "synthetic-unknown"), registered: graphRefusal, permissive: graphRefusal},
 		}
 		requireRefusal := func(guard string, name string, err error, want string) {
@@ -331,6 +361,9 @@ func TestCompetitionSidecarSourceAuthorizationOnlyWidens(t *testing.T) {
 			requireRefusal("registered", c.name, err, c.registered)
 			if _, sidecar := c.commits["sidecar"]; sidecar && err == nil {
 				t.Errorf("the registered guard admits a graph with a sidecar key: %s", c.name)
+			}
+			if _, operatorCore := c.commits["operator-core"]; operatorCore && err == nil {
+				t.Errorf("the registered guard admits a graph with an operator-core key: %s", c.name)
 			}
 		}
 

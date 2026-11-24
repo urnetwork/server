@@ -1,5 +1,5 @@
 // The source graph selector keeps every round of the ten repositories at its
-// exact frozen bytes and names the eleven only by an explicit version.
+// exact frozen bytes and names the twelve only by an explicit version.
 package model
 
 import (
@@ -11,8 +11,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Omission is the ten, sidecar/1 is the ten with sidecar last, and no other
-// spelling selects a graph.
+// Omission is the ten, sidecar/1 is the ten with sidecar and operator-core last,
+// and no other spelling selects a graph.
 func TestCompetitionSourceGraphPolicyNamesItsRepositories(t *testing.T) {
 	ten := "server connect sdk proxy glog goidenticons userwireguard sn warp gvisor"
 	for _, c := range []struct {
@@ -20,7 +20,7 @@ func TestCompetitionSourceGraphPolicyNamesItsRepositories(t *testing.T) {
 		names  string
 	}{
 		{policy: CompetitionSourceGraphPolicyLegacy, names: ten},
-		{policy: CompetitionSourceGraphPolicySidecar, names: ten + " sidecar"},
+		{policy: CompetitionSourceGraphPolicySidecar, names: ten + " sidecar operator-core"},
 	} {
 		names, err := CompetitionSourceRepositoryNamesForGraphPolicy(c.policy)
 		if err != nil || strings.Join(names, " ") != c.names {
@@ -93,20 +93,34 @@ func TestCompetitionSourceLockMatchesGraphPolicy(t *testing.T) {
 	for _, repository := range CompetitionSourceRepositoryNamesBeforeSidecar() {
 		ten[repository] = strings.Repeat("a", 40)
 	}
-	eleven := map[string]string{"sidecar": strings.Repeat("b", 40)}
+	twelve := map[string]string{"sidecar": strings.Repeat("b", 40), "operator-core": strings.Repeat("c", 40)}
 	for repository, commit := range ten {
-		eleven[repository] = commit
+		twelve[repository] = commit
 	}
-	if !CompetitionSourceLockMatchesGraphPolicy(ten, CompetitionSourceGraphPolicyLegacy) || !CompetitionSourceLockMatchesGraphPolicy(eleven, CompetitionSourceGraphPolicySidecar) {
+	if !CompetitionSourceLockMatchesGraphPolicy(ten, CompetitionSourceGraphPolicyLegacy) || !CompetitionSourceLockMatchesGraphPolicy(twelve, CompetitionSourceGraphPolicySidecar) {
 		t.Fatal("a lock was refused under its own source graph")
 	}
-	if CompetitionSourceLockMatchesGraphPolicy(eleven, CompetitionSourceGraphPolicyLegacy) {
-		t.Fatal("a lock naming sidecar stood under the graph of the ten")
+	if CompetitionSourceLockMatchesGraphPolicy(twelve, CompetitionSourceGraphPolicyLegacy) {
+		t.Fatal("a lock naming sidecar and operator-core stood under the graph of the ten")
 	}
 	if CompetitionSourceLockMatchesGraphPolicy(ten, CompetitionSourceGraphPolicySidecar) {
 		t.Fatal("a lock of the ten stood under sidecar/1")
 	}
-	if CompetitionSourceLockMatchesGraphPolicy(eleven, "sidecar/2") || CompetitionSourceLockMatchesGraphPolicy(nil, CompetitionSourceGraphPolicyLegacy) {
+	// the eleven sidecar/1 named before operator-core, and its mirror
+	for _, name := range []string{"operator-core", "sidecar"} {
+		eleven := map[string]string{}
+		for repository, commit := range twelve {
+			if repository != name {
+				eleven[repository] = commit
+			}
+		}
+		for _, policy := range []CompetitionSourceGraphPolicy{CompetitionSourceGraphPolicyLegacy, CompetitionSourceGraphPolicySidecar} {
+			if CompetitionSourceLockMatchesGraphPolicy(eleven, policy) {
+				t.Fatalf("a lock lacking %s stood under %q", name, policy)
+			}
+		}
+	}
+	if CompetitionSourceLockMatchesGraphPolicy(twelve, "sidecar/2") || CompetitionSourceLockMatchesGraphPolicy(nil, CompetitionSourceGraphPolicyLegacy) {
 		t.Fatal("an unknown graph or an absent lock was accepted")
 	}
 	replaced := map[string]string{"sidecar": strings.Repeat("b", 40)}
@@ -118,8 +132,21 @@ func TestCompetitionSourceLockMatchesGraphPolicy(t *testing.T) {
 	if CompetitionSourceLockMatchesGraphPolicy(replaced, CompetitionSourceGraphPolicyLegacy) {
 		t.Fatal("sidecar replaced a repository of the ten")
 	}
-	eleven["sidecar"] = strings.Repeat("0", 64)
-	if CompetitionSourceLockMatchesGraphPolicy(eleven, CompetitionSourceGraphPolicySidecar) {
-		t.Fatal("a malformed sidecar commit was accepted")
+	replaced = map[string]string{"sidecar": strings.Repeat("b", 40), "synthetic-unknown": strings.Repeat("c", 40)}
+	for repository, commit := range ten {
+		replaced[repository] = commit
+	}
+	if CompetitionSourceLockMatchesGraphPolicy(replaced, CompetitionSourceGraphPolicySidecar) {
+		t.Fatal("an unknown repository stood in for operator-core")
+	}
+	for _, name := range []string{"sidecar", "operator-core"} {
+		malformed := map[string]string{}
+		for repository, commit := range twelve {
+			malformed[repository] = commit
+		}
+		malformed[name] = strings.Repeat("0", 64)
+		if CompetitionSourceLockMatchesGraphPolicy(malformed, CompetitionSourceGraphPolicySidecar) {
+			t.Fatalf("a malformed %s commit was accepted", name)
+		}
 	}
 }

@@ -41,7 +41,7 @@ func competitionSidecarSourceMigrationContracts() []snMainnetMigrationContract {
 		return nil
 	}
 	return []snMainnetMigrationContract{
-		migrationCurrentSuffix(version, "source guards of the ten live repositories or those ten with sidecar, with retained intake custody",
+		migrationCurrentSuffix(version, "source guards of the ten live repositories or those ten with sidecar and operator-core, with retained intake custody",
 			competitionSidecarSourceArtifactQuery()),
 	}
 }

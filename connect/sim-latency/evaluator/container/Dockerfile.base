@@ -3,7 +3,11 @@
 # Both upstream images are pinned Docker Official Image indexes. A season
 # release publishes the resulting evaluator image and subsequently refers to
 # it only by its registry digest.
-ARG GO_IMAGE=golang:1.27.3-bookworm@sha256:32fa283222e2905d9fee971f60c842e5c815fdc036cf7ea599bf36bd7ca8f67f
+# The Go image moved to 1.27.4 with server's module (QD-674, QD-1393). Its
+# index digest is recorded when the owner re-qualifies the evaluator on
+# go1.27.4 (owner decision 272); until then it is the all-zero digest, which
+# no registry serves, and build-base.sh refuses to build.
+ARG GO_IMAGE=golang:1.27.4-bookworm@sha256:0000000000000000000000000000000000000000000000000000000000000000
 ARG RUNTIME_IMAGE=ubuntu:24.04@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea
 
 FROM ${GO_IMAGE} AS go-toolchain
@@ -42,12 +46,14 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=go-toolchain /usr/local/go /usr/local/go
-RUN test "$(go env GOVERSION)" = go1.27.3
+RUN test "$(go env GOVERSION)" = go1.27.4
 ARG BASE_SHA
 ARG SOURCE_EPOCH
 ARG SOURCE_CONFIG_SHA256
 ARG SOURCE_LOCK_SHA256
-# The private builder copies exactly the ten locked live repositories.
+# The private builder copies exactly the locked live repositories of the
+# source graph: the twelve of sidecar/1, the ten with sidecar and
+# operator-core (QD-769, QD-1393).
 COPY source/ /workspace/
 COPY source-lock.json /opt/urnetwork/source-lock.json
 COPY sim-latency.yml /opt/urnetwork/sim-latency.yml
@@ -73,6 +79,7 @@ RUN test "$(git -C /workspace/server rev-parse HEAD)" = "${BASE_SHA}" \
     && git config --system --add safe.directory /workspace/warp \
     && git config --system --add safe.directory /workspace/gvisor \
     && git config --system --add safe.directory /workspace/sidecar \
+    && git config --system --add safe.directory /workspace/operator-core \
     && chmod 0555 /usr/local/libexec/competition-container /usr/local/libexec/competition-official-run \
     && install -d -m 0755 /opt/urnetwork/bin /opt/urnetwork/submission /opt/urnetwork/go
 

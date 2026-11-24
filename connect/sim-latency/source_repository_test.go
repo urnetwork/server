@@ -105,12 +105,12 @@ func TestSourceRepositoryCoverageReadsPinnedCommitNotMovingMain(t *testing.T) {
 // This independent fixture prevents a removed main dependency from silently
 // shrinking every serializer, validator, image copy, and source ledger together.
 func TestSourceRepositorySetPreservesFrozenEvaluatorGraph(t *testing.T) {
-	want := []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "warp", "gvisor", "sidecar"}
+	want := []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "warp", "gvisor", "sidecar", "operator-core"}
 	if got := sourceRepositoryNames(); !slices.Equal(got, want) {
 		t.Fatalf("frozen evaluator repositories = %v, want %v", got, want)
 	}
 	if got := model.CompetitionSourceRepositoryNames(); !slices.Equal(got, want) {
-		t.Fatalf("the control plane's graph of the eleven = %v, want %v", got, want)
+		t.Fatalf("the control plane's graph of the twelve = %v, want %v", got, want)
 	}
 }
 
@@ -133,7 +133,7 @@ func TestSourceLedgerRequiresSidecarPin(t *testing.T) {
 	if err != nil || decoded.EvaluationSource.Epochs[0].Repositories.Sidecar.Commit != repositoryCommits["sidecar"] {
 		t.Fatalf("the ledger's sidecar pin did not survive its codec: %v", err)
 	}
-	if commits := manifest.EvaluationSource.Epochs[0].Repositories.commits(); len(commits) != 11 || commits["sidecar"] != manifest.EvaluationSource.Epochs[0].Repositories.Sidecar.Commit {
+	if commits := manifest.EvaluationSource.Epochs[0].Repositories.commits(); len(commits) != 12 || commits["sidecar"] != manifest.EvaluationSource.Epochs[0].Repositories.Sidecar.Commit {
 		t.Fatalf("the epoch's source identity does not name sidecar: %v", commits)
 	}
 	var document map[string]any
@@ -152,6 +152,76 @@ func TestSourceLedgerRequiresSidecarPin(t *testing.T) {
 	manifest.EvaluationSource.Epochs[0].Repositories.Sidecar.Commit = "not-a-commit"
 	if err := validateSourceManifest(manifest); err == nil {
 		t.Fatal("a malformed sidecar pin was accepted")
+	}
+}
+
+// The ledger takes operator-core as it took sidecar (QD-1393): every epoch and
+// generation pins it, and a ledger of the eleven, the ten with sidecar alone,
+// is refused, not completed.
+func TestSourceLedgerRequiresOperatorCorePin(t *testing.T) {
+	repositoryCommits := map[string]string{}
+	for index, repository := range sourceRepositoryNames() {
+		repositoryCommits[repository] = fmt.Sprintf("%040x", index+1)
+	}
+	manifest := sourceTestManifest(repositoryCommits)
+	if err := validateSourceManifest(manifest); err != nil {
+		t.Fatal(err)
+	}
+	content, err := yaml.Marshal(manifest)
+	if err != nil || strings.Count(string(content), "operator-core:") != 1 {
+		t.Fatalf("the ledger does not serialize its operator-core pin: %v\n%s", err, content)
+	}
+	decoded, err := decodeSourceManifest(content)
+	if err != nil || decoded.EvaluationSource.Epochs[0].Repositories.OperatorCore.Commit != repositoryCommits["operator-core"] {
+		t.Fatalf("the ledger's operator-core pin did not survive its codec: %v", err)
+	}
+	if commits := manifest.EvaluationSource.Epochs[0].Repositories.commits(); commits["operator-core"] != repositoryCommits["operator-core"] {
+		t.Fatalf("the epoch's source identity does not name operator-core: %v", commits)
+	}
+	var document map[string]any
+	if err := yaml.Unmarshal(content, &document); err != nil {
+		t.Fatal(err)
+	}
+	epochs := document["evaluation_source"].(map[string]any)["epochs"].([]any)
+	delete(epochs[0].(map[string]any)["repositories"].(map[string]any), "operator-core")
+	eleven, err := yaml.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decodeSourceManifest(eleven); err == nil || !strings.Contains(err.Error(), "repository operator-core has an invalid commit") {
+		t.Fatalf("a ledger of the ten with sidecar alone was accepted: %v", err)
+	}
+	manifest.EvaluationSource.Epochs[0].Repositories.OperatorCore.Commit = "not-a-commit"
+	if err := validateSourceManifest(manifest); err == nil {
+		t.Fatal("a malformed operator-core pin was accepted")
+	}
+}
+
+// The evaluator locks sidecar and operator-core but no submission may change
+// either (QD-1393): every path the production template's mono-root policy
+// allows lies in one of the ten product repositories.
+func TestProductionTemplateAllowsNoPathInSidecarOrOperatorCore(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join("launch", "competition-production.yml.template"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var template struct {
+		PatchPolicy struct {
+			PathBase     string   `yaml:"path_base"`
+			AllowedPaths []string `yaml:"allowed_paths"`
+		} `yaml:"patch_policy"`
+	}
+	if err := yaml.Unmarshal(content, &template); err != nil {
+		t.Fatal(err)
+	}
+	if template.PatchPolicy.PathBase != "mono_root_v1" || len(template.PatchPolicy.AllowedPaths) == 0 {
+		t.Fatalf("the production template's patch policy is not the mono-root one: %+v", template.PatchPolicy)
+	}
+	for _, path := range template.PatchPolicy.AllowedPaths {
+		repository, _, _ := strings.Cut(path, "/")
+		if !slices.Contains(model.CompetitionSourceRepositoryNamesBeforeSidecar(), repository) {
+			t.Errorf("the production template allows %s outside the ten product repositories", path)
+		}
 	}
 }
 

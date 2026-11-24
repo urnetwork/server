@@ -112,7 +112,7 @@ func cloneSourceBuildRepository(ctx context.Context, repository, source, destina
 		}
 	}
 	fetch.Env = append(fetch.Env, "GIT_NO_LAZY_FETCH=1", "GIT_OPTIONAL_LOCKS=0")
-	fetch.Stdout, fetch.Stderr = &sourceBoundedWriter{limit: maximumSourceConfigBytes}, &sourceBoundedWriter{limit: defaultSourceGitExecutionSettings().MaximumDiagnosticBytes}
+	fetch.Stdout, fetch.Stderr = &sourceBoundedWriter{limit: defaultSourceEpochSettings().MaximumSourceConfigBytes}, &sourceBoundedWriter{limit: defaultSourceGitExecutionSettings().MaximumDiagnosticBytes}
 	if err := fetch.Run(); err != nil {
 		return fmt.Errorf("exact approved source fetch: %w", err)
 	}
@@ -144,7 +144,7 @@ func validateSourceBuildRequest(request reviewedSourceBuildRequest) error {
 	proposal := request.Proposal
 	instrument := request.Operation == "isolated_trusted_instrument_build"
 	if (!instrument && request.Operation != "isolated_reviewed_source_build") || request.SandboxContract != "offline_evaluator_containment_v1" || proposal == nil || proposal.Schema != 2 ||
-		(!instrument && (proposal.ReviewId == ([16]byte{}) || proposal.JobId == ([16]byte{}) || !validSha256(proposal.ReviewDecisionDigest))) || request.SourceGeneration < 1 || maximumCompetitionEpoch < request.SourceGeneration ||
+		(!instrument && (proposal.ReviewId == ([16]byte{}) || proposal.JobId == ([16]byte{}) || !validSha256(proposal.ReviewDecisionDigest))) || request.SourceGeneration < 1 || defaultSourceEpochSettings().MaximumCompetitionEpoch < request.SourceGeneration ||
 		!validSha256(proposal.PatchSha256) || !validSha256(proposal.BaseSourceLockSha256) ||
 		!strings.HasPrefix(proposal.EvaluatedImageDigest, "sha256:") || !validSha256(strings.TrimPrefix(proposal.EvaluatedImageDigest, "sha256:")) {
 		return errors.New("source build requires the authenticated reviewed-source protocol")

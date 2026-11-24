@@ -74,9 +74,10 @@ var (
 
 // Whether this binary links MG0, §7's P0: network_client_owner, and the altered
 // account_api_key and auth_code. Nothing may read or write them while it is
-// false. MG0 also widens the competition's source guards to admit sidecar as an
-// eleventh repository (competitionSidecarSourceMigration); a database without
-// it refuses a source graph that names sidecar.
+// false. MG0 also widens the competition's source guards to admit sidecar and
+// operator-core as the eleventh and twelfth repositories
+// (competitionSidecarSourceMigration); a database without it refuses a source
+// graph that names either.
 func SidecarMg0Linked() bool {
 	return sidecarMg0Linked()
 }

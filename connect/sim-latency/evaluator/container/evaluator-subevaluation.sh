@@ -3,8 +3,9 @@
 # Prospective private worker-to-Compose evaluator for protocol v1.
 # Submission bytes choose only the canonical patch. Every image, command,
 # resource ceiling, mount, and artifact name below is evaluator-owned.
-# This release measures the source graph of eleven repositories, the ten with
-# sidecar, and accepts only a request whose frozen policy names sidecar/1.
+# This release measures the source graph of twelve repositories, the ten with
+# sidecar and operator-core, and accepts only a request whose frozen policy
+# names sidecar/1.
 
 set -Eeuo pipefail
 umask 077
@@ -356,7 +357,7 @@ if [ "$staging" = true ]; then
     source_branch=sim-latency-staging
     source_mode_args=(--staging)
 fi
-REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor sidecar)
+REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor sidecar operator-core)
 readonly REPOSITORIES
 repository_names_json="$(printf '%s\n' "${REPOSITORIES[@]}" | jq -Rsc 'split("\n")[:-1]')"
 round_id="$(jq -er '.round_id' "$request_path")"

@@ -537,7 +537,7 @@ Only after review finalizes the epoch does the external control loop run one of:
 ./run-local-main.sh promote --epoch N --no-winner
 ```
 
-Promotion creates one temporary root and clones all ten locked repositories
+Promotion creates one temporary root and clones all twelve locked repositories
 into it. It checks out each `sim-latency` branch at the prior epoch, applies and
 commits the winner to the evaluated server surface, verifies every dependency
 remains unchanged, pushes changed source branches first, and activates the new

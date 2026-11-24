@@ -34,8 +34,8 @@ func trustedInstrumentTree(ctx context.Context, repositoryRoot, selectedCommit s
 		}
 	}
 	for _, path := range approval.ProtectedPaths {
-		original, originalErr := sourceGitBytes(ctx, repositoryRoot, maximumSourceConfigBytes, "ls-tree", "-z", base, "--", path)
-		selected, selectedErr := sourceGitBytes(ctx, repositoryRoot, maximumSourceConfigBytes, "ls-tree", "-z", selectedCommit, "--", path)
+		original, originalErr := sourceGitBytes(ctx, repositoryRoot, defaultSourceEpochSettings().MaximumSourceConfigBytes, "ls-tree", "-z", base, "--", path)
+		selected, selectedErr := sourceGitBytes(ctx, repositoryRoot, defaultSourceEpochSettings().MaximumSourceConfigBytes, "ls-tree", "-z", selectedCommit, "--", path)
 		if originalErr != nil || selectedErr != nil || string(original) != string(selected) {
 			return "", fmt.Errorf("trusted instrument protected preimage conflict at %s; retain the actual selected product and obtain a new operator approval", path)
 		}
@@ -61,7 +61,7 @@ func trustedInstrumentTree(ctx context.Context, repositoryRoot, selectedCommit s
 			return nil, err
 		}
 		command.Env = append(command.Env, "GIT_INDEX_FILE="+filepath.Join(root, "index"))
-		output := &sourceBoundedWriter{limit: maximumSourceConfigBytes}
+		output := &sourceBoundedWriter{limit: defaultSourceEpochSettings().MaximumSourceConfigBytes}
 		command.Stdout, command.Stderr = output, &sourceBoundedWriter{limit: 4096}
 		if err := command.Run(); err != nil {
 			return nil, fmt.Errorf("exact trusted instrument patch failed (no merge or conflict recovery is permitted): %w", err)
@@ -80,7 +80,7 @@ func trustedInstrumentTree(ctx context.Context, repositoryRoot, selectedCommit s
 	}
 	// Full-index, binary-safe diff bytes are the approval format. Comparison
 	// refuses extra paths, missing hunks, fuzz, offsets and unnoticed changes.
-	actual, err := sourceGitBytes(ctx, repositoryRoot, maximumSourceConfigBytes, "diff", "--binary", "--full-index", "--no-ext-diff", "--no-renames", selectedCommit, strings.TrimSpace(string(tree)), "--")
+	actual, err := sourceGitBytes(ctx, repositoryRoot, defaultSourceEpochSettings().MaximumSourceConfigBytes, "diff", "--binary", "--full-index", "--no-ext-diff", "--no-renames", selectedCommit, strings.TrimSpace(string(tree)), "--")
 	if err != nil || string(actual) != string(approval.Patch) {
 		return "", errors.New("trusted instrument result differs from the exact approved canonical patch bytes")
 	}

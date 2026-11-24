@@ -79,15 +79,15 @@ func TestCompetitionSourceLockDigestRejectsIncompleteAndUnknownGraphs(t *testing
 	}
 }
 
-// The active graph names sidecar after the ten, and a lock of the eleven has its
-// own canonical bytes: the ten's with sidecar in key order. The ten alone keep
-// the digest they had.
-func TestCompetitionSourceLockDigestBindsTheTenWithSidecar(t *testing.T) {
+// The active graph names sidecar and operator-core after the ten, and a lock of
+// the twelve has its own canonical bytes: the ten's with the two in key order.
+// The ten alone keep the digest they had.
+func TestCompetitionSourceLockDigestBindsTheTenWithSidecarAndOperatorCore(t *testing.T) {
 	ten := []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "warp", "gvisor"}
 	if names := CompetitionSourceRepositoryNamesBeforeSidecar(); strings.Join(names, " ") != strings.Join(ten, " ") {
 		t.Fatalf("the graph before sidecar = %v", names)
 	}
-	if names := CompetitionSourceRepositoryNames(); strings.Join(names, " ") != strings.Join(ten, " ")+" sidecar" {
+	if names := CompetitionSourceRepositoryNames(); strings.Join(names, " ") != strings.Join(ten, " ")+" sidecar operator-core" {
 		t.Fatalf("the active graph = %v", names)
 	}
 	CompetitionSourceRepositoryNames()[0] = "changed"
@@ -100,52 +100,66 @@ func TestCompetitionSourceLockDigestBindsTheTenWithSidecar(t *testing.T) {
 	for _, name := range CompetitionSourceRepositoryNames() {
 		commits[name] = strings.Repeat("c", 40)
 	}
-	canonical := `{"schema":1,"development_snapshot":false,"repositories":{"connect":"` + commits["connect"] + `","glog":"` + commits["glog"] + `","goidenticons":"` + commits["goidenticons"] + `","gvisor":"` + commits["gvisor"] + `","proxy":"` + commits["proxy"] + `","sdk":"` + commits["sdk"] + `","server":"` + commits["server"] + `","sidecar":"` + commits["sidecar"] + `","sn":"` + commits["sn"] + `","userwireguard":"` + commits["userwireguard"] + `","warp":"` + commits["warp"] + `"}}`
+	canonical := `{"schema":1,"development_snapshot":false,"repositories":{"connect":"` + commits["connect"] + `","glog":"` + commits["glog"] + `","goidenticons":"` + commits["goidenticons"] + `","gvisor":"` + commits["gvisor"] + `","operator-core":"` + commits["operator-core"] + `","proxy":"` + commits["proxy"] + `","sdk":"` + commits["sdk"] + `","server":"` + commits["server"] + `","sidecar":"` + commits["sidecar"] + `","sn":"` + commits["sn"] + `","userwireguard":"` + commits["userwireguard"] + `","warp":"` + commits["warp"] + `"}}`
 	expected := sha256.Sum256([]byte(canonical))
 	for _, staging := range []bool{false, true} {
 		digest, err := CompetitionSourceLockDigestForMode(commits, staging)
 		if err != nil || digest != hex.EncodeToString(expected[:]) {
-			t.Fatalf("the eleven's digest, staging=%t: %s %v", staging, digest, err)
+			t.Fatalf("the twelve's digest, staging=%t: %s %v", staging, digest, err)
 		}
 	}
 	before := maps.Clone(commits)
 	delete(before, "sidecar")
+	delete(before, "operator-core")
 	beforeDigest, err := CompetitionSourceLockDigest(before)
 	if err != nil || beforeDigest == hex.EncodeToString(expected[:]) {
 		t.Fatalf("the ten alone: %s %v", beforeDigest, err)
 	}
 }
 
-// Sidecar is admitted only beside all ten, with a well-formed commit, and with
-// nothing else: it stands in for no live repository and brings no other name.
-func TestCompetitionSourceLockDigestRejectsSidecarInAnIncompleteOrUnknownGraph(t *testing.T) {
-	eleven := map[string]string{}
+// Sidecar and operator-core are admitted only together, beside all ten, each
+// with a well-formed commit, and with nothing else: neither stands in for a
+// live repository or for the other, and they bring no other name. The eleven of
+// sidecar alone, the graph sidecar/1 named before operator-core, is refused.
+func TestCompetitionSourceLockDigestRejectsTheTwoInAnIncompleteOrUnknownGraph(t *testing.T) {
+	twelve := map[string]string{}
 	for _, name := range CompetitionSourceRepositoryNames() {
-		eleven[name] = strings.Repeat("d", 40)
+		twelve[name] = strings.Repeat("d", 40)
 	}
 	for _, name := range CompetitionSourceRepositoryNamesBeforeSidecar() {
-		invalid := maps.Clone(eleven)
+		invalid := maps.Clone(twelve)
 		delete(invalid, name)
 		if _, err := CompetitionSourceLockDigest(invalid); err == nil {
-			t.Fatalf("sidecar replaced mandatory %s", name)
+			t.Fatalf("the two replaced mandatory %s", name)
 		}
 		invalid["synthetic-unknown"] = strings.Repeat("d", 40)
 		if _, err := CompetitionSourceLockDigest(invalid); err == nil {
-			t.Fatalf("sidecar and an unknown repository replaced %s", name)
+			t.Fatalf("the two and an unknown repository replaced %s", name)
 		}
 	}
-	for _, commit := range []string{"", "invalid-commit", strings.Repeat("d", 39), strings.Repeat("D", 40)} {
-		invalid := maps.Clone(eleven)
-		invalid["sidecar"] = commit
-		if _, err := CompetitionSourceLockDigestForMode(invalid, true); err == nil {
-			t.Fatalf("accepted the sidecar pin %q", commit)
+	for _, name := range []string{"sidecar", "operator-core"} {
+		alone := maps.Clone(twelve)
+		delete(alone, name)
+		if _, err := CompetitionSourceLockDigest(alone); err == nil {
+			t.Fatalf("the ten with one of the two, lacking %s, was accepted", name)
+		}
+		alone[name+"-synthetic"] = strings.Repeat("d", 40)
+		if _, err := CompetitionSourceLockDigest(alone); err == nil {
+			t.Fatalf("an unknown repository stood in for %s", name)
+		}
+		for _, commit := range []string{"", "invalid-commit", strings.Repeat("d", 39), strings.Repeat("D", 40)} {
+			invalid := maps.Clone(twelve)
+			invalid[name] = commit
+			if _, err := CompetitionSourceLockDigestForMode(invalid, true); err == nil {
+				t.Fatalf("accepted the %s pin %q", name, commit)
+			}
 		}
 	}
 	for _, name := range []string{"synthetic-unknown", "operator-proxy"} {
-		invalid := maps.Clone(eleven)
+		invalid := maps.Clone(twelve)
 		invalid[name] = strings.Repeat("d", 40)
 		if _, err := CompetitionSourceLockDigest(invalid); err == nil {
-			t.Fatalf("accepted %s as a twelfth repository", name)
+			t.Fatalf("accepted %s as a thirteenth repository", name)
 		}
 	}
 }

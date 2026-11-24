@@ -25,11 +25,25 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const (
-	maximumCompetitionEpoch       = 6
-	maximumSourceConfigBytes      = 1024 * 1024
-	stagingEvaluationSourceBranch = "sim-latency-staging"
-)
+const stagingEvaluationSourceBranch = "sim-latency-staging"
+
+// Bounds the competition's source ledger and the files read in one piece with
+// it (QD-702).
+type sourceEpochSettings struct {
+	// The last epoch of a season, whose first is 0. It is the competition
+	// protocol's bound, which build-base.sh's --epoch and the worker's source
+	// identity hold as well, so it changes on every side together.
+	MaximumCompetitionEpoch int
+	// The largest source ledger, manifest, module file, evaluator configuration
+	// or bounded Git output read in one piece, in bytes. 1 MiB holds every
+	// ledger with room; a larger file is refused, never truncated.
+	MaximumSourceConfigBytes int
+}
+
+// Six epochs after the baseline, and 1 MiB.
+func defaultSourceEpochSettings() sourceEpochSettings {
+	return sourceEpochSettings{MaximumCompetitionEpoch: 6, MaximumSourceConfigBytes: 1024 * 1024}
+}
 
 var sourceGitShaPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
@@ -54,12 +68,17 @@ type sourceRepositories struct {
 	// sidecar module builds only beside this checkout, so a ledger without the
 	// pin is refused, as one that still names operator-proxy is.
 	Sidecar sourceRepository `yaml:"sidecar"`
+	// The twelfth repository (QD-1393). Every server commit since owner
+	// decision 251 requires operator-core and builds only beside this checkout,
+	// so a ledger without the pin is refused, as one without sidecar is.
+	OperatorCore sourceRepository `yaml:"operator-core"`
 }
 
 // sourceRepositoryNames returns every repository copied into and built by the
-// evaluator: the ten it has held and sidecar, in the order of the producers of
-// the sidecar/1 source graph (evaluator-sidecar.sh and its two policy
-// siblings). A fresh slice keeps callers from mutating the package policy.
+// evaluator: the ten it has held, sidecar and operator-core, in the order of
+// the producers of the sidecar/1 source graph (evaluator-sidecar.sh and its two
+// policy siblings). A fresh slice keeps callers from mutating the package
+// policy.
 func sourceRepositoryNames() []string {
 	return sourceRepositoryNamesForMode(false)
 }
@@ -77,7 +96,7 @@ func sourceRepositoryNamesForMode(_ bool) []string {
 		"userwireguard",
 		"sn",
 	}
-	return append(names, "warp", "gvisor", "sidecar")
+	return append(names, "warp", "gvisor", "sidecar", "operator-core")
 }
 
 // commits returns the complete evaluation-source identity for one epoch.
@@ -99,6 +118,7 @@ func (self sourceRepositories) commitsForMode(_ bool) map[string]string {
 		"warp":          self.Warp.Commit,
 		"gvisor":        self.Gvisor.Commit,
 		"sidecar":       self.Sidecar.Commit,
+		"operator-core": self.OperatorCore.Commit,
 	}
 	return commits
 }
@@ -181,16 +201,17 @@ type sourceRecord struct {
 
 // readSourceFile bounds operator configuration before parsing it.
 func readSourceFile(path string) ([]byte, error) {
+	settings := defaultSourceEpochSettings()
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
-	fileBytes, err := io.ReadAll(io.LimitReader(file, maximumSourceConfigBytes+1))
+	fileBytes, err := io.ReadAll(io.LimitReader(file, int64(settings.MaximumSourceConfigBytes)+1))
 	if err != nil {
 		return nil, err
 	}
-	if maximumSourceConfigBytes < len(fileBytes) {
+	if settings.MaximumSourceConfigBytes < len(fileBytes) {
 		return nil, errors.New("file is oversized")
 	}
 	return fileBytes, nil
@@ -208,7 +229,7 @@ func loadSourceManifest(path string) (*sourceManifest, error) {
 // decodeSourceManifest authenticates one bounded strict source ledger equally
 // for local configuration, persisted recovery, and staged config publication.
 func decodeSourceManifest(manifestBytes []byte) (*sourceManifest, error) {
-	if len(manifestBytes) == 0 || len(manifestBytes) > maximumSourceConfigBytes {
+	if len(manifestBytes) == 0 || len(manifestBytes) > defaultSourceEpochSettings().MaximumSourceConfigBytes {
 		return nil, errors.New("source manifest is empty or oversized")
 	}
 	manifest := &sourceManifest{}
@@ -269,7 +290,7 @@ func validateSourceManifest(manifest *sourceManifest) error {
 	if _, err := time.Parse(time.RFC3339, manifest.FrozenAt); err != nil {
 		return errors.New("source config frozen_at must be an RFC3339 timestamp")
 	}
-	if len(manifest.EvaluationSource.Epochs) == 0 || maximumCompetitionEpoch+1 < len(manifest.EvaluationSource.Epochs) {
+	if len(manifest.EvaluationSource.Epochs) == 0 || defaultSourceEpochSettings().MaximumCompetitionEpoch+1 < len(manifest.EvaluationSource.Epochs) {
 		return errors.New("source config must contain baseline epoch 0 and at most six promoted epochs")
 	}
 	for epochIndex, epoch := range manifest.EvaluationSource.Epochs {
@@ -658,8 +679,8 @@ func configuredSourcePathsForMode(opts docopt.Opts, staging bool) (string, strin
 func configuredEpoch(opts docopt.Opts) (int, error) {
 	value := optString(opts, "--epoch", "")
 	epochNumber, err := strconv.Atoi(value)
-	if err != nil || epochNumber < 0 || maximumCompetitionEpoch < epochNumber {
-		return 0, fmt.Errorf("--epoch must be an integer in 0..%d", maximumCompetitionEpoch)
+	if err != nil || epochNumber < 0 || defaultSourceEpochSettings().MaximumCompetitionEpoch < epochNumber {
+		return 0, fmt.Errorf("--epoch must be an integer in 0..%d", defaultSourceEpochSettings().MaximumCompetitionEpoch)
 	}
 	return epochNumber, nil
 }

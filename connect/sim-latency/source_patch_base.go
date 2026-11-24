@@ -18,6 +18,6 @@ func validateSourcePatchBase(ctx context.Context, root, commit, repository strin
 	ctx, cancel := context.WithTimeout(ctx, defaultSourceGitReadSettings().Timeout)
 	defer cancel()
 	return controller.ValidateCompetitionRepositoryPatchBase(patch, policy, repository, func(relative string) ([]byte, error) {
-		return sourceGitBytes(ctx, root, maximumSourceConfigBytes, "--literal-pathspecs", "ls-tree", "-z", "--full-tree", commit, "--", relative)
+		return sourceGitBytes(ctx, root, defaultSourceEpochSettings().MaximumSourceConfigBytes, "--literal-pathspecs", "ls-tree", "-z", "--full-tree", commit, "--", relative)
 	})
 }

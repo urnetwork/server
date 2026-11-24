@@ -213,7 +213,7 @@ func executeG2InstrumentBaseTechnicalQualification(ctx context.Context, config g
 	}
 	info, err := os.Lstat(config.ApprovalPath)
 	canonical, pathErr := filepath.EvalSymlinks(config.ApprovalPath)
-	if err != nil || pathErr != nil || canonical != config.ApprovalPath || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > maximumSourceConfigBytes {
+	if err != nil || pathErr != nil || canonical != config.ApprovalPath || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > int64(defaultSourceEpochSettings().MaximumSourceConfigBytes) {
 		return "", errors.New("technical instrument approval is missing, redirected or oversized")
 	}
 	approvalFile, err := os.Open(config.ApprovalPath)
@@ -225,9 +225,9 @@ func executeG2InstrumentBaseTechnicalQualification(ctx context.Context, config g
 		_ = approvalFile.Close()
 		return "", errors.New("technical instrument approval changed while opening")
 	}
-	approvalBytes, readErr := io.ReadAll(io.LimitReader(approvalFile, maximumSourceConfigBytes+1))
+	approvalBytes, readErr := io.ReadAll(io.LimitReader(approvalFile, int64(defaultSourceEpochSettings().MaximumSourceConfigBytes)+1))
 	closeErr := approvalFile.Close()
-	if err := errors.Join(readErr, closeErr); err != nil || len(approvalBytes) > maximumSourceConfigBytes || int64(len(approvalBytes)) != info.Size() {
+	if err := errors.Join(readErr, closeErr); err != nil || len(approvalBytes) > defaultSourceEpochSettings().MaximumSourceConfigBytes || int64(len(approvalBytes)) != info.Size() {
 		return "", errors.New("technical instrument approval changed or exceeded its bounded read")
 	}
 	approvalHash := sha256.Sum256(approvalBytes)
@@ -351,7 +351,7 @@ func executeG2InstrumentBaseTechnicalQualification(ctx context.Context, config g
 	scriptDigests := make([]string, 0, 2)
 	for _, relative := range []string{"connect/sim-latency/official-run.sh", "connect/sim-latency/evaluator/container/entrypoint.sh"} {
 		content, err := os.ReadFile(filepath.Join(serverRoot, filepath.FromSlash(relative)))
-		if err != nil || len(content) <= 0 || len(content) > maximumSourceConfigBytes {
+		if err != nil || len(content) <= 0 || len(content) > defaultSourceEpochSettings().MaximumSourceConfigBytes {
 			return directory, errors.New("technical image protected script is unavailable or oversized")
 		}
 		digest := sha256.Sum256(content)
@@ -491,7 +491,7 @@ func TestG2InstrumentBaseTechnicalImageQualification(t *testing.T) {
 	}
 	config := defaultG2InstrumentBaseTechnicalSettings()
 	path, expected := os.Getenv("SIM_LATENCY_G2_BRIDGE_SETTINGS"), os.Getenv("SIM_LATENCY_G2_BRIDGE_SETTINGS_SHA256")
-	content, err := readSourceHostTrustedFile(path, maximumSourceConfigBytes)
+	content, err := readSourceHostTrustedFile(path, defaultSourceEpochSettings().MaximumSourceConfigBytes)
 	if err != nil || !validSha256(expected) {
 		t.Fatal("technical image input must be root-sealed and digest pinned", err)
 	}

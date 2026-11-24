@@ -1,5 +1,6 @@
 // The permissive step must keep every source authority and change only the two
-// census counts, each under the sidecar condition.
+// census counts, each under the condition that the graph holds both sidecar and
+// operator-core.
 package server
 
 import (
@@ -8,9 +9,9 @@ import (
 	"testing"
 )
 
-// Each guard is the registered one with one count under the sidecar condition,
-// so a deployment cannot drop the elected-winner, exact-source, lease or
-// readiness requirements with it, or require sidecar of the running release.
+// Each guard is the registered one with one count under the condition of the
+// two, so a deployment cannot drop the elected-winner, exact-source, lease or
+// readiness requirements with it, or require either of the running release.
 func TestCompetitionSidecarSourceMigrationOnlyWidensTheLatestGuards(t *testing.T) {
 	migration := competitionSidecarSourceMigration()
 	if migration != competitionSidecarSourceMigration() {
@@ -21,8 +22,8 @@ func TestCompetitionSidecarSourceMigrationOnlyWidensTheLatestGuards(t *testing.T
 		t.Fatalf("the permissive step replaces %d functions", len(functions))
 	}
 	for name, condition := range map[string]string{
-		"competition_v2_source_graph_valid": "commits ? 'sidecar'",
-		"competition_v2_source_authorized":  "intent->'commits' ? 'sidecar'",
+		"competition_v2_source_graph_valid": "commits ?& ARRAY['sidecar','operator-core']",
+		"competition_v2_source_authorized":  "intent->'commits' ?& ARRAY['sidecar','operator-core']",
 	} {
 		registered, ok := sidecarGroupRegisteredFunction(name)
 		if !ok || registered == "" {
@@ -36,10 +37,10 @@ func TestCompetitionSidecarSourceMigrationOnlyWidensTheLatestGuards(t *testing.T
 	for _, expected := range []string{
 		"SET LOCAL lock_timeout = '5s';",
 		"CREATE OR REPLACE FUNCTION competition_v2_source_graph_valid",
-		"jsonb_object_keys(commits))=(CASE WHEN commits ? 'sidecar' THEN 11 ELSE 10 END)",
+		"jsonb_object_keys(commits))=(CASE WHEN commits ?& ARRAY['sidecar','operator-core'] THEN 12 ELSE 10 END)",
 		"commits ?& ARRAY['server','connect','sdk','proxy','glog','goidenticons','userwireguard','sn','warp','gvisor']",
 		"CREATE OR REPLACE FUNCTION competition_v2_source_authorized",
-		"jsonb_object_keys(intent->'git_refs'))<>(CASE WHEN intent->'commits' ? 'sidecar' THEN 12 ELSE 11 END)",
+		"jsonb_object_keys(intent->'git_refs'))<>(CASE WHEN intent->'commits' ?& ARRAY['sidecar','operator-core'] THEN 13 ELSE 11 END)",
 		"intent:=competition_v2_instrument_product_intent(intent,env,competition,season);",
 		"PERFORM competition_v2_source_mode(intent)",
 		"competition_v2_winner_source_authorized(intent,predecessor_id)",
@@ -51,13 +52,13 @@ func TestCompetitionSidecarSourceMigrationOnlyWidensTheLatestGuards(t *testing.T
 		}
 	}
 	for _, forbidden := range []string{
-		"jsonb_object_keys(commits))=10", "jsonb_object_keys(commits))=11",
-		"jsonb_object_keys(intent->'git_refs'))<>11", "jsonb_object_keys(intent->'git_refs'))<>12",
-		"'gvisor','sidecar'", "operator-proxy",
+		"jsonb_object_keys(commits))=10", "jsonb_object_keys(commits))=11", "jsonb_object_keys(commits))=12",
+		"jsonb_object_keys(intent->'git_refs'))<>11", "jsonb_object_keys(intent->'git_refs'))<>12", "jsonb_object_keys(intent->'git_refs'))<>13",
+		"'gvisor','sidecar'", "commits ? 'sidecar'", "commits ? 'operator-core'", "operator-proxy",
 		"CREATE TRIGGER", "ALTER FUNCTION", "UPDATE competition_", "DELETE FROM competition_", "CREATE FUNCTION",
 	} {
 		if strings.Contains(migration, forbidden) {
-			t.Errorf("the permissive step requires sidecar, rewrites evidence or keeps an old count: %q", forbidden)
+			t.Errorf("the permissive step requires sidecar, admits one of the two alone, rewrites evidence or keeps an old count: %q", forbidden)
 		}
 	}
 }

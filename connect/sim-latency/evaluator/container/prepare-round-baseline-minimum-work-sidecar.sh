@@ -4,8 +4,8 @@
 # Install beside the new policy's dependencies in a new protected release directory.
 # It cannot run build_candidate, candidate code, or publish a submission result.
 # This release prepares the control of a round whose source graph is the ten
-# repositories with sidecar. It accepts only a request naming sidecar/1 and
-# runs only the producer of that graph, pinned below.
+# repositories with sidecar and operator-core. It accepts only a request
+# naming sidecar/1 and runs only the producer of that graph, pinned below.
 set -Eeuo pipefail
 umask 077
 baseline_arguments=("$@")
@@ -56,7 +56,7 @@ baseline_actual_management_affinity="$(awk -F: \
 round_baseline_control_prefix() {
     local source="$1" program prefix count
     [ -f "$source" ] && [ ! -L "$source" ] || return 1
-    [ "$(sha256sum -- "$source" | awk '{print $1}')" = ebacbbdc25a4ad2c49c1436e70aeda343124fb46bad9885068140b2d74105f16 ] || return 1
+    [ "$(sha256sum -- "$source" | awk '{print $1}')" = 22fe793bcf833df42cb341f64ea4f9afeca0fbcd57409f5823a91813fbba8a7e ] || return 1
     program="$(<"$source")"
     count="$(printf '%s\n' "$program" | awk '$0 == "build_candidate" {n++} END {print n+0}')"
     [ "$count" = 1 ] || return 1

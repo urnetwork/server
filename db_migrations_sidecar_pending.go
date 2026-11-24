@@ -52,8 +52,8 @@ func sidecarPendingMigrations() []any {
 
 // MG0, §7's P0 (§19.7): the owner row that marks a client, and the columns that
 // carry an API key's id onto the auth codes it creates. With them, the
-// permissive step that admits sidecar as the competition's eleventh source
-// repository (QD-128, QD-752).
+// permissive step that admits sidecar and operator-core as the competition's
+// eleventh and twelfth source repositories (QD-128, QD-752, QD-1393).
 func sidecarMg0Migrations() []any {
 	return []any{
 		// Set at mint and deleted with its client (§7.7). The marks admin_refused
@@ -107,11 +107,11 @@ func sidecarMg0Migrations() []any {
 		),
 
 		// The competition's source guards admit the ten live repositories, or
-		// those ten with sidecar (QD-128, QD-752). The release running when this
-		// applies sends ten and keeps passing; the release that links MG0 may
-		// send either. It replaces two functions in place and takes no table
-		// lock. Requiring eleven is a cleanup migration for after that release is
-		// deployed, and is in no group.
+		// those ten with sidecar and operator-core (QD-128, QD-752, QD-1393). The
+		// release running when this applies sends ten and keeps passing; the
+		// release that links MG0 may send either. It replaces two functions in
+		// place and takes no table lock. Requiring the twelve is a cleanup
+		// migration for after that release is deployed, and is in no group.
 		newSqlMigration(competitionSidecarSourceMigration()),
 
 		// the group's marker (SidecarMg0Linked); it changes nothing

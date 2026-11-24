@@ -19,9 +19,10 @@ package sidecart3
 // (checkPlan). QuorumLoss and DriveMiss run on T3's 4-host file-cluster layouts alone (cluster_faults.go),
 // and a Net on the local stack's one MinIO process refuses both. Every blob request carries its deadline in
 // the store's time, and the store clock, when on, sits beneath these wrappers, so what a plan lets through
-// is recorded on the schedule's clock (clock.go). After a move of the Net's clock, the clusters' admin info is
-// read again once, before the first request, and every request arriving meanwhile waits for that reread
-// (clockCatchUp). Wrappers are safe for concurrent use.
+// is recorded on the schedule's clock (clock.go). Once the Net's clock has moved past
+// Settings.AdminInfoRereadAfter since the last reread, the clusters' admin info is read again once, before the
+// first request, and every request arriving meanwhile waits for that reread (clockCatchUp). Wrappers are safe for
+// concurrent use.
 
 import (
 	"context"
@@ -90,13 +91,17 @@ type catchUpHooks struct {
 // admin info is CheckStaleAfter old on the Net's clock, and the store clock's aging of the Redis families' ttls
 // (clock.go).
 //
-// The first request to find the clock moved past the last catch-up runs the work up to that time, and every request
-// that arrives while it is in flight waits for it to finish and then looks at the clock again, so no request after a
-// move goes on before the work that move called for has finished, whatever their order. One that went on during a
-// reread would be refused on admin info still stale (ErrFileClusterPools, which evs answers 503 UNAVAILABLE), and its
-// client's retry would wait on a fake clock no one moves. The work runs once a move, with no lock held, and the time
-// is recorded only once it has finished. This is QD-1111's lock held across the check, built so that a wait still
-// ends with its request's ctx and a killed actor parks holding nothing.
+// The first request to find the clock moved past the last catch-up, by more than moveThreshold, runs the work up to
+// that time, and every request that arrives while it is in flight waits for it to finish and then looks at the clock
+// again, so no request after a move goes on before the work that move called for has finished, whatever their order.
+// One that went on during a reread would be refused on admin info still stale (ErrFileClusterPools, which evs
+// answers 503 UNAVAILABLE), and its client's retry would wait on a fake clock no one moves. The work runs once a
+// move, with no lock held, and the time is recorded only once it has finished. This is QD-1111's lock held across the
+// check, built so that a wait still ends with its request's ctx and a killed actor parks holding nothing.
+//
+// A move within moveThreshold calls for no work. faultBlobs' rereads take Settings.AdminInfoRereadAfter (QD-1395), so
+// a clock following real time in small steps rereads about once a threshold, not before every request after a step;
+// the store clock's aging takes none, every move aging the families.
 //
 // A request waits with the baton given up, as a fake that parks a caller does, and stops waiting when its ctx ends.
 // Requests queue behind the work for its real duration, which on a layout under a cluster fault may be a check's
@@ -106,6 +111,9 @@ type clockCatchUp struct {
 	// what the hooks and a waiting request's error call this catch-up
 	what  string
 	hooks *catchUpHooks
+	// how far the clock moves past caughtUpTime before the work runs, set before the first catch-up; non-positive:
+	// any move
+	moveThreshold time.Duration
 
 	stateLock sync.Mutex
 	// the Net's time the last finished catch-up ran to
@@ -114,14 +122,15 @@ type clockCatchUp struct {
 	inFlight chan struct{}
 }
 
-// A catch-up with nothing to do until the Net's clock moves past caughtUpTime. hooks nil tells no test anything.
+// A catch-up with nothing to do until the Net's clock moves past caughtUpTime, whose work runs after any move. hooks
+// nil tells no test anything.
 func newClockCatchUp(net *sidecartest.Net, what string, caughtUpTime time.Time, hooks *catchUpHooks) *clockCatchUp {
 	return &clockCatchUp{net: net, what: what, hooks: hooks, caughtUpTime: caughtUpTime}
 }
 
-// Runs work from the time the last catch-up ran to up to the Net's now, once the clock has moved past it, after
-// waiting for any catch-up in flight. An error is ctx's, which ended while the request waited: the request goes no
-// further, and a dead actor's goroutine parks here as it would at a fake.
+// Runs work from the time the last catch-up ran to up to the Net's now, once the clock has moved past it by more than
+// moveThreshold, after waiting for any catch-up in flight. An error is ctx's, which ended while the request waited:
+// the request goes no further, and a dead actor's goroutine parks here as it would at a fake.
 func (self *clockCatchUp) catchUp(ctx context.Context, work func(fromTime time.Time, toTime time.Time)) error {
 	for {
 		// read outside the lock, which calls no one: a move after this read is the next request's to catch up, as a
@@ -136,7 +145,7 @@ func (self *clockCatchUp) catchUp(ctx context.Context, work func(fromTime time.T
 				inFlight = self.inFlight
 				return false
 			}
-			if !self.caughtUpTime.Before(now) {
+			if !self.caughtUpTime.Add(max(self.moveThreshold, 0)).Before(now) {
 				return false
 			}
 			fromTime = self.caughtUpTime
@@ -195,8 +204,9 @@ func (self *clockCatchUp) runWork(ctx context.Context, work func(), toTime time.
 
 // server.FileClusters with the Net's plans, over blobs, the clusters themselves or the store clock on them.
 // Each cluster it hands out is wrapped, and before a request it reads the clusters' admin info again
-// whenever the Net's clock has moved since it last did, every request after a move waiting for that reread
-// (clockCatchUp), so a schedule's Advance never leaves a write refused on admin info the fake clock made stale.
+// whenever the Net's clock has moved past rereadAfter since it last did, every request after such a move waiting
+// for that reread (clockCatchUp), so a schedule's Advance never leaves a write refused on admin info the fake clock
+// made stale. A move within rereadAfter, which stays below the clusters' CheckStaleAfter, leaves admin info fresh.
 type faultBlobs struct {
 	blobs sidecar.BlobStore
 	// reads every cluster's admin info and sentinel again: server.FileClusters.Check
@@ -204,26 +214,30 @@ type faultBlobs struct {
 	net   *sidecartest.Net
 	// QuorumLoss and DriveMiss on a layout, nil on the local stack
 	clusterFaults *clusterFaults
-	// the reread after each move of the Net's clock
+	// the reread after each move of the Net's clock past rereadAfter
 	rereads *clockCatchUp
 }
 
 var _ sidecar.BlobStore = (*faultBlobs)(nil)
 
-// check is the clusters' Check. hooks nil tells no test anything.
-func newFaultBlobs(blobs sidecar.BlobStore, check func(ctx context.Context), net *sidecartest.Net, clusterFaults *clusterFaults, hooks *catchUpHooks) *faultBlobs {
+// check is the clusters' Check. rereadAfter is Settings.AdminInfoRereadAfter: non-positive rereads after every move.
+// hooks nil tells no test anything.
+func newFaultBlobs(blobs sidecar.BlobStore, check func(ctx context.Context), net *sidecartest.Net, clusterFaults *clusterFaults, rereadAfter time.Duration, hooks *catchUpHooks) *faultBlobs {
+	// the first request reads admin info again whatever the clock says, as the zero time is before every time, past
+	// any threshold
+	rereads := newClockCatchUp(net, "admin info reread", time.Time{}, hooks)
+	rereads.moveThreshold = rereadAfter
 	return &faultBlobs{
 		blobs:         blobs,
 		check:         check,
 		net:           net,
 		clusterFaults: clusterFaults,
-		// the first request reads admin info again whatever the clock says, as the zero time is before every time
-		rereads: newClockCatchUp(net, "admin info reread", time.Time{}, hooks),
+		rereads:       rereads,
 	}
 }
 
-// Rereads admin info once the Net's clock has moved since the last reread, or waits for the reread in flight. An
-// error is ctx's, which ended while the request waited.
+// Rereads admin info once the Net's clock has moved past rereadAfter since the last reread, or waits for the reread
+// in flight. An error is ctx's, which ended while the request waited.
 func (self *faultBlobs) fresh(ctx context.Context) error {
 	return self.rereads.catchUp(ctx, func(fromTime time.Time, toTime time.Time) {
 		self.check(context.WithoutCancel(ctx))

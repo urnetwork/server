@@ -129,28 +129,29 @@ func roundBaselinePreparationPolicyDependencies(policy model.CompetitionG2Volume
 	}
 }
 
-// The releases of the eleven-repository source graph (QD-769), one for each
-// scoring policy: a producer whose repository list ends in sidecar, and the
-// preparation program that pins it. The three historical producers above keep
-// their own programs and pins and never authenticate these bytes.
+// The releases of the twelve-repository source graph (QD-769, QD-1393), one for
+// each scoring policy: a producer whose repository list ends in sidecar and
+// operator-core, and the preparation program that pins it. The three historical
+// producers above keep their own programs and pins and never authenticate these
+// bytes.
 func roundBaselineSidecarProducer(policy model.CompetitionG2VolumePolicy, coverage *model.CompetitionWorkCoveragePolicy) (producer string, digest string, program string, err error) {
 	if coverage != nil {
 		if _, err := model.CompetitionScorerVersionForWorkCoverage(policy, coverage); err != nil {
 			return "", "", "", err
 		}
-		return "evaluator-work-coverage-sidecar.sh", "7a98e73540e236c364d59e421d090c23b16e28da04977fc81d44ebe549c3f8d0", "prepare-round-baseline-work-coverage-sidecar.sh", nil
+		return "evaluator-work-coverage-sidecar.sh", "ab3f591422d6fe93ae44f7859706c9599da8e0afe2b0f3058f491594b5d2f0d2", "prepare-round-baseline-work-coverage-sidecar.sh", nil
 	}
 	switch policy {
 	case model.CompetitionG2VolumePolicyLegacy:
-		return "evaluator-sidecar.sh", "ccb50d82ac9bc88f524c7aa2306fde74f820673a6f05c48cf3b70ee925b56cad", "prepare-round-baseline-sidecar.sh", nil
+		return "evaluator-sidecar.sh", "c789fa3ba4f889c5530116e30002a69a758e0ce8cd5a3aa2fd284cb9315fa2e9", "prepare-round-baseline-sidecar.sh", nil
 	case model.CompetitionG2VolumePolicyMinimumWork:
-		return "evaluator-minimum-work-sidecar.sh", "ebacbbdc25a4ad2c49c1436e70aeda343124fb46bad9885068140b2d74105f16", "prepare-round-baseline-minimum-work-sidecar.sh", nil
+		return "evaluator-minimum-work-sidecar.sh", "22fe793bcf833df42cb341f64ea4f9afeca0fbcd57409f5823a91813fbba8a7e", "prepare-round-baseline-minimum-work-sidecar.sh", nil
 	default:
 		return "", "", "", errors.New("unsupported baseline preparation g2 volume policy")
 	}
 }
 
-// The files a producer of the eleven-repository graph runs beside, at the
+// The files a producer of the twelve-repository graph runs beside, at the
 // bytes of the release this tree holds. It shares no digest map with the
 // sealed v3 release: the two helpers that carry the repository list differ,
 // and the helpers of this tree read their Docker scope from
@@ -171,9 +172,9 @@ func roundBaselineSidecarDependencyDigests() map[string]string {
 		"postgres-init.sh":               "653b81b0fcf2fdaf4a3f4421a252a582484581e3a03463c0fad03186ee14d77c",
 		"timeout-budget.sh":              "7f3298edaca3bd31f4e5a02d17fd88ccb66f961e9d8493d9b047426d8fab476d",
 		"entrypoint.sh":                  "efbfe1a8dd8fb58b4fef8e57bea205e819dfdf21a85ec31d71d85365cf467758",
-		"build-submission.sh":            "86dfa74176f3d7a061eb67e5762a3d61de2c5c87354d783f30f5a12d5246b068",
+		"build-submission.sh":            "6fe8feeca093fbeb54f96ad9e73dcfa8fa50fb8e9ca66e1e3a7fb1e46114667e",
 		"submission-builder-identity.sh": "97281a179b680778c416f708b2d0abb95810eaa84ed15b87d2644b4467a86c49",
-		"prepare-evaluation-source.sh":   "b07a3dccd5145915a4e4ebb8e58ab451b91fe0f8633236884c1de81809f48fa0",
+		"prepare-evaluation-source.sh":   "2065946cdcb78d6a979bd7400386285d52d1210ec419e4c6ff6f617c1d932236",
 		"subevaluation-ownership.sh":     "dc697fd97c6b635c419be6724344f9c4bcbad655572c9eaad5af5604cbe1599a",
 		"Dockerfile.submission":          "255d1827494c22482bb851323ee13d8ee03fb407fbf40348531b7d2ec32fc034",
 		"competitionpatch":               "",

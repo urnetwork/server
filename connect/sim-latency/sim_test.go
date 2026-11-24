@@ -443,8 +443,8 @@ type lifecycleHarness struct {
 // Completes all six admission, evaluation, review, and promotion transitions
 // with the same fail-closed ordering required by RUN-MAIN.md.
 func (self *lifecycleHarness) run(epochs []lifecycleEpoch) error {
-	if len(epochs) != maximumCompetitionEpoch {
-		return fmt.Errorf("season has %d epochs, want %d", len(epochs), maximumCompetitionEpoch)
+	if len(epochs) != defaultSourceEpochSettings().MaximumCompetitionEpoch {
+		return fmt.Errorf("season has %d epochs, want %d", len(epochs), defaultSourceEpochSettings().MaximumCompetitionEpoch)
 	}
 	for epochIndex, epoch := range epochs {
 		expectedEpoch := epochIndex + 1
@@ -516,8 +516,8 @@ func TestRunMainCompleteSixEpochLifecycle(t *testing.T) {
 		sourceCommit:          "source-epoch-0-baseline",
 		improvementPercentage: 16.1,
 	}
-	epochs := make([]lifecycleEpoch, 0, maximumCompetitionEpoch)
-	for epoch := 1; epoch <= maximumCompetitionEpoch; epoch += 1 {
+	epochs := make([]lifecycleEpoch, 0, defaultSourceEpochSettings().MaximumCompetitionEpoch)
+	for epoch := 1; epoch <= defaultSourceEpochSettings().MaximumCompetitionEpoch; epoch += 1 {
 		opensAt := firstOpen.Add(time.Duration(epoch-1) * (7*24*time.Hour + time.Hour))
 		closesAt := opensAt.Add(7 * 24 * time.Hour)
 		submissions := []lifecycleSubmission{
@@ -573,8 +573,8 @@ func TestRunMainCompleteSixEpochLifecycle(t *testing.T) {
 	if err := harness.run(epochs); err != nil {
 		t.Fatal(err)
 	}
-	if len(harness.transitions) != maximumCompetitionEpoch ||
-		len(harness.waitedEpochs) != maximumCompetitionEpoch {
+	if len(harness.transitions) != defaultSourceEpochSettings().MaximumCompetitionEpoch ||
+		len(harness.waitedEpochs) != defaultSourceEpochSettings().MaximumCompetitionEpoch {
 		t.Fatalf("completed transitions=%d waits=%d, want six of each", len(harness.transitions), len(harness.waitedEpochs))
 	}
 	expectedWinners := []string{

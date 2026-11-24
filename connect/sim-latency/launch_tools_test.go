@@ -287,11 +287,11 @@ func TestHandoffManifestAuthenticatesEveryLocalInput(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	sourceEvidence, err := inspectEvidenceFile(sourcePath, maximumSourceConfigBytes)
+	sourceEvidence, err := inspectEvidenceFile(sourcePath, int64(defaultSourceEpochSettings().MaximumSourceConfigBytes))
 	if err != nil {
 		t.Fatal(err)
 	}
-	openApiEvidence, err := inspectEvidenceFile(openApiPath, maximumSourceConfigBytes)
+	openApiEvidence, err := inspectEvidenceFile(openApiPath, int64(defaultSourceEpochSettings().MaximumSourceConfigBytes))
 	if err != nil {
 		t.Fatal(err)
 	}

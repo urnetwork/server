@@ -192,7 +192,7 @@ func applyRepositoryPatchesContext(ctx context.Context, root string, identityByt
 		return runGitRaw(repository, args...)
 	}
 	// the identity's own graph, which the lock digest above held to the ten live
-	// repositories or those ten with sidecar
+	// repositories or those ten with sidecar and operator-core
 	repositories := slices.Collect(maps.Keys(identity.Repositories))
 	sort.Strings(repositories)
 	for _, repository := range repositories {

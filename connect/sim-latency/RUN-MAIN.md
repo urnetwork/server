@@ -745,14 +745,16 @@ the worker is run from this host. Set an exact control-plane image identity in
 The following requirements describe production and the legacy staging-alias
 workflow, not explicit v2 staging. Every newly eligible production epoch
 checkpoint in `config/main/sim-latency.yml` must list exactly these
-ten repositories: `server`, `connect`, `sdk`, `proxy`, `glog`,
-`goidenticons`, `userwireguard`, `sn`, `warp`, and `gvisor`. Each commit
+twelve repositories: `server`, `connect`, `sdk`, `proxy`, `glog`,
+`goidenticons`, `userwireguard`, `sn`, `warp`, `gvisor`, `sidecar`, and
+`operator-core` (QD-769, QD-1393). A ledger of the ten belongs to the release
+that measured it; this tree's tools refuse it (QD-877). Each commit
 must be reachable from that repository's remote `sim-latency` branch, and the active epoch commit must
 be the branch head before promotion begins. Never fill a missing dependency
 from a local checkout, its default branch, or the evaluator builder's current
 `HEAD`; those sources are deliberately excluded from the evaluation identity.
 Before legacy staging, each repository must also expose a `sim-latency-staging` branch
-whose head exactly equals its epoch-zero commit. The harness verifies all ten
+whose head exactly equals its epoch-zero commit. The harness verifies all twelve
 remote aliases before it creates, evaluates, or advances a staging epoch.
 Staging branches never receive a winner or advance automatically; they isolate
 the name used for pre-production coordination while retaining the exact frozen
@@ -760,13 +762,14 @@ baseline source content and evaluator protocol. A reviewed evaluator repair is
 a separate release operation at a drained staging-round boundary, not a
 winner promotion or a change to a round already accepting/evaluating work.
 
-The active production and staging protocols require exactly ten repositories,
+The active production and staging protocols require exactly twelve repositories,
 never a retired placeholder pin. Server's `go.mod` replaces `gvisor.dev/gvisor`
-with the `../gvisor` sibling. Current tools reject mode-mismatched, extra, or
+with the `../gvisor` sibling, and the sidecar and operator-core modules with
+theirs. Current tools reject mode-mismatched, extra, or
 incomplete checkpoints and source locks; they never infer a missing
 commit. Prepare a reviewed complete checkpoint, matching remote aliases, and a
-new evaluator image at the drained release boundary. Preserve old eight- and
-ten-repository images, locks, baseline artifacts, and round evidence as
+new evaluator image at the drained release boundary. Preserve old eight-, ten-
+and eleven-repository images, locks, baseline artifacts, and round evidence as
 historical records; do not rewrite them to claim the new source identity.
 
 The continuously deployed main control-plane graph can later add or remove a
