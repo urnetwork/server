@@ -11,9 +11,13 @@ package main
 // server cannot serve yet stays empty, and fails closed as smtpedgeservice.SmtpReportIntakeDeps says:
 //
 //   - Tokens: network_dns_zone.report_token has no column yet (plan-DNS-rua-token's interim), so every
-//     <token>@ report is dropped unread;
-//   - Keys: plan-SMTP-report-seal-key's interim, so no raw report is sealed: its bytes drop and only its
-//     fields are kept.
+//     <token>@ report is dropped unread.
+//
+// The Keys, each network's mail key, come from api's report-key route on the platform listener's gate bearer
+// (newPlatformReportKeySource, plan-SMTP-report-seal-key), which main gives the intake through sealThrough: api
+// answers the key only once it verified it against the network's rows, so a report is sealed to that key, or to
+// none, its raw bytes then dropped unread and its fields kept, and a key api cannot tell now is the intake's error,
+// 451. Without api's url or the bearer the block seals nothing, says so at start, and keeps every report's fields.
 //
 // The Join and the halt ladder, SMTP-M9-15's attribution and SMTP-M9-16's ladder, are the block's to give
 // (attributeThrough, report_join.go), where its binary links MG9's send log, halts and keys and its vault holds the
@@ -392,6 +396,41 @@ func newPlatformNoticeGate(apiUrl string) (platformNoticeGate, error) {
 		return nil, err
 	}
 	return client, nil
+}
+
+// Seals each report to its network's mail key from now on, the key read from keys (newPlatformReportKeySource): the
+// intake is made again with it, its other seams as they were. An error leaves the intake as it was. Called before the
+// listener has the intake, as attributeThrough is.
+func (self *platformReportIntake) sealThrough(keys smtpedgeservice.SmtpReportKeySource) error {
+	if keys == nil {
+		return errors.New("report intake: no key source")
+	}
+	deps := *self.deps
+	deps.Keys = keys
+	intake, err := smtpedgeservice.NewSmtpReportIntake(self.host, self.store, &deps, self.settings)
+	if err != nil {
+		return err
+	}
+	self.intake = intake
+	self.deps = &deps
+	return nil
+}
+
+// The network mail keys on api at apiUrl, its report-key route on the platform listener's bearer from the block's
+// secret files, or the part that is missing, never the bearer.
+func newPlatformReportKeySource(apiUrl string) (smtpedgeservice.SmtpReportKeySource, error) {
+	if apiUrl == "" {
+		return nil, errors.New("no api url")
+	}
+	bearer, err := server.LoadInternalGateCredential(server.InternalGateCallerMxedgePlatform)
+	if err != nil {
+		return nil, err
+	}
+	source, err := smtpedgeservice.NewSmtpReportKeyGateSource(&smtpedgeservice.SmtpReportKeyGateSourceArgs{ApiUrl: apiUrl, Bearer: bearer})
+	if err != nil {
+		return nil, err
+	}
+	return source, nil
 }
 
 // §12's label map as the intake reads <root>'s rows: the network a <net> label or alias names in root, a

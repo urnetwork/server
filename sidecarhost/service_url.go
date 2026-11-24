@@ -1,8 +1,10 @@
 package sidecarhost
 
 // The base URLs a block reaches other services at (§19.4): api's, whose internal gate the blocks with no database
-// read (§8.9), the dns API block's, which the dns edges feed from (§12.6), and the sockets service's, which the edges
-// find and register at (§9). warp hands a deployed block each one in its environment, from the env_vars of its
+// read (§8.9), the dns API block's, which the dns edges feed from (§12.6), the sockets service's, which the edges
+// find and register at (§9), and gkm's, whose drop-key route api reads for §14.8's report intake under a token of its
+// own (controller.SmtpReportKeySource; api reads the variable itself, having no flags). warp hands a deployed block
+// each one in its environment, from the env_vars of its
 // fragment (warp/services/sidecar-blocks): https://<name>.${WARP_DOMAIN}, which warpctl writes out with the
 // deployment's own domain when it renders the block's unit, so no fragment holds a production name. A block's flag
 // reads the variable as its default: a deployed block needs no argument, a flag given wins, as run-local.sh's
@@ -23,6 +25,8 @@ const (
 	ApiUrlEnvName = "UR_API_URL"
 	// -sockets_url's default: the sockets service's base URL.
 	SocketsUrlEnvName = "UR_SOCKETS_URL"
+	// gkm's base URL, which api reads for the report intake's seal key.
+	GkmUrlEnvName = "UR_GKM_URL"
 )
 
 // A base URL flag whose default is an environment variable's value, read when the flag is read: a value given on the

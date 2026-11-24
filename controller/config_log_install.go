@@ -7,6 +7,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -165,6 +166,8 @@ func installApiProjection(ctx context.Context, host *sidecar.ServiceHost) (func(
 	restoreDnsScopes := model.SetDnsScopeLabelSource(model.DnsScopeLabelSourceOf(cache))
 	// §14.14's mail_send and report read, without which POST /smtp/dkim-keys and GET /smtp/reports answer 503
 	restoreSmtpChecks := model.SetSmtpApiGate(model.SmtpApiGateOf(cache))
+	// §14.8's report seal key from the same cache and gkm, without which the internal report-key route answers 503
+	restoreReportKeys := SetSmtpReportKeySource(newApiSmtpReportKeySource(cache, os.Getenv(sidecarhost.GkmUrlEnvName), host.Clock))
 	apiAclCache.Store(cache)
 	oauth.SetEdgeLoginSource(oauth.NewProjectionEdgeLoginSource(cache))
 	closeContracts := installContractGateWhenEnabled(ctx, cache)
@@ -174,6 +177,7 @@ func installApiProjection(ctx context.Context, host *sidecar.ServiceHost) (func(
 		closeContracts()
 		oauth.SetEdgeLoginSource(nil)
 		apiAclCache.CompareAndSwap(cache, nil)
+		restoreReportKeys()
 		restoreSmtpChecks()
 		restoreDnsScopes()
 		restoreApprovals()

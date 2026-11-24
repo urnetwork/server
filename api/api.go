@@ -68,6 +68,7 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 	internalGateProjection := handlers.NewInternalGateProjectionHandlers(nil)
 	internalGateEdgeClient := handlers.NewInternalGateEdgeClientHandlers(nil)
 	internalGateAbuseNotice := handlers.NewInternalGateAbuseNoticeHandlers(nil)
+	internalGateReportKey := handlers.NewInternalGateReportKeyHandlers(nil)
 	internalGateIdentityClients := handlers.NewInternalGateIdentityClientsHandlers(nil)
 	verifyRequestClosure := handlers.NewVerifyRequestClosureHandlers()
 	providerWorkBody := DefaultRouteSettings().ProviderWorkBody
@@ -598,6 +599,9 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 	// a role mail's notice from the platform listener, its header facts alone, on the platform listener's internal
 	// bearer (QD-1070, owner decision 612)
 	routes = append(routes, internalGateAbuseNotice.Routes()...)
+	// the network mail key the platform listener's intake seals a network's reports to, its public key alone, on the
+	// platform listener's internal bearer (plan-SMTP-report-seal-key, QD-075)
+	routes = append(routes, internalGateReportKey.Routes()...)
 	// §5.15's sidecar_id to client lookup for the hint writers of hosts with no Postgres, on gkm's and mxedge's internal
 	// bearers (plan-KEYS-hint-addressing, QD-146)
 	routes = append(routes, internalGateIdentityClients.Routes()...)
