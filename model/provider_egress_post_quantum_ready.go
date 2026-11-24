@@ -6,7 +6,14 @@
 // capability probe recorded its own, so the window reading and the modern
 // census keep their table whichever probe measured the provider. It is
 // post-quantum only when the turn's outcome is positive (FP2-PROTOCOL.md
-// §12.8).
+// §12.8), with one exception (owner, 2026-11-24): a turn whose post-quantum
+// session sealed while its IPv4 HTTPS leg failed before writing a request
+// (UrlProbeE2eEvidence.Sealed) is post-quantum evidence for a provider whose
+// published country the URL-success guard exempts. There the probe's general
+// catalog fails before any request for most providers, mostly at the DNS
+// lookup through the provider, so those providers would otherwise never hold
+// evidence however they seal. The turn's pq_outcome stays unmeasured, so
+// strict selection's eight-hour window does not count it.
 //
 // The ready marker. Strict post-quantum selection matches only providers whose
 // newest post-quantum outcome in the eight-hour window is positive, so it may
@@ -88,18 +95,21 @@ func recordProviderEgressHealthE2e(ctx context.Context, health *ProviderEgressHe
 	if !stored.Stored || health.UrlProbeEvidence == nil || health.UrlProbeEvidence.E2e == nil {
 		return
 	}
-	e2e := health.UrlProbeEvidence.E2e
 	// only an outcome the window keeps is a sample of the provider: a recheck
 	// or one on probation stores no post-quantum outcome either
 	if !stored.Recheck && !stored.Probation {
-		evidence, conclusive := providerModernEvidenceOfE2e(e2e, health.UrlProbeEvidence.MeasuredAt)
-		if conclusive {
-			server.HandleError(func() {
+		server.HandleError(func() {
+			// the guard and the provider's published country are read only
+			// for a sealed turn, at its ingest, which follows the turn
+			evidence, conclusive := providerModernEvidenceOfE2e(health.UrlProbeEvidence, func() bool {
+				return providerOnlineSuccessCountryExempt(ctx, health.ClientId)
+			})
+			if conclusive {
 				if err := RecordProviderModernEvidence(ctx, health.ClientId, evidence); err != nil {
 					glog.Warningf("[egress]modern evidence of %s from a URL turn was refused: %s\n", health.ClientId, err)
 				}
-			})
-		}
+			}
+		})
 	}
 	server.HandleError(func() {
 		noteClientScorePostQuantumStream(ctx, server.NowUtc(), DefaultClientScorePostQuantumReadySettings())
@@ -118,21 +128,55 @@ func recordProviderEgressHealthE2e(ctx context.Context, health *ProviderEgressHe
 // capability probe and this ingest before it counted any negotiated
 // post-quantum group. The observation carries no window size, so a resizable
 // window records a largest size of 0.
-func providerModernEvidenceOfE2e(e2e *egresshealth.UrlProbeE2eEvidence, observedAt time.Time) (ProviderModernEvidence, bool) {
-	if e2e.Pq != egresshealth.UrlProbePqPositive && e2e.Pq != egresshealth.UrlProbePqNegative {
+//
+// A sealed turn is conclusive too, and post-quantum, when exemptCountry says
+// the URL-success guard exempts the provider's published country (owner,
+// 2026-11-24): its post-quantum group sealed on the turn's one tunnel and
+// client, and the IPv4 HTTPS leg failed before it wrote a request
+// (providerModernEvidenceSealedTurn). exemptCountry is asked for that turn
+// alone. Unlike a positive, the reading proves the seal but no request
+// carried through it: the price of evidence where the probe's catalog fails
+// before any request for most providers. Anywhere else a sealed turn records
+// nothing, as before.
+func providerModernEvidenceOfE2e(urlEvidence *egresshealth.UrlProbeEvidence, exemptCountry func() bool) (ProviderModernEvidence, bool) {
+	e2e := urlEvidence.E2e
+	if e2e == nil {
 		return ProviderModernEvidence{}, false
 	}
 	if e2e.Window != egresshealth.UrlProbeWindowResizable && e2e.Window != egresshealth.UrlProbeWindowFixed {
 		return ProviderModernEvidence{}, false
 	}
-	return ProviderModernEvidence{
-		E2eNegotiated: e2e.KeyExchange != "",
-		KeyExchange:   e2e.KeyExchange,
-		PostQuantum: e2e.Pq == egresshealth.UrlProbePqPositive &&
-			egresshealth.UrlProbeKeyExchangePostQuantum(e2e.KeyExchange),
-		WindowAdvertised: e2e.Window == egresshealth.UrlProbeWindowResizable,
-		ObservedAt:       observedAt.UTC(),
-	}, true
+	switch {
+	case e2e.Pq == egresshealth.UrlProbePqPositive || e2e.Pq == egresshealth.UrlProbePqNegative:
+		return ProviderModernEvidence{
+			E2eNegotiated: e2e.KeyExchange != "",
+			KeyExchange:   e2e.KeyExchange,
+			PostQuantum: e2e.Pq == egresshealth.UrlProbePqPositive &&
+				egresshealth.UrlProbeKeyExchangePostQuantum(e2e.KeyExchange),
+			WindowAdvertised: e2e.Window == egresshealth.UrlProbeWindowResizable,
+			ObservedAt:       urlEvidence.MeasuredAt.UTC(),
+		}, true
+	case providerModernEvidenceSealedTurn(urlEvidence) && exemptCountry():
+		return ProviderModernEvidence{
+			E2eNegotiated:    true,
+			KeyExchange:      e2e.KeyExchange,
+			PostQuantum:      true,
+			WindowAdvertised: e2e.Window == egresshealth.UrlProbeWindowResizable,
+			ObservedAt:       urlEvidence.MeasuredAt.UTC(),
+		}, true
+	default:
+		return ProviderModernEvidence{}, false
+	}
+}
+
+// Whether a URL turn sealed a post-quantum session on its one tunnel and
+// client while its IPv4 HTTPS leg failed before writing a request: an
+// unmeasured outcome the prober marks sealed, with a post-quantum group, no
+// seal at a request, and no request written in the outcome's own evidence.
+func providerModernEvidenceSealedTurn(urlEvidence *egresshealth.UrlProbeEvidence) bool {
+	e2e := urlEvidence.E2e
+	return e2e != nil && e2e.Pq == egresshealth.UrlProbePqUnmeasured && e2e.Sealed && !e2e.SealedBeforeRequest &&
+		!urlEvidence.RequestWritten && egresshealth.UrlProbeKeyExchangePostQuantum(e2e.KeyExchange)
 }
 
 // Notes one stored outcome of the post-quantum stream at now: a stream whose
