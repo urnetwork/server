@@ -1,9 +1,9 @@
 {{define "headline"}}{{.TextHeadline}}{{end}}
-{{define "why"}}Sent to the Owners and Admins of a URnetwork network when an
-abuse action is taken on it or lifted.{{end}}
+{{define "why"}}Sent to the Owners and Admins of {{.Network}}
+when an abuse action is taken on it or lifted.{{end}}
 {{define "content"}}
-{{if .Lift}}An abuse action on your network has been lifted.{{else}}URnetwork took an abuse action on your network. It holds until a
-person reviews it, and you can appeal it.{{end}}
+{{if .Lift}}An abuse action on {{.Network}} has been lifted.{{else}}URnetwork took an abuse action on {{.Network}}.
+It holds until a person reviews it, and you can appeal it.{{end}}
 
 Action: {{.ActionText}}
 Category: {{.CategoryText}}
