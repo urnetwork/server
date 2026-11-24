@@ -1892,6 +1892,19 @@ The capability probe's own tunnels, prober shard and passes go away (§12.4).
 
   The ingest validates it as it does the other legs. A prober cannot claim
   `positive` without a post-quantum key exchange and a passed IPv4 HTTPS leg.
+- **Seal without a request (owner, 2026-11-24):** an `unmeasured` outcome
+  whose post-quantum session sealed on the turn's one tunnel and client while
+  the IPv4 HTTPS leg failed before it wrote a request (its DNS lookup or dial
+  through the provider) adds `"sealed": true`. The field is omitted
+  otherwise, and the ingest refuses it on any other outcome. The outcome
+  stays `unmeasured`, so `pq_outcome` and strict selection's window are
+  unchanged. The ingest records it in `provider_modern_evidence` as
+  post-quantum only for a provider whose published country the URL-success
+  guard exempts (the countries `urnetwork_stats_provider_online_success_exempt`
+  lists), where the general catalog fails before any request for most
+  providers; elsewhere it records nothing. The ingest decodes runs strictly,
+  so a prober that sends the field rolls only after every api that ingests
+  its runs knows it.
 - **Column:** the §4.1 migration adds `pq_outcome` beside `failed_later_legs`,
   so there is no second migration. The store sets it from the validated
   evidence: 1 positive, 2 negative, 0 otherwise. Rechecks and probation runs
