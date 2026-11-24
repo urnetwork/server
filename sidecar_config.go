@@ -137,6 +137,7 @@ type sidecarConfigYaml struct {
 		Mxedge            *sidecarGateYaml   `yaml:"mxedge"`
 		Smtpedge          *sidecarGateYaml   `yaml:"smtpedge"`
 		Dns               *sidecarGateYaml   `yaml:"dns"`
+		Compute           *sidecarGateYaml   `yaml:"compute"`
 		Push              *sidecarSwitchYaml `yaml:"push"`
 		Wake              *sidecarSwitchYaml `yaml:"wake"`
 		Bridge            *sidecarSwitchYaml `yaml:"bridge"`
@@ -267,6 +268,7 @@ func newSidecarConfig(y *sidecarConfigYaml) *SidecarConfig {
 		SidecarGateMxedge:   y.Sidecar.Mxedge,
 		SidecarGateSmtpedge: y.Sidecar.Smtpedge,
 		SidecarGateDns:      y.Sidecar.Dns,
+		SidecarGateCompute:  y.Sidecar.Compute,
 	} {
 		if gate != nil {
 			config.serviceGates[name] = newSidecarServiceGate(name, gate)

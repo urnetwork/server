@@ -36,7 +36,7 @@ func testProcessDbGrants() map[string]bool {
 		"api": true, "taskworker": true, "connect": true, "gossip": true, "mcp": true, "monitor": true,
 		"proxy": true, "competitionworker": true,
 		"all": true, "alt": true,
-		"dns": true, "mxedge": true, "mxedge-platform": true, "smtpedge": true,
+		"dns": true, "mxedge": true, "mxedge-platform": true, "smtpedge": true, "compute": true,
 		"evs": false, "gkm": false, "sockets": false, "tlsedge": false, "dnsedge": false,
 	}
 }
@@ -259,5 +259,17 @@ func TestEnvAuthenticatorKeepsServiceHostsChecks(t *testing.T) {
 		if err != nil || principal != c.principal {
 			t.Errorf("%+v for %q: %v", c.principal, c.audience, err)
 		}
+	}
+}
+
+// The compute block holds a pool for §14.4's groups, so its Env grants the db its engine's handlers reach Postgres
+// through (CSRV-M12-03, owner decision 594).
+func TestComputeProcessIsGrantedTheDb(t *testing.T) {
+	grants, err := ProcessGrants("compute")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !grants.Db {
+		t.Fatal("the compute block is granted no db")
 	}
 }

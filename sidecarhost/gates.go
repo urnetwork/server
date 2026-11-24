@@ -31,6 +31,7 @@ var gatesServiceNames = []string{
 	sidecar.ServiceGateMxedge,
 	sidecar.ServiceGateSmtpedge,
 	sidecar.ServiceGateDns,
+	sidecar.ServiceGateCompute,
 }
 
 // The tunables.

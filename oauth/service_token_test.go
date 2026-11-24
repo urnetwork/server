@@ -9,6 +9,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -395,4 +396,31 @@ func TestMintServiceTokenRefusesWhatNoVerifierTakes(t *testing.T) {
 	defer Testing_SetSignerKeys(newTestSignerKey(t, SignerKeySetMcp))()
 	_, _, err := MintServiceToken(newTestServiceTokenArgs())
 	connect.AssertEqual(t, err != nil, true)
+}
+
+// compute is a service audience (CSRV-M12-03): the exchange issues an admitted
+// sidecar's client a compute token with no scope, naming its sidecar, which
+// verifies at compute and at no other audience, and no evs token verifies at
+// compute.
+func TestExchangeIssuesTheComputeAudience(t *testing.T) {
+	connect.AssertEqual(t, IsServiceTokenAudience("compute"), true)
+	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
+		self := newExchangeFixture(t)
+
+		result, err := Exchange(t.Context(), self.args("compute", ""))
+		connect.AssertEqual(t, err, nil)
+		claims, err := newTestServiceTokenVerifier(t).Verify(result.AccessToken, "compute")
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, claims.NetworkId, self.networkId)
+		connect.AssertEqual(t, claims.ClientId, self.clientId)
+		connect.AssertEqual(t, *claims.SidecarId, self.sidecarId)
+		connect.AssertEqual(t, len(claims.Scopes()), 0)
+		_, err = newTestServiceTokenVerifier(t).Verify(result.AccessToken, "sockets")
+		connect.AssertEqual(t, errors.Is(err, ErrInvalidServiceToken), true)
+
+		evsResult, err := Exchange(t.Context(), self.args("evs", ""))
+		connect.AssertEqual(t, err, nil)
+		_, err = newTestServiceTokenVerifier(t).Verify(evsResult.AccessToken, "compute")
+		connect.AssertEqual(t, errors.Is(err, ErrInvalidServiceToken), true)
+	})
 }

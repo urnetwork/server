@@ -43,6 +43,8 @@ type Grants struct {
 //   - Of sidecar's blocks, the dns API, mxedge's router and its platform listener (mxedge-platform, the
 //     router's binary in its own role) and smtpedge hold a pool, the router's under its own restricted
 //     role.
+//   - compute, DESIGN-COMPUTE §14.2's broker and orchestrator, holds a pool for its ledger, providers and enclaves
+//     (§14.4's MG-C1 to MG-C3; CSRV-M12-03), which its engine reaches through the Env (owner decision 594).
 //   - evs and gkm keep durable state only in the file clusters (owner decisions 2, 19, 21), sockets
 //     keeps soft state in Redis alone, and the dns edges hold no Redis or Postgres handle at all (I-12).
 //     tlsedge's pool is under a restricted role of its own (owner decision 495), for its engine's store
@@ -54,6 +56,8 @@ func ProcessGrants(process string) (*Grants, error) {
 	case "all", "alt":
 		return &Grants{Db: true}, nil
 	case "dns", "mxedge", "mxedge-platform", "smtpedge":
+		return &Grants{Db: true}, nil
+	case "compute":
 		return &Grants{Db: true}, nil
 	case "evs", "gkm", "sockets", "tlsedge", "dnsedge":
 		return &Grants{Db: false}, nil

@@ -45,8 +45,10 @@ const (
 	ServiceTokenRecoveryScopePrefix = "recovery:"
 )
 
-// The audiences a service token may name (§7.8; sockets', QD-1029). The api's
-// is never one.
+// The audiences a service token may name (§7.8; sockets', QD-1029; compute's,
+// DESIGN-COMPUTE §14.2, CSRV-M12-03, issued as sockets' is: no scope, naming the
+// sidecar, its member and its subject client). The api's is never one, and a
+// compute token is no credential at api.
 var serviceTokenAudiences = map[string]bool{
 	"evs":     true,
 	"gkm":     true,
@@ -54,6 +56,7 @@ var serviceTokenAudiences = map[string]bool{
 	"certs":   true,
 	"mail":    true,
 	"sockets": true,
+	"compute": true,
 }
 
 // Whether audience is one a service token may name.

@@ -97,7 +97,7 @@ func requireSidecarGateTableCase(t *testing.T, table *sidecarGateTable, c sideca
 	for idStr := range table.Buckets {
 		bucketIds = append(bucketIds, requireSidecarId(t, idStr))
 	}
-	for _, name := range []string{SidecarGateEvs, SidecarGateGkm, SidecarGateSockets, SidecarGateTlsedge, SidecarGateMxedge, SidecarGateSmtpedge, SidecarGateDns, "storage"} {
+	for _, name := range []string{SidecarGateEvs, SidecarGateGkm, SidecarGateSockets, SidecarGateTlsedge, SidecarGateMxedge, SidecarGateSmtpedge, SidecarGateDns, SidecarGateCompute, "storage"} {
 		gate := config.Service(name)
 		want, ok := c.Expect.Services[name]
 		if !ok {
@@ -657,7 +657,7 @@ func FuzzSidecarConfig(f *testing.F) {
 }
 
 // config/main, config/local and config/canary sidecar.yml parse and are dark: no
-// gate open, no switch on, no network named. None carries the retired p0_enforce
+// gate open, compute's written closed among them, no switch on, no network named. None carries the retired p0_enforce
 // (owner decision 510), which reads like a switch for P0's refusals and is not
 // one: they refuse in code since M1.
 func TestSidecarConfigFilesAreDark(t *testing.T) {
@@ -684,11 +684,15 @@ func TestSidecarConfigFilesAreDark(t *testing.T) {
 		if _, ok := sidecarYamlLookup(generic, "sidecar", "p0_enforce"); ok {
 			t.Errorf("%s carries the retired p0_enforce", path)
 		}
-		for _, name := range []string{SidecarGateEvs, SidecarGateGkm, SidecarGateSockets, SidecarGateTlsedge, SidecarGateMxedge, SidecarGateSmtpedge, SidecarGateDns} {
+		for _, name := range []string{SidecarGateEvs, SidecarGateGkm, SidecarGateSockets, SidecarGateTlsedge, SidecarGateMxedge, SidecarGateSmtpedge, SidecarGateDns, SidecarGateCompute} {
 			gate := config.Service(name)
 			if gate.Enabled() || gate.Percent() != 0 || 0 < len(gate.NetworkIds()) {
 				t.Errorf("%s opens %s", path, name)
 			}
+		}
+		// the compute block's line is written closed, for the owner's later step (CSRV-M12-03)
+		if _, found := sidecarYamlLookup(generic, "sidecar", SidecarGateCompute); !found {
+			t.Errorf("%s has no compute line", path)
 		}
 		if format2 := config.Format2(); format2.Gate().Enabled() || format2.Purge() != SidecarFormat2Observe || format2.Drop() != SidecarFormat2Observe {
 			t.Errorf("%s opens format2", path)

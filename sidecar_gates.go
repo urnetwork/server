@@ -33,6 +33,9 @@ const (
 	SidecarGateMxedge   = "mxedge"
 	SidecarGateSmtpedge = "smtpedge"
 	SidecarGateDns      = "dns"
+	// DESIGN-COMPUTE §14.2's broker and orchestrator, the compute block (CSRV-M12-03): §19.11's rule that every new
+	// service has a gate governs, the compute design naming none
+	SidecarGateCompute = "compute"
 )
 
 // §19.11's switches, each only `enabled`.

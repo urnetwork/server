@@ -569,6 +569,7 @@
   "services": {
     "alt": "certificates",
     "api": "certificates",
+    "compute": "certificates",
     "connect": "certificates",
     "dns": "certificates",
     "dnsedge": "certificates",
