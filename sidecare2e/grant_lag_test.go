@@ -46,20 +46,21 @@
 // At the end every acknowledged write reads back on the owner's device with its content, at a version of its own;
 // no refused write's path stands; and no device raised a fork, tamper, regression or gap alarm.
 //
-// What it found, in its first runs (2026-11-23, on sidecar 2a4e4b33):
+// What it found, in its runs of 2026-11-23 on sidecar 2a4e4b33 (runs 3 and 4 alike):
 //
 //   - the rotation phase fails, the product's (question e2e-grant-lag-case-gkm-rotation-grant-lag). The new writer's
 //     key client rotates inside EnsureWritable, and asks the exchange one token for its state's batch of repo scopes.
 //     The exchange, behind the grant, leaves the writer's rw out of that token, and gkm refuses the rotation's claim.
-//     QD-1179's single-scope retry does not apply, since the batch already carried the role, so the write ends 0.1 s
-//     after its grant with ErrGkmWait ("gkm write gate closed: the generation's pin 23 is below holders_shrunk_at
-//     31"), while api's gate applied the grant 2.5 s after it landed. gkm's client rides out no exchange refusal, as
-//     QD-1226's question noted
-//   - every other check held in run 3. The fresh grants' writes and leases were refused at 0, 1 and 2 s and granted
-//     near 3 s, api's gate applying each 2.4 s to 2.5 s after it landed, and every subscriber heard every commit. In
-//     the never phase the write asked 11 times over 5.03 s (its two uploads' loops) and the lease at 0, 1, 3 and 5 s,
-//     each ending with invalid_scope. The revoked devices' writes were refused by their own key clients within 40 ms,
-//     and their reads by evs's gate, 403 SCOPE, on tokens the lagging exchange had still issued
+//     QD-1179's single-scope retry does not apply, since the batch already carried the role, so the write ends within
+//     half a second of its grant (0.1 s and 0.47 s) with ErrGkmWait ("gkm write gate closed: the generation's pin 23
+//     is below holders_shrunk_at 31"), while api's gate applied the grant 2.5 s after it landed. gkm's client rides
+//     out no exchange refusal, as QD-1226's question noted
+//   - every other check held. The fresh grants' writes and leases were refused at 0, 1 and 2 s and granted near 3 s,
+//     api's gate applying each 2.4 s to 2.5 s after it landed, and every subscriber heard every commit. In the never
+//     phase the write asked 11 times, about once a second in each of its two uploads' loops, ending 5.03 s and 5.17 s
+//     after it began, and the lease at 0, 1, 3 and 5 s, each ending with invalid_scope. The revoked devices' writes
+//     were refused within 150 ms by their own key clients or gkm's gate, and their reads by evs's gate, 403 SCOPE, on
+//     tokens the lagging exchange had still issued
 //
 // Not here, each for the reason given:
 //
