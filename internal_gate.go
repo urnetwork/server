@@ -87,7 +87,8 @@ const (
 	InternalGateCallerEdge InternalGateCaller = "edge"
 	// the platform listener's role-mail intake (owner decision 612; QD-1121): mxedge-platform alone mounts it, and it
 	// reaches only the route that files a role mail's notice (AbuseNoticeGatePath), whose one effect is a page at
-	// any hour, so no edge block's bearer can page the rota
+	// any hour, so no edge block's bearer can page the rota, and the route that answers the public mail key its report
+	// intake seals a network's reports to (smtpedgeservice.SmtpReportKeyGatePath; plan-SMTP-report-seal-key)
 	InternalGateCallerMxedgePlatform InternalGateCaller = "mxedge-platform"
 )
 

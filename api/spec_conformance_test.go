@@ -44,6 +44,7 @@ import (
 	snprotocol "github.com/urfoundation/sn/protocol"
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/sidecar"
+	"github.com/urnetwork/sidecar/smtpedgeservice"
 	"github.com/urnetwork/sidecar/socketsservice"
 
 	"github.com/urnetwork/server"
@@ -308,6 +309,8 @@ func registry() []specEndpoint {
 		{"POST", "/internal/gate/edge-client", rt(server.EdgeClientMintArgs{}), rt(server.EdgeClientMintResult{})},
 		// a role mail's notice from the platform listener (QD-1070, owner decision 612)
 		{"POST", "/internal/gate/abuse-notice", rt(server.AbuseNoticeGateArgs{}), rt(server.AbuseNoticeGateResult{})},
+		// the network mail key the platform listener's intake seals reports to (plan-SMTP-report-seal-key, QD-075)
+		{"GET", "/internal/gate/report-key/{network_id}", nil, rt(smtpedgeservice.SmtpReportKeyReply{})},
 		// a Team direct MX's probe outcome from mxedge's prober (QD-1103, owner decision 639)
 		{"POST", "/internal/gate/mail-direct-mx-probe", rt(server.MailDirectMxProbeGateArgs{}), rt(server.MailDirectMxProbeGateResult{})},
 		// §5.15's sidecar_id to client lookup (plan-KEYS-hint-addressing, QD-146, QD-1171)

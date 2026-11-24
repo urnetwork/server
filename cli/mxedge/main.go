@@ -20,7 +20,10 @@
 // The platform role files role mail's notices at api (-api_url) on a gate bearer of its own,
 // internal-gate-mxedge-platform.yml (report_intake.go; QD-1070, owner decision 612; QD-1121), which its block
 // mounts. Without the url or the file it files none, says so at start, and answers role mail as before; it stays
-// ready either way, since the intake's reports need neither. Its intake attributes ARF reports and role mail by
+// ready either way, since the intake's reports need neither. On the same bearer its intake reads each network's mail
+// key from api's report-key route and seals each report to it (plan-SMTP-report-seal-key); without the url or the
+// file it seals none, says so at start, and keeps every report's fields. Its intake attributes ARF reports and role
+// mail by
 // SMTP-M9-15's join and halts by SMTP-M9-16's ladder (report_join.go), over the send log, the X-UR-Ref keys its block
 // mounts from M9 (smtpedge-x-ur-ref.yml, warp's mxedge-platform-x-ur-ref.yml) and a Quota over its own Postgres, where
 // its binary links MG9; without them it attributes nothing, says so at start, and serves the rest as before.
@@ -113,6 +116,13 @@ func main() {
 				glog.Errorf("[mxedge]no role mail pages the rota, since role mail's notices cannot reach api: %v\n", err)
 			} else {
 				intake.fileNoticesThrough(gate, nil)
+			}
+			// each network's mail key at api, on the same bearer (plan-SMTP-report-seal-key)
+			if keys, err := newPlatformReportKeySource(apiUrl.Url()); err != nil {
+				// the error names what is missing, never the bearer
+				glog.Errorf("[mxedge]no report is sealed, so each one's raw bytes are dropped unread and its fields kept: %v\n", err)
+			} else if err := intake.sealThrough(keys); err != nil {
+				glog.Errorf("[mxedge]no report is sealed, so each one's raw bytes are dropped unread and its fields kept: %v\n", err)
 			}
 			deps.IntakeGroups = reportIntakeGroups()
 			// SMTP-M9-15's join and SMTP-M9-16's ladder (report_join.go), their Quota on a context of its own,

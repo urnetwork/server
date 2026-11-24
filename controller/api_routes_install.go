@@ -21,8 +21,9 @@ package controller
 //	                 (InstallAbuseStanding; ABUSE-M5-07)
 //	authorization    rev/'s store and the issuer's worker, and the projection: the authorization log's sequencer, the
 //	                 gate cache, the approval gate's states, the dns scopes' labels, the smtp routes' §8 checks, the
-//	                 edge logins, the contract gate while sidecar.yml's acl_contract_gate is on and the exchange's
-//	                 scopes (installApiAuthorization, installApiProjection)
+//	                 report intake's seal key (SmtpReportKeySource, gkm at $UR_GKM_URL), the edge logins, the contract
+//	                 gate while sidecar.yml's acl_contract_gate is on and the exchange's scopes
+//	                 (installApiAuthorization, installApiProjection)
 //	device grant     ur-cli's device authorizations in Redis (oauth.InstallDeviceAuthorizationStore; QD-830)
 //	certs            §13.15's /tls routes while sidecar.yml's certs switch is on (InstallTlsCerts; QD-846)
 //

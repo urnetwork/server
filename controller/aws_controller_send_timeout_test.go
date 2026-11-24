@@ -74,10 +74,14 @@ func newAwsEndpoint(t *testing.T, contentType string, body string) *awsEndpointF
 	return fixture
 }
 
-// A sender pointed at the fixture with synthetic credentials.
+// A sender pointed at the fixture with synthetic credentials and its own email
+// config, so no email.yml is read: an email send reads the config for its
+// default sender even when the caller names one, and with no email.yml the
+// read panics and ends the test binary.
 func (self *awsEndpointFixture) sender(sendTimeout time.Duration) *AWSMessageSender {
 	return &AWSMessageSender{
 		sendTimeout: sendTimeout,
+		emailConfig: &EmailConfig{CompanySenderEmail: "sender@synthetic.example"},
 		endpoint:    self.server.URL,
 		credentials: credentials.NewStaticCredentials("synthetic-access-key", "synthetic-secret-key", ""),
 	}

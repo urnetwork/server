@@ -6,7 +6,6 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,11 +17,12 @@ import (
 // grepping so comments and test fixtures cannot satisfy the implementation
 // side of the contract.
 func TestEveryFixedProductionAlertClassIsCataloged(t *testing.T) {
-	_, currentFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("cannot locate monitor package")
+	// go test runs in the package directory. The caller's path is no
+	// directory under -trimpath, where it is the module path.
+	directory, err := os.Getwd()
+	if err != nil {
+		t.Fatal("cannot locate monitor package:", err)
 	}
-	directory := filepath.Dir(currentFile)
 	catalogBytes, err := os.ReadFile(filepath.Join(directory, "SIGNALS.md"))
 	if err != nil {
 		t.Fatal(err)
