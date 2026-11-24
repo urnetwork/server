@@ -67,11 +67,11 @@
 //
 // QD-1230 (gkm-grant-lag-ride-out) has gkm's key client ride the lag out as evs's client does: a call gkm refuses
 // under a batch whose token the exchange granted without the call's repo scope goes again under that scope alone,
-// whose invalid_scope it asks again a second apart for GkmSettings.ExchangeScopeWaitTimeout. In two runs of
+// whose invalid_scope it asks again a second apart for GkmSettings.ExchangeScopeWaitTimeout. In three runs of
 // 2026-11-23 after it every check holds: the rotation's claim, refused 403 under the batch, asked for rw alone at
-// +0.06 to +0.1 s, +1.1 and +2.1 s, each refused invalid_scope, and was granted at +3.1 s, api's gate having applied
-// the grant at +2.5 s; gkm took the claim, and the write landed at +3.1 s and +4.9 s, the second waiting 1.7 s on
-// gkm's answer to the claim
+// +0.06 to +0.3 s, then a second and two seconds later, each refused invalid_scope, and was granted at +3.1 to
+// +3.3 s, api's gate having applied the grant at +2.5 s; gkm took the claim, and the write landed at +3.1, +3.4 and
+// +4.9 s, the last waiting 1.7 s on gkm's answer to the claim
 //
 // Not here, each for the reason given:
 //
