@@ -46,6 +46,8 @@ type frontMetrics struct {
 	// upgrade, so a stream or a tunnel doesn't skew it
 	responseHeaderSeconds *prometheus.HistogramVec
 	limitRefusals         *prometheus.CounterVec
+	// requests charged to the validator rate class, by outcome
+	validatorClassRequests *prometheus.CounterVec
 	// the earliest NotAfter of the certificates the front serves
 	// (CertificateStore.EarliestExpiry), set when NewFront builds it. A
 	// vector without labels has no value until then, so a process that
@@ -82,8 +84,14 @@ func newFrontMetrics(registerer prometheus.Registerer) *frontMetrics {
 			Namespace: "urnetwork",
 			Subsystem: "front",
 			Name:      "limit_refusals_total",
-			Help:      "Requests and QUIC connections the lb_alt front refused under its D8 limits, by limit (request, route, concurrency, quic, state; identity, identity_concurrency, ceiling and ceiling_concurrency for the identity limit; interface for a QUIC connection on an interface the route table doesn't list, class for one of a class the front doesn't serve on QUIC), zone: the request zone the request was charged to, whichever limit refused it, nginx's route_<service>_<path> for a route zone from the route file, identity for a request charged to its verified identity, or default for the interface's shared zone, which a refused QUIC connection is counted in too, - for interface and class; and name_class, the class of the name the request or connection named (connect, api, lb, forwarded, redirect, unknown): a QUIC connection's is api or connect, each class with a cap of its own",
-		}, []string{"limit", "zone", "name_class"}),
+			Help:      "Requests and QUIC connections the lb_alt front refused under its D8 limits, by limit (request, route, concurrency, quic, state; identity, identity_concurrency, ceiling and ceiling_concurrency for the identity limit; interface for a QUIC connection on an interface the route table doesn't list, class for one of a class the front doesn't serve on QUIC), zone: the request zone the request was charged to, whichever limit refused it, nginx's route_<service>_<path> for a route zone from the route file, identity for a request charged to its verified identity, or default for the interface's shared zone, which a refused QUIC connection is counted in too, - for interface and class; and name_class, the class of the name the request or connection named (connect, api, lb, forwarded, redirect, unknown): a QUIC connection's is api or connect, each class with a cap of its own; and rate_class, validator for a request charged to the SN25 validator rate class, else default",
+		}, []string{"limit", "zone", "name_class", "rate_class"}),
+		validatorClassRequests: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "urnetwork",
+			Subsystem: "front",
+			Name:      "validator_class_requests_total",
+			Help:      "Requests the lb_alt front charged to the SN25 validator rate class: those whose verified validator class token names the request's verified client, by outcome (admitted, refused)",
+		}, []string{"outcome"}),
 		certificateExpiry: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: "urnetwork",
 			Subsystem: "front",
@@ -113,6 +121,7 @@ func newFrontMetrics(registerer prometheus.Registerer) *frontMetrics {
 		metrics.requests,
 		metrics.responseHeaderSeconds,
 		metrics.limitRefusals,
+		metrics.validatorClassRequests,
 		metrics.certificateExpiry,
 		metrics.quicClientHellos,
 		metrics.connectAddresses,

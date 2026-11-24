@@ -268,6 +268,27 @@ func (self *StReservedAttemptUpload) Begin(ctx context.Context, credential, head
 	return lease, nil
 }
 
+// The rate class a validator's class consent earns: its admitted activation's
+// owner and the admission's expiry, for the api to mint a class token. A
+// refusal maps as Begin's: 503 when this instance is not current, else 403.
+func (self *StReservedAttemptUpload) Class(ctx context.Context, credential, header string) (validator.ValidatorUploadClass, error) {
+	if self == nil || self.admission == nil {
+		return validator.ValidatorUploadClass{}, errors.New("503 Validator reserved upload is unavailable.")
+	}
+	sessionHash, err := protocol.ValidatorAttemptUploadSessionHash(credential)
+	if err != nil {
+		return validator.ValidatorUploadClass{}, fmt.Errorf("401 Invalid upload client session: %w", err)
+	}
+	class, err := self.admission.Class(ctx, header, sessionHash)
+	if err != nil {
+		if errors.Is(err, validator.ErrValidatorUploadAuthorityNotCurrent) || self.authorityNotCurrent(ctx) {
+			return validator.ValidatorUploadClass{}, router.PrivateCause(http.StatusServiceUnavailable, "Validator staging authority is not current on this instance.", err)
+		}
+		return validator.ValidatorUploadClass{}, router.PrivateCause(http.StatusForbidden, "Validator staging authority refused.", err)
+	}
+	return class, nil
+}
+
 // An admission whose first refresh has not finished, whose last one failed or
 // that is stopping refuses every upload, and that says nothing about the
 // validator: a sibling block's refresh, or this one's next, can admit it. So

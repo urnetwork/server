@@ -146,7 +146,7 @@ func TestFrontServesItsBuiltPartsPerInterface(t *testing.T) {
 	if release, ok := front.AcquireQuicConnection("eth9", netip.MustParseAddr("198.51.100.7"), NameClassConnect); ok || release != nil {
 		t.Error("an unknown interface admitted a QUIC connection")
 	}
-	if count := testCounterValue(t, metrics.limitRefusals.WithLabelValues("interface", routeHttpNoLabel, "connect")); count != 1 {
+	if count := testCounterValue(t, metrics.limitRefusals.WithLabelValues("interface", routeHttpNoLabel, "connect", limitRateClassDefault)); count != 1 {
 		t.Errorf("%v unknown interface refusals counted, want 1", count)
 	}
 }
@@ -207,7 +207,7 @@ func TestFrontAcquireQuicConnection(t *testing.T) {
 	if release, ok := front.AcquireQuicConnection("eth1", addr, NameClassConnect); ok || release != nil {
 		t.Fatal("a third connection was admitted")
 	}
-	if count := testCounterValue(t, testFront.metrics.limitRefusals.WithLabelValues("quic", limitDefaultZone, "connect")); count != 1 {
+	if count := testCounterValue(t, testFront.metrics.limitRefusals.WithLabelValues("quic", limitDefaultZone, "connect", limitRateClassDefault)); count != 1 {
 		t.Errorf("%v quic refusals counted, want 1", count)
 	}
 	// another interface is another quota, and HTTP isn't touched

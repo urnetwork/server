@@ -108,7 +108,7 @@ func TestRouteHttpLimitsFollowNginxPhaseOrder(t *testing.T) {
 			t.Errorf("after %s, a request = %d, want 429: it was charged", c.name, response.Code)
 		}
 	}
-	if count := testCounterValue(t, testFront.metrics.limitRefusals.WithLabelValues("request", limitDefaultZone, "api")); count != 4 {
+	if count := testCounterValue(t, testFront.metrics.limitRefusals.WithLabelValues("request", limitDefaultZone, "api", limitRateClassDefault)); count != 4 {
 		t.Errorf("%v request refusals counted, want 4", count)
 	}
 }
@@ -228,7 +228,7 @@ func TestRouteHttpRouteZonesApplyOnServiceNamesOnly(t *testing.T) {
 	if response := serveTestRequest(https, newTestRequestFrom(lbAddr, "POST", "test-lb.service.example", "/hidden-example/by/service/api/connect/control", true)); response.Code != http.StatusTooManyRequests {
 		t.Fatalf("the route through an lb route, again = %d, want the shared zone's 429", response.Code)
 	}
-	if count := testCounterValue(t, testFront.metrics.limitRefusals.WithLabelValues("route", "route_api_connect_control", "api")); count != 1 {
+	if count := testCounterValue(t, testFront.metrics.limitRefusals.WithLabelValues("route", "route_api_connect_control", "api", limitRateClassDefault)); count != 1 {
 		t.Errorf("%v route refusals counted, want 1", count)
 	}
 }
@@ -249,6 +249,7 @@ func testLimitRefusalSeries(t *testing.T, metrics *frontMetrics) map[[3]string]f
 			t.Fatal(err)
 		}
 		labels := [3]string{}
+		validatorClass := false
 		for _, labelPair := range metric.GetLabel() {
 			switch labelPair.GetName() {
 			case "limit":
@@ -257,9 +258,21 @@ func testLimitRefusalSeries(t *testing.T, metrics *frontMetrics) map[[3]string]f
 				labels[1] = labelPair.GetValue()
 			case "name_class":
 				labels[2] = labelPair.GetValue()
+			case "rate_class":
+				switch labelPair.GetValue() {
+				case limitRateClassDefault:
+				case limitRateClassValidator:
+					validatorClass = true
+				default:
+					t.Errorf("the refusal counter has a rate_class %q", labelPair.GetValue())
+				}
 			default:
 				t.Errorf("the refusal counter has a label %q", labelPair.GetName())
 			}
+		}
+		// a refusal of the validator rate class is keyed limit/validator
+		if validatorClass {
+			labels[0] += "/" + limitRateClassValidator
 		}
 		series[labels] = metric.GetCounter().GetValue()
 	}
