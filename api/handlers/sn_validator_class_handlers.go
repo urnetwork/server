@@ -36,7 +36,7 @@ var snValidatorClassMints = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "urnetwork",
 	Subsystem: "sn",
 	Name:      "validator_class_mints_total",
-	Help:      "SN25 validator rate class tokens asked for at POST /sn/validator-class, by outcome: minted, refused_403 (the admission refused the validator, or the request), refused_503 (this instance's admission is not current, or the token could not be minted), refused_other (any other status)",
+	Help:      "SN25 validator rate class tokens asked for at POST /sn/validator-class by an authenticated client, by outcome: minted, refused_403 (the admission refused the validator, or the request), refused_503 (this instance's admission is not current, or the token could not be minted), refused_other (any other refusal)",
 }, []string{"outcome"})
 
 func init() {
@@ -73,7 +73,14 @@ func snValidatorClassOutcome(err error) string {
 func serveSnValidatorClass(w http.ResponseWriter, r *http.Request, reservedLane SnReservedAttemptUploadLane, mint func(session.ValidatorClassClaims) (string, error), now func() time.Time) {
 	router.WrapRequireClient(router.PrivateErrors(func(clientSession *session.ClientSession) (result *SnValidatorClassResult, resultErr error) {
 		defer clientSession.Cancel()
-		defer func() { snValidatorClassMints.WithLabelValues(snValidatorClassOutcome(resultErr)).Inc() }()
+		defer func() {
+			outcome := snValidatorClassOutcome(resultErr)
+			// neither a result nor an error: the impl panicked
+			if result == nil && resultErr == nil {
+				outcome = "refused_other"
+			}
+			snValidatorClassMints.WithLabelValues(outcome).Inc()
+		}()
 		ctx, cancel := context.WithTimeout(clientSession.Ctx, 10*time.Second)
 		defer cancel()
 		byJwt := clientSession.ByJwt
