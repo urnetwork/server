@@ -35,6 +35,9 @@ func sidecarPendingGroups() []struct {
 		{name: "MG7", markerId: sidecarMg7MigrationId, group: sidecarMg7Migrations()},
 		{name: "MG8", markerId: sidecarMg8MigrationId, group: sidecarMg8Migrations()},
 		{name: "MG9", markerId: sidecarMg9MigrationId, group: sidecarMg9Migrations()},
+		{name: "MG-C1", markerId: sidecarMgC1MigrationId, group: sidecarMgC1Migrations()},
+		{name: "MG-C2", markerId: sidecarMgC2MigrationId, group: sidecarMgC2Migrations()},
+		{name: "MG-C3", markerId: sidecarMgC3MigrationId, group: sidecarMgC3Migrations()},
 	}
 }
 
@@ -77,6 +80,7 @@ func TestSidecarGroupsEndTheMigrations(t *testing.T) {
 	for _, linked := range []func() bool{
 		SidecarMg0Linked, SidecarMg1Linked, SidecarMg2Linked, SidecarMg5Linked,
 		SidecarMg6Linked, SidecarMg7Linked, SidecarMg8Linked, SidecarMg9Linked,
+		SidecarMgC1Linked, SidecarMgC2Linked, SidecarMgC3Linked,
 	} {
 		if !linked() {
 			t.Fatal("a build with the tag does not report every group linked")

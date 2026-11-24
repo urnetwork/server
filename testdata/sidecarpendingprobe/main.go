@@ -22,5 +22,8 @@ func main() {
 		server.SidecarMg7Linked(),
 		server.SidecarMg8Linked(),
 		server.SidecarMg9Linked(),
+		server.SidecarMgC1Linked(),
+		server.SidecarMgC2Linked(),
+		server.SidecarMgC3Linked(),
 	)
 }

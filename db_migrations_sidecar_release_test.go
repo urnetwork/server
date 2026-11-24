@@ -15,6 +15,7 @@ func TestReleaseBuildRegistersNoPendingGroup(t *testing.T) {
 	for _, linked := range []func() bool{
 		SidecarMg0Linked, SidecarMg1Linked, SidecarMg2Linked, SidecarMg5Linked,
 		SidecarMg6Linked, SidecarMg7Linked, SidecarMg8Linked, SidecarMg9Linked,
+		SidecarMgC1Linked, SidecarMgC2Linked, SidecarMgC3Linked,
 	} {
 		if linked() {
 			t.Fatal("a release build links a pending group")

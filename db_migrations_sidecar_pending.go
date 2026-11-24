@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"slices"
 	"testing"
+
+	"github.com/urnetwork/sidecar/model"
 )
 
 // The migration groups waiting for their own Gn-out (db_migrations_sidecar.go).
@@ -42,6 +44,9 @@ func sidecarPendingMigrations() []any {
 		sidecarMg7Migrations(),
 		sidecarMg8Migrations(),
 		sidecarMg9Migrations(),
+		sidecarMgC1Migrations(),
+		sidecarMgC2Migrations(),
+		sidecarMgC3Migrations(),
 	)
 }
 
@@ -2135,4 +2140,70 @@ func sidecarMg9SmtpMigrations() []any {
 			CREATE INDEX smtp_dkim_key_remove_time ON smtp_dkim_key (remove_time) WHERE remove_time IS NOT NULL
 		`),
 	}
+}
+
+// MG-C1, DESIGN-COMPUTE §14.4's ledger (M12), after MG9: PostgreSQL 15's floor first, since its rollups use UNIQUE
+// NULLS NOT DISTINCT, so db migrate on an older database fails before anything of the group applies; then BAL's part,
+// every table of §14.4's MG-C1 row, compute_terms among them.
+func sidecarMgC1Migrations() []any {
+	return slices.Concat(
+		[]any{
+			computeRequirePostgres15(),
+		},
+		sidecarMgC1LedgerMigrations(),
+		[]any{
+			// the group's marker (SidecarMgC1Linked); it changes nothing
+			newCodeMigration(sidecarMgC1MigrationId, func(ctx context.Context) {}),
+		},
+	)
+}
+
+// MG-C1's §9.4 part, BAL's: registered from sidecar/model's own files (CONTRACTS C-30), empty until BAL lands it.
+func sidecarMgC1LedgerMigrations() []any {
+	return sidecarComputeMigrationValues(model.ComputeMigrationPart(model.ComputeMigrationGroupC1, model.ComputeMigrationOwnerBal))
+}
+
+// MG-C2, §14.4's providers (M12), after MG-C1.
+func sidecarMgC2Migrations() []any {
+	return slices.Concat(
+		sidecarMgC2ProviderMigrations(),
+		sidecarMgC2GammaMigrations(),
+		sidecarMgC2SearchMigrations(),
+		[]any{
+			// the group's marker (SidecarMgC2Linked); it changes nothing
+			newCodeMigration(sidecarMgC2MigrationId, func(ctx context.Context) {}),
+		},
+	)
+}
+
+// MG-C2's §4 part, PROV's: compute_provider and compute_provider_price, registered from sidecar/model (C-30).
+func sidecarMgC2ProviderMigrations() []any {
+	return sidecarComputeMigrationValues(model.ComputeMigrationPart(model.ComputeMigrationGroupC2, model.ComputeMigrationOwnerProv))
+}
+
+// MG-C2's §10 part, GAMMA's: compute_provider_ledger, compute_gamma_deposit and compute_gamma_op, registered from
+// sidecar/model (C-30).
+func sidecarMgC2GammaMigrations() []any {
+	return sidecarComputeMigrationValues(model.ComputeMigrationPart(model.ComputeMigrationGroupC2, model.ComputeMigrationOwnerGamma))
+}
+
+// MG-C2's §21 part, SRCH's: compute_search_outcome_hour and compute_search_flag, registered from sidecar/model (C-30).
+func sidecarMgC2SearchMigrations() []any {
+	return sidecarComputeMigrationValues(model.ComputeMigrationPart(model.ComputeMigrationGroupC2, model.ComputeMigrationOwnerSrch))
+}
+
+// MG-C3, §14.4's enclaves (M14), after MG-C2.
+func sidecarMgC3Migrations() []any {
+	return slices.Concat(
+		sidecarMgC3EnclaveMigrations(),
+		[]any{
+			// the group's marker (SidecarMgC3Linked); it changes nothing
+			newCodeMigration(sidecarMgC3MigrationId, func(ctx context.Context) {}),
+		},
+	)
+}
+
+// MG-C3's §11 part, ENC's: compute_enclave and compute_enclave_event, registered from sidecar/model (C-30).
+func sidecarMgC3EnclaveMigrations() []any {
+	return sidecarComputeMigrationValues(model.ComputeMigrationPart(model.ComputeMigrationGroupC3, model.ComputeMigrationOwnerEnc))
 }

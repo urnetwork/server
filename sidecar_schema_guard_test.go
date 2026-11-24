@@ -38,7 +38,7 @@ type sidecarColumnsFile struct {
 }
 
 type sidecarColumnsTable struct {
-	// MG0 to MG9: the group that creates the table or adds its columns
+	// MG0 to MG9, or MG-C1 to MG-C3: the group that creates the table or adds its columns
 	Group string `yaml:"group"`
 	// a table that exists before the sidecar, of which only the mapped columns are the sidecar's
 	Existing bool `yaml:"existing"`
@@ -51,6 +51,7 @@ type sidecarColumnsTable struct {
 var sidecarGroupLinkedFunctions = map[string]func() bool{
 	"MG0": SidecarMg0Linked, "MG1": SidecarMg1Linked, "MG2": SidecarMg2Linked, "MG5": SidecarMg5Linked,
 	"MG6": SidecarMg6Linked, "MG7": SidecarMg7Linked, "MG8": SidecarMg8Linked, "MG9": SidecarMg9Linked,
+	"MG-C1": SidecarMgC1Linked, "MG-C2": SidecarMgC2Linked, "MG-C3": SidecarMgC3Linked,
 }
 
 func readSidecarColumns(t testing.TB, path string) *sidecarColumnsFile {

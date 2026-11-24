@@ -31,6 +31,9 @@ var sidecarGroupMarkerIds = []string{
 	sidecarMg7MigrationId,
 	sidecarMg8MigrationId,
 	sidecarMg9MigrationId,
+	sidecarMgC1MigrationId,
+	sidecarMgC2MigrationId,
+	sidecarMgC3MigrationId,
 }
 
 func TestSidecarPendingRunsOnlyInLocalCanaryOrTests(t *testing.T) {

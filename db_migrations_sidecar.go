@@ -1,7 +1,10 @@
 package server
 
 import (
+	"fmt"
 	"sync"
+
+	operator "github.com/urnetwork/operator-core"
 )
 
 // The sidecar's migration groups (§19.7, D-OPS-6). A group is pending until its
@@ -40,6 +43,10 @@ const (
 	sidecarMg7MigrationId = "sidecar_mg7"
 	sidecarMg8MigrationId = "sidecar_mg8"
 	sidecarMg9MigrationId = "sidecar_mg9"
+	// DESIGN-COMPUTE §14.4's groups, after MG9 (CSRV-M12-02)
+	sidecarMgC1MigrationId = "sidecar_mg_c1"
+	sidecarMgC2MigrationId = "sidecar_mg_c2"
+	sidecarMgC3MigrationId = "sidecar_mg_c3"
 )
 
 // Whether this binary links the group that the code migration id ends, asked once
@@ -59,6 +66,10 @@ var (
 	sidecarMg7Linked = sidecarGroupLinked(sidecarMg7MigrationId)
 	sidecarMg8Linked = sidecarGroupLinked(sidecarMg8MigrationId)
 	sidecarMg9Linked = sidecarGroupLinked(sidecarMg9MigrationId)
+
+	sidecarMgC1Linked = sidecarGroupLinked(sidecarMgC1MigrationId)
+	sidecarMgC2Linked = sidecarGroupLinked(sidecarMgC2MigrationId)
+	sidecarMgC3Linked = sidecarGroupLinked(sidecarMgC3MigrationId)
 )
 
 // Whether this binary links MG0, §7's P0: network_client_owner, and the altered
@@ -111,6 +122,67 @@ func SidecarMg8Linked() bool {
 // which are MG5's.
 func SidecarMg9Linked() bool {
 	return sidecarMg9Linked()
+}
+
+// Whether this binary links MG-C1, DESIGN-COMPUTE §14.4's ledger (M12): BAL's compute_* ledger tables, compute_terms
+// among them. The compute block's readiness requires it, and nothing may read or write its tables while it is false.
+func SidecarMgC1Linked() bool {
+	return sidecarMgC1Linked()
+}
+
+// Whether this binary links MG-C2, §14.4's providers (M12): PROV's compute_provider and compute_provider_price,
+// GAMMA's compute_provider_ledger, compute_gamma_deposit and compute_gamma_op, and SRCH's compute_search_outcome_hour
+// and compute_search_flag. The compute block's readiness requires it.
+func SidecarMgC2Linked() bool {
+	return sidecarMgC2Linked()
+}
+
+// Whether this binary links MG-C3, §14.4's enclaves (M14): ENC's compute_enclave and compute_enclave_event. The
+// compute block reads it per request, on the enclave routes alone, so the block is ready between M12's exit and M14's.
+func SidecarMgC3Linked() bool {
+	return sidecarMgC3Linked()
+}
+
+// The least server_version_num MG-C1 runs on: PostgreSQL 15, the first with UNIQUE NULLS NOT DISTINCT, which its
+// rollups use (§14.4; production runs 18). A version number, so a constant.
+const computePostgresMinVersionNum = 150000
+
+// The statement that refuses a database below floor, a server_version_num, raising before anything of its group is
+// applied; it creates nothing. server's runner applies each statement in its own transaction, so a refused run leaves
+// the group unapplied from this statement on.
+func computePostgresFloorSql(floor int) string {
+	return fmt.Sprintf(`
+		DO $compute_postgres_floor$
+		BEGIN
+			IF current_setting('server_version_num')::int < %d THEN
+				RAISE EXCEPTION 'MG-C1 needs a server_version_num of at least %d (UNIQUE NULLS NOT DISTINCT), and this database runs %%', current_setting('server_version');
+			END IF;
+		END
+		$compute_postgres_floor$
+	`, floor, floor)
+}
+
+// MG-C1's first step (§14.4): db migrate on a database older than PostgreSQL 15, as a local, T3 or canary one may be,
+// fails closed with nothing of the group applied.
+func computeRequirePostgres15() *SqlMigration {
+	return newSqlMigration(computePostgresFloorSql(computePostgresMinVersionNum))
+}
+
+// A compute part's steps as the migrations slice holds them: each registered statement (sidecar/model's
+// RegisterComputeMigrationPart, CONTRACTS C-30), in its order. A data step, which the registry refuses, panics here
+// too, so the slice never holds a step it would skip. Declared here, outside the pending file, so a group's function
+// moves at its Gn-out with nothing of the pending file behind it.
+func sidecarComputeMigrationValues(parts ...[]*operator.Migration) []any {
+	values := []any{}
+	for _, part := range parts {
+		for _, migration := range part {
+			if migration == nil || migration.Sql == "" || migration.Code != nil {
+				panic(fmt.Errorf("a compute migration part holds a step that is no statement"))
+			}
+			values = append(values, newSqlMigration(migration.Sql))
+		}
+	}
+	return values
 }
 
 // Whether a binary that links a pending group may run. A pending group's
