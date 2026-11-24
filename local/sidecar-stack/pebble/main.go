@@ -12,6 +12,11 @@
 // Pebble's own command does; -always-valid takes every challenge as passed, for a run that has no resolver the
 // container can reach. Pebble never checks CAA or a customer's accounturi (§22.9), so those rows stay LE staging's.
 //
+// Pebble v2.10.3 wedges for good when an authorization is deactivated while its challenge is under validation, so a
+// request on an authorization waits until the validation authority has finished the challenges of it under way, at
+// most -validation-wait, past which it is answered 503 (pebble_hold.go). A stop answers each request still waiting
+// 503, gives the rest ShutdownTimeout and then closes their connections and fails, naming Pebble's goroutines.
+//
 // It is a test fixture: it keeps every account, order and key in memory, issues certificates nothing trusts, and nothing
 // in it is fit to face a network. The compose file publishes its ports on 127.0.0.1 alone.
 package main
@@ -37,6 +42,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -64,26 +70,37 @@ type PebbleSettings struct {
 	CertificateLife time.Duration
 	// The tlsserver profile's validity: 45 days.
 	TlsServerValidity time.Duration
-	// How long a stop waits for open requests.
+	// How long a request on an authorization waits for the validation authority to finish a challenge of it under
+	// way (pebble_hold.go): past the 15 s Pebble gives each lookup and dial, so a loaded machine still waits one out.
+	// A request held this long is answered 503 and logged. Must be positive.
+	ValidationWaitTimeout time.Duration
+	// How long a stop waits for open requests, past which it closes their connections and fails. Must be positive.
 	ShutdownTimeout time.Duration
 }
 
 func DefaultPebbleSettings() *PebbleSettings {
 	return &PebbleSettings{
-		NonceRejectPercent: 5,
-		AuthzReusePercent:  0,
-		Hostnames:          []string{"localhost", "sidecar-test-pebble", "127.0.0.1"},
-		CertificateLife:    30 * 24 * time.Hour,
-		TlsServerValidity:  45 * 24 * time.Hour,
-		ShutdownTimeout:    10 * time.Second,
+		NonceRejectPercent:    5,
+		AuthzReusePercent:     0,
+		Hostnames:             []string{"localhost", "sidecar-test-pebble", "127.0.0.1"},
+		CertificateLife:       30 * 24 * time.Hour,
+		TlsServerValidity:     45 * 24 * time.Hour,
+		ValidationWaitTimeout: 30 * time.Second,
+		ShutdownTimeout:       10 * time.Second,
 	}
 }
 
 // One Pebble: its ACME handler and what its management port answers.
 type pebbleServer struct {
+	// Pebble's behind the hold
 	acme        http.Handler
 	management  http.Handler
 	certificate tls.Certificate
+	// the hold acme is, which a test reads; nil on a server a test builds around a handler of its own
+	hold *pebbleHold
+	// closed at the stop, which lets every held request go
+	stopping chan struct{}
+	stopOnce sync.Once
 }
 
 // A throwaway certificate for hostnames, made at start, on a P-256 key nothing else holds.
@@ -124,13 +141,15 @@ func pebbleListenerCertificate(hostnames []string, life time.Duration) (tls.Cert
 // Pebble as settings configure it. Pebble reads its knobs from the environment as it is built, so they are set here
 // first, as its own command reads them.
 func newPebbleServer(settings *PebbleSettings, logger *log.Logger) (*pebbleServer, error) {
-	if len(settings.Hostnames) == 0 || settings.CertificateLife <= 0 || settings.TlsServerValidity <= 0 {
-		return nil, errors.New("pebble needs hostnames and positive lives")
+	if len(settings.Hostnames) == 0 || settings.CertificateLife <= 0 || settings.TlsServerValidity <= 0 || settings.ValidationWaitTimeout <= 0 || settings.ShutdownTimeout <= 0 {
+		return nil, errors.New("pebble needs hostnames, and positive lives and timeouts")
 	}
 	environment := map[string]string{
 		"PEBBLE_VA_NOSLEEP":      "1",
 		"PEBBLE_WFE_NONCEREJECT": strconv.Itoa(settings.NonceRejectPercent),
 		"PEBBLE_AUTHZREUSE":      strconv.Itoa(settings.AuthzReusePercent),
+		// set either way, since a Pebble built earlier in the process may have set it
+		"PEBBLE_VA_ALWAYS_VALID": "0",
 	}
 	if settings.AlwaysValid {
 		environment["PEBBLE_VA_ALWAYS_VALID"] = "1"
@@ -145,7 +164,9 @@ func newPebbleServer(settings *PebbleSettings, logger *log.Logger) (*pebbleServe
 		pebbleProfileTlsServer: {Description: "45 days, as LE's tlsserver", ValidityPeriod: uint64(settings.TlsServerValidity.Seconds())},
 		"default":              {Description: "Pebble's default"},
 	})
-	validator := va.New(logger, 0, 0, false, settings.DnsServer, memoryStore)
+	// the validation authority's log is read for each challenge it finishes (pebble_hold.go)
+	validations := newPebbleValidations(log.New(logger.Writer(), logger.Prefix(), logger.Flags()))
+	validator := va.New(log.New(validations, "", 0), 0, 0, false, settings.DnsServer, memoryStore)
 	frontEnd := wfe.New(logger, memoryStore, validator, authority, []string{"pebble.example"}, false, false, 0, 0)
 	certificate, err := pebbleListenerCertificate(settings.Hostnames, settings.CertificateLife)
 	if err != nil {
@@ -166,10 +187,20 @@ func newPebbleServer(settings *PebbleSettings, logger *log.Logger) (*pebbleServe
 		writer.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(writer).Encode(map[string]string{"directory": wfe.DirectoryPath})
 	})
-	return &pebbleServer{acme: frontEnd.Handler(), management: management, certificate: certificate}, nil
+	stopping := make(chan struct{})
+	hold := newPebbleHold(settings, memoryStore, validations, frontEnd.Handler(), logger, stopping)
+	return &pebbleServer{
+		acme:        hold,
+		management:  management,
+		certificate: certificate,
+		hold:        hold,
+		stopping:    stopping,
+	}, nil
 }
 
-// Serves the ACME port on TLS and the management port in the clear until ctx ends, then stops both.
+// Serves the ACME port on TLS and the management port in the clear until ctx ends, then stops both: each request
+// the hold has is answered 503, and the rest have shutdownTimeout to end. Past it the stop closes their connections
+// and fails naming Pebble's goroutines, which a wedged Pebble's requests never leave. Called once.
 func (self *pebbleServer) serve(ctx context.Context, acmeListener net.Listener, managementListener net.Listener, shutdownTimeout time.Duration) error {
 	acmeServer := &http.Server{Handler: self.acme, TLSConfig: &tls.Config{Certificates: []tls.Certificate{self.certificate}, MinVersion: tls.VersionTLS12}}
 	managementServer := &http.Server{Handler: self.management}
@@ -181,12 +212,21 @@ func (self *pebbleServer) serve(ctx context.Context, acmeListener net.Listener, 
 	case <-ctx.Done():
 	case err = <-served:
 	}
+	if errors.Is(err, http.ErrServerClosed) {
+		err = nil
+	}
+	self.stopOnce.Do(func() {
+		close(self.stopping)
+	})
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
-	acmeServer.Shutdown(shutdownCtx)
-	managementServer.Shutdown(shutdownCtx)
-	if errors.Is(err, http.ErrServerClosed) {
-		return nil
+	acmeShutdownErr := acmeServer.Shutdown(shutdownCtx)
+	if managementShutdownErr := managementServer.Shutdown(shutdownCtx); managementShutdownErr != nil {
+		managementServer.Close()
+	}
+	if acmeShutdownErr != nil {
+		acmeServer.Close()
+		err = errors.Join(err, fmt.Errorf("Pebble's requests had not ended %v after the stop, so Pebble is wedged:\n%s", shutdownTimeout, pebbleGoroutines()))
 	}
 	return err
 }
@@ -199,6 +239,7 @@ func main() {
 	flag.IntVar(&settings.NonceRejectPercent, "nonce-reject", settings.NonceRejectPercent, "good nonces refused as bad, in percent")
 	flag.IntVar(&settings.AuthzReusePercent, "authz-reuse", settings.AuthzReusePercent, "orders whose authorizations are reused, in percent")
 	flag.BoolVar(&settings.AlwaysValid, "always-valid", false, "every challenge passes with no lookup or dial")
+	flag.DurationVar(&settings.ValidationWaitTimeout, "validation-wait", settings.ValidationWaitTimeout, "how long a request on an authorization waits for a challenge of it under validation, past which it is answered 503")
 	flag.Parse()
 
 	logger := log.New(io.Discard, "", 0)
