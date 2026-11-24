@@ -7,11 +7,13 @@ package main
 // before it answers the DATA or BDAT, and the intake keeps the envelope and the message in memory (mx-4).
 //
 // It reads config/<env>/smtpedge.yml for the names, the sending addresses, the loop allowlist and the report
-// bounds, as the smtpedge block will (smtpedgeservice.LoadSmtpEdgeSettings). Each of the intake's seams that
-// server cannot serve yet stays empty, and fails closed as smtpedgeservice.SmtpReportIntakeDeps says:
+// bounds, as the smtpedge block will (smtpedgeservice.LoadSmtpEdgeSettings). Each seam the block cannot give the
+// intake stays empty, says so at start, and fails closed as smtpedgeservice.SmtpReportIntakeDeps says.
 //
-//   - Tokens: network_dns_zone.report_token has no column yet (plan-DNS-rua-token's interim), so every
-//     <token>@ report is dropped unread.
+// The Tokens tie a report at <token>@<report host> to the network whose zone holds the token, by network_dns_zone's
+// unique index on report_token over the block's own Postgres (report_token_source.go; plan-SMTP-net-token, §14.6),
+// which main gives the intake through resolveTokensThrough where the binary links MG6, the column's group; in one that
+// does not, every <token>@ report is dropped unread, as no zone there draws a token for its rua.
 //
 // The Keys, each network's mail key, come from api's report-key route on the platform listener's gate bearer
 // (newPlatformReportKeySource, plan-SMTP-report-seal-key), which main gives the intake through sealThrough: api
@@ -125,11 +127,11 @@ func reportIntakeName(name string) string {
 	return strings.ToLower(strings.TrimSuffix(name, "."))
 }
 
-// The platform block's intake from config: smtpedge.yml's settings on model's store, reporters' keys from the
-// process's resolver and no report tokens yet. smtpedge.yml's root and report host must be mxedge.yml's
-// platform_root and platform_report_host, since the listener takes recipients by the one and the intake routes
-// them by the other: mail one took and the other could not route would be answered 250 and dropped. An error
-// leaves the block without an intake, so every recipient the listener answers for gets 451 4.3.0.
+// The platform block's intake from config: smtpedge.yml's settings on model's store and reporters' keys from the
+// process's resolver, its report tokens given after it (resolveBlockReportTokens). smtpedge.yml's root and report
+// host must be mxedge.yml's platform_root and platform_report_host, since the listener takes recipients by the one
+// and the intake routes them by the other: mail one took and the other could not route would be answered 250 and
+// dropped. An error leaves the block without an intake, so every recipient the listener answers for gets 451 4.3.0.
 func newConfiguredReportIntake(mxEdgeSettings *mxedgeservice.MxEdgeSettings) (*platformReportIntake, error) {
 	settings, err := loadReportIntakeSettings()
 	if err != nil {
@@ -148,7 +150,8 @@ func newConfiguredReportIntake(mxEdgeSettings *mxedgeservice.MxEdgeSettings) (*p
 }
 
 // The intake as the platform listener reaches it. Safe for concurrent use, as the intake is, once
-// fileNoticesThrough and attributeThrough have run, which they do before the listener has it.
+// fileNoticesThrough, sealThrough, resolveTokensThrough and attributeThrough have run, which they do before the
+// listener has it.
 type platformReportIntake struct {
 	intake *smtpedgeservice.SmtpReportIntake
 	// what the intake was made with, which attributeThrough makes it again with
@@ -435,7 +438,7 @@ func newPlatformReportKeySource(apiUrl string) (smtpedgeservice.SmtpReportKeySou
 
 // §12's label map as the intake reads <root>'s rows: the network a <net> label or alias names in root, a
 // retiring alias's included, since a network's mail still names it (plan-SMTP-net-token). A name nothing holds
-// is no network; a read that failed is an error, so the reporter retries.
+// is no network; a read that failed, the pool's or one a context ended under, is an error, so the reporter retries.
 type reportLabelSource struct {
 	root string
 }
@@ -443,12 +446,16 @@ type reportLabelSource struct {
 // See smtpedgeservice.SmtpLabelSource.
 func (self *reportLabelSource) NetworkForLabel(ctx context.Context, label string) (networkId sidecar.Id, ok bool, returnErr error) {
 	defer func() {
-		// the model raises a failed read, which reaches the intake as an error
+		// the model raises a failed read, a context that ended under it included, and every raise reaches the intake
+		// as an error, as the token index's and the report store's do: the listener calls the intake under no server
+		// handler, so a raise that left here would end the connection with go-smtp's 421 where the intake answers 451
 		if r := recover(); r != nil {
-			if server.IsDoneError(r) {
-				panic(r)
+			networkId, ok = sidecar.Id{}, false
+			if err, isErr := r.(error); isErr {
+				returnErr = fmt.Errorf("report intake: the label map: %w", err)
+			} else {
+				returnErr = fmt.Errorf("report intake: the label map: %v", r)
 			}
-			returnErr = fmt.Errorf("report intake: the label map: %v", r)
 		}
 	}()
 	resolvedId, _, err := model.ResolveNetworkLabel(ctx, self.root, label, false)
