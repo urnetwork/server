@@ -348,6 +348,29 @@ func TestReportLabelSourceSaysUnknownOrFails(t *testing.T) {
 	})
 }
 
+// A label read a context ended under, the intake's StoreTimeout or the block's drain, is an error, which the intake
+// answers as the listener's 451, never a raise past the intake, which would reach go-smtp's recover and end the
+// connection with its 421.
+func TestReportLabelSourceAnswersAnEndedReadAsAnError(t *testing.T) {
+	source := &reportLabelSource{root: "root.example"}
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		if !server.SidecarMg2Linked() {
+			return
+		}
+		ctx := context.Background()
+		label, err := model.EnsureNetworkLabel(ctx, server.NewId(), "root.example")
+		if err != nil {
+			t.Fatal(err)
+		}
+		ended, cancel := context.WithCancel(ctx)
+		cancel()
+		_, ok, err := source.NetworkForLabel(ended, label)
+		if ok || !errors.Is(err, context.Canceled) {
+			t.Fatalf("a read a context ended under: %t, %v", ok, err)
+		}
+	})
+}
+
 // A notice route that records each call and answers what the test sets.
 type testNoticeGate struct {
 	stateLock sync.Mutex

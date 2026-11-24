@@ -438,7 +438,7 @@ func newPlatformReportKeySource(apiUrl string) (smtpedgeservice.SmtpReportKeySou
 
 // §12's label map as the intake reads <root>'s rows: the network a <net> label or alias names in root, a
 // retiring alias's included, since a network's mail still names it (plan-SMTP-net-token). A name nothing holds
-// is no network; a read that failed is an error, so the reporter retries.
+// is no network; a read that failed, the pool's or one a context ended under, is an error, so the reporter retries.
 type reportLabelSource struct {
 	root string
 }
@@ -446,12 +446,16 @@ type reportLabelSource struct {
 // See smtpedgeservice.SmtpLabelSource.
 func (self *reportLabelSource) NetworkForLabel(ctx context.Context, label string) (networkId sidecar.Id, ok bool, returnErr error) {
 	defer func() {
-		// the model raises a failed read, which reaches the intake as an error
+		// the model raises a failed read, a context that ended under it included, and every raise reaches the intake
+		// as an error, as the token index's and the report store's do: the listener calls the intake under no server
+		// handler, so a raise that left here would end the connection with go-smtp's 421 where the intake answers 451
 		if r := recover(); r != nil {
-			if server.IsDoneError(r) {
-				panic(r)
+			networkId, ok = sidecar.Id{}, false
+			if err, isErr := r.(error); isErr {
+				returnErr = fmt.Errorf("report intake: the label map: %w", err)
+			} else {
+				returnErr = fmt.Errorf("report intake: the label map: %v", r)
 			}
-			returnErr = fmt.Errorf("report intake: the label map: %v", r)
 		}
 	}()
 	resolvedId, _, err := model.ResolveNetworkLabel(ctx, self.root, label, false)
