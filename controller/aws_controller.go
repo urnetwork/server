@@ -336,8 +336,25 @@ func (self *MissingWalletTemplate) AmountUsd() string {
 }
 
 // fixme - we can clean this up so all public functions are in the interface
+//
+// The error of a failed send can carry the recipient's address or number: a
+// caller that logs it, or hands it to something that logs it, such as a
+// route's error, names the failure by accountMessageSendFailureKind instead
+// (I-13).
 type MessageSender interface {
 	SendAccountMessageTemplate(userAuth string, template Template, sendOpts ...any) error
+}
+
+// The kind of a failed account message send, as a log line names it: "timeout"
+// for a send that ran out of time (an error that is `context.DeadlineExceeded`),
+// else "failed". SES's and Pinpoint's messages can name the recipient, so a
+// line about a failed send names this kind and the ids it already has, never
+// the error, as the account message outbox's lines do (I-13).
+func accountMessageSendFailureKind(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	return "failed"
 }
 
 var messageSenderInstance MessageSender = &AWSMessageSender{}
@@ -383,11 +400,16 @@ var accountMessageSendFailures = newBoundedReport(defaultAccountMessageSendSetti
 // http client both stop there, so a hung endpoint fails the send instead of
 // holding the caller. Each call is counted (urnetwork_account_message_sends_total)
 // and failures are reported at most once per interval; a call that ran out of
-// time returns an error that is `context.DeadlineExceeded`.
+// time returns an error that is `context.DeadlineExceeded`. A failed call's
+// error can carry the recipient's address or number, which SES's and
+// Pinpoint's messages name, so the sender's own lines name the channel, the
+// kind and the SDK's error code alone (I-13).
 // The zero value is the production sender. Safe for concurrent use.
 type AWSMessageSender struct {
-	// zero uses email.yml's send timeout
+	// zero uses the email config's send timeout
 	sendTimeout time.Duration
+	// nil reads email.yml (EnvEmailConfig); tests give their own
+	emailConfig *EmailConfig
 	// empty uses the AWS endpoints; tests point both services at a local server
 	endpoint string
 	// nil uses the default credential chain
@@ -409,12 +431,20 @@ func (self *AWSMessageSender) SendAccountMessageTemplate(userAuth string, templa
 	}
 }
 
+// The sender's email config: its own, or email.yml's.
+func (self *AWSMessageSender) envEmailConfig() *EmailConfig {
+	if self.emailConfig != nil {
+		return self.emailConfig
+	}
+	return EnvEmailConfig()
+}
+
 // The bound on one call.
 func (self *AWSMessageSender) timeout() time.Duration {
 	if 0 < self.sendTimeout {
 		return self.sendTimeout
 	}
-	return EnvEmailConfig().SendTimeout()
+	return self.envEmailConfig().SendTimeout()
 }
 
 // A session for one call in the region, whose http client stops at the send
@@ -465,8 +495,9 @@ func accountMessageSendResult(sendCtx context.Context, channel string, sendTimeo
 		err = fmt.Errorf("%s send timed out after %s: %w: %w", channel, sendTimeout, context.DeadlineExceeded, err)
 	}
 	accountMessageSendCounter.WithLabelValues(channel, result).Inc()
-	// the line names the channel and the SDK's error code only: SES messages can
-	// carry an address
+	// each line names the channel, the kind and the SDK's error code only: an
+	// SES or Pinpoint message can carry the recipient's address or number, so
+	// no line prints the error (I-13)
 	code := "?"
 	var awsErr awserr.Error
 	if errors.As(err, &awsErr) {
@@ -481,8 +512,9 @@ func accountMessageSendResult(sendCtx context.Context, channel string, sendTimeo
 			suppressedCount,
 		)
 	}
+	// every failure, where the report above is bounded
 	if glog.V(1) {
-		glog.Infof("[aws]account %s send %s: %s\n", channel, result, err)
+		glog.Infof("[aws]account %s send %s (%s)\n", channel, result, code)
 	}
 	return err
 }
@@ -618,7 +650,9 @@ func SmsAllowed(template Template) bool {
 // contacting AWS, the same as a delivered message for its callers.
 func (self *AWSMessageSender) sendSmsTemplate(phoneNumber string, template Template) error {
 	if !SmsAllowed(template) {
-		glog.V(1).Infof("[aws]account message %s is not sent by sms\n", template.Name())
+		if glog.V(1) {
+			glog.Infof("[aws]account message %s is not sent by sms\n", template.Name())
+		}
 		return nil
 	}
 	bodyText, err := RenderSmsTemplate(template)
@@ -661,8 +695,9 @@ func (self *AWSMessageSender) sendEmail(emailAddress string, templateName string
 	awsRegion := "us-west-1"
 	charSet := "UTF-8"
 
+	emailConfig := self.envEmailConfig()
 	// note any sender email domain will need to be registed as an identity in SES
-	senderEmail := EnvEmailConfig().CompanySenderEmail
+	senderEmail := emailConfig.CompanySenderEmail
 	for _, sendOpt := range sendOpts {
 		switch v := sendOpt.(type) {
 		case SendAccountEmailSenderEmail:
@@ -708,7 +743,6 @@ func (self *AWSMessageSender) sendEmail(emailAddress string, templateName string
 		},
 		Source: aws.String(senderEmail),
 	}
-	emailConfig := EnvEmailConfig()
 	if replyTo := strings.TrimSpace(emailConfig.ReplyToEmail); replyTo != "" {
 		input.ReplyToAddresses = []*string{aws.String(replyTo)}
 	}

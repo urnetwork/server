@@ -250,9 +250,11 @@ func authVerifySend(
 	)
 	if err != nil {
 		// the sender counts the failure and reports it at most once per
-		// interval; a client can repeat this request, so the detail is verbose
+		// interval; a client can repeat this request, so the line is verbose.
+		// The error can carry the address, so the line names its kind alone
+		// (I-13)
 		if glog.V(1) {
-			glog.Infof("[auth]verification code send failed: %s\n", err)
+			glog.Infof("[auth]verification code send %s\n", accountMessageSendFailureKind(err))
 		}
 		result.Error = &AuthVerifySendError{
 			Code:    model.AuthVerifySendErrorCodeSendFailed,
@@ -396,9 +398,11 @@ func authPasswordReset(
 	)
 	if err != nil {
 		// the sender counts the failure and reports it at most once per
-		// interval; a client can repeat this request, so the detail is verbose
+		// interval; a client can repeat this request, so the line is verbose.
+		// The error can carry the address, so the line names its kind alone
+		// (I-13)
 		if glog.V(1) {
-			glog.Infof("[auth]password reset code send failed: %s\n", err)
+			glog.Infof("[auth]password reset code send %s\n", accountMessageSendFailureKind(err))
 		}
 		result.Error = &AuthVerifySendError{
 			Code:    model.AuthVerifySendErrorCodeSendFailed,

@@ -206,7 +206,9 @@ func StNotifyEpochEarnings(ctx context.Context, deploymentKey model.StDeployment
 // reads for it: one email per address, each followed by the settings'
 // SendInterval. A Team's email names the Team as that read finds it
 // (QD-1223). sent counts the emails sent; skipped counts each network with no
-// address and each email whose send failed.
+// address and each email whose send failed. A failed send's line names the
+// network and the failure's kind alone: the send's error can carry the
+// address, a Team's billing recipients' among them (I-13).
 func stSendEpochEarnings(
 	ctx context.Context,
 	deploymentKey model.StDeploymentKey,
@@ -240,7 +242,14 @@ func stSendEpochEarnings(
 			}
 			for i, userAuth := range userAuths {
 				if err := sender.SendAccountMessageTemplate(userAuth, template); err != nil {
-					glog.Warningf("[st]epoch %d earnings email %d of %d to network %s failed: %s\n", epoch, i+1, len(userAuths), networkId, err)
+					glog.Warningf(
+						"[st]epoch %d earnings email %d of %d to network %s: send %s\n",
+						epoch,
+						i+1,
+						len(userAuths),
+						networkId,
+						accountMessageSendFailureKind(err),
+					)
 					skipped += 1
 				} else {
 					sent += 1
