@@ -128,9 +128,13 @@ func TestNetworkProxiesNeverUsedOverSocksOrWireguardShowNoNotice(t *testing.T) {
 		connect.AssertEqual(t, Pro().ProOnlyFeature(FeatureSocksProxy), true)
 		connect.AssertEqual(t, Pro().ProOnlyFeature(FeatureWireguardProxy), true)
 
+		// the network's two proxies are from before the free cap was 1
+		// (2026-11-24); it keeps both
 		freeSession := testProFeaturesNetwork(t, ctx, "profeaturesunused")
+		restoreProxyClientLimits := Testing_SetProxyClientLimits(0, 0)
 		httpsClientId, _ := testProFeaturesProxy(t, freeSession, "https proxy", false)
 		wgClientId, _ := testProFeaturesProxy(t, freeSession, "wireguard proxy", true)
+		restoreProxyClientLimits()
 
 		status, features := testProFeaturesNotice(t, freeSession)
 		connect.AssertEqual(t, status.PlanKnown, true)

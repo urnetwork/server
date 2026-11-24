@@ -28,8 +28,10 @@ func TestReusableProxyLocationMatches(t *testing.T) {
 func TestFindReusableNetworkProxy(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		defer Testing_ClearNetworkClientLimitCache()
-		// this test creates more proxies than the free plan's proxy cap
+		// this test creates more proxies in one free network than the free
+		// plan's client limit and its hosted proxy cap (1) allow
 		defer Testing_SetConcurrentClientsLimit(1000, 1000)()
+		defer Testing_SetProxyClientLimits(0, 0)()
 		ctx := context.Background()
 		settings := DefaultReusableNetworkProxySettings()
 
