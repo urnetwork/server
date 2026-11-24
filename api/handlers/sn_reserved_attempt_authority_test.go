@@ -227,7 +227,10 @@ func (self *snReservedAttemptAuthority) startUnrefreshed(t testing.TB, replicaNo
 	config := &controller.StConfig{Enabled: true, Profile: "testnet", DeploymentId: "reserved-http-fixture", ChainId: 945, GenesisHash: self.record.Domain.GenesisHash, Netuid: 521, NoId: replicaNoID,
 		ContractAddress: common.Address(self.record.Domain.Coordinator), SettlementVault: common.Address(self.record.Domain.SettlementVault), RpcUrls: []string{self.endpoint.URL}}
 	config.ReservedAttemptUpload = &controller.StReservedAttemptUploadConfig{NativeRPCURLs: []string{self.endpoint.URL}, Budget: model.StReservedAttemptUploadBudget{RetryRequestsPerHour: 2, ObjectsPerHour: 3, BytesPerHour: 256},
-		Admission: validator.ValidatorUploadAdmissionConfig{Deployment: self.deployment, ReplicaNoID: replicaNoID, MaximumContextBytes: 65536, MaximumOwners: 2, BlocksPerRange: 200, MaximumRanges: 1, MaximumEventsPerRange: 4,
+		// The one discovery range [1001, 1201] stays open at the finalized head
+		// 1200, so every refresh reads it, as these tests expect. sn keeps a
+		// closed range per process and tests that itself.
+		Admission: validator.ValidatorUploadAdmissionConfig{Deployment: self.deployment, ReplicaNoID: replicaNoID, MaximumContextBytes: 65536, MaximumOwners: 2, BlocksPerRange: 201, MaximumRanges: 1, MaximumEventsPerRange: 4,
 			RefreshSeconds: 10, MaximumRefreshSeconds: 20, MaximumHeadAgeSeconds: 60, MaximumIntentSeconds: 25, FreshActivePerOwner: 1, RetryActivePerOwner: 1}}
 	owner, err := controller.NewStReservedAttemptUploadWithConfig(t.Context(), config)
 	if err != nil {
