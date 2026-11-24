@@ -606,8 +606,16 @@ func (self *privateSdkBrowsingFixture) captureProviderReports(lateAbsent bool) e
 
 // Each SDK device owns a non-nil generated instance, like the mobile host.
 // The public constructor treats this as required input, not an optional value.
+// The baselines measure a device without post-quantum encryption, the app
+// default before 2026-11-24, and these providers are not probed modern: an
+// explicit profile keeps them comparable.
 func privateSdkBrowsingNewDevice(space *sdk.NetworkSpace, byJwt string, settings *sdk.DeviceLocalSettings) (*sdk.DeviceLocal, error) {
-	return sdk.NewDeviceLocal(space, byJwt, "sdk browsing device", "synthetic sdk browsing device", "perfvar", sdk.NewId(), settings)
+	device, err := sdk.NewDeviceLocal(space, byJwt, "sdk browsing device", "synthetic sdk browsing device", "perfvar", sdk.NewId(), settings)
+	if err != nil {
+		return nil, err
+	}
+	device.SetPerformanceProfile(&sdk.PerformanceProfile{WindowType: sdk.WindowTypeAuto})
+	return device, nil
 }
 
 // Constructor failure must retire partial owners before TestEnv resets its
