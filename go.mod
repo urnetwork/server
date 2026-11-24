@@ -20,7 +20,7 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/jsonschema-go v0.4.3
 	github.com/google/uuid v1.6.0
-	github.com/gorilla/websocket v1.5.3
+	github.com/gorilla/websocket v1.5.4-0.20240701034025-d67f41855da4
 	github.com/holiman/uint256 v1.3.2
 	github.com/jackc/pgerrcode v0.0.0-20250907135507-afb5586c32a6
 	github.com/jackc/pgx/v5 v5.10.0
@@ -31,6 +31,7 @@ require (
 	github.com/mholt/acmez/v3 v3.1.7
 	github.com/miekg/dns v1.1.72
 	github.com/minio/minio-go/v7 v7.2.1
+	github.com/mjl-/mox v0.0.17
 	github.com/modelcontextprotocol/go-sdk v1.7.0
 	github.com/mozillazg/go-unidecode v0.2.0
 	github.com/mr-tron/base58 v1.3.0
@@ -153,7 +154,6 @@ require (
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/mjl-/adns v0.0.0-20260809141028-22f885debe71 // indirect
 	github.com/mjl-/flate v0.0.0-20250221133712-6372d09eb978 // indirect
-	github.com/mjl-/mox v0.0.17 // indirect
 	github.com/mostynb/zstdpool-freelist v0.0.0-20201229113212-927304c0c3b1 // indirect
 	github.com/multiformats/go-base32 v0.1.0 // indirect
 	github.com/multiformats/go-base36 v0.2.0 // indirect

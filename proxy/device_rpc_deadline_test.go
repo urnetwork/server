@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -144,8 +145,10 @@ func TestProxyRpcDeadlineMissingHijackerIsError(t *testing.T) {
 	}
 }
 
-// Gorilla wraps hijack errors as HandshakeError; the original 500 response
-// and lack of socket ownership must remain unchanged.
+// Gorilla wraps hijack errors as HandshakeError, whose text ends with the
+// hijacker's own (gorilla puts its "websocket: hijack: " prefix before it since
+// the GO-2026-6278 fix); the original 500 response and lack of socket ownership
+// must remain unchanged.
 func TestProxyRpcDeadlineHijackFailurePreservesOwner(t *testing.T) {
 	handler := NewDeviceRpcHandler(nil, nil)
 	want := errors.New("synthetic hijack rejected")
@@ -156,7 +159,7 @@ func TestProxyRpcDeadlineHijackFailurePreservesOwner(t *testing.T) {
 		defer ws.Close()
 	}
 	var handshakeErr websocket.HandshakeError
-	if !errors.As(err, &handshakeErr) || err.Error() != want.Error() || response.Code != http.StatusInternalServerError || raw.closes != 0 || raw.writes != 0 {
+	if !errors.As(err, &handshakeErr) || !strings.HasSuffix(err.Error(), want.Error()) || response.Code != http.StatusInternalServerError || raw.closes != 0 || raw.writes != 0 {
 		t.Fatalf("hijack=%v closes=%d writes=%d", err, raw.closes, raw.writes)
 	}
 }
