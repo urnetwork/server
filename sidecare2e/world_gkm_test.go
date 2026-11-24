@@ -21,8 +21,12 @@ import (
 type worldKeysSettings struct {
 	// The sidecars of the one network.
 	KeysClientCount int
-	// The bound every phase of the case shares: the bootstrap and two joins, each of which may wait out a late ask's
-	// minute (T3WorldSettings.KeyJoinTimeout), then the repo, the writes and the rotation, inside the case's 10 minutes.
+	// The bound every phase of the case shares: the bootstrap and two joins, then the repo, the writes and the
+	// rotation, inside the case's 10 minutes. Since keys-late-delivery a join takes about as long as a statement's
+	// sync: the joiner's config key comes as the first wrap its admission's signer delivers at once, or late from a
+	// holder gkm's hint by sidecar id reaches, within GkmSettings.LateDeliverJitter (15 s), and gkm caches no keying
+	// repo/ to refuse either. Only a joiner both missed waits on its late ask, asked again each LateAskInterval (1 min),
+	// inside T3WorldSettings.KeyJoinTimeout.
 	PhaseTimeout time.Duration
 	// How long a sidecar may take to hold a generation the owner made, its key client learning of it by gkm's hint or
 	// its resync, and how often it is asked meanwhile, since a key client's learning has no hook a test reads.
