@@ -845,7 +845,13 @@ func TestSnHotkeyWalletMappingRefusalsAreCoded(t *testing.T) {
 		refusal := snHotkeyWalletMappingRefusal(c.err)
 		recorder := httptest.NewRecorder()
 		router.RaiseHttpError(refusal, recorder)
-		if !errors.Is(refusal, c.err) || recorder.Code != c.status || strings.TrimSpace(recorder.Body.String()) != c.err.Error() {
+		// an internal failure's 500 keeps its cause out of the answer
+		// (2ff56f1dd), which is the router's fixed message
+		wantBody := c.err.Error()
+		if c.status == http.StatusInternalServerError {
+			wantBody = router.UnexpectedErrorMessage
+		}
+		if !errors.Is(refusal, c.err) || recorder.Code != c.status || strings.TrimSpace(recorder.Body.String()) != wantBody {
 			t.Errorf("%v: status %d, body %q", c.err, recorder.Code, recorder.Body.String())
 		}
 	}
