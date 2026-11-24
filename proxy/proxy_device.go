@@ -262,7 +262,11 @@ type ProxyDeviceManager struct {
 	proxyFeatureReader      func(context.Context, server.Id, string) bool
 	// Notes a Pro feature use, in process only: settings.FeatureUses, or nil
 	// for a manager without an owner.
-	featureUseNoter    func(proxyId server.Id, feature string, useTime time.Time)
+	featureUseNoter func(proxyId server.Id, feature string, useTime time.Time)
+	// Takes the build line of each construction that succeeds
+	// (proxy_device_build_log.go): glog.Infof in production. Tests read the
+	// lines here.
+	buildLogf          func(format string, args ...any)
 	windowIdentityGate *windowIdentityRestoreGate
 	// Each proxy's hosted session, reused by its next device
 	// (hosted_session_reuse.go).
@@ -366,6 +370,7 @@ func NewProxyDeviceManager(ctx context.Context, settings *ProxyDeviceManagerSett
 		networkSpace.Close()
 	}
 	manager.proxyDeviceBuilder = manager.newProxyDevice
+	manager.buildLogf = glog.Infof
 	manager.proxyDeviceConfigReader = model.GetProxyDeviceConfigForAdmission
 	manager.proxyFeatureReader = model.ProxyFeatureAllowedForAdmission
 	if settings.FeatureUses != nil {
@@ -438,13 +443,23 @@ func (self *ProxyDeviceManager) networkSpaceForDevice() *sdk.NetworkSpace {
 }
 
 // Opens a device with the manager's lifetime. A caller that starts construction
-// retains its synchronous setup and unpublished-device cleanup ownership.
+// retains its synchronous setup and unpublished-device cleanup ownership. Its
+// build line names no caller; the service's entry points open through
+// openProxyDeviceFor or with a caller in their context.
 func (self *ProxyDeviceManager) OpenProxyDevice(proxyId server.Id) (*ProxyDevice, error) {
 	return self.openProxyDevice(self.ctx, proxyId, false)
 }
 
+// OpenProxyDevice for a caller, which a construction this open starts logs
+// (proxy_device_build_log.go).
+func (self *ProxyDeviceManager) openProxyDeviceFor(caller proxyDeviceCaller, proxyId server.Id) (*ProxyDevice, error) {
+	return self.openProxyDevice(withProxyDeviceCaller(self.ctx, caller), proxyId, false)
+}
+
 // Bounds this caller's wait while keeping shared construction and the device
-// owned by the manager. Cancellation never stops another caller's setup.
+// owned by the manager. Cancellation never stops another caller's setup. A
+// caller in ctx (withProxyDeviceCaller) is the one a construction this open
+// starts logs.
 func (self *ProxyDeviceManager) OpenProxyDeviceWithContext(ctx context.Context, proxyId server.Id) (*ProxyDevice, error) {
 	return self.openProxyDevice(ctx, proxyId, true)
 }
@@ -456,7 +471,7 @@ func (self *ProxyDeviceManager) OpenProxyDeviceWithContext(ctx context.Context, 
 // a construction in flight starts nothing. The caller has admitted the caller
 // and the plan. A failure holds the next construction back for its cooldown,
 // as for any open, and the dial reports it. Shutdown joins the worker.
-func (self *ProxyDeviceManager) startOpenProxyDevice(proxyId server.Id) {
+func (self *ProxyDeviceManager) startOpenProxyDevice(caller proxyDeviceCaller, proxyId server.Id) {
 	if self.proxyDeviceOpenOrOpening(proxyId) {
 		return
 	}
@@ -469,7 +484,7 @@ func (self *ProxyDeviceManager) startOpenProxyDevice(proxyId server.Id) {
 	self.lifecycleLock.Unlock()
 	go server.HandleError(func() {
 		defer self.openWorkers.Done()
-		if _, err := self.openProxyDevice(self.ctx, proxyId, false); err != nil {
+		if _, err := self.openProxyDeviceFor(caller, proxyId); err != nil {
 			if glog.V(1) {
 				glog.Infof("[proxy][%s]open at sign-in err=%s\n", proxyId, err)
 			}
@@ -593,8 +608,13 @@ func (self *ProxyDeviceManager) openProxyDevice(ctx context.Context, proxyId ser
 
 		// become the creator: publish an in-flight marker, release the lock, then
 		// create the device (db load + DeviceLocal + tun) with NO lock held so the
-		// cold start never blocks other proxy ids/clients (fix E).
-		c := &deviceCreation{done: make(chan struct{})}
+		// cold start never blocks other proxy ids/clients (fix E). The marker
+		// keeps this opener's caller for the build line; the cancellable
+		// creator's ctx ends with its request, and the caller outlives it here.
+		c := &deviceCreation{
+			done:   make(chan struct{}),
+			caller: proxyDeviceCallerFromContext(ctx),
+		}
 		pdState.creating = c
 		if cancellableCreator {
 			// This admitted opener keeps both counts nonzero until ownership is
@@ -631,6 +651,9 @@ func (self *ProxyDeviceManager) createProxyDevice(proxyId server.Id, pdState *pr
 	if err == nil && pd != nil {
 		// before publication, so every opener reads how it was opened
 		pd.setup.built(proxyId, buildStart, time.Now())
+		// once per construction: only the creator runs this, and the openers
+		// waiting on c log nothing
+		self.logBuild(proxyId, pd, c.caller)
 	}
 
 	accepted := false
@@ -885,10 +908,10 @@ func (self *ProxyDeviceManager) checkCallerWithContext(ctx context.Context, prox
 		// lock subnets, which for a LockCallerIp config are the customer's /32) —
 		// the rest of the request path (transport_announce, rate limits) already
 		// logs hex(ClientIpHash), so a refused caller stays correlatable with its
-		// other log lines without putting the address itself in the logs
+		// other log lines, and with the build lines (proxyCallerHash), without
+		// putting the address itself in the logs
 		if !entry.found {
-			callerHash := server.ClientIpHashForAddr(addr)
-			glog.Infof("[proxy]caller %x refused: proxy %s has no config\n", callerHash[:8], proxyId)
+			glog.Infof("[proxy]caller %s refused: proxy %s has no config\n", proxyCallerHash(addr), proxyId)
 			return errProxyDeviceNotFound
 		}
 
@@ -903,10 +926,9 @@ func (self *ProxyDeviceManager) checkCallerWithContext(ctx context.Context, prox
 			}
 		}
 
-		callerHash := server.ClientIpHashForAddr(addr)
 		glog.Infof(
-			"[proxy]caller %x refused: outside the ip lock for proxy %s (%d subnets)\n",
-			callerHash[:8], proxyId, len(entry.lockSubnets),
+			"[proxy]caller %s refused: outside the ip lock for proxy %s (%d subnets)\n",
+			proxyCallerHash(addr), proxyId, len(entry.lockSubnets),
 		)
 		return errCallerNotAuthorized
 	}, func(err error) error {
@@ -1184,6 +1206,8 @@ type proxyDeviceState struct {
 type deviceCreation struct {
 	done chan struct{}
 	err  error
+	// the opener that started the creation, which its build line names
+	caller proxyDeviceCaller
 }
 
 // defaultProxyDeviceIdleRefillHold is how long a device may go without user
@@ -1577,8 +1601,8 @@ func NewProxyDevice(
 		proxyDevice.startUniqueExit(networkSpace.GetApiUrl(), initialProviderClientId)
 	}
 
-	glog.Infof("[pd]using api=%s connect=%s\n", networkSpace.GetApiUrl(), networkSpace.GetPlatformUrl())
-
+	// the manager logs each construction's one line, with its caller
+	// (proxy_device_build_log.go)
 	transferredControl = true
 	return proxyDevice, nil
 }
