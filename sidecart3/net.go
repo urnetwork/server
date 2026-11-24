@@ -93,20 +93,20 @@ type Settings struct {
 	// that got no answer (a connection reset, refused or closed, or no answer in time): the MakeBucket of each bucket,
 	// and the clusters' first admin read. Under load the local stack's MinIO, behind Docker's port forward, resets new
 	// connections, which says nothing of the row a Net is built for (QD-1395). A refusal, such as AccessDenied, or any
-	// other answer is never sent again, and nor is a call once ctx has ended. 5. A MakeBucket also rides minio-go's own
-	// retries of each request, ten with about 4 s of backoff in all, so a stack that refuses every dial, truly down,
-	// reports about 25 s later than with none, under the same message, and an admin read about five SetupRetryWaits
-	// later. Non-positive: no call is sent again.
+	// other answer is never sent again, and nor is a call once ctx has ended. 5: on a stack that is truly down,
+	// refusing every dial, an admin read reports about five SetupRetryWaits later than with none, under the same
+	// message, and a MakeBucket about 25 s later, as minio-go sends each of its requests up to ten times itself, with
+	// about 4 s of backoff in all. Non-positive: no call is sent again.
 	SetupRetryCount int
-	// How long the setup waits, in real time, which the stores keep, before sending a call again: 1 s, about as long
-	// as a burst of resets lasted on a loaded machine. Non-positive: at once.
+	// How long the setup waits before sending a call again, in real time, the stores' own: 1 s (QD-1395), so a call's
+	// tries span at least five seconds more than one try does. Non-positive: at once.
 	SetupRetryWait time.Duration
 	// How far the Net's clock moves past the last reread of the clusters' admin info before a request reads it again
 	// (faults.go's faultBlobs): the file clusters' CheckInterval, 30 s, how often their own checks read it, well inside
 	// CheckStaleAfter. So a clock that follows real time in small steps rereads about once in 30 s, not before every
-	// request after a step (QD-1395), while a schedule's jump past it still rereads before its next request. It must
-	// stay below FileClusters.CheckStaleAfter, which a Net refuses to be built past, or a request after a move just
-	// short of it would find admin info stale. Non-positive: every move rereads.
+	// request after a step (QD-1395), while a schedule's jump past it still rereads before its next request. It stays
+	// below FileClusters.CheckStaleAfter, or a request after a move just short of it would find admin info stale: a Net
+	// whose threshold reaches CheckStaleAfter is not built. Non-positive: every move rereads.
 	AdminInfoRereadAfter time.Duration
 
 	// What this package's tests see of each Net's catch-ups with its clock: the admin info reread (faults.go) and
