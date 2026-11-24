@@ -179,31 +179,18 @@ func ValidateReferralCode(
 		if validateResult.Valid {
 
 			/**
-			 * Check cap
+			 * Check cap: the referrer's links that have not ended
+			 * (network_referral_terms.go)
 			 */
 
-			var count int
-			result, err = tx.Query(
-				ctx,
-				`
-					SELECT COUNT(*) FROM network_referral
-					WHERE referral_network_id = $1
-				`,
-				referralNetworkId,
-			)
-			server.WithPgResult(result, err, func() {
-				if result.Next() {
-					server.Raise(result.Scan(&count))
-				}
+			count := activeReferralCountInTx(ctx, tx, *referralNetworkId, server.NowUtc())
 
-				// Ask ReferralsCapped, never MaxReferrals directly: with no pro.yml the
-				// raw cap is 0 and `count >= 0` is always true, so EVERY code would come
-				// back capped. No spec means no cap.
-				if Pro().ReferralsCapped(count) {
-					validateResult.IsCapped = true
-				}
-
-			})
+			// Ask ReferralsCapped, never MaxReferrals directly: with no pro.yml the
+			// raw cap is 0 and `count >= 0` is always true, so EVERY code would come
+			// back capped. No spec means no cap.
+			if Pro().ReferralsCapped(count) {
+				validateResult.IsCapped = true
+			}
 
 		}
 

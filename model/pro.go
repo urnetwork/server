@@ -54,10 +54,9 @@ type proReferralYaml struct {
 	MaxReferrals     int    `yaml:"max_referrals"`
 	// the referral terms (ReferralTermsSettings); an absent key keeps its
 	// default
-	LinkDuration          string `yaml:"link_duration"`
-	ExistingLinkLimitFrom string `yaml:"existing_link_limit_from"`
-	AppUseDailyBytes      string `yaml:"app_use_daily_bytes"`
-	AppUseDays            *int   `yaml:"app_use_days"`
+	ClaimWindow      string `yaml:"claim_window"`
+	AppUseDailyBytes string `yaml:"app_use_daily_bytes"`
+	AppUseDays       *int   `yaml:"app_use_days"`
 }
 
 type proSeekerYaml struct {
@@ -321,8 +320,8 @@ type ProConfig struct {
 	ReferredBonus  ByteCount
 	ReferralPeriod time.Duration
 	MaxReferrals   int
-	// when a referral pays: once its referred network uses the app, and for
-	// how long (network_referral_terms.go)
+	// when a new referral pays: once its referred network claims it by app use
+	// within the claim window (network_referral_terms.go)
 	ReferralTerms ReferralTermsSettings
 
 	// seekerDataMultiplier scales a Seeker/Saga holder's free + referral data grants;

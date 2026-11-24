@@ -13,45 +13,36 @@ import (
 
 // The referral terms (network_referral_terms.go). Until 2026-11-24 every link
 // paid both its sides from the run after it was made, for as long as it
-// stood: no app use was asked of the referred network, nothing limited the
-// period, and a re-point (the set-referral upsert) restarted the link's
-// create_time.
+// stood: no app use was asked of the referred network, a link nobody used
+// held its referrer's cap slot for good, and a re-point (the set-referral
+// upsert) restarted the link's create_time.
 
 const referralTermsTestMib = ByteCount(1024 * 1024)
 
-// Each case is one link at the grant window's start, under the default terms
-// or the ones the case names.
+const referralTermsTestDay = 24 * time.Hour
+
+// Each case is one link under the default terms or the ones the case names.
+// Its age plays no part: a claimed link pays for life, and an existing one
+// needs no claim.
 func TestReferralLinkPays(t *testing.T) {
-	startTime := time.Date(2026, 12, 20, 11, 36, 0, 0, time.UTC)
-	day := 24 * time.Hour
-	limitFrom := time.Date(2026, 12, 3, 0, 0, 0, 0, time.UTC)
-	withLimit := DefaultReferralTermsSettings()
-	withLimit.ExistingLinkLimitFrom = limitFrom
-	laterLimit := DefaultReferralTermsSettings()
-	laterLimit.ExistingLinkLimitFrom = startTime.Add(time.Hour)
+	now := time.Date(2026, 12, 20, 11, 36, 0, 0, time.UTC)
 	noAppUse := DefaultReferralTermsSettings()
 	noAppUse.AppUseDayCount = 0
-	forLife := DefaultReferralTermsSettings()
-	forLife.LinkDuration = 0
 	for _, c := range []struct {
 		name  string
 		link  referralLink
 		terms ReferralTermsSettings
 		pays  bool
 	}{
-		{name: "a new link without app use", link: referralLink{createTime: startTime.Add(-day)}, terms: DefaultReferralTermsSettings(), pays: false},
-		{name: "a new link once qualified", link: referralLink{createTime: startTime.Add(-day), qualified: true}, terms: DefaultReferralTermsSettings(), pays: true},
-		{name: "a new link without app use, when none is asked", link: referralLink{createTime: startTime.Add(-day)}, terms: noAppUse, pays: true},
-		{name: "a qualified new link on its last day", link: referralLink{createTime: startTime.Add(-90*day + time.Second), qualified: true}, terms: DefaultReferralTermsSettings(), pays: true},
-		{name: "a qualified new link at 90 days", link: referralLink{createTime: startTime.Add(-90 * day), qualified: true}, terms: DefaultReferralTermsSettings(), pays: false},
-		{name: "a qualified new link past 90 days, for life", link: referralLink{createTime: startTime.Add(-200 * day), qualified: true}, terms: forLife, pays: true},
-		{name: "an existing link without app use", link: referralLink{createTime: startTime.Add(-day), existingLink: true}, terms: DefaultReferralTermsSettings(), pays: true},
-		{name: "an existing link past 90 days, no date set", link: referralLink{createTime: startTime.Add(-200 * day), existingLink: true}, terms: DefaultReferralTermsSettings(), pays: true},
-		{name: "an existing link past 90 days, before the date", link: referralLink{createTime: startTime.Add(-200 * day), existingLink: true}, terms: laterLimit, pays: true},
-		{name: "an existing link past 90 days, from the date", link: referralLink{createTime: startTime.Add(-200 * day), existingLink: true}, terms: withLimit, pays: false},
-		{name: "an existing link under 90 days, from the date", link: referralLink{createTime: startTime.Add(-30 * day), existingLink: true}, terms: withLimit, pays: true},
+		{name: "a new link not claimed", link: referralLink{createTime: now.Add(-referralTermsTestDay)}, terms: DefaultReferralTermsSettings(), pays: false},
+		{name: "a new link claimed", link: referralLink{createTime: now.Add(-referralTermsTestDay), qualified: true}, terms: DefaultReferralTermsSettings(), pays: true},
+		{name: "a new link claimed 200 days ago", link: referralLink{createTime: now.Add(-200 * referralTermsTestDay), qualified: true}, terms: DefaultReferralTermsSettings(), pays: true},
+		{name: "a new link ended", link: referralLink{createTime: now.Add(-91 * referralTermsTestDay), ended: true}, terms: DefaultReferralTermsSettings(), pays: false},
+		{name: "a new link not claimed, when no app use is asked", link: referralLink{createTime: now.Add(-referralTermsTestDay)}, terms: noAppUse, pays: true},
+		{name: "an existing link", link: referralLink{createTime: now.Add(-referralTermsTestDay), existingLink: true}, terms: DefaultReferralTermsSettings(), pays: true},
+		{name: "an existing link 400 days old", link: referralLink{createTime: now.Add(-400 * referralTermsTestDay), existingLink: true}, terms: DefaultReferralTermsSettings(), pays: true},
 	} {
-		if pays := referralLinkPays(c.link, startTime, &c.terms); pays != c.pays {
+		if pays := referralLinkPays(c.link, &c.terms); pays != c.pays {
 			t.Errorf("%s: pays %t, want %t", c.name, pays, c.pays)
 		}
 	}
@@ -60,48 +51,56 @@ func TestReferralLinkPays(t *testing.T) {
 // A referrer counts its paying links only, and a referred network on a link
 // that does not pay is in no referrer's list.
 func TestPayingReferralsCountOnlyPayingLinks(t *testing.T) {
-	startTime := time.Date(2026, 12, 20, 11, 36, 0, 0, time.UTC)
+	now := time.Date(2026, 12, 20, 11, 36, 0, 0, time.UTC)
 	terms := DefaultReferralTermsSettings()
 	referrerId := server.NewId()
-	qualifiedId, waitingId, existingId, pastId := server.NewId(), server.NewId(), server.NewId(), server.NewId()
+	claimedId, waitingId, existingId, endedId := server.NewId(), server.NewId(), server.NewId(), server.NewId()
 	referrals := payingReferrals([]referralLink{
-		{networkId: qualifiedId, referralNetworkId: referrerId, createTime: startTime.Add(-time.Hour), qualified: true},
-		{networkId: waitingId, referralNetworkId: referrerId, createTime: startTime.Add(-time.Hour)},
-		{networkId: existingId, referralNetworkId: referrerId, createTime: startTime.Add(-400 * 24 * time.Hour), existingLink: true},
-		{networkId: pastId, referralNetworkId: referrerId, createTime: startTime.Add(-91 * 24 * time.Hour), qualified: true},
-	}, startTime, &terms)
-	connect.AssertEqual(t, referrals[referrerId], []server.Id{qualifiedId, existingId})
+		{networkId: claimedId, referralNetworkId: referrerId, createTime: now.Add(-200 * referralTermsTestDay), qualified: true},
+		{networkId: waitingId, referralNetworkId: referrerId, createTime: now.Add(-time.Hour)},
+		{networkId: existingId, referralNetworkId: referrerId, createTime: now.Add(-400 * referralTermsTestDay), existingLink: true},
+		{networkId: endedId, referralNetworkId: referrerId, createTime: now.Add(-91 * referralTermsTestDay), ended: true},
+	}, &terms)
+	connect.AssertEqual(t, referrals[referrerId], []server.Id{claimedId, existingId})
 	connect.AssertEqual(t, len(referrals), 1)
 }
 
-// An absent key keeps its default, and each key overrides it. A malformed
-// date refuses to load rather than lift the limit.
+// An absent key keeps its default, and each key overrides it. A claim window
+// of 0 has no deadline, and with no app use asked nothing ends either. A
+// malformed window refuses to load rather than lift the deadline.
 func TestParseReferralTerms(t *testing.T) {
 	connect.AssertEqual(t, parseReferralTerms(proReferralYaml{}), DefaultReferralTermsSettings())
 	defaults := DefaultReferralTermsSettings()
-	connect.AssertEqual(t, defaults.LinkDuration, 90*24*time.Hour)
+	connect.AssertEqual(t, defaults.ClaimWindow, 90*referralTermsTestDay)
 	connect.AssertEqual(t, defaults.AppUseDailyByteCount, 10*referralTermsTestMib)
 	connect.AssertEqual(t, defaults.AppUseDayCount, 2)
-	connect.AssertEqual(t, defaults.ExistingLinkLimitFrom.IsZero(), true)
+	connect.AssertEqual(t, defaults.claimDeadlines(), true)
 
 	zero := 0
 	terms := parseReferralTerms(proReferralYaml{
-		LinkDuration:          "720h",
-		ExistingLinkLimitFrom: "2026-12-03T00:00:00Z",
-		AppUseDailyBytes:      "1mib",
-		AppUseDays:            &zero,
+		ClaimWindow:      "720h",
+		AppUseDailyBytes: "1mib",
+		AppUseDays:       &zero,
 	})
-	connect.AssertEqual(t, terms.LinkDuration, 720*time.Hour)
-	connect.AssertEqual(t, terms.ExistingLinkLimitFrom, time.Date(2026, 12, 3, 0, 0, 0, 0, time.UTC))
+	connect.AssertEqual(t, terms.ClaimWindow, 720*time.Hour)
 	connect.AssertEqual(t, terms.AppUseDailyByteCount, referralTermsTestMib)
 	connect.AssertEqual(t, terms.AppUseDayCount, 0)
-	connect.AssertEqual(t, parseReferralTerms(proReferralYaml{ExistingLinkLimitFrom: "2026-12-03"}).ExistingLinkLimitFrom, time.Date(2026, 12, 3, 0, 0, 0, 0, time.UTC))
+	connect.AssertEqual(t, terms.claimDeadlines(), false)
+
+	now := time.Date(2026, 12, 20, 11, 36, 0, 0, time.UTC)
+	for _, window := range []string{"0", "0s"} {
+		noDeadline := parseReferralTerms(proReferralYaml{ClaimWindow: window})
+		connect.AssertEqual(t, noDeadline.ClaimWindow, time.Duration(0))
+		connect.AssertEqual(t, noDeadline.claimDeadlines(), false)
+		connect.AssertEqual(t, noDeadline.claimCutoff(now), time.Time{})
+	}
+	connect.AssertEqual(t, defaults.claimCutoff(now), now.Add(-90*referralTermsTestDay))
 
 	refused := func() (refused bool) {
 		defer func() {
 			refused = recover() != nil
 		}()
-		parseReferralTerms(proReferralYaml{ExistingLinkLimitFrom: "next week"})
+		parseReferralTerms(proReferralYaml{ClaimWindow: "next week"})
 		return
 	}
 	connect.AssertEqual(t, refused(), true)
@@ -149,6 +148,18 @@ func referralTermsTestLink(ctx context.Context, networkId server.Id) (createTime
 			`SELECT create_time, existing_link FROM network_referral WHERE network_id = $1`,
 			networkId,
 		).Scan(&createTime, &existingLink))
+	})
+	return
+}
+
+// When the link ended, or nil while it has not.
+func referralTermsTestEndTime(ctx context.Context, networkId server.Id) (endTime *time.Time) {
+	server.Db(ctx, func(conn server.PgConn) {
+		server.Raise(conn.QueryRow(
+			ctx,
+			`SELECT end_time FROM network_referral WHERE network_id = $1`,
+			networkId,
+		).Scan(&endTime))
 	})
 	return
 }
@@ -292,92 +303,197 @@ func TestReferralBonusCountsOnlyQualifyingReferrals(t *testing.T) {
 	})
 }
 
-// A link pays for 90 days from its creation: a qualified new link of 89 days
-// pays both sides, one of 91 days neither.
-func TestReferralBonusEndsAfterTheLinkPeriod(t *testing.T) {
+// A new link claimed in time pays both sides for life: claimed by app use on
+// its 5th and 6th days, it still pays at day 200, run after run, and never
+// ends.
+func TestReferralClaimedLinkPaysForLife(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		referralTermsTestConfig(t)
 		now := server.NowUtc()
-		day := 24 * time.Hour
+		createTime := now.Add(-200 * referralTermsTestDay)
 		referrerId, _ := referralTermsTestNetwork(ctx, "referrer")
-		code := CreateNetworkReferralCode(ctx, referrerId).ReferralCode
-		link := func(name string, age time.Duration) server.Id {
-			networkId, _ := referralTermsTestNetwork(ctx, name)
+		refereeId, refereeClientId := referralTermsTestNetwork(ctx, "referee")
+		if CreateNetworkReferral(ctx, refereeId, CreateNetworkReferralCode(ctx, referrerId).ReferralCode) == nil {
+			t.Fatal("synthetic referral rejected")
+		}
+		referralTermsTestSetLink(ctx, refereeId, createTime, false)
+		referralTermsTestUse(ctx, refereeClientId, 10*referralTermsTestMib, createTime.Add(5*referralTermsTestDay))
+		referralTermsTestUse(ctx, refereeClientId, 10*referralTermsTestMib, createTime.Add(6*referralTermsTestDay))
+
+		for run := range 2 {
+			startTime, endTime := ReferralGrantWindow(now.Add(time.Duration(run) * referralTermsTestDay))
+			added := AddReferralBonusesToAllNetworks(ctx, startTime, endTime, ByteCount(100), ByteCount(10))
+			connect.AssertEqual(t, added[referrerId], ByteCount(100))
+			connect.AssertEqual(t, added[refereeId], ByteCount(10))
+		}
+		connect.AssertEqual(t, referralTermsTestEndTime(ctx, refereeId), (*time.Time)(nil))
+	})
+}
+
+// A new link not claimed within its 90 days ends at its deadline: it pays
+// neither side, stays as a record with its end time, and frees its slot, so
+// a referrer whose 20 links all ended can refer again. A link of 89 days
+// still holds its slot.
+func TestReferralUnclaimedLinkEndsAndFreesItsSlot(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		referralTermsTestConfig(t)
+		now := server.NowUtc()
+		day := referralTermsTestDay
+		link := func(code string, age time.Duration) (server.Id, server.Id) {
+			networkId, clientId := referralTermsTestNetwork(ctx, "referee")
 			if CreateNetworkReferral(ctx, networkId, code) == nil {
 				t.Fatal("synthetic referral rejected")
 			}
 			referralTermsTestSetLink(ctx, networkId, now.Add(-age), false)
-			Testing_QualifyReferralReferee(ctx, networkId, now.Add(-age))
-			return networkId
+			return networkId, clientId
 		}
-		currentId := link("current", 89*day)
-		pastId := link("past", 91*day)
+		endedReferrerId, _ := referralTermsTestNetwork(ctx, "ended-referrer")
+		endedCode := CreateNetworkReferralCode(ctx, endedReferrerId).ReferralCode
+		openReferrerId, _ := referralTermsTestNetwork(ctx, "open-referrer")
+		openCode := CreateNetworkReferralCode(ctx, openReferrerId).ReferralCode
+		endedIds := []server.Id{}
+		for i := range 20 {
+			networkId, clientId := link(endedCode, 91*day)
+			if i == 0 {
+				// one day of app use inside the window does not claim it
+				referralTermsTestUse(ctx, clientId, 50*referralTermsTestMib, now.Add(-80*day))
+			}
+			endedIds = append(endedIds, networkId)
+		}
+		for range 20 {
+			link(openCode, 89*day)
+		}
+
+		startTime, endTime := ReferralGrantWindow(now)
+		added := AddReferralBonusesToAllNetworks(ctx, startTime, endTime, ByteCount(100), ByteCount(10))
+		for _, networkId := range append([]server.Id{endedReferrerId}, endedIds...) {
+			if _, granted := added[networkId]; granted {
+				t.Fatalf("a link past its claim window was granted %d", added[networkId])
+			}
+		}
+		for _, networkId := range endedIds {
+			endTime := referralTermsTestEndTime(ctx, networkId)
+			createTime, _ := referralTermsTestLink(ctx, networkId)
+			if endTime == nil || !endTime.Equal(createTime.Add(90*day)) {
+				t.Fatalf("an unclaimed link past its window ended at %v, want its deadline %s", endTime, createTime.Add(90*day))
+			}
+		}
+
+		// the ended referrer's slots are free; the open referrer is still capped
+		connect.AssertEqual(t, len(GetReferralsByReferralNetworkId(ctx, endedReferrerId)), 0)
+		connect.AssertEqual(t, ValidateReferralCode(ctx, endedCode).IsCapped, false)
+		connect.AssertEqual(t, len(GetReferralsByReferralNetworkId(ctx, openReferrerId)), 20)
+		connect.AssertEqual(t, ValidateReferralCode(ctx, openCode).IsCapped, true)
+		newId, _ := referralTermsTestNetwork(ctx, "new-referee")
+		connect.AssertNotEqual(t, CreateNetworkReferral(ctx, newId, endedCode), nil)
+		refusedId, _ := referralTermsTestNetwork(ctx, "refused-referee")
+		connect.AssertEqual(t, CreateNetworkReferral(ctx, refusedId, openCode), nil)
+	})
+}
+
+// A link that existed when the terms began pays both sides for life, with no
+// claim: at day 400 it still pays, never ends, and holds its slot.
+func TestReferralExistingLinkPaysForLife(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		referralTermsTestConfig(t)
+		now := server.NowUtc()
+		referrerId, _ := referralTermsTestNetwork(ctx, "referrer")
+		refereeId, _ := referralTermsTestNetwork(ctx, "referee")
+		if CreateNetworkReferral(ctx, refereeId, CreateNetworkReferralCode(ctx, referrerId).ReferralCode) == nil {
+			t.Fatal("synthetic referral rejected")
+		}
+		referralTermsTestSetLink(ctx, refereeId, now.Add(-400*referralTermsTestDay), true)
 
 		startTime, endTime := ReferralGrantWindow(now)
 		added := AddReferralBonusesToAllNetworks(ctx, startTime, endTime, ByteCount(100), ByteCount(10))
 		connect.AssertEqual(t, added[referrerId], ByteCount(100))
-		connect.AssertEqual(t, added[currentId], ByteCount(10))
-		if _, granted := added[pastId]; granted {
-			t.Fatalf("a link past its period was granted %d", added[pastId])
-		}
+		connect.AssertEqual(t, added[refereeId], ByteCount(10))
+		connect.AssertEqual(t, referralTermsTestEndTime(ctx, refereeId), (*time.Time)(nil))
+		connect.AssertEqual(t, len(GetReferralsByReferralNetworkId(ctx, referrerId)), 1)
 	})
 }
 
-// A link that existed when the terms began pays with no app use, and its
-// period starts to count only at existing_link_limit_from: until the date is
-// set, and before it, a link of 120 days pays; from the date it pays nothing,
-// and a link of 30 days still pays until its own 90 days.
-func TestReferralExistingLinksKeepPayingUntilTheSetDate(t *testing.T) {
+// App use after the claim deadline claims nothing: a link of 95 days whose
+// friend used the app yesterday and today ends unclaimed and pays neither
+// side.
+func TestReferralAppUseAfterTheClaimWindowDoesNotClaim(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		referralTermsTestConfig(t)
+		now := server.NowUtc()
+		today := auditDeviceDayStart(now)
+		referrerId, _ := referralTermsTestNetwork(ctx, "referrer")
+		refereeId, refereeClientId := referralTermsTestNetwork(ctx, "referee")
+		if CreateNetworkReferral(ctx, refereeId, CreateNetworkReferralCode(ctx, referrerId).ReferralCode) == nil {
+			t.Fatal("synthetic referral rejected")
+		}
+		referralTermsTestSetLink(ctx, refereeId, now.Add(-95*referralTermsTestDay), false)
+		referralTermsTestUse(ctx, refereeClientId, 20*referralTermsTestMib, today.Add(-referralTermsTestDay))
+		referralTermsTestUse(ctx, refereeClientId, 20*referralTermsTestMib, today.Add(time.Minute))
+
+		startTime, endTime := ReferralGrantWindow(now)
+		added := AddReferralBonusesToAllNetworks(ctx, startTime, endTime, ByteCount(100), ByteCount(10))
+		for _, networkId := range []server.Id{referrerId, refereeId} {
+			if _, granted := added[networkId]; granted {
+				t.Fatalf("app use after the claim window was granted %d", added[networkId])
+			}
+		}
+		connect.AssertNotEqual(t, referralTermsTestEndTime(ctx, refereeId), (*time.Time)(nil))
+	})
+}
+
+// With claim_window 0 there is no deadline: an unclaimed new link of 400
+// days does not end and holds its slot, and app use still claims it.
+func TestReferralWithoutAClaimWindowNothingEnds(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		config := referralTermsTestConfig(t)
+		config.ReferralTerms.ClaimWindow = 0
 		now := server.NowUtc()
-		day := 24 * time.Hour
+		today := auditDeviceDayStart(now)
 		referrerId, _ := referralTermsTestNetwork(ctx, "referrer")
-		code := CreateNetworkReferralCode(ctx, referrerId).ReferralCode
-		link := func(name string, age time.Duration) server.Id {
-			networkId, _ := referralTermsTestNetwork(ctx, name)
-			if CreateNetworkReferral(ctx, networkId, code) == nil {
-				t.Fatal("synthetic referral rejected")
-			}
-			referralTermsTestSetLink(ctx, networkId, now.Add(-age), true)
-			return networkId
+		refereeId, refereeClientId := referralTermsTestNetwork(ctx, "referee")
+		if CreateNetworkReferral(ctx, refereeId, CreateNetworkReferralCode(ctx, referrerId).ReferralCode) == nil {
+			t.Fatal("synthetic referral rejected")
 		}
-		oldId := link("old", 120*day)
-		youngId := link("young", 30*day)
+		referralTermsTestSetLink(ctx, refereeId, now.Add(-400*referralTermsTestDay), false)
 		grant := func(at time.Time) map[server.Id]ByteCount {
 			startTime, endTime := ReferralGrantWindow(at)
 			return AddReferralBonusesToAllNetworks(ctx, startTime, endTime, ByteCount(100), ByteCount(10))
 		}
 
-		for _, limitFrom := range []time.Time{{}, now.Add(day)} {
-			config.ReferralTerms.ExistingLinkLimitFrom = limitFrom
-			added := grant(now)
-			connect.AssertEqual(t, added[referrerId], ByteCount(200))
-			connect.AssertEqual(t, added[oldId], ByteCount(10))
-			connect.AssertEqual(t, added[youngId], ByteCount(10))
+		added := grant(now)
+		for _, networkId := range []server.Id{referrerId, refereeId} {
+			if _, granted := added[networkId]; granted {
+				t.Fatalf("an unclaimed link was granted %d", added[networkId])
+			}
 		}
+		connect.AssertEqual(t, referralTermsTestEndTime(ctx, refereeId), (*time.Time)(nil))
+		connect.AssertEqual(t, len(GetReferralsByReferralNetworkId(ctx, referrerId)), 1)
 
-		config.ReferralTerms.ExistingLinkLimitFrom = now.Add(-time.Hour)
-		added := grant(now.Add(time.Hour))
+		referralTermsTestUse(ctx, refereeClientId, 10*referralTermsTestMib, today.Add(-referralTermsTestDay))
+		referralTermsTestUse(ctx, refereeClientId, 10*referralTermsTestMib, today.Add(time.Minute))
+		added = grant(now.Add(time.Minute))
 		connect.AssertEqual(t, added[referrerId], ByteCount(100))
-		connect.AssertEqual(t, added[youngId], ByteCount(10))
-		if _, granted := added[oldId]; granted {
-			t.Fatalf("an existing link past its period was granted %d after the set date", added[oldId])
-		}
+		connect.AssertEqual(t, added[refereeId], ByteCount(10))
 	})
 }
 
-// A re-point keeps the link's create time, so the period still counts from
-// the first link; so does a link made again after an unlink. A re-point to
-// the same referrer is no re-point.
-func TestReferralRepointKeepsTheLinkPeriod(t *testing.T) {
+// A re-point keeps the link's create time, so the claim window still counts
+// from the first link; so does a link made again after an unlink. A re-point
+// to the same referrer is no re-point. A link past its window unclaimed that
+// is re-pointed ends at once, holds no slot at its new referrer, and can no
+// longer be claimed.
+func TestReferralRepointKeepsTheClaimWindow(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		referralTermsTestConfig(t)
 		now := server.NowUtc()
-		firstLinkTime := now.Add(-60 * 24 * time.Hour)
+		today := auditDeviceDayStart(now)
+		firstLinkTime := now.Add(-60 * referralTermsTestDay)
 		referrerAId, _ := referralTermsTestNetwork(ctx, "referrer-a")
 		referrerBId, _ := referralTermsTestNetwork(ctx, "referrer-b")
 		codeA := CreateNetworkReferralCode(ctx, referrerAId).ReferralCode
@@ -405,13 +521,36 @@ func TestReferralRepointKeepsTheLinkPeriod(t *testing.T) {
 		connect.AssertNotEqual(t, CreateNetworkReferral(ctx, refereeId, codeA), nil)
 		connect.AssertEqual(t, GetReferralNetworkByChildNetworkId(ctx, refereeId).Id, referrerAId)
 		assertFirstLinkTime("a link made again after an unlink")
+		connect.AssertEqual(t, referralTermsTestEndTime(ctx, refereeId), (*time.Time)(nil))
+
+		// past its window unclaimed, then re-pointed
+		lateId, lateClientId := referralTermsTestNetwork(ctx, "late-referee")
+		if CreateNetworkReferral(ctx, lateId, codeA) == nil {
+			t.Fatal("synthetic referral rejected")
+		}
+		referralTermsTestSetLink(ctx, lateId, now.Add(-95*referralTermsTestDay), false)
+		connect.AssertNotEqual(t, CreateNetworkReferral(ctx, lateId, codeB), nil)
+		connect.AssertNotEqual(t, referralTermsTestEndTime(ctx, lateId), (*time.Time)(nil))
+		for _, networkReferral := range GetReferralsByReferralNetworkId(ctx, referrerBId) {
+			if *networkReferral.NetworkId == lateId {
+				t.Fatal("an ended link holds a slot at its new referrer")
+			}
+		}
+		referralTermsTestUse(ctx, lateClientId, 20*referralTermsTestMib, today.Add(-referralTermsTestDay))
+		referralTermsTestUse(ctx, lateClientId, 20*referralTermsTestMib, today.Add(time.Minute))
+		startTime, endTime := ReferralGrantWindow(now)
+		added := AddReferralBonusesToAllNetworks(ctx, startTime, endTime, ByteCount(100), ByteCount(10))
+		if _, granted := added[lateId]; granted {
+			t.Fatalf("a re-pointed link past its window was granted %d", added[lateId])
+		}
 	})
 }
 
 // An existing link that is re-pointed to another referrer is a new referral:
-// it pays nothing until the referred network qualifies by its app use, and
-// then pays the new referrer. A re-point to the same referrer keeps it an
-// existing link.
+// it pays nothing until the referred network claims it by its app use within
+// its original window, and then pays the new referrer. A re-point to the
+// same referrer keeps it an existing link. An existing link older than the
+// window that is re-pointed ends at once.
 func TestReferralRepointedExistingLinkNeedsAppUse(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
@@ -426,7 +565,7 @@ func TestReferralRepointedExistingLinkNeedsAppUse(t *testing.T) {
 		if CreateNetworkReferral(ctx, refereeId, codeA) == nil {
 			t.Fatal("synthetic referral rejected")
 		}
-		referralTermsTestSetLink(ctx, refereeId, now.Add(-10*24*time.Hour), true)
+		referralTermsTestSetLink(ctx, refereeId, now.Add(-10*referralTermsTestDay), true)
 		runCount := 0
 		grant := func() map[server.Id]ByteCount {
 			runCount += 1
@@ -448,17 +587,26 @@ func TestReferralRepointedExistingLinkNeedsAppUse(t *testing.T) {
 		added = grant()
 		for _, networkId := range []server.Id{referrerAId, referrerBId, refereeId} {
 			if _, granted := added[networkId]; granted {
-				t.Fatalf("a re-pointed link was granted %d before the referred network qualified", added[networkId])
+				t.Fatalf("a re-pointed link was granted %d before the referred network claimed it", added[networkId])
 			}
 		}
 
-		referralTermsTestUse(ctx, refereeClientId, 10*referralTermsTestMib, today.Add(-24*time.Hour))
+		referralTermsTestUse(ctx, refereeClientId, 10*referralTermsTestMib, today.Add(-referralTermsTestDay))
 		referralTermsTestUse(ctx, refereeClientId, 10*referralTermsTestMib, today.Add(time.Minute))
 		added = grant()
 		connect.AssertEqual(t, added[referrerBId], ByteCount(100))
 		connect.AssertEqual(t, added[refereeId], ByteCount(10))
 		_, granted := added[referrerAId]
 		connect.AssertEqual(t, granted, false)
+
+		// an existing link of 100 days, re-pointed, ends at once
+		oldId, _ := referralTermsTestNetwork(ctx, "old-referee")
+		if CreateNetworkReferral(ctx, oldId, codeA) == nil {
+			t.Fatal("synthetic referral rejected")
+		}
+		referralTermsTestSetLink(ctx, oldId, now.Add(-100*referralTermsTestDay), true)
+		connect.AssertNotEqual(t, CreateNetworkReferral(ctx, oldId, codeB), nil)
+		connect.AssertNotEqual(t, referralTermsTestEndTime(ctx, oldId), (*time.Time)(nil))
 	})
 }
 

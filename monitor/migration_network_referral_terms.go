@@ -4,11 +4,13 @@ import "github.com/urnetwork/server"
 
 // The referral terms' migration (server network_referral_terms_schema.go):
 // the existing-link flag on each referral link, with false as the default of
-// every link made after it, the referred networks' first link and
-// qualification, and their app use per UTC day, versioned by its position.
-var networkReferralTermsMigrationContract = migrationCurrentSuffix(server.NetworkReferralTermsSchemaMigrationVersion(), "referral terms: existing links, referred networks and their app use",
+// every link made after it, and the time an unclaimed link ended; the referred
+// networks' first link and claim, and their app use per UTC day, versioned by
+// its position.
+var networkReferralTermsMigrationContract = migrationCurrentSuffix(server.NetworkReferralTermsSchemaMigrationVersion(), "referral terms: existing links, ended links, referred networks and their app use",
 	snMainnetMigrationColumns("network_referral",
-		snMainnetMigrationColumn{name: "existing_link", kind: "boolean", notNull: true, defaultExpression: "false"}),
+		snMainnetMigrationColumn{name: "existing_link", kind: "boolean", notNull: true, defaultExpression: "false"},
+		snMainnetMigrationColumn{name: "end_time", kind: "timestamp without time zone"}),
 	migrationFp2Table("network_referral_referee"),
 	snMainnetMigrationColumns("network_referral_referee",
 		snMainnetMigrationColumn{name: "network_id", kind: "uuid", notNull: true},
