@@ -505,11 +505,8 @@ func installT3WorldApi(ctx context.Context, host *sidecar.ServiceHost, first sid
 	revSettings.Clock = host.Clock
 	revStore := model.NewSidecarRevStore(first, oauth.SignRevocation, revSettings)
 	if host.Budget != nil {
-		prices := evsservice.DefaultPriceTable4KiB()
-		revStore.SetWriteBudget(host.Budget, func(byteCount int64) int64 {
-			price, _ := prices.Price(evsservice.WriteOperation{Kind: evsservice.WriteOperationCreate, ObjectByteCount: byteCount, Count: 1})
-			return price
-		})
+		// each create, raise and DELETE at its own one of §11.13's cost rows, as api's install spends them
+		revStore.SetWriteBudget(host.Budget, nil)
 	}
 	model.SetSidecarRevStore(revStore)
 	pops = append(pops, func() { model.SetSidecarRevStore(nil) })

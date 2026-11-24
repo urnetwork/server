@@ -496,7 +496,7 @@ type evsConcurrencyCase struct {
 	droppedState *evsConcurrencyDropped
 	erasedState  *evsConcurrencyErased
 	// the rev/ writer's writes in this process as the world began, and the P0 api's budget spent on the hold's object,
-	// which api's write budget is read against
+	// its create and its release's delete, which api's write budget is read against
 	revWritesAtStart    *controlPlaneRevWrites
 	holdPricedByteCount int64
 
@@ -1131,7 +1131,6 @@ func (self *evsConcurrencyCase) dropPhase() {
 	if err != nil {
 		t.Fatalf("the hold: %v", err)
 	}
-	self.holdPricedByteCount = hold.pricedByteCount
 	var group sync.WaitGroup
 	var dropped *evsConcurrencyDropped
 	var dropErr error
@@ -1147,6 +1146,8 @@ func (self *evsConcurrencyCase) dropPhase() {
 		self.world.FailProgress(t, "the second phase", err, bursts)
 	}
 	group.Wait()
+	// what api's budget spent on the hold: its object's create and, once the drop released it, its delete
+	self.holdPricedByteCount = hold.pricedByteCount
 	FailBurstErrors(t, bursts)
 	if dropErr != nil {
 		t.Errorf("the drop: %v", dropErr)

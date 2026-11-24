@@ -4,7 +4,7 @@ package model
 // (api_write_spend.go), as the authorization log's sequencer spends its objects (config_log_budget_test.go). Each test
 // runs on T2's fake Blobs behind evsservice.BudgetedBlobs, so a PUT whose ctx no budget passed is refused, with the
 // PUTs sent counted by key, and holds each writer's budget to the writes the store shows took effect, priced as
-// testApiBudgetPrice prices them:
+// testApiBudgetPrices prices them, each write at its own cost row:
 //
 //   - a rev/ write racing another writer spends nothing for the PUT the racer's object refused 412: over an object at
 //     or past its not_before it ends current, and over one below it raises it, spending that raise once;
@@ -41,10 +41,27 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// What the tests price a write at: a fixed part for each write and a part for each byte, so a total tells both how
-// many writes were spent and of what.
-func testApiBudgetPrice(objectByteCount int64) int64 {
-	return 1000 + 3*objectByteCount
+// The cost rows the tests price writes at: §11.13's three rows as a table holds them, each its own fixed part, odd so
+// no few writes of one row sum to another's, and a part for each byte, so a total tells how many writes of each row
+// were spent and of what.
+func testApiBudgetPrices() *evsservice.PriceTable {
+	return &evsservice.PriceTable{
+		BlockByteCount:       1,
+		SmallObjectByteCount: 0,
+		CreateByteCount:      9001,
+		OverwriteByteCount:   14009,
+		DeleteByteCount:      3511,
+		ShardCount:           1,
+	}
+}
+
+// What one write of operation on an object of objectByteCount bytes prices at under testApiBudgetPrices.
+func testApiBudgetPrice(operation evsservice.WriteOperationKind, objectByteCount int64) int64 {
+	price, err := testApiBudgetPrices().Price(evsservice.WriteOperation{Kind: operation, ObjectByteCount: objectByteCount, Count: 1})
+	if err != nil {
+		panic(err)
+	}
+	return price
 }
 
 // A first cluster that counts the PUTs sent to each key.
@@ -111,7 +128,7 @@ func (self *testApiBudgetWorld) revStore() (*SidecarRevStore, *sidecartest.FakeW
 	settings.Clock = self.clock
 	store := NewSidecarRevStore(self.cluster, testRevSign, settings)
 	budget := sidecartest.NewFakeWriteBudget(nil)
-	store.SetWriteBudget(budget, testApiBudgetPrice)
+	store.SetWriteBudget(budget, testApiBudgetPrices())
 	return store, budget
 }
 
@@ -119,7 +136,7 @@ func (self *testApiBudgetWorld) revStore() (*SidecarRevStore, *sidecartest.FakeW
 func (self *testApiBudgetWorld) holdStore() (*AbuseHoldStore, *sidecartest.FakeWriteBudget) {
 	store := NewAbuseHoldStore(self.cluster)
 	budget := sidecartest.NewFakeWriteBudget(nil)
-	store.SetWriteBudget(budget, testApiBudgetPrice)
+	store.SetWriteBudget(budget, testApiBudgetPrices())
 	return store, budget
 }
 
@@ -139,15 +156,15 @@ func (self *testApiBudgetWorld) checkFaultsFired(step string) {
 	}
 }
 
-// What the object at key prices at as it stands: the P0 one write of it spends. A HEAD is a GET to the fault queue,
-// so this is read only once the GET faults armed fired.
-func (self *testApiBudgetWorld) objectPrice(key string) int64 {
+// What a write of operation of the object at key, as it stands, prices at: the P0 one such write of it spends. A HEAD
+// is a GET to the fault queue, so this is read only once the GET faults armed fired.
+func (self *testApiBudgetWorld) objectPrice(key string, operation evsservice.WriteOperationKind) int64 {
 	self.t.Helper()
 	info, err := self.cluster.Head(self.t.Context(), key)
 	if err != nil {
 		self.t.Fatal(err)
 	}
-	return testApiBudgetPrice(info.ByteCount)
+	return testApiBudgetPrice(operation, info.ByteCount)
 }
 
 // The P0 of kind the budgets spent on the world's cluster, summed, failing the test on any violation of the
@@ -248,7 +265,7 @@ func TestSidecarRevWriteRacingAnotherWriterSpendsOnce(t *testing.T) {
 				t.Fatal(err)
 			}
 			racerWriteCount += 1
-			racerSpent += world.objectPrice(key)
+			racerSpent += world.objectPrice(key, evsservice.WriteOperationCreate)
 		}
 		raced := *revocation
 		raced.NotBefore = revocation.NotBefore.Add(testCase.racerOffset)
@@ -257,7 +274,12 @@ func TestSidecarRevWriteRacingAnotherWriterSpendsOnce(t *testing.T) {
 			if err := racer.Write(ctx, &raced); err != nil {
 				t.Errorf("%s: the racer's write: %v", testCase.name, err)
 			}
-			racerSpent += world.objectPrice(key)
+			// over its own standing object the racer raises, an overwrite; else it creates
+			if testCase.standing {
+				racerSpent += world.objectPrice(key, evsservice.WriteOperationOverwrite)
+			} else {
+				racerSpent += world.objectPrice(key, evsservice.WriteOperationCreate)
+			}
 		}
 		outcomeCount := testApiBudgetRevWriteCount(testCase.outcome)
 		err := writer.Write(ctx, revocation)
@@ -284,7 +306,8 @@ func TestSidecarRevWriteRacingAnotherWriterSpendsOnce(t *testing.T) {
 		if spent := world.spent(sidecar.WriteP0KindRevocation, racerBudget); spent != racerSpent {
 			t.Errorf("%s: the racer spent %d, and its writes price at %d", testCase.name, spent, racerSpent)
 		}
-		writerWant := int64(testCase.writeCount) * world.objectPrice(key)
+		// the write's one write that took effect is a raise over the racer's object, an overwrite
+		writerWant := int64(testCase.writeCount) * world.objectPrice(key, evsservice.WriteOperationOverwrite)
 		if spent := world.spent(sidecar.WriteP0KindRevocation, writerBudget); spent != writerWant {
 			t.Errorf("%s: the write spent %d for %d writes that took effect, which price at %d", testCase.name, spent, testCase.writeCount, writerWant)
 		}
@@ -316,15 +339,18 @@ func TestSidecarRevPutSentAgainAfterItNeverLandedSpendsOnce(t *testing.T) {
 		spentBefore := int64(0)
 		putCountBefore := 0
 		outcome := "created"
+		operation := evsservice.WriteOperationCreate
 		if testCase.raise {
 			standing := *revocation
 			standing.NotBefore = revocation.NotBefore.Add(-time.Minute)
 			if err := writer.Write(ctx, &standing); err != nil {
 				t.Fatal(err)
 			}
-			spentBefore = world.objectPrice(key)
+			spentBefore = world.objectPrice(key, evsservice.WriteOperationCreate)
 			putCountBefore = 1
 			outcome = "raised"
+			// a raise is an If-Match PUT over the object: the overwrite row
+			operation = evsservice.WriteOperationOverwrite
 		}
 		world.fault(&sidecartest.FaultPlan{Op: sidecartest.FaultOpPut, KeyPrefix: key, Result: testCase.result})
 		outcomeCount := testApiBudgetRevWriteCount(outcome)
@@ -343,7 +369,7 @@ func TestSidecarRevPutSentAgainAfterItNeverLandedSpendsOnce(t *testing.T) {
 		if notBefore := world.revNotBefore(revocation); !notBefore.Equal(revocation.NotBefore) {
 			t.Errorf("%s: the object holds not_before %v, want %v", testCase.name, notBefore, revocation.NotBefore)
 		}
-		if spent, want := world.spent(sidecar.WriteP0KindRevocation, budget), spentBefore+world.objectPrice(key); spent != want {
+		if spent, want := world.spent(sidecar.WriteP0KindRevocation, budget), spentBefore+world.objectPrice(key, operation); spent != want {
 			t.Errorf("%s: spent %d, and the writes that took effect price at %d", testCase.name, spent, want)
 		}
 	}
@@ -371,15 +397,18 @@ func TestSidecarRevLostAnswerThatLandedCountsCreated(t *testing.T) {
 		spentBefore := int64(0)
 		putCountBefore := 0
 		outcome := "created"
+		operation := evsservice.WriteOperationCreate
 		if testCase.raise {
 			standing := *revocation
 			standing.NotBefore = revocation.NotBefore.Add(-time.Minute)
 			if err := writer.Write(ctx, &standing); err != nil {
 				t.Fatal(err)
 			}
-			spentBefore = world.objectPrice(key)
+			spentBefore = world.objectPrice(key, evsservice.WriteOperationCreate)
 			putCountBefore = 1
 			outcome = "raised"
+			// a raise is an If-Match PUT over the object: the overwrite row
+			operation = evsservice.WriteOperationOverwrite
 		}
 		world.fault(&sidecartest.FaultPlan{Op: sidecartest.FaultOpPut, KeyPrefix: key, Result: sidecartest.ApplyThenDrop})
 		outcomeCount, currentCount := testApiBudgetRevWriteCount(outcome), testApiBudgetRevWriteCount("current")
@@ -398,7 +427,7 @@ func TestSidecarRevLostAnswerThatLandedCountsCreated(t *testing.T) {
 		if count := world.cluster.putCount(key); count != putCountBefore+1 {
 			t.Errorf("%s: %d PUTs for the write, want 1", testCase.name, count-putCountBefore)
 		}
-		if spent, want := world.spent(sidecar.WriteP0KindRevocation, budget), spentBefore+world.objectPrice(key); spent != want {
+		if spent, want := world.spent(sidecar.WriteP0KindRevocation, budget), spentBefore+world.objectPrice(key, operation); spent != want {
 			t.Errorf("%s: spent %d, and the writes that took effect price at %d", testCase.name, spent, want)
 		}
 	}
@@ -456,7 +485,7 @@ func TestSidecarRevUnsettledPutSpendsOnceAcrossItsRetry(t *testing.T) {
 		if count := testApiBudgetRevWriteCount("failed"); count != failedCount+1 {
 			t.Errorf("%s: the write and its retry counted %v failures, want 1", testCase.name, count-failedCount)
 		}
-		price := world.objectPrice(key)
+		price := world.objectPrice(key, evsservice.WriteOperationCreate)
 		if unsettledSpent != price {
 			t.Errorf("%s: the write whose outcome stayed unknown spent %d, and its object prices at %d", testCase.name, unsettledSpent, price)
 		}
@@ -522,7 +551,7 @@ func TestAbuseHoldCreateRetriedAfterALostAnswerSpendsOnce(t *testing.T) {
 		if count := world.cluster.putCount(key); count != 2 {
 			t.Errorf("%s: %d PUTs, want the create's and its retry's", testCase.name, count)
 		}
-		if spent, price := world.spent(sidecar.WriteP0KindLifecycle, budget), world.objectPrice(key); spent != price {
+		if spent, price := world.spent(sidecar.WriteP0KindLifecycle, budget), world.objectPrice(key, evsservice.WriteOperationCreate); spent != price {
 			t.Errorf("%s: the create and its retry spent %d, and the one object prices at %d", testCase.name, spent, price)
 		}
 	}
@@ -557,12 +586,15 @@ func TestAbuseHoldRewriteRefusedIfMatchSpendsNothing(t *testing.T) {
 
 		spentBefore := int64(0)
 		var before []byte
+		// a missing object's put-back is a create, and a rewrite of a standing one an If-Match overwrite
+		operation := evsservice.WriteOperationCreate
 		if !testCase.missing {
 			if _, err := store.Create(ctx, record); err != nil {
 				t.Fatal(err)
 			}
-			spentBefore = world.objectPrice(key)
+			spentBefore = world.objectPrice(key, evsservice.WriteOperationCreate)
 			before = world.holdBody(store, record)
+			operation = evsservice.WriteOperationOverwrite
 		}
 		// the renewal §2703(f)(2) allows, keeping place_time
 		renewed := *record
@@ -602,7 +634,7 @@ func TestAbuseHoldRewriteRefusedIfMatchSpendsNothing(t *testing.T) {
 		if held := world.holdBody(store, record); string(held) != string(renewedBody) {
 			t.Errorf("%s: the object holds %s, want %s", testCase.name, held, renewedBody)
 		}
-		if spent, want := world.spent(sidecar.WriteP0KindLifecycle, budget), spentBefore+world.objectPrice(key); spent != want {
+		if spent, want := world.spent(sidecar.WriteP0KindLifecycle, budget), spentBefore+world.objectPrice(key, operation); spent != want {
 			t.Errorf("%s: spent %d, and the writes that took effect price at %d", testCase.name, spent, want)
 		}
 	}
@@ -619,7 +651,7 @@ func TestSidecarRevUnsettledPutPastItsCountSpendsAgain(t *testing.T) {
 	settings.UnsettledWriteCount = 0
 	writer := NewSidecarRevStore(world.cluster, testRevSign, settings)
 	budget := sidecartest.NewFakeWriteBudget(nil)
-	writer.SetWriteBudget(budget, testApiBudgetPrice)
+	writer.SetWriteBudget(budget, testApiBudgetPrices())
 	revocation := newTestRevocation(world.clock.Now())
 	key := revocation.key()
 
@@ -632,7 +664,7 @@ func TestSidecarRevUnsettledPutPastItsCountSpendsAgain(t *testing.T) {
 	if err := writer.Write(ctx, revocation); err != nil {
 		t.Fatal(err)
 	}
-	if spent, price := world.spent(sidecar.WriteP0KindRevocation, budget), world.objectPrice(key); spent != 2*price {
+	if spent, price := world.spent(sidecar.WriteP0KindRevocation, budget), world.objectPrice(key, evsservice.WriteOperationCreate); spent != 2*price {
 		t.Errorf("spent %d with no unsettled PUT remembered, want the unsettled PUT's and the retry's, %d", spent, 2*price)
 	}
 }
@@ -654,7 +686,7 @@ func TestSidecarRevWriteRefusesWithoutAnObjectBound(t *testing.T) {
 	settings.ObjectMaxByteCount = 0
 	writer := NewSidecarRevStore(world.cluster, testRevSign, settings)
 	budget := sidecartest.NewFakeWriteBudget(nil)
-	writer.SetWriteBudget(budget, testApiBudgetPrice)
+	writer.SetWriteBudget(budget, testApiBudgetPrices())
 	lower := *revocation
 	lower.NotBefore = revocation.NotBefore.Add(-time.Minute)
 	if err := writer.Write(ctx, &lower); err == nil {

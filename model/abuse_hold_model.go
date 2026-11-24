@@ -41,6 +41,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/urnetwork/sidecar"
+	"github.com/urnetwork/sidecar/evsservice"
 
 	"github.com/urnetwork/server"
 )
@@ -116,9 +117,10 @@ type AbuseHoldSettings struct {
 	// bound, the readers' HoldSetSettings.RereadInterval. Placement and renewal report the time.
 	BindTimeout time.Duration
 	// How many hold/ writes whose outcome stayed unknown, the read after them failing too, the writer remembers by key:
-	// each is spent as issued, once, and the write of its key that settles it spends nothing more (api_write_spend.go).
-	// Past it such a write is spent and not remembered, so the write that settles it spends again, one object over.
-	// 1,024: each needs the store to fail both a write and the read after it. Non-positive remembers none.
+	// each is spent as issued, once, and the write of its key that settles it spends only what its own cost row prices
+	// past that (api_write_spend.go). Past it such a write is spent and not remembered, so the write that settles it
+	// spends again, one write over. 1,024: each needs the store to fail both a write and the read after it.
+	// Non-positive remembers none.
 	UnsettledWriteCount int
 }
 
@@ -299,12 +301,14 @@ func legalHoldTimesEqual(a *time.Time, b *time.Time) bool {
 
 // api's and taskworker's hold/ writer on the first metadata cluster: the hold/<network_id>/<case_id>/_ objects,
 // written through sidecar.EncodeHoldRecord so a reader parses exactly what api writes. Every write is P0 of kind
-// lifecycle (plan-EVSB-write-classes) once OPS installs the process's budget: each PUT carries P0, and each create or
-// rewrite is spent once the store shows it took effect (api_write_spend.go), so a 412 and a PUT a read shows never
-// landed spend nothing, and one whose outcome stays unknown is spent as issued, once. A renewal and the pass's
-// put-back keep a hold's place_time, so after a create's unknown outcome a read that finds no object, or one of
-// another placement, shows the create never landed; after a rewrite's, the object it was conditioned on standing
-// shows it never landed. Safe for concurrent use.
+// lifecycle (plan-EVSB-write-classes, QD-084) once the process installs its budget (SetWriteBudget): each PUT and
+// DELETE carries P0, and each is spent once the store shows it took effect, at its own one of §11.13's cost rows
+// (api_write_spend.go): a create, a rewrite's If-Match PUT as the overwrite it is, a missing object's put-back as a
+// create, and a DELETE as a delete. A 412, a DELETE of a key already gone, which is never sent, and a write a read
+// shows never landed spend nothing, and one whose outcome stays unknown is spent as issued, once. A renewal and the
+// pass's put-back keep a hold's place_time, so after a create's unknown outcome a read that finds no object, or one
+// of another placement, shows the create never landed; after a rewrite's or a DELETE's, the object it was
+// conditioned on, or meant, standing shows it never landed. Safe for concurrent use.
 type AbuseHoldStore struct {
 	cluster sidecar.BlobCluster
 	// the process's write budget's spend, P0 of kind lifecycle
@@ -324,10 +328,11 @@ func NewAbuseHoldStoreWithSettings(cluster sidecar.BlobCluster, settings *AbuseH
 	}
 }
 
-// Spends every hold/ create and rewrite that takes effect from budget, as P0 of kind lifecycle, priced by price, and
-// passes every PUT through it as P0 (see the type's doc). nil removes it.
-func (self *AbuseHoldStore) SetWriteBudget(budget sidecar.WriteBudget, price func(objectByteCount int64) int64) {
-	self.spend.setBudget(budget, price)
+// Spends every hold/ write that takes effect from budget, as P0 of kind lifecycle at its row of prices, §11.13's cost
+// rows, and passes every PUT and DELETE through it as P0 (see the type's doc). nil prices is the table a budget built
+// with evsservice's default settings prices with; nil budget removes it.
+func (self *AbuseHoldStore) SetWriteBudget(budget sidecar.WriteBudget, prices *evsservice.PriceTable) {
+	self.spend.setBudget(budget, prices)
 }
 
 // What shows a create of record never landed, after its outcome was unknown: no object, or one of another placement,
@@ -397,15 +402,16 @@ func (self *AbuseHoldStore) Create(ctx context.Context, record *sidecar.HoldReco
 	}
 	key := sidecar.HoldObjectKey(record.NetworkId, record.CaseId)
 	_, putErr := self.cluster.PutIfNoneMatch(self.spend.p0Context(ctx), key, body, nil)
+	put := newApiWrite(evsservice.WriteOperationCreate, body, "", abuseHoldCreateNeverLanded(record))
 	var unknown *sidecar.BlobUnknownError
 	var unknownPut *apiWrite
 	switch {
 	case putErr == nil:
-		self.spend.spendWritten(ctx, key, len(body))
+		self.spend.spendWritten(ctx, key, put)
 		return record, nil
 	case errors.As(putErr, &unknown):
 		// it may have landed: the read decides
-		unknownPut = newApiWrite(body, "", abuseHoldCreateNeverLanded(record))
+		unknownPut = put
 	case !errors.Is(putErr, sidecar.ErrBlobPrecondition):
 		return nil, putErr
 	}
@@ -445,7 +451,8 @@ func (self *AbuseHoldStore) Create(ctx context.Context, record *sidecar.HoldReco
 // Rewrites record's object If-Match, or creates it when it is gone: a renewal, or the pass putting back what a
 // live row says. Equal bytes write nothing. A write whose outcome was unknown reads its key: its own bytes there are
 // the write landed, its answer lost, and nil; any other error, a 412's included, leaves the outcome to the caller's
-// retry, which reads again. The write is spent once the store shows it took effect (see the type's doc).
+// retry, which reads again. The write is spent once the store shows it took effect, an If-Match PUT at the overwrite
+// row and a missing object's at the create row (see the type's doc).
 func (self *AbuseHoldStore) Rewrite(ctx context.Context, record *sidecar.HoldRecord) error {
 	body, err := sidecar.EncodeHoldRecord(record)
 	if err != nil {
@@ -469,33 +476,32 @@ func (self *AbuseHoldStore) Rewrite(ctx context.Context, record *sidecar.HoldRec
 	if found && bytes.Equal(object.Body, body) {
 		return nil
 	}
-	var neverLanded func(found bool, body []byte, etag string) bool
+	var put *apiWrite
 	if !found {
 		_, err = self.cluster.PutIfNoneMatch(self.spend.p0Context(ctx), key, body, nil)
-		neverLanded = abuseHoldCreateNeverLanded(record)
+		put = newApiWrite(evsservice.WriteOperationCreate, body, "", abuseHoldCreateNeverLanded(record))
 	} else {
 		conditionEtag := object.Etag
 		_, err = self.cluster.PutIfMatch(self.spend.p0Context(ctx), key, conditionEtag, body, nil)
 		// the object it was conditioned on still stands: it replaced nothing
-		neverLanded = func(found bool, body []byte, etag string) bool {
+		put = newApiWrite(evsservice.WriteOperationOverwrite, body, "", func(found bool, body []byte, etag string) bool {
 			return found && etag == conditionEtag
-		}
+		})
 	}
 	var unknown *sidecar.BlobUnknownError
 	switch {
 	case err == nil:
-		self.spend.spendWritten(ctx, key, len(body))
+		self.spend.spendWritten(ctx, key, put)
 		return nil
 	case errors.As(err, &unknown):
 		// it may have landed: the read decides
-		unknownPut := newApiWrite(body, "", neverLanded)
 		_, found, heldBody, heldEtag, readErr := read()
 		if readErr != nil {
 			// no read told: spent as issued, once, for the write that settles it
-			self.spend.spendUnsettled(ctx, key, unknownPut)
+			self.spend.spendUnsettled(ctx, key, put)
 			return err
 		}
-		if writeLanded, _ := self.spend.settleRead(ctx, key, unknownPut, found, heldBody, heldEtag); writeLanded {
+		if writeLanded, _ := self.spend.settleRead(ctx, key, put, found, heldBody, heldEtag); writeLanded {
 			// landed, its answer lost
 			return nil
 		}
@@ -506,9 +512,30 @@ func (self *AbuseHoldStore) Rewrite(ctx context.Context, record *sidecar.HoldRec
 	}
 }
 
-// Deletes one hold's object; nil when it is gone already.
+// Deletes one hold's object; nil when it is gone already. The key is read first, so a key already gone, which the
+// store's DELETE answers nil as it answers one that deleted, sends nothing and spends nothing; the DELETE is spent at
+// §11.13's delete row once the store shows it took effect, and one whose outcome was unknown reads the key again: gone,
+// it landed, its answer lost, and nil; the object it meant still standing, it never landed (see the type's doc).
 func (self *AbuseHoldStore) Delete(ctx context.Context, networkId server.Id, caseId server.Id) error {
-	return self.cluster.Delete(ctx, sidecar.HoldObjectKey(sidecar.Id(networkId), sidecar.Id(caseId)))
+	key := sidecar.HoldObjectKey(sidecar.Id(networkId), sidecar.Id(caseId))
+	read := func() (found bool, body []byte, etag string, err error) {
+		object, found, err := self.readKey(ctx, key, networkId, caseId)
+		if err != nil {
+			return false, nil, "", err
+		}
+		body, etag = abuseHoldReadBody(object, found)
+		return found, body, etag, nil
+	}
+	found, heldBody, heldEtag, err := read()
+	if err != nil {
+		return err
+	}
+	// an earlier write of the key, spent with its outcome unknown, may settle here
+	self.spend.settleRead(ctx, key, nil, found, heldBody, heldEtag)
+	if !found {
+		return nil
+	}
+	return self.spend.deleteObject(ctx, key, heldEtag, read)
 }
 
 // hold/ keys after startAfter, at most limit, and whether more follow.

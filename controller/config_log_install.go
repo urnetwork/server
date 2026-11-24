@@ -125,29 +125,27 @@ func newAuthorizationIssuerWorker(ctx context.Context) *task.TaskWorker {
 	return worker
 }
 
+// rev/'s writer on the issuer's first cluster, spending host's budget: each create, raise and DELETE at its own
+// one of §11.13's cost rows, by the table the budget, built with evsservice's default settings, prices with
+// (model.SidecarRevStore.SetWriteBudget's nil prices).
 func installApiRevocations(host *sidecar.ServiceHost, first sidecar.BlobCluster) func() {
 	settings := model.DefaultSidecarRevSettings()
 	settings.Clock = host.Clock
 	store := model.NewSidecarRevStore(first, oauth.SignRevocation, settings)
-	store.SetWriteBudget(host.Budget, priceMetadataCreate)
+	store.SetWriteBudget(host.Budget, nil)
 	model.SetSidecarRevStore(store)
 	return func() { model.SetSidecarRevStore(nil) }
 }
 
-var metadataPrices = evsservice.DefaultPriceTable4KiB()
-
-func priceMetadataCreate(byteCount int64) int64 {
-	price, _ := metadataPrices.Price(evsservice.WriteOperation{Kind: evsservice.WriteOperationCreate, ObjectByteCount: byteCount, Count: 1})
-	return price
-}
-
 // The API's writer and the worker's retention and effects reader use the same
-// verifier on their own scoped cluster. Settings select each process's duties.
+// verifier on their own scoped cluster. Settings select each process's duties. The sequencer spends host's budget
+// at §11.13's create row for each object it creates and its delete row for each its retention deletes, by the table
+// the budget, built with evsservice's default settings, prices with.
 func NewHostedConfigLogSequencer(host *sidecar.ServiceHost, first sidecar.BlobCluster, settings *model.ConfigLogSettings) *model.ConfigLogSequencer {
 	settings.AclSpendCheck = sidecar.NewSpendCheck(nil)
 	settings.Clock = host.Clock
 	sequencer := model.NewConfigLogSequencer(first, settings, model.AdvanceNetworkAclHead)
-	sequencer.SetWriteBudget(host.Budget, priceMetadataCreate)
+	sequencer.SetWriteBudget(host.Budget, nil)
 	return sequencer
 }
 

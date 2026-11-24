@@ -38,10 +38,10 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// What the tests price an object's create at: a fixed part for each object and a part for each byte, so a total
-// tells both how many objects were spent and which.
+// What the tests price an object's create at, the create row of testApiBudgetPrices: a fixed part for each object and
+// a part for each byte, so a total tells both how many objects were spent and which.
 func testConfigLogBudgetPrice(objectByteCount int64) int64 {
-	return 1000 + 3*objectByteCount
+	return testApiBudgetPrice(evsservice.WriteOperationCreate, objectByteCount)
 }
 
 // A first cluster that counts the PUTs sent to each key.
@@ -137,7 +137,7 @@ func (self *testConfigLogBudgetWorld) sequencer() (*ConfigLogSequencer, *sidecar
 	settings.Clock = self.world.Clock()
 	sequencer := NewConfigLogSequencer(self.cluster, settings, nil)
 	budget := sidecartest.NewFakeWriteBudget(nil)
-	sequencer.SetWriteBudget(budget, testConfigLogBudgetPrice)
+	sequencer.SetWriteBudget(budget, testApiBudgetPrices())
 	return sequencer, budget
 }
 
@@ -522,7 +522,7 @@ func TestConfigLogAdoptedRunWrittenAgainSpendsNothing(t *testing.T) {
 	settings.Clock = self.world.Clock()
 	restored := NewConfigLogSequencer(lost, settings, nil)
 	budget := sidecartest.NewFakeWriteBudget(nil)
-	restored.SetWriteBudget(budget, testConfigLogBudgetPrice)
+	restored.SetWriteBudget(budget, testApiBudgetPrices())
 	check := func(step string) {
 		t.Helper()
 		held := testConfigLogBudgetHeldPrice(t, lost, sidecar.Id(self.networkId))
