@@ -103,11 +103,13 @@ func testIdentifierOf(call *ast.CallExpr, index int) string {
 
 // Each service all runs installs through its own list alone: api's main through its route set's install, connect's
 // through its exchange's and taskworker's through its tasks', each once, before its service runs, api's and
-// connect's over the host they set their Env with. So whatever a service's main installs is a part of the list all's
-// main installs, and a part added to a main beside its list fails here before all could miss it.
+// connect's over the host they set their Env with; gossip's, which all runs when asked, installs nothing. So whatever
+// a service's main installs is a part of the list all's main installs, and a part added to a main beside its list,
+// or a first install in gossip's, fails here before all could miss it.
 func TestServiceMainsInstallThroughTheirListsAlone(t *testing.T) {
 	for _, c := range []struct {
-		path    string
+		path string
+		// "" for none
 		install string
 		run     string
 		// whether the install takes the host the main sets its Env with
@@ -116,14 +118,25 @@ func TestServiceMainsInstallThroughTheirListsAlone(t *testing.T) {
 		{path: "../api/main.go", install: "controller.InstallApiRoutes", run: "api.Run", host: true},
 		{path: "../connect/main.go", install: "controller.InstallConnectExchange", run: "connectserver.Run", host: true},
 		{path: "../taskworker/main.go", install: "work.InstallTaskworkerTasks", run: "taskworker.Run"},
+		{path: "../gossip/main.go", run: "gossipserver.Run"},
 	} {
 		calls := readTestFuncCalls(t, c.path, "main")
+		run := testFindCall(calls, c.run)
+		if run == nil {
+			t.Errorf("%s does not call %s", c.path, c.run)
+			continue
+		}
+		if c.install == "" {
+			if installs := testInstallCalls(calls); len(installs) != 0 {
+				t.Errorf("%s installs %v, which all's list does not hold", c.path, installs)
+			}
+			continue
+		}
 		if installs := testInstallCalls(calls); !slices.Equal(installs, []string{c.install}) {
 			t.Errorf("%s installs %v, want %s alone", c.path, installs, c.install)
 		}
 		install := testFindCall(calls, c.install)
-		run := testFindCall(calls, c.run)
-		if install == nil || run == nil || run.Pos() < install.Pos() {
+		if install == nil || run.Pos() < install.Pos() {
 			t.Errorf("%s does not install before %s", c.path, c.run)
 		}
 		if c.host {
