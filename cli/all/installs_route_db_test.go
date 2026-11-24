@@ -11,12 +11,15 @@ package main
 // network's load. sidecar.yml's acl_contract_gate is on, which only CreateContract and the residents' peer lists read.
 //
 //	before   with nothing installed, as all's process ran: the authorization log's read answers 503, the device
-//	         grant temporarily_unavailable, and there is no gate cache and no contract gate for connect's residents
+//	         grant temporarily_unavailable, and there is no gate cache, and no contract gate or hard deny for
+//	         connect's residents
 //	all      the log's read serves the empty network's projection, the device grant serves an authorization and the
 //	         issuer's metadata names it; the approval cancel, the smtp reports read, the DKIM publish's mail_send, the
 //	         exchange's scopes and the mail enable's scope labels each reach api's gate cache, which held nothing of
-//	         the request's network before the request and tracks it after; and the contract gate is installed
-//	undone   the one undo takes it all out again: the log's read answers 503 once more, and no cache or gate is left
+//	         the request's network before the request and tracks it after; and the contract gate and the hard deny
+//	         connect's residents read are installed, by api's projection and standing
+//	undone   the one undo takes it all out again: the log's read answers 503 once more, and no cache, gate or hard
+//	         deny is left
 //	api      api's install answers each request as all's did
 //
 // Each request comes from a peer of its own. The answers are compared whole, status and body, but for the device
@@ -273,8 +276,8 @@ func TestAllAnswersTheRoutesApisInstallsServeAsApiDoes(t *testing.T) {
 		if answer := routes.serve(deviceAuthorization); answer.code == http.StatusOK || !strings.Contains(answer.body, "temporarily_unavailable") {
 			tb.Errorf("the device grant with nothing installed: %d %s", answer.code, answer.body)
 		}
-		if controller.ApiAuthorizationCache() != nil || controller.AclContractGateInstalled() {
-			tb.Fatal("a gate cache or a contract gate before any install")
+		if controller.ApiAuthorizationCache() != nil || controller.AclContractGateInstalled() || controller.AbuseHardDenyInstalled() {
+			tb.Fatal("a gate cache, a contract gate or a hard deny before any install")
 		}
 
 		// a fake first metadata cluster in place of vault's file-clusters-api.yml, for each install
@@ -298,9 +301,13 @@ func TestAllAnswersTheRoutesApisInstallsServeAsApiDoes(t *testing.T) {
 			if controller.ApiAuthorizationCache() == nil {
 				tb.Fatalf("%s's installs published no gate cache", name)
 			}
-			// connect's residents read it at each CreateContract and peer list
+			// connect's residents read both at each CreateContract, and the gate at each peer list: api's standing
+			// and projection install them where connect's own install is covered
 			if !controller.AclContractGateInstalled() {
 				tb.Errorf("%s's installs installed no contract gate", name)
+			}
+			if !controller.AbuseHardDenyInstalled() {
+				tb.Errorf("%s's installs installed no hard deny", name)
 			}
 
 			// the authorization log's sequencer: the empty network's projection
@@ -360,8 +367,8 @@ func TestAllAnswersTheRoutesApisInstallsServeAsApiDoes(t *testing.T) {
 			if answer := routes.serve(projectionRead); answer.code != http.StatusServiceUnavailable {
 				tb.Errorf("%s: the log's read once undone: %d %s", name, answer.code, answer.body)
 			}
-			if controller.ApiAuthorizationCache() != nil || controller.AclContractGateInstalled() {
-				tb.Errorf("%s: the undone installs left a gate cache or a contract gate", name)
+			if controller.ApiAuthorizationCache() != nil || controller.AclContractGateInstalled() || controller.AbuseHardDenyInstalled() {
+				tb.Errorf("%s: the undone installs left a gate cache, a contract gate or a hard deny", name)
 			}
 			return answers
 		}

@@ -92,6 +92,12 @@ func SetAbuseHardDeny(snapshot *model.AbuseHardDenySnapshot) (restore func()) {
 	}
 }
 
+// Whether this process has installed a snapshot for CreateContract's hard deny, by InstallAbuseHardDeny or as
+// InstallAbuseStanding's. A process with none holds no network.
+func AbuseHardDenyInstalled() bool {
+	return abuseHardDeny.Load() != nil
+}
+
 // Installs a hard deny snapshot of its own in a process that runs CreateContract and nothing else of §21, connect at
 // startup, and answers what removes it and stops the snapshot. A binary that does not link MG5 installs none.
 func InstallAbuseHardDeny(ctx context.Context) (restore func()) {
