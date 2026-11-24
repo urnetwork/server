@@ -271,7 +271,8 @@ func newCatchUpFixture(t *testing.T, hooks *catchUpHooks) *catchUpFixture {
 	t.Cleanup(net.Close)
 	store := sidecartest.NewFakeBlobs(net.Clock(), sidecartest.NewFaultQueue(), nil, nil)
 	admin := &fakeAdminInfo{clock: net.Clock()}
-	blobs := newFaultBlobs(&staleRefusingBlobs{BlobStore: store, admin: admin}, admin.check, net, nil, hooks)
+	// a reread after every move, as the fake refuses a write on admin info any move made stale
+	blobs := newFaultBlobs(&staleRefusingBlobs{BlobStore: store, admin: admin}, admin.check, net, nil, 0, hooks)
 	cluster, err := blobs.FirstCluster()
 	if err != nil {
 		t.Fatal(err)
