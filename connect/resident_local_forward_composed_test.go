@@ -237,13 +237,11 @@ func (self *localForwardComposedFixture) run() {
 func (self *localForwardComposedFixture) send(firstIndex int, count int) {
 	for index := firstIndex; index < firstIndex+count; index++ {
 		message := newLocalTransportTestMessage(index, localForwardComposedByteCount(index))
-		select {
-		case self.forward.send <- message:
-			self.forward.UpdateActivity()
-		case <-self.ctx.Done():
+		if self.forward.send.sendWait(message, self.ctx.Done(), nil, nil) != messageQueueSent {
 			clientconnect.MessagePoolReturn(message)
 			self.t.Fatalf("message %d refused", index)
 		}
+		self.forward.UpdateActivity()
 	}
 }
 

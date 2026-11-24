@@ -85,7 +85,7 @@ func (self *exchangeTcpBenchmarkSingleReadConn) SetWriteDeadline(time.Time) erro
 
 // Creates a real loopback TCP pair so net.Buffers can retain its TCP writev
 // implementation instead of falling back through a test connection wrapper.
-func newExchangeTcpBenchmarkPair(benchmark *testing.B) (*net.TCPConn, *net.TCPConn) {
+func newExchangeTcpBenchmarkPair(benchmark testing.TB) (*net.TCPConn, *net.TCPConn) {
 	benchmark.Helper()
 
 	listener, err := net.ListenTCP(
@@ -929,8 +929,8 @@ func newExchangeOutboundBatchConnection(
 		conn:          recorder,
 		sendBuffer:    NewDefaultExchangeBuffer(settings),
 		receiveBuffer: NewReceiveOnlyExchangeBuffer(settings),
-		send:          make(chan []byte, exchangeTcpBenchmarkBurstMessageCount),
-		receive:       make(chan []byte, exchangeTcpBenchmarkBurstMessageCount),
+		send:          newMessageQueue(exchangeTcpBenchmarkBurstMessageCount),
+		receive:       newMessageQueue(exchangeTcpBenchmarkBurstMessageCount),
 		settings:      settings,
 		header:        ExchangeHeader{Op: op},
 	}
@@ -971,13 +971,13 @@ func runExchangeOutboundBatchFormation(
 
 	source := connection.send
 	if bridge {
-		source = make(chan []byte, exchangeTcpBenchmarkBurstMessageCount)
+		source = newMessageQueue(exchangeTcpBenchmarkBurstMessageCount)
 	}
 	witnesses := make([][]byte, 0, exchangeTcpBenchmarkBurstMessageCount)
 	for messageIndex := range exchangeTcpBenchmarkBurstMessageCount {
 		message := newExchangeTcpBenchmarkMessage(messageIndex)
 		witnesses = append(witnesses, connectlib.MessagePoolShareReadOnly(message))
-		source <- message
+		source.sendForTest(message)
 	}
 
 	go connection.Run()
@@ -993,7 +993,7 @@ func runExchangeOutboundBatchFormation(
 			writeTimer := time.NewTimer(0)
 			defer writeTimer.Stop()
 			for messageIndex := range exchangeTcpBenchmarkBurstMessageCount {
-				message := <-source
+				message, _ := source.receiveForTest()
 				result := connection.sendMessage(
 					connection.Done(),
 					message,
@@ -1031,11 +1031,11 @@ func runExchangeOutboundBatchFormation(
 	}
 	connection.Close()
 
-	if len(source) != 0 || len(connection.send) != 0 {
+	if source.len() != 0 || connection.send.len() != 0 {
 		testingT.Fatalf(
 			"exchange queues remain source=%d connection=%d",
-			len(source),
-			len(connection.send),
+			source.len(),
+			connection.send.len(),
 		)
 	}
 	for witnessIndex, witness := range witnesses {

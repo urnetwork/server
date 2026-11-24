@@ -221,8 +221,8 @@ func TestResidentForwardRefusedOffersDoNotRenewIdleDeadline(t *testing.T) {
 		snapshot := ledger.snapshot()
 		if !snapshot.Complete || snapshot.Groups[residentPayloadForwardIngress].Messages != 0 ||
 			snapshot.Groups[residentPayloadForwardOutput].Messages != int64(settings.ForwardBufferSize+1) ||
-			len(forward.send) != settings.ForwardBufferSize || lookups.Load() != 1 {
-			t.Fatalf("native held lookup and full output queue not established: %+v queue=%d lookup=%d", snapshot, len(forward.send), lookups.Load())
+			forward.send.len() != settings.ForwardBufferSize || lookups.Load() != 1 {
+			t.Fatalf("native held lookup and full output queue not established: %+v queue=%d lookup=%d", snapshot, forward.send.len(), lookups.Load())
 		}
 		// Fourteen refused offers spread over the allowance, the last one step
 		// before it ends.

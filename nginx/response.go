@@ -60,6 +60,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/urnetwork/server"
 )
 
 // Lets a forwarder name the block that answered, for the metrics and the
@@ -73,8 +75,13 @@ type upstreamBlockRecorder interface {
 // request hijacks its connection, by the connection: released when both have
 // let go. Safe for concurrent use.
 type responseSlot struct {
-	release   func()
-	holdCount atomic.Int32
+	release func()
+	// a connect upgrade's count in the concentration gauges
+	// (frontConcentration), released with the slot; nil for any other
+	// request. Set on the request's goroutine before any hijack, so before
+	// the count of holders can reach zero elsewhere
+	concentrationRelease func()
+	holdCount            atomic.Int32
 }
 
 // A slot held once, by the request.
@@ -95,6 +102,9 @@ func (self *responseSlot) acquireHold() {
 func (self *responseSlot) releaseHold() {
 	if self.holdCount.Add(-1) == 0 {
 		self.release()
+		if self.concentrationRelease != nil {
+			self.concentrationRelease()
+		}
 	}
 }
 
@@ -167,6 +177,18 @@ func (self *responseState) writer() http.ResponseWriter {
 // after a hijack, when the connection closes, whichever is later.
 func (self *responseState) holdSlot(release func()) {
 	self.slot = newResponseSlot(release)
+}
+
+// Holds a connect upgrade's count in the concentration gauges with the
+// request's slot, released as the slot is: when the request ends or, after a
+// hijack, when the connection closes, whichever is later. Called on the
+// request's goroutine before any hijack. A request without a slot gets one
+// that holds only the count.
+func (self *responseState) holdConcentration(release func()) {
+	if self.slot == nil {
+		self.slot = newResponseSlot(func() {})
+	}
+	self.slot.concentrationRelease = release
 }
 
 // Lets go of the request's hold on its slot, once its handler has returned.
@@ -270,6 +292,7 @@ func (self *responseState) armWriteDeadline() {
 	if sendTimeout <= 0 {
 		return
 	}
+	server.CountTimerDeadlineAfter(server.TimerCensusSiteFrontResponseDeadline, sendTimeout)
 	self.controller.SetWriteDeadline(time.Now().Add(sendTimeout))
 }
 
@@ -279,6 +302,7 @@ func (self *responseState) clearWriteDeadline() {
 	if self.front.settings.Http.SendTimeout <= 0 {
 		return
 	}
+	server.CountTimerStop(server.TimerCensusSiteFrontResponseDeadline)
 	self.controller.SetWriteDeadline(time.Time{})
 }
 
@@ -399,7 +423,7 @@ var errResponseFrontCut = errors.New("lbalt front: closed")
 // reads whole after the answer, then closes at once over a pipelined request
 // still arriving. Only the server's own writer can be marked. h2 and h3 need
 // none: an h2 answer ends its stream and resets the request's side with
-// NO_ERROR while the server reads on, and the vendored http3 stops the
+// NO_ERROR while the server reads on, and the quic-go fork's http3 stops the
 // request's side with H3_NO_ERROR, so neither closes a connection over an
 // unread body.
 func (self *responseState) finish() {

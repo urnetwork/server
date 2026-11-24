@@ -34,7 +34,7 @@ func TestWriteGrantErrorHidesUnauthorizedDetail(t *testing.T) {
 
 // The declared reasons keep their words: they tell the user what to do.
 func TestWriteGrantErrorKeepsTheDeclaredReasons(t *testing.T) {
-	for _, reason := range []error{errUnauthorizedGuestNetwork, errUnauthorizedNoNetwork} {
+	for _, reason := range unauthorizedReasons {
 		code, refusal := grantErrorTestResponse(t, reason)
 		if code != http.StatusForbidden || refusal.Error != "access_denied" || refusal.ErrorDescription != reason.Error() {
 			t.Errorf("declared reason changed: %d %+v, want %q", code, refusal, reason.Error())

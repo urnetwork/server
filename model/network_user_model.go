@@ -283,6 +283,8 @@ func AddAuth(
 				AuthJwt:       *authArgs.AuthJwt,
 				UserId:        session.ByJwt.UserId,
 				Notify:        true,
+				// ParseAuthJwt verified the token and its email
+				Proven: true,
 			},
 			session.Ctx,
 		)
@@ -386,13 +388,19 @@ func addUserAuthInTx(
 	// TODO - if they have authed through SSO, mark them as verified
 
 	/**
-	 * Check if this user_auth is already associated with a different user
+	 * Check if this user_auth is already associated with a different user.
+	 * An unverified hold older than UnverifiedUserAuthClaimTimeout yields to
+	 * this one and is released (auth_user_auth_claim.go). The row is added
+	 * unverified unless the caller says otherwise: an email or phone added to
+	 * an account is pending, and grants nothing, until a code sent to it
+	 * verifies it (AuthVerify).
 	 */
-	err := validateUserAuthAvailability(
+	err := claimUserAuthInTx(
 		ctx,
 		tx,
 		*userAuth,
 		args.UserId,
+		false,
 	)
 	if err != nil {
 		returnErr = err
@@ -513,59 +521,10 @@ type AddSsoAuthArgs struct {
 	// for an account's creation, a migration, or a legacy Apple account's
 	// backfill, which add no way in that the account did not already have
 	Notify bool `json:"-"`
-}
-
-func validateUserAuthAvailability(
-	ctx context.Context,
-	tx server.PgTx,
-	userAuth string,
-	userId server.Id,
-) error {
-
-	// Every row counts: the user auth is unique per auth type, so this user
-	// and another can each hold it under a different type, and the first row
-	// alone could be this user's while the insert then meets the other's on
-	// the unique index. A failed query raises.
-	heldByOther := func(sql string) bool {
-		query, err := tx.Query(ctx, sql, userAuth)
-		held := false
-		server.WithPgResult(query, err, func() {
-			for query.Next() {
-				var holderUserId server.Id
-				server.Raise(query.Scan(&holderUserId))
-				if holderUserId != userId {
-					held = true
-				}
-			}
-		})
-		return held
-	}
-
-	/**
-	 * check if the user_auth is already associated with a different user in sso table
-	 */
-	if heldByOther(`
-		SELECT user_id
-		   FROM network_user_auth_sso
-		   WHERE user_auth = $1
-		`) {
-		// user auth is associated with a different user
-		return fmt.Errorf("user_auth %s already exists for a different user", userAuth)
-	}
-
-	/**
-	 * check if the user_auth is already associated with a different user in email/phone + password table
-	 */
-	if heldByOther(`
-		SELECT user_id
-		   FROM network_user_auth_password
-		   WHERE user_auth = $1
-		`) {
-		// user already exists with this user_auth
-		return fmt.Errorf("user_auth %s already exists for a different user", userAuth)
-	}
-
-	return nil
+	// the provider verified this token's email just now (ParseAuthJwt). An
+	// unverified email or phone that another account holds yields to it and is
+	// released (claimUserAuthInTx). A migration's stored token is no proof.
+	Proven bool `json:"-"`
 }
 
 func addSsoAuth(
@@ -605,15 +564,18 @@ func addSsoAuthInTx(
 	normalJwtUserAuth, _ := NormalUserAuth(parsedAuthJwt.UserAuth)
 
 	/**
-	 * Check user auth isn't already associated with a different user
+	 * Check user auth isn't already associated with a different user. A
+	 * verified token proves its email, so an unverified hold of another
+	 * account yields to it at once and is released (claimUserAuthInTx).
 	 */
 	// rows are stored under the normalized user auth, so the conflict check
 	// must use it too
-	err := validateUserAuthAvailability(
+	err := claimUserAuthInTx(
 		ctx,
 		tx,
 		normalJwtUserAuth,
 		args.UserId,
+		args.Proven,
 	)
 	if err != nil {
 		returnErr = err
@@ -887,9 +849,9 @@ func addWalletAuthInTxAdded(
 	walletAuth := addWalletAuth.WalletAuth
 
 	// Check for an existing binding of this wallet to a different user
-	// before attempting the INSERT below, mirroring the
-	// validateUserAuthAvailability pre-check addUserAuthInTx does for
-	// email/phone auth. A unique violation from the INSERT or the mirror
+	// before attempting the INSERT below, mirroring the claimUserAuthInTx
+	// pre-check addUserAuthInTx does for email/phone auth. A unique violation
+	// from the INSERT or the mirror
 	// update aborts this transaction and is no answer for the client, so
 	// every conflict that is already committed is refused here, at once.
 	// Only a concurrent link of the same wallet, committed after this

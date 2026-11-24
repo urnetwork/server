@@ -413,6 +413,7 @@ var deletedNetworkKeptTables = map[string]string{
 	"network_wallet_mapping_challenge":    deletedNetworkKeepSettlement,
 	"network_wallet_mapping_consent":      deletedNetworkKeepSettlement,
 	"provider_client_verdict":             deletedNetworkKeepSettlement,
+	"provider_egress_exit_day":            deletedNetworkKeepSettlement,
 	"provider_work_owner":                 deletedNetworkKeepSettlement,
 	"provider_work_request":               deletedNetworkKeepSettlement,
 	"provider_work_session_event":         deletedNetworkKeepSettlement,

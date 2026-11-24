@@ -34,14 +34,15 @@ type OnboardingError struct {
 
 // ----- price tier -----
 
-// How the plan response resolved the country behind the price tier. storefront
-// and billing are what the store or the card will charge; ip and default are
-// DISPLAY ESTIMATES only -- the charged tier on Stripe is finalized from the
-// card's billing country, and the stores price by their own storefront.
+// How the price tier was resolved. storefront is what the App Store or Google
+// Play charges, which the plan response and the welcome offer show a store
+// app; signals is what the server charges on every rail without a store,
+// decided from the country signals it holds (price_tier_signals.go); default
+// is the default tier when the server holds no signal, an estimate: a Stripe
+// trial's card can still move it.
 const (
 	PriceTierSourceStorefront = "storefront"
-	PriceTierSourceBilling    = "billing"
-	PriceTierSourceIp         = "ip"
+	PriceTierSourceSignals    = "signals"
 	PriceTierSourceDefault    = "default"
 )
 
@@ -50,16 +51,19 @@ type PriceTierResult struct {
 	YearlyUsd  float64 `json:"yearly_usd"`
 	MonthlyUsd float64 `json:"monthly_usd"`
 	Currency   string  `json:"currency"`
-	// Source is one of storefront | billing | ip | default
+	// Source is one of storefront | signals | default
 	Source string `json:"source"`
-	// Estimate is true when the tier is a display estimate (ip or default)
+	// Estimate is true when the tier is an estimate (default)
 	Estimate bool `json:"estimate"`
 }
 
 type ResolvedPriceTier struct {
-	Tier        *model.ProPriceTier
-	Source      string
-	CountryCode string
+	Tier *model.ProPriceTier
+	// one of the PriceTierSource* values
+	Source string
+	// what decided a tier the server charges; nil for a storefront's, which
+	// the store charges
+	Evidence *PriceTierEvidence
 }
 
 func (self *ResolvedPriceTier) Result() *PriceTierResult {
@@ -69,28 +73,37 @@ func (self *ResolvedPriceTier) Result() *PriceTierResult {
 		MonthlyUsd: self.Tier.MonthlyUsd,
 		Currency:   model.PriceTierCurrency,
 		Source:     self.Source,
-		Estimate:   self.Source == PriceTierSourceIp || self.Source == PriceTierSourceDefault,
+		Estimate:   self.Source == PriceTierSourceDefault,
 	}
 }
 
-// ResolvePriceTier resolves the caller's price tier in the documented order: the
-// store's storefront country when the app sent one, the Stripe customer's
-// billing country when a customer exists, else the client ip as an estimate,
-// else the default tier.
+// ResolvePriceTier is the tier the plan response and the welcome offer show:
+// the storefront country's when a store app sent one, since the App Store and
+// Google Play charge their own storefront's price, else the tier the server
+// prices its own rails at (ResolvePurchasePriceTier). A purchase the server
+// prices never reads the storefront country.
 func ResolvePriceTier(clientSession *session.ClientSession, storefrontCountry string) *ResolvedPriceTier {
-	pro := model.Pro()
 	if code := model.CountryCodeFromStorefront(storefrontCountry); code != "" {
-		return &ResolvedPriceTier{Tier: pro.PriceTierForCountry(code), Source: PriceTierSourceStorefront, CountryCode: code}
+		return &ResolvedPriceTier{Tier: model.Pro().PriceTierForCountry(code), Source: PriceTierSourceStorefront}
 	}
+	return ResolvePurchasePriceTier(clientSession, "")
+}
+
+// eventPriceTier is the tier a batch of client events is stamped with, an
+// analytics estimate read cheaply on every batch: the Stripe billing
+// country's, else the request address's, else the default tier. What a
+// purchase is charged is ResolvePurchasePriceTier's.
+func eventPriceTier(clientSession *session.ClientSession) *model.ProPriceTier {
+	pro := model.Pro()
 	if clientSession.ByJwt != nil {
 		if code := model.NormalizeCountryCode(model.GetStripeCustomerBillingCountry(clientSession.Ctx, clientSession.ByJwt.NetworkId)); code != "" {
-			return &ResolvedPriceTier{Tier: pro.PriceTierForCountry(code), Source: PriceTierSourceBilling, CountryCode: code}
+			return pro.PriceTierForCountry(code)
 		}
 	}
 	if code := clientCountryCode(clientSession); code != "" {
-		return &ResolvedPriceTier{Tier: pro.PriceTierForCountry(code), Source: PriceTierSourceIp, CountryCode: code}
+		return pro.PriceTierForCountry(code)
 	}
-	return &ResolvedPriceTier{Tier: pro.DefaultPriceTier(), Source: PriceTierSourceDefault}
+	return pro.DefaultPriceTier()
 }
 
 // clientCountryCode is the ip database's country for the session's address, ""
@@ -441,7 +454,7 @@ func ClientEventsSend(
 	now := server.NowUtc()
 	cfg := model.Onboarding()
 	// stamped once per batch: the tier estimate and the campaign path
-	tier := ResolvePriceTier(clientSession, "")
+	tier := eventPriceTier(clientSession)
 	path := model.OnboardingPathForNetwork(model.GetOnboardingOffer(clientSession.Ctx, networkId))
 	assignments := cfg.AssignExperiments(networkId, now)
 
@@ -459,7 +472,7 @@ func ClientEventsSend(
 		}
 		event.NetworkId = networkId
 		event.ReceivedAt = now
-		event.Tier = tier.Tier.Name
+		event.Tier = tier.Name
 		event.Path = path
 		if a := clientEventAssignment(assignments, event); a != nil {
 			event.Experiment = a.ExperimentId

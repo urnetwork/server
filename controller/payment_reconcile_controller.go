@@ -46,6 +46,7 @@ import (
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
+	"github.com/urnetwork/server/task"
 )
 
 // paymentReconcileWindow is how far back the server-side renewal iteration
@@ -627,9 +628,12 @@ type PaymentReconcileStoreResult struct {
 	// card gift orders whose check failed (payment_reconcile_gift.go): in the
 	// run's errors, not in Errors, so one order's failure never holds the
 	// store's watermark, which belongs to the invoice listing
-	GiftCheckoutErrors int  `json:"gift_checkout_errors,omitempty"`
-	Skipped            bool `json:"skipped,omitempty"`
-	BudgetExhausted    bool `json:"budget_exhausted,omitempty"`
+	GiftCheckoutErrors int `json:"gift_checkout_errors,omitempty"`
+	// Play data plans whose missing renewal poll was scheduled again
+	// (poll_rearmed, or would_rearm_poll in a dry run)
+	PollsRearmed    int  `json:"polls_rearmed,omitempty"`
+	Skipped         bool `json:"skipped,omitempty"`
+	BudgetExhausted bool `json:"budget_exhausted,omitempty"`
 }
 
 type PaymentReconcileRunResult struct {
@@ -696,6 +700,8 @@ func (self *paymentReconcileRun) record(
 	case model.PaymentReconcileActionSkippedStore:
 		self.skipped = append(self.skipped, store)
 		self.storeResult(store).Skipped = true
+	case model.PaymentReconcileActionPollRearmed, model.PaymentReconcileActionWouldRearmPoll:
+		self.storeResult(store).PollsRearmed += 1
 	}
 	if err := addPaymentReconciliationEvent(self.connOwner, self.clientSession.Ctx, &model.PaymentReconciliationEvent{
 		RunId:     self.runId,
@@ -2089,10 +2095,17 @@ func appleReconcileCreditTransactionInConn(connOwner server.PgConn,
 // Purchases whose last credited window ended up to
 // paymentReconcileLapsedWindow ago are checked too; a lapsed row is only ever
 // credited, never ended.
+//
+// Data plans first (reconcilePlayDataPlans): there are few, and the renewal
+// loop can spend the whole budget.
 func reconcilePlay(run *paymentReconcileRun, since time.Time) (bool, error) {
 	ctx := run.clientSession.Ctx
 	store := model.SubscriptionMarketGoogle
 	packageName := playPackageNameFunc()
+
+	if !reconcilePlayDataPlans(run, packageName) {
+		return false, nil
+	}
 
 	// lapsed purchases too: an account-hold recovery or a renewal whose RTDN
 	// and scheduled poll both missed stays visible after the window ends
@@ -2314,6 +2327,127 @@ func reconcilePlay(run *paymentReconcileRun, since time.Time) (bool, error) {
 	}
 
 	return true, nil
+}
+
+// reconcilePlayDataPlans keeps every active Google Play data plan polled. A
+// data plan (a Play product that credits data only) writes no renewal row, so
+// the renewal loop never sees it: its renewals are credited only by its store
+// notification and by its renewal poll. A notification can be lost, and a poll
+// chain could end (the race fixed in PlaySubscriptionRenewalPost: a
+// notification credit merged into a poll that then stopped), and then nothing
+// credited the next renewal. While the store's notifications were refused in
+// October 2026, a data plan's renewal went uncredited that way.
+//
+// Each data plan with a data window open now and no renewal poll pending
+// (model.GetActivePlayDataPlansInConn, task.PendingRunOnceKeysInConn) is read
+// from Play. One Play still reports paid, on a product play.yml credits as
+// data, gets its poll back at the expiry Play reports, as the notification
+// schedules it. The poll credits what Play charged when it runs; this leg
+// credits nothing. One Play reports over (expired, cancelled past its expiry,
+// or gone) gets no poll, and its data window runs out on its own. A dry run
+// records would_rearm_poll instead. false when the store API budget ran out.
+func reconcilePlayDataPlans(run *paymentReconcileRun, packageName string) bool {
+	ctx := run.clientSession.Ctx
+	store := model.SubscriptionMarketGoogle
+
+	plans := model.GetActivePlayDataPlansInConn(run.connOwner, ctx, run.now, paymentReconcileRenewalLimit)
+	if len(plans) == 0 {
+		return true
+	}
+	keys := make([]string, len(plans))
+	for i, plan := range plans {
+		keys[i] = playRenewalPollRunOnce(plan.PurchaseToken).String()
+	}
+	pending := task.PendingRunOnceKeysInConn(run.connOwner, ctx, keys)
+
+	for i, plan := range plans {
+		if pending[keys[i]] {
+			continue
+		}
+		run.examine(store)
+		if !run.spend(store) {
+			return false
+		}
+
+		subUrl := fmt.Sprintf(
+			"%s/androidpublisher/v3/applications/%s/purchases/subscriptionsv2/tokens/%s",
+			playPublisherApiBaseUrl,
+			packageName,
+			plan.PurchaseToken,
+		)
+		sub, err := server.HttpGetRequireStatusOk[*PlaySubscription](
+			ctx,
+			subUrl,
+			func(header http.Header) {
+				playAuthHeaderFunc(ctx, header)
+			},
+			server.ResponseJsonObject[*PlaySubscription],
+		)
+		if err != nil {
+			if v, ok := err.(*server.HttpStatusError); ok && v.StatusCode == 410 {
+				// gone from the store: nothing left to poll
+				continue
+			}
+			run.record(
+				store,
+				model.PaymentReconcileActionError,
+				&plan.NetworkId,
+				plan.PurchaseToken,
+				map[string]any{"error": err.Error(), "leg": "data_plan_status"},
+			)
+			continue
+		}
+		if len(sub.LineItems) == 0 {
+			continue
+		}
+
+		minExpiryTime := sub.LineItems[0].RequireExpiryTime()
+		maxExpiryTime := minExpiryTime
+		for _, item := range sub.LineItems[1:] {
+			expiryTime := item.RequireExpiryTime()
+			if expiryTime.Before(minExpiryTime) {
+				minExpiryTime = expiryTime
+			}
+			if maxExpiryTime.Before(expiryTime) {
+				maxExpiryTime = expiryTime
+			}
+		}
+		switch sub.SubscriptionState {
+		case "SUBSCRIPTION_STATE_EXPIRED", "SUBSCRIPTION_STATE_PENDING_PURCHASE_CANCELED":
+			continue
+		case "SUBSCRIPTION_STATE_CANCELED":
+			if !maxExpiryTime.After(run.now) {
+				continue
+			}
+		}
+		// the product names the plan's data, and only a data plan this server
+		// credits is polled: UR Pro has its own loop
+		productId := sub.LineItems[0].ProductId
+		if sku, ok := playSkusFunc()[productId]; !ok || sku.Supporter {
+			continue
+		}
+
+		details := map[string]any{
+			"subscription_id":    productId,
+			"subscription_state": sub.SubscriptionState,
+			"expiry_time":        minExpiryTime.UTC().Format(time.RFC3339),
+		}
+		if run.dryRun {
+			run.record(store, model.PaymentReconcileActionWouldRearmPoll, &plan.NetworkId, plan.PurchaseToken, details)
+			continue
+		}
+		server.TxInConn(ctx, run.connOwner, func(tx server.PgTx) {
+			SchedulePlaySubscriptionRenewal(run.clientSession, tx, &PlaySubscriptionRenewalArgs{
+				NetworkId:      plan.NetworkId,
+				PackageName:    packageName,
+				SubscriptionId: productId,
+				PurchaseToken:  plan.PurchaseToken,
+				CheckTime:      minExpiryTime,
+			})
+		})
+		run.record(store, model.PaymentReconcileActionPollRearmed, &plan.NetworkId, plan.PurchaseToken, details)
+	}
+	return true
 }
 
 // playUnlinkedBoundElsewhere: the purchase carries no account identifiers

@@ -227,8 +227,8 @@ func newClientScoreTargetKeys(forceMinimum bool, rankMode RankMode, target clien
 // at most one sample each, rather than every encoded sample for their current
 // provider location. The returned bytes move directly into the 512-item/8MiB
 // streaming writer and are cleared after the synchronous Exec.
-func splitClientScoreSamples(clientScores []*ClientScore) (countsBytes []byte, counts []int, encodeSample func(int) []byte) {
-	counts, encodeSample = pageClientScoreSamples(clientScores)
+func splitClientScoreSamples(clientScores []*ClientScore, format clientScorePageFormat) (countsBytes []byte, counts []int, encodeSample func(int) []byte) {
+	counts, encodeSample = pageClientScoreSamples(clientScores, format)
 	countsBytes = encodeClientScoreGobValue(updateClientScoresPhaseMetrics, counts)
 	return
 }
@@ -237,8 +237,13 @@ func splitClientScoreSamples(clientScores []*ClientScore) (countsBytes []byte, c
 // the modern providers shuffled and paged, then the others, so every page
 // holds one class and the leading modernPageCount pages are the modern ones.
 // The counts document lists the page sizes in that order, in the format
-// readers before the partition read.
+// readers before the partition read. The pages are gob.
 func splitClientScoreSamplesModernFirst(clientScores []*ClientScore) clientScoreFacetPayload {
+	return splitClientScoreSamplesModernFirstInFormat(clientScores, clientScorePageFormatGob)
+}
+
+// splitClientScoreSamplesModernFirst with its pages in format.
+func splitClientScoreSamplesModernFirstInFormat(clientScores []*ClientScore, format clientScorePageFormat) clientScoreFacetPayload {
 	modernClientScores := make([]*ClientScore, 0, len(clientScores))
 	otherClientScores := make([]*ClientScore, 0, len(clientScores))
 	for _, clientScore := range clientScores {
@@ -248,8 +253,8 @@ func splitClientScoreSamplesModernFirst(clientScores []*ClientScore) clientScore
 			otherClientScores = append(otherClientScores, clientScore)
 		}
 	}
-	modernCounts, encodeModernSample := pageClientScoreSamples(modernClientScores)
-	otherCounts, encodeOtherSample := pageClientScoreSamples(otherClientScores)
+	modernCounts, encodeModernSample := pageClientScoreSamples(modernClientScores, format)
+	otherCounts, encodeOtherSample := pageClientScoreSamples(otherClientScores, format)
 	counts := append(modernCounts, otherCounts...)
 	modernPageCount := len(modernCounts)
 	return clientScoreFacetPayload{
@@ -266,8 +271,8 @@ func splitClientScoreSamplesModernFirst(clientScores []*ClientScore) clientScore
 }
 
 // Shuffles one list of scores and buckets it into balanced samples of at most
-// ClientScoreSampleCount, encoding each on demand.
-func pageClientScoreSamples(clientScores []*ClientScore) (counts []int, encodeSample func(int) []byte) {
+// ClientScoreSampleCount, encoding each on demand in format.
+func pageClientScoreSamples(clientScores []*ClientScore, format clientScorePageFormat) (counts []int, encodeSample func(int) []byte) {
 	mathrand.Shuffle(len(clientScores), func(i int, j int) {
 		clientScores[i], clientScores[j] = clientScores[j], clientScores[i]
 	})
@@ -287,7 +292,7 @@ func pageClientScoreSamples(clientScores []*ClientScore) (counts []int, encodeSa
 	encodeSample = func(i int) []byte {
 		i0 := i * clientsPerSample
 		i1 := min((i+1)*clientsPerSample, len(clientScores))
-		return encodeClientScoreGobValue(updateClientScoresPhaseMetrics, clientScores[i0:i1])
+		return encodeClientScorePage(updateClientScoresPhaseMetrics, format, clientScores[i0:i1])
 	}
 	return
 }
@@ -296,8 +301,15 @@ func pageClientScoreSamples(clientScores []*ClientScore) (counts []int, encodeSa
 // every family facet, the native facets of a non-forced mode, and the public
 // ClientFilter. A non-forced mode also gets every capability facet, union
 // and native, from the classified copies of the downgraded providers
-// (FP2-PROTOCOL.md §4.4); the filter does not count them.
+// (FP2-PROTOCOL.md §4.4); the filter does not count them. The pages are gob.
 func exportClientScores(forceMinimum bool, rankMode RankMode, s map[server.Id]*ClientScore) clientScoreExportPayload {
+	return exportClientScoresInFormat(forceMinimum, rankMode, s, clientScorePageFormatGob)
+}
+
+// exportClientScores with its pages in format
+// (network_client_score_page_codec.go). The counts, filter and partition
+// documents stay gob in either format.
+func exportClientScoresInFormat(forceMinimum bool, rankMode RankMode, s map[server.Id]*ClientScore, format clientScorePageFormat) clientScoreExportPayload {
 	mapSpan := updateClientScoresPhaseMetrics.start(updateClientScoresPhaseTargetMap)
 	defer mapSpan.finish()
 	clientScores := []*ClientScore{}
@@ -307,6 +319,8 @@ func exportClientScores(forceMinimum bool, rankMode RankMode, s map[server.Id]*C
 	nativeCapabilityFacetClientScores := map[ipFamilyFacet][]*ClientScore{}
 	publicCount := 0
 	publicNetReliabilityWeight := float64(0)
+	publicModernCount := 0
+	publicModernNetReliabilityWeight := float64(0)
 	for _, clientScore := range s {
 		if classified := clientScore.capabilityCopy; !forceMinimum && classified != nil {
 			if facet, ok := clientScoreCapabilityFacetOf(classified.capabilityClass()); ok {
@@ -331,21 +345,30 @@ func exportClientScores(forceMinimum bool, rankMode RankMode, s map[server.Id]*C
 			if !clientScore.NetworkOnly {
 				publicCount += 1
 				publicNetReliabilityWeight += clientScore.ReliabilityWeight
+				if clientScore.Modern {
+					publicModernCount += 1
+					publicModernNetReliabilityWeight += clientScore.ReliabilityWeight
+				}
 			}
 		}
 	}
 
 	// the samples above carry Network-only providers too -- FindProviders2
 	// filters them per request against the caller's network -- but the
-	// ClientFilter does not. It is read only by loadLocationStables, which
-	// decides the `Stable` flag GetProviderLocations publishes to every
-	// user. That is a public surface, so like the provider count in
-	// UpdateClientLocations it counts only providers a stranger can reach:
-	// a location whose only supply is network-only is not stable, and with
-	// zero public providers it reports no providers at all.
+	// ClientFilter does not. It is read only by loadLocationSupplies, which
+	// decides whether the location lists publish a location to every user,
+	// and its `Stable` flag. That is a public surface, so like the provider
+	// count in UpdateClientLocations it counts only providers a stranger can
+	// reach: a location whose only supply is network-only is not stable, and
+	// with zero public providers it reports no providers at all. The modern
+	// count is the same population's modern providers, the supply a list that
+	// requires modern providers publishes.
 	filter := &ClientFilter{
-		Count:                publicCount,
-		NetReliabilityWeight: publicNetReliabilityWeight,
+		Count:                      publicCount,
+		NetReliabilityWeight:       publicNetReliabilityWeight,
+		ModernCount:                publicModernCount,
+		ModernNetReliabilityWeight: publicModernNetReliabilityWeight,
+		ModernCounted:              true,
 	}
 
 	payload := clientScoreExportPayload{
@@ -353,25 +376,25 @@ func exportClientScores(forceMinimum bool, rankMode RankMode, s map[server.Id]*C
 	}
 	updateClientScoresPhaseMetrics.addWork(updateClientScoresPhaseTargetMap, len(s), 0)
 	mapSpan.finish()
-	payload.countsBytes, payload.counts, payload.encodeSample = splitClientScoreSamples(clientScores)
+	payload.countsBytes, payload.counts, payload.encodeSample = splitClientScoreSamples(clientScores, format)
 	// the facets, native and union, are partitioned modern first; the
 	// un-faceted union is read only from exporters that predate the facets
 	if !forceMinimum {
 		payload.nativeFacets = map[ipFamilyFacet]clientScoreFacetPayload{}
 		for _, facet := range ipFamilyFacets {
-			payload.nativeFacets[facet] = splitClientScoreSamplesModernFirst(nativeFacetClientScores[facet])
+			payload.nativeFacets[facet] = splitClientScoreSamplesModernFirstInFormat(nativeFacetClientScores[facet], format)
 		}
 	}
 	// every facet, an empty one included: see the key layout comment
 	for _, facet := range ipFamilyFacets {
-		payload.facets[facet] = splitClientScoreSamplesModernFirst(facetClientScores[facet])
+		payload.facets[facet] = splitClientScoreSamplesModernFirstInFormat(facetClientScores[facet], format)
 	}
 	if !forceMinimum {
 		payload.capabilityFacets = map[ipFamilyFacet]clientScoreFacetPayload{}
 		payload.nativeCapabilityFacets = map[ipFamilyFacet]clientScoreFacetPayload{}
 		for _, facet := range clientScoreCapabilityFacets {
-			payload.capabilityFacets[facet] = splitClientScoreSamplesModernFirst(capabilityFacetClientScores[facet])
-			payload.nativeCapabilityFacets[facet] = splitClientScoreSamplesModernFirst(nativeCapabilityFacetClientScores[facet])
+			payload.capabilityFacets[facet] = splitClientScoreSamplesModernFirstInFormat(capabilityFacetClientScores[facet], format)
+			payload.nativeCapabilityFacets[facet] = splitClientScoreSamplesModernFirstInFormat(nativeCapabilityFacetClientScores[facet], format)
 		}
 	}
 

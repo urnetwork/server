@@ -90,7 +90,11 @@ func contractPartitionSwap(ctx context.Context, statements []string, timing *con
 		locked := false
 		for _, statement := range statements {
 			start := time.Now()
-			RaisePgResult(tx.Exec(ctx, statement))
+			if !locked && strings.HasPrefix(statement, "LOCK TABLE ") {
+				contractExecLockStatement(ctx, tx, statement)
+			} else {
+				RaisePgResult(tx.Exec(ctx, statement))
+			}
 			if !locked && strings.HasPrefix(statement, "LOCK TABLE ") {
 				lockedAt = time.Now()
 				timing.lockWait = lockedAt.Sub(start)

@@ -64,15 +64,17 @@ func TestOperatorBlockReliabilityRetainedIsTheRetention(t *testing.T) {
 }
 
 // Pure: a transfer rollup writes from the first whole day the contract
-// horizon reaper cannot reach, two days inside its 35-day floor.
+// horizon reaper cannot reach, two days inside its 14-day floor (35 days
+// until 2026-11-23, when the first day was 33 days back).
 func TestTransferAuditRollupFirstDay(t *testing.T) {
 	for _, sample := range []struct {
 		now  time.Time
 		want time.Time
 	}{
-		{now: time.Date(2026, time.November, 8, 10, 0, 0, 0, time.UTC), want: time.Date(2026, time.October, 7, 0, 0, 0, 0, time.UTC)},
-		{now: time.Date(2026, time.November, 8, 0, 0, 0, 0, time.UTC), want: time.Date(2026, time.October, 6, 0, 0, 0, 0, time.UTC)},
-		{now: time.Date(2026, time.November, 8, 0, 0, 0, 1, time.UTC), want: time.Date(2026, time.October, 7, 0, 0, 0, 0, time.UTC)},
+		{now: time.Date(2026, time.November, 8, 10, 0, 0, 0, time.UTC), want: time.Date(2026, time.October, 28, 0, 0, 0, 0, time.UTC)},
+		{now: time.Date(2026, time.November, 8, 0, 0, 0, 0, time.UTC), want: time.Date(2026, time.October, 27, 0, 0, 0, 0, time.UTC)},
+		{now: time.Date(2026, time.November, 8, 0, 0, 0, 1, time.UTC), want: time.Date(2026, time.October, 28, 0, 0, 0, 0, time.UTC)},
+		{now: time.Date(2026, time.November, 25, 6, 0, 0, 0, time.UTC), want: time.Date(2026, time.November, 14, 0, 0, 0, 0, time.UTC)},
 	} {
 		if got := TransferAuditRollupFirstDay(sample.now); !got.Equal(sample.want) {
 			t.Errorf("at %s: first day %s, want %s", sample.now, got, sample.want)

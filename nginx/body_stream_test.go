@@ -15,7 +15,7 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/quic-go/quic-go/http3"
+	"github.com/urnetwork/quic-go/http3"
 )
 
 // A streamed body's first read keeps a declared body it returns whole, as
@@ -152,10 +152,10 @@ func TestStreamedBodyTimeoutBeforeAnInterruptIsTheClients(t *testing.T) {
 }
 
 // A declared body whose reads end, without an error, short of its length, as
-// the vendored http3 ends one at the stream's end, fails as the client's 400
-// with an unexpected end, so its request's write fails and nothing marks it
-// whole; one of unknown length, or one ending at its length, reads to its
-// end.
+// the quic-go fork's http3 ends one at the stream's end, fails as the
+// client's 400 with an unexpected end, so its request's write fails and
+// nothing marks it whole; one of unknown length, or one ending at its
+// length, reads to its end.
 func TestStreamedBodyEndingShortOfItsLengthFails(t *testing.T) {
 	for _, c := range []struct {
 		name           string

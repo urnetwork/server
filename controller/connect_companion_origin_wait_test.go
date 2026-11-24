@@ -29,7 +29,7 @@ func TestCompanionOriginWaitSharedMissesRetainFallbackAndFinalRead(t *testing.T)
 		want := &model.TransferEscrow{}
 		calls := 0
 		before := 0.0
-		for _, source := range []string{"initial", "event", "fallback", "deadline"} {
+		for _, source := range []string{"initial", "event", "fallback", "deadline", "registration"} {
 			before += testutil.ToFloat64(companionOriginLookupCounter.WithLabelValues(source))
 		}
 		shared := testCompanionOriginLookup(func(_ context.Context, force bool, create func() (*model.TransferEscrow, error)) (*model.TransferEscrow, error) {
@@ -42,7 +42,7 @@ func TestCompanionOriginWaitSharedMissesRetainFallbackAndFinalRead(t *testing.T)
 		got, err := waitForCompanionOrigin(t.Context(), shared, func() (*model.TransferEscrow, error) {
 			calls++
 			return want, nil
-		})
+		}, companionOriginWaitEvents{})
 		if got != want || err != nil || calls != 1 || time.Since(start) != 3*time.Second {
 			t.Fatalf("shared absence skipped final read: calls=%d elapsed=%v err=%v", calls, time.Since(start), err)
 		}
@@ -56,7 +56,7 @@ func TestCompanionOriginWaitSharedMissesRetainFallbackAndFinalRead(t *testing.T)
 			}
 		}
 		after := 0.0
-		for _, source := range []string{"initial", "event", "fallback", "deadline"} {
+		for _, source := range []string{"initial", "event", "fallback", "deadline", "registration"} {
 			after += testutil.ToFloat64(companionOriginLookupCounter.WithLabelValues(source))
 		}
 		if after-before != 1 {
@@ -94,7 +94,7 @@ func TestCompanionOriginWaitSharedMissCrossingDeadlineGetsOwnFinalRead(t *testin
 				return nil, model.ErrMissingCompanionOrigin
 			}
 			return want, nil
-		}, updates)
+		}, companionOriginWaitEvents{arm: updates})
 		if got != want || err != nil || forced != 1 || time.Since(start) != 3025*time.Millisecond {
 			t.Fatalf("crossing shared miss replaced final read: got=%v err=%v forced=%d elapsed=%v", got, err, forced, time.Since(start))
 		}
@@ -108,7 +108,7 @@ func TestCompanionOriginWaitBoundsMissingLookupCount(t *testing.T) {
 		escrow, err := waitForCompanionOrigin(context.Background(), nil, func() (*model.TransferEscrow, error) {
 			attempts = append(attempts, time.Since(start))
 			return nil, model.ErrMissingCompanionOrigin
-		})
+		}, companionOriginWaitEvents{})
 		if escrow != nil || !errors.Is(err, model.ErrMissingCompanionOrigin) {
 			t.Fatalf("missing origin = (%v, %v)", escrow, err)
 		}
@@ -135,7 +135,7 @@ func TestCompanionOriginWaitFindsOriginAtDeadline(t *testing.T) {
 				return nil, model.ErrMissingCompanionOrigin
 			}
 			return want, nil
-		})
+		}, companionOriginWaitEvents{})
 		if err != nil || got != want || time.Since(start) != CompanionOriginWaitTimeout {
 			t.Fatalf("deadline origin = (%v, %v) after %v", got, err, time.Since(start))
 		}
@@ -157,7 +157,7 @@ func TestCompanionOriginWaitPreservesImmediateAndTerminalResults(t *testing.T) {
 		got, err := waitForCompanionOrigin(context.Background(), nil, func() (*model.TransferEscrow, error) {
 			calls++
 			return test.escrow, test.err
-		})
+		}, companionOriginWaitEvents{})
 		if got != test.escrow || err != test.err || calls != 1 {
 			t.Fatalf("%s = (%v, %v), calls=%d", test.name, got, err, calls)
 		}
@@ -174,7 +174,7 @@ func TestCompanionOriginWaitCancellationDoesNotStartAnotherTransaction(t *testin
 			_, err := waitForCompanionOrigin(ctx, nil, func() (*model.TransferEscrow, error) {
 				calls++
 				return nil, model.ErrMissingCompanionOrigin
-			})
+			}, companionOriginWaitEvents{})
 			result <- err
 		}()
 		synctest.Wait()
@@ -193,7 +193,7 @@ func TestCompanionOriginWaitAlreadyCanceledDoesNotStartTransaction(t *testing.T)
 	_, err := waitForCompanionOrigin(ctx, nil, func() (*model.TransferEscrow, error) {
 		calls++
 		return nil, model.ErrMissingCompanionOrigin
-	})
+	}, companionOriginWaitEvents{})
 	if !errors.Is(err, context.Canceled) || calls != 0 {
 		t.Fatalf("already canceled err=%v, transactions=%d", err, calls)
 	}
@@ -208,7 +208,7 @@ func TestCompanionOriginWaitPreservesCommitDuringCancellation(t *testing.T) {
 		calls++
 		cancel()
 		return want, nil
-	})
+	}, companionOriginWaitEvents{})
 	if err != nil || got != want || calls != 1 {
 		t.Fatalf("committed transaction lost or retried: result=(%v, %v), calls=%d", got, err, calls)
 	}
@@ -222,7 +222,7 @@ func TestCompanionOriginWaitSlowMissingQueryDoesNotExtendRetryWindow(t *testing.
 			calls++
 			time.Sleep(CompanionOriginWaitTimeout)
 			return nil, model.ErrMissingCompanionOrigin
-		})
+		}, companionOriginWaitEvents{})
 		if !errors.Is(err, model.ErrMissingCompanionOrigin) || calls != 1 || time.Since(start) != CompanionOriginWaitTimeout {
 			t.Fatalf("slow missing query err=%v, calls=%d, elapsed=%v", err, calls, time.Since(start))
 		}
@@ -245,7 +245,7 @@ func TestCompanionOriginWaitDoesNotLoseEventDuringLookup(t *testing.T) {
 				return nil, model.ErrMissingCompanionOrigin
 			}
 			return want, nil
-		}, updates)
+		}, companionOriginWaitEvents{arm: updates})
 		if got != want || err != nil || calls != 2 || time.Since(start) != 100*time.Millisecond {
 			t.Fatalf("event during query lost: got=(%v, %v), calls=%d elapsed=%v", got, err, calls, time.Since(start))
 		}
@@ -271,7 +271,7 @@ func TestCompanionOriginWaitEventPreemptsSlowFallback(t *testing.T) {
 				return want, nil
 			}
 			return nil, model.ErrMissingCompanionOrigin
-		}, updates)
+		}, companionOriginWaitEvents{arm: updates})
 		if got != want || err != nil || calls != 3 || time.Since(start) != 250*time.Millisecond {
 			t.Fatalf("event waited for fallback: got=(%v, %v), calls=%d elapsed=%v", got, err, calls, time.Since(start))
 		}
@@ -287,7 +287,7 @@ func TestCompanionOriginWaitMissingNotificationStillFindsOrigin(t *testing.T) {
 				return nil, model.ErrMissingCompanionOrigin
 			}
 			return want, nil
-		}, func() <-chan struct{} { return nil })
+		}, companionOriginWaitEvents{arm: func() <-chan struct{} { return nil }})
 		if got != want || err != nil || time.Since(start) != 600*time.Millisecond {
 			t.Fatalf("legacy or lost event not recovered: got=(%v, %v), elapsed=%v", got, err, time.Since(start))
 		}
@@ -304,7 +304,7 @@ func TestCompanionOriginWaitDuplicateEventsRemainRateLimited(t *testing.T) {
 			calls++
 			changes.Update(func(version uint64) uint64 { return version + 1 })
 			return nil, model.ErrMissingCompanionOrigin
-		}, updates)
+		}, companionOriginWaitEvents{arm: updates})
 		if !errors.Is(err, model.ErrMissingCompanionOrigin) || calls != 31 || time.Since(start) != 3*time.Second {
 			t.Fatalf("duplicate events bypassed rate/deadline: err=%v calls=%d elapsed=%v", err, calls, time.Since(start))
 		}

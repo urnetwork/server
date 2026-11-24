@@ -26,6 +26,11 @@ package controller
 // credited, the account is not recorded as paying with gamma, and no receipt
 // is sent (gift_gamma_controller.go).
 //
+// A claim of a direct payment (purpose claim, gamma_claim.go) is credited as
+// a plan (3, which also voids what waited for it, as a purchase does) or as
+// the data its item names (4), but not 6: the hotkey that paid is the
+// customer's own, never one we can charge, so it starts no automatic charge.
+//
 // Nothing here changes how the network provides: an automatic upgrade never
 // touches the provide mode.
 
@@ -58,8 +63,13 @@ func gammaCreditIntent(clientSession *session.ClientSession, intent *model.Gamma
 	duration := model.Pro().DataCodeDuration
 	if !plan {
 		var ok bool
-		// what the charged pack grants, whatever its rails say now
-		byteCount, ok = dataPackByteCount(intent.Item)
+		if intent.Purpose == model.GammaPurposeClaim {
+			// what the claim answered it credits
+			byteCount, ok = model.ParseGammaClaimDataItem(intent.Item)
+		} else {
+			// what the charged pack grants, whatever its rails say now
+			byteCount, ok = dataPackByteCount(intent.Item)
+		}
 		if !ok || byteCount <= 0 {
 			return false, fmt.Errorf("intent %s names an unknown data pack", intent.IntentId)
 		}
@@ -158,9 +168,10 @@ func gammaCreditIntentInTx(
 			// the offer is once; a renewal is at the regular price
 			renewPlan = model.SolanaPlanYearly
 		}
-		if intent.Purpose == model.GammaPurposePurchase {
-			// the purchase replaces the renewal or seat upgrade that waited
-			// for it (gammaPlanHold): it pays for the days they would buy
+		if intent.Purpose == model.GammaPurposePurchase || intent.Purpose == model.GammaPurposeClaim {
+			// the purchase (or a claim of a plan) replaces the renewal or seat
+			// upgrade that waited for it (gammaPlanHold): it pays for the days
+			// they would buy
 			voided, inFlight := model.VoidReplacedGammaPlanIntentsInTx(tx, ctx, networkId, gammaKnownPlans, now)
 			if 0 < voided {
 				glog.Infof("[gamma]intent %s replaced %d automatic plan charge(s) of network %s\n", intent.IntentId, voided, networkId)
@@ -214,7 +225,10 @@ func gammaCreditIntentInTx(
 	}
 
 	model.SetGammaPaymentIntentGrantInTx(tx, ctx, intent.IntentId, balanceId, balanceCodeId)
-	model.RecordGammaAccountPaymentInTx(tx, ctx, networkId, intent.Hotkey, renewPlan, intent.Tier, now)
+	if intent.Purpose != model.GammaPurposeClaim {
+		// a claim's hotkey is the customer's own: nothing is charged from it
+		model.RecordGammaAccountPaymentInTx(tx, ctx, networkId, intent.Hotkey, renewPlan, intent.Tier, now)
+	}
 	gammaAddReceiptInTx(tx, clientSession, intent, charge, plan, byteCount)
 	addSalesPaymentNoticeInTx(tx, func() *model.SalesPaymentNotice {
 		return gammaSalesNotice(intent, plan, byteCount)
@@ -308,6 +322,8 @@ func gammaSalesNotice(intent *model.GammaPaymentIntent, plan bool, byteCount mod
 		notice.Kind = "automatic top-up"
 	case model.GammaPurposeSeat:
 		notice.Kind = "automatic upgrade at the client limit"
+	case model.GammaPurposeClaim:
+		notice.Kind = "claim of a direct payment"
 	}
 	switch {
 	case plan && intent.Item == model.SolanaPlanYearlyOnboarding:
@@ -327,6 +343,9 @@ func gammaItemDescription(item string) string {
 	switch item {
 	case model.SolanaPlanMonthly:
 		return "URnetwork Pro monthly"
+	}
+	if byteCount, ok := model.ParseGammaClaimDataItem(item); ok {
+		return "URnetwork data (" + model.SalesDataItem(byteCount) + "), for a claimed SN25 Gamma payment"
 	}
 	return cryptoItemDescription(item)
 }

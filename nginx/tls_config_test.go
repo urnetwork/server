@@ -420,7 +420,7 @@ func TestNewTlsConfigsServesANameTheStoreLacksAsUnknown(t *testing.T) {
 		t.Fatal("the store covers extra-api.service.example, so the test shows nothing")
 	}
 	metrics := newFrontMetrics(prometheus.NewRegistry())
-	tlsConfig, quicTlsConfig := newTlsConfigs(certificateStore, newNameMatcher(matcherTable), matcherTable.Lb.Names[0], matcherTable.Listen, DefaultTlsSettings(), metrics)
+	tlsConfig, quicTlsConfig := newTlsConfigs(certificateStore, newNameMatcher(matcherTable), matcherTable.Lb.Names[0], matcherTable.Listen, matcherTable.Interfaces, DefaultTlsSettings(), metrics, time.Now)
 
 	config, err := tlsConfig.GetConfigForClient(&tls.ClientHelloInfo{ServerName: "extra-api.service.example"})
 	if err != nil {
@@ -436,11 +436,11 @@ func TestNewTlsConfigsServesANameTheStoreLacksAsUnknown(t *testing.T) {
 	if _, err := quicTlsConfig.GetConfigForClient(&tls.ClientHelloInfo{ServerName: "extra-api.service.example", SupportedProtos: []string{"h3"}}); err == nil {
 		t.Fatalf("quic served a name without a certificate")
 	}
-	if count := testutil.ToFloat64(metrics.quicClientHellos.WithLabelValues(tlsQuicPortOther, tlsQuicNameClassUnknown, "true")); count != 1 {
+	if count := testutil.ToFloat64(metrics.quicClientHellos.WithLabelValues(tlsQuicInterfaceOther, tlsQuicPortOther, tlsQuicNameClassUnknown, "true")); count != 1 {
 		t.Fatalf("the ClientHello of a name without a certificate counted %v times as unknown", count)
 	}
 
-	noDefaultTlsConfig, _ := newTlsConfigs(certificateStore, newNameMatcher(vault.routeTable), "absent.example", vault.routeTable.Listen, DefaultTlsSettings(), newFrontMetrics(prometheus.NewRegistry()))
+	noDefaultTlsConfig, _ := newTlsConfigs(certificateStore, newNameMatcher(vault.routeTable), "absent.example", vault.routeTable.Listen, vault.routeTable.Interfaces, DefaultTlsSettings(), newFrontMetrics(prometheus.NewRegistry()), time.Now)
 	if _, err := noDefaultTlsConfig.GetConfigForClient(&tls.ClientHelloInfo{ServerName: "unknown.example"}); err == nil {
 		t.Fatalf("an unknown name got a config with no default certificate")
 	}

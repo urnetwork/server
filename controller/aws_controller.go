@@ -290,7 +290,13 @@ func (self *X402ReceiptTemplate) Balance() string {
 	return model.ByteCountHumanReadable(self.BalanceByteCount)
 }
 
+// The notice that a Google Play subscription ended without renewing
+// (PlaySubscriptionRenewalPost): a UR Pro subscription, or a data plan.
 type SubscriptionEndedTemplate struct {
+	// the subscription was a data plan, a product that credits data only and
+	// never Pro. Added after the notice was first sent: a notice written
+	// before it reads as UR Pro, as it did then.
+	DataOnly bool
 	BaseTemplate
 }
 

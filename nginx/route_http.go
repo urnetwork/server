@@ -54,6 +54,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/router"
 )
 
@@ -740,7 +741,7 @@ func (self *routeHttpHandler) serveProxy(exchange *routeHttpExchange, r *http.Re
 		return
 	}
 	if location.inProcess {
-		self.serveInProcess(exchange, r, request, location, upstreamTarget)
+		self.serveInProcess(exchange, r, request, location, upstreamTarget, upgradeRequested)
 		return
 	}
 
@@ -788,7 +789,11 @@ func (self *routeHttpHandler) serveProxy(exchange *routeHttpExchange, r *http.Re
 // that read is bounded as before the front's own answers
 // (routeHttpExchange.boundUnreadBody). A hijacked connection is the
 // tunnel's, whose owner sets its deadlines.
-func (self *routeHttpHandler) serveInProcess(exchange *routeHttpExchange, r *http.Request, request *routeRequest, location *routeHttpLocation, upstreamTarget string) {
+//
+// An upgrade counts against its source address in the concentration gauges
+// for as long as it holds its limit slot: until connect's handler returns
+// or, once hijacked, until the connection closes (LBALTOPT2 R16).
+func (self *routeHttpHandler) serveInProcess(exchange *routeHttpExchange, r *http.Request, request *routeRequest, location *routeHttpLocation, upstreamTarget string, upgradeRequested bool) {
 	router.SetIngressHeaders(r)
 	r.Header.Del("Early-Data")
 
@@ -810,6 +815,9 @@ func (self *routeHttpHandler) serveInProcess(exchange *routeHttpExchange, r *htt
 		r.Body = http.MaxBytesReader(writer, r.Body, maxBodyBytes)
 	}
 	exchange.response.upstreamBlock = routeHttpInProcessBlock
+	if upgradeRequested {
+		exchange.response.holdConcentration(self.front.concentration.acquire(request.clientAddrPort.Addr()))
+	}
 	self.front.connectHandler.ServeHTTP(writer, r)
 	if !exchange.response.hijacked && exchange.response.requestBodyUnread() {
 		exchange.boundUnreadBody()
@@ -874,6 +882,7 @@ func (self *routeHttpExchange) boundUnreadBody() {
 	if lingeringTimeout := self.front.settings.Http.LingeringTimeout; 0 < lingeringTimeout {
 		lingeringDeadline = time.Now().Add(lingeringTimeout)
 	}
+	server.CountTimerDeadline(server.TimerCensusSiteFrontResponseDeadline, lingeringDeadline)
 	http.NewResponseController(self.writer()).SetReadDeadline(lingeringDeadline)
 }
 

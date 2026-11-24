@@ -29,6 +29,7 @@ package session
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -70,8 +71,41 @@ const sessionMintRedisBudget = RevocationCheckBudget
 // inside its transaction (model's client cap exemption,
 // SetClientCapExemptUntilInTx). Such a read that Redis does not answer within
 // it returns ErrSessionStoreUnavailable, and RegisterAndSignInTx falls back as
-// for a registration Redis does not answer.
+// for a registration Redis does not answer. A mint with a budget of its own
+// (MintHostedSession) reads it with SessionMintRedisBudgetFor.
 const SessionMintRedisBudget = sessionMintRedisBudget
+
+// The budget of each Redis step of the hosted proxy's own session mint
+// (MintHostedSession), the hosted path's check budget: the proxy hosts'
+// in-process Redis calls overran the mint budget 5-15% of the time on
+// 2026-11-21 (HostedRevocationCheckBudget). That mint opens a proxy device, at
+// most about once a second per proxy process before the session reuse, and
+// takes none of the hosted registration slots, so its longer wait holds a few
+// of the process's pooled connections at most, and only while Redis stalls.
+// The hosted children's mints keep sessionMintRedisBudget: they hold the
+// registration slots (localclient MintAdmission), where a longer wait costs
+// other devices' registrations, and a child whose registration Redis does not
+// answer in time is signed on its carried session unextended
+// (session_mint_unextended.go), not refused.
+const hostedSessionMintRedisBudget = HostedRevocationCheckBudget
+
+type sessionMintRedisBudgetKey struct{}
+
+// Sets the budget of each Redis step of the mint that runs under ctx, the
+// session marker read in its transaction included.
+func withSessionMintRedisBudget(ctx context.Context, budget time.Duration) context.Context {
+	return context.WithValue(ctx, sessionMintRedisBudgetKey{}, budget)
+}
+
+// SessionMintRedisBudgetFor is the budget of each Redis step of a mint, or of
+// any other transaction, that runs under ctx: SessionMintRedisBudget, unless
+// the mint set its own (MintHostedSession).
+func SessionMintRedisBudgetFor(ctx context.Context) time.Duration {
+	if budget, ok := ctx.Value(sessionMintRedisBudgetKey{}).(time.Duration); ok {
+		return budget
+	}
+	return sessionMintRedisBudget
+}
 
 // The service label comes from the stats push grouping (StartStatsPusher).
 var sessionMintUntaggedCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -93,16 +127,18 @@ func sessionKindClass(kind string, credential *ByJwt) string {
 	return sessionKindLabel(sessionClass(kind, credential.ClientId == nil))
 }
 
-// The clock sample and the mint script, each within the mint budget. exempt
-// is the provider exemption the mint sets (sessionMintExemption).
+// The clock sample and the mint script, each within the mint budget
+// (SessionMintRedisBudgetFor). exempt is the provider exemption the mint sets
+// (sessionMintExemption).
 func registerSessionMint(ctx context.Context, credential *ByJwt, kind string, origin *server.Id, fenceOrigin bool, exempt string) (*registeredSession, error) {
-	clockCtx, cancelClock := context.WithTimeout(ctx, sessionMintRedisBudget)
+	budget := SessionMintRedisBudgetFor(ctx)
+	clockCtx, cancelClock := context.WithTimeout(ctx, budget)
 	err := verifySessionMintClock(clockCtx)
 	cancelClock()
 	if err != nil {
 		return nil, err
 	}
-	registerCtx, cancelRegister := context.WithTimeout(ctx, sessionMintRedisBudget)
+	registerCtx, cancelRegister := context.WithTimeout(ctx, budget)
 	defer cancelRegister()
 	return registerNetworkSession(registerCtx, credential, kind, origin, fenceOrigin, server.NowUtc(), exempt)
 }

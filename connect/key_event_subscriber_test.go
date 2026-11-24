@@ -33,6 +33,7 @@ func TestKeyEventSubscriberBuildsOnePeerDeltaPerEvent(t *testing.T) {
 			func(*model.NetworkPeerEvent) {},
 			10*time.Minute,
 			0,
+			nil,
 		)
 		// Stop the worker before dispatch so this routing test cannot perform
 		// registry I/O. The model-layer test separately proves that listeners

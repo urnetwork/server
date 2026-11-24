@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/quic-go/quic-go"
+	"github.com/urnetwork/quic-go"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/router"
 )
@@ -89,6 +89,44 @@ func TestRunRejectedConnectPreservesStatusWithoutPublishingMetrics(t *testing.T)
 	}
 	if checks != 1 || serves != 1 || starts != 0 || flushes != 0 {
 		t.Fatalf("checks/serves/metrics starts/flushes = %d/%d/%d/%d, want 1/1/0/0", checks, serves, starts, flushes)
+	}
+}
+
+// Run counts the process's timer changes from its start, before readiness,
+// with the default sample period, and stops counting as it returns
+// (timer_census.go).
+func TestRunCountsTimerChangesWhileItRuns(t *testing.T) {
+	for key, value := range map[string]string{
+		"WARP_ENV": "test", "WARP_VERSION": "2026.9.4+1037600680",
+		"WARP_HOST": "synthetic-host", "WARP_SERVICE": "connect", "WARP_BLOCK": "g1",
+		"WARP_HOST_IPV4": "127.0.0.1", "WARP_HOST_IPV6": "", "WARP_PORTS": "8080:8080",
+	} {
+		t.Setenv(key, value)
+	}
+	t.Cleanup(router.SetWarpStatusReady)
+	readinessErr := errors.New("database migration head 627 is below binary-required head 630")
+	running := false
+	err := runWithDependencies(context.Background(), RunOptions{Port: 8080},
+		func(context.Context) error {
+			router.SetWarpStatusNotReady(readinessErr)
+			return readinessErr
+		},
+		func(context.Context) func() {
+			return func() {}
+		},
+		func(context.Context, string, http.Handler, bool, server.HttpServerOptions) error {
+			running = server.Testing_TimerCensusCounts() != nil
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !running {
+		t.Fatal("connect served with no timer census running")
+	}
+	if counts := server.Testing_TimerCensusCounts(); counts != nil {
+		t.Fatal("the timer census outlived Run")
 	}
 }
 

@@ -20,6 +20,7 @@ import (
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/internal/timersweep"
 )
 
 // note `streamKey` and `streamHop` are []byte so they can be directly stored into redis
@@ -974,6 +975,9 @@ type StreamHopListener struct {
 	pollInterval   time.Duration
 	fullReadEvery  int
 	readStreamHops func(context.Context, server.Id) (int64, map[StreamHop]bool)
+	// the backstop poll's timer waits here, off the runtime's timer heaps
+	// (CPUOPT7 §11). Nil gives the timer a sweep of its own.
+	timerSweep *timersweep.Sweep
 
 	// key-event inputs (PEERSSTREAMS2.md): `kick` wakes the loop for an
 	// immediate counter check (every hop add/remove bumps the counter, so
@@ -986,15 +990,21 @@ type StreamHopListener struct {
 	// Nil outside package tests. The callback runs after the listener worker
 	// has joined and immediately before CloseAndWait returns.
 	afterCloseWaitForTest func()
+	// Nil outside package tests. Called with each deadline the poll timer is
+	// armed for, before the wait. Set at construction, before run reads it.
+	afterPollArmForTest func(deadline time.Time)
 }
 
 // NewStreamHopListener polls the client's hops version counter every
 // `pollInterval` (jittered ±20%) and emits a Reset event with the full hop
 // set whenever the counter moved (PEERS2.md). Every `fullReadEvery`-th tick
 // full-reads unconditionally as insurance against a missed bump. No
-// subscriptions, no standing connections.
-func NewStreamHopListener(ctx context.Context, clientId server.Id, callback func(*StreamHopEvent), pollInterval time.Duration, fullReadEvery int) *StreamHopListener {
-	return newStreamHopListener(ctx, clientId, callback, pollInterval, fullReadEvery, GetActiveStreamHops)
+// subscriptions, no standing connections. The poll's timer waits on
+// timerSweep, the process's sweep, and fires at its deadline or at most one
+// sweep tick after it, never before; a nil timerSweep gives it a sweep of its
+// own.
+func NewStreamHopListener(ctx context.Context, clientId server.Id, callback func(*StreamHopEvent), pollInterval time.Duration, fullReadEvery int, timerSweep *timersweep.Sweep) *StreamHopListener {
+	return newStreamHopListener(ctx, clientId, callback, pollInterval, fullReadEvery, GetActiveStreamHops, timerSweep)
 }
 
 // Constructs a listener with an injectable snapshot reader for deterministic
@@ -1006,6 +1016,22 @@ func newStreamHopListener(
 	pollInterval time.Duration,
 	fullReadEvery int,
 	readStreamHops func(context.Context, server.Id) (int64, map[StreamHop]bool),
+	timerSweep *timersweep.Sweep,
+) *StreamHopListener {
+	return newStreamHopListenerWithPollArm(ctx, clientId, callback, pollInterval, fullReadEvery, readStreamHops, timerSweep, nil)
+}
+
+// newStreamHopListener with an observer of each poll deadline it arms, for
+// the sweep tests.
+func newStreamHopListenerWithPollArm(
+	ctx context.Context,
+	clientId server.Id,
+	callback func(*StreamHopEvent),
+	pollInterval time.Duration,
+	fullReadEvery int,
+	readStreamHops func(context.Context, server.Id) (int64, map[StreamHop]bool),
+	timerSweep *timersweep.Sweep,
+	afterPollArm func(deadline time.Time),
 ) *StreamHopListener {
 	cancelCtx, cancel := context.WithCancel(ctx)
 
@@ -1018,7 +1044,10 @@ func newStreamHopListener(
 		pollInterval:   pollInterval,
 		fullReadEvery:  fullReadEvery,
 		readStreamHops: readStreamHops,
+		timerSweep:     timerSweep,
 		kick:           make(chan struct{}, 1),
+
+		afterPollArmForTest: afterPollArm,
 	}
 	go func() {
 		defer close(shl.done)
@@ -1097,15 +1126,26 @@ func (self *StreamHopListener) run() {
 	consecutiveErrors := 0
 	tick := 0
 	// the poll deadline is absolute so a stream of kicks cannot starve the
-	// corrective poll (PEERSSTREAMS2.md §5.4)
+	// corrective poll (PEERSSTREAMS2.md §5.4). Its one timer waits on the
+	// sweep, which a kick leaves armed: a time.After per pass left a runtime
+	// timer in a P's heap as a zombie after each kick (CPUOPT7 §11).
 	nextPollTime := time.Now().Add(jitterInterval(0))
+	pollTimer := self.timerSweep.NewTimer(time.Until(nextPollTime))
+	defer pollTimer.Stop()
+	if self.afterPollArmForTest != nil {
+		self.afterPollArmForTest(nextPollTime)
+	}
 	for {
 		select {
 		case <-self.ctx.Done():
 			return
 		case <-self.kick:
-		case <-time.After(time.Until(nextPollTime)):
+		case <-pollTimer.C:
 			nextPollTime = time.Now().Add(jitterInterval(consecutiveErrors))
+			pollTimer.Reset(time.Until(nextPollTime))
+			if self.afterPollArmForTest != nil {
+				self.afterPollArmForTest(nextPollTime)
+			}
 		}
 
 		tick += 1

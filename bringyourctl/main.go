@@ -52,6 +52,7 @@ Usage:
     bringyourctl db close-evidence-retention [--mode=<mode>] [--max-rows-per-second=<n>] [--remove]
     bringyourctl db usage-archive-export [--mode=<mode>] [--close-time-floor=<date>] [--max-weeks-per-pass=<n>] [--remove]
     bringyourctl db reindex-index <index> [--dry-run] [--lock-timeout=<duration>] [--timeout=<duration>] [--parallel=<n>]
+    bringyourctl db contract-legacy-compact [--dry-run] [--table=<table>] [--max-rows=<n>] [--count-timeout=<duration>] [--compact-timeout=<duration>]
     bringyourctl evidence move-flat [--checkpoint=<path>] [--journal=<path>] [--snapshot=<path>] [--objects-per-second=<n>] [--workers=<n>] [--batch-rows=<n>] [--max-moves=<n>] [--until-created=<time>] [--dry-run]
     bringyourctl evidence snapshot-hashes --out=<path> [--pages-per-second=<n>] [--batch-pages=<n>]
     bringyourctl evidence move-flat-verify --journal=<path> [--checkpoint=<path>] [--fallback-sample=<n>]
@@ -234,7 +235,20 @@ Options:
     --drop-old     Drop the old egress health history once --verify passes.
                    With model migrate table-swap, drop the table's kept old
                    table once its rollback window (a day) has passed.
-    --table=<table>  With model migrate table-swap, the table whose live rows
+    --max-rows=<n>  With db contract-legacy-compact, the most live rows a
+                   legacy leaf may hold to be rewritten (default 100000, at
+                   most 250000). With the reaper's 60k unsettled contracts,
+                   contract_close holds about twice as many rows.
+    --count-timeout=<duration>  With db contract-legacy-compact, the bound
+                   of each leaf's live row count, a read only walk of its
+                   primary key (Go duration, default 5s, at most 1m).
+    --compact-timeout=<duration>  With db contract-legacy-compact, the bound
+                   of each leaf's CLUSTER once it holds the leaf's lock, which
+                   it waits for at most 1s (Go duration, default 3s, at most
+                   10s). Statements on that leaf wait behind it.
+    --table=<table>  With db contract-legacy-compact, the one contract table
+                   whose legacy leaf to compact; every one when omitted. With
+                   model migrate table-swap, the table whose live rows
                    are copied into a fresh twin and swapped in under its name
                    (PARTITION-CANDIDATES.md §4.4): pending_task, with every
                    taskworker stopped. The copy and the index builds run
@@ -247,9 +261,11 @@ Options:
                    admitted before the cutover that retires later is
                    journaled without its network id.
     --mode=<mode>  With db close-evidence-retention, set the close evidence
-                   row retention's brake: on, or off to stop the row deletes
-                   from their next batch. The weekly drops of partitioned
-                   evidence never read it. With db usage-archive-export, set
+                   retention's brake: on, or off to stop the row deletes
+                   from their next batch, and the weekly drops of
+                   partitioned evidence below 91 days from their next run.
+                   While it is on the evidence keeps its 7-day window. With
+                   db usage-archive-export, set
                    the export control's mode: on drops exported, verified
                    weeks early, dry_run verifies them and keeps them, off
                    drops nothing early from the next retention pass.
@@ -261,10 +277,12 @@ Options:
                    usage-archive-export, delete the export control, so no
                    week of the usage archive drops before its 52 weeks.
     --close-time-floor=<date>  With db usage-archive-export, the close time
-                   floor (YYYY-MM-DD, UTC): a week leaves early only when it
-                   ends by the floor and every row closed before it. It is
-                   never later than 70 days ago, whatever is set. Move it only
-                   past SN epochs that are recorded with no recovery pending.
+                   floor (YYYY-MM-DD, UTC), or rolling for none: a week leaves
+                   early only when it ends by the floor and every row closed
+                   before it. Whatever is set, the floor in force is never
+                   later than 25 days ago, nor than a week before the window
+                   of an SN epoch not yet recorded; with rolling it is the
+                   earlier of the two.
     --max-weeks-per-pass=<n>  With db usage-archive-export, the early drops
                    (or dry-run verifications) of one retention pass, 1 to 4.
     --lock-timeout=<duration>  With db reindex-index, how long the rebuild
@@ -417,6 +435,8 @@ func main() {
 			dbUsageArchiveExport(opts)
 		} else if reindexIndex, _ := opts.Bool("reindex-index"); reindexIndex {
 			dbReindexIndex(opts)
+		} else if contractLegacyCompact, _ := opts.Bool("contract-legacy-compact"); contractLegacyCompact {
+			dbContractLegacyCompact(opts)
 		}
 	} else if evidence, _ := opts.Bool("evidence"); evidence {
 		if moveFlatVerify, _ := opts.Bool("move-flat-verify"); moveFlatVerify {
@@ -789,14 +809,16 @@ func dbKeyHistoryFloor(opts docopt.Opts) {
 	fmt.Printf("Key history retention floor now: %s (published body: %t)\n", floor, published)
 }
 
-// dbCloseEvidenceRetention prints the close evidence row retention's brake
+// dbCloseEvidenceRetention prints the close evidence retention's brake
 // ({close_evidence_retention}control, server.RemoveExpiredCloseEvidence) and
 // the floor the installed evidence guard admits, after setting the brake's
 // fields with --mode and --max-rows-per-second, or deleting it with --remove.
-// The brake stops or paces the row deletes from their next batch, without
-// touching the contract horizon reaper. It is the way to stop them. It does not
-// stop the weekly drops of partitioned evidence, which never read it. Putting
-// the guard's 91-day body back stops both below 91 days, but pages
+// The brake stops or paces the row deletes of remove_expired_close_evidence
+// from their next batch, without touching the contract horizon reaper. It is
+// the way to stop them. While it is on, the evidence keeps its 7-day window
+// (server.CloseEvidenceRetentionWindow); off, 91 days, which also stops the
+// weekly drops of partitioned evidence below 91 days from their next run.
+// Putting an older guard body back keeps that guard's age, but pages
 // migration-schema-drift.
 func dbCloseEvidenceRetention(opts docopt.Opts) {
 	ctx := context.Background()
@@ -819,8 +841,8 @@ func dbCloseEvidenceRetention(opts docopt.Opts) {
 	server.Raise(err)
 	control := server.NarrowCloseEvidenceRetentionControl(stored, settings)
 	fmt.Printf("Close evidence retention brake: %v, deletes on %t at up to %g rows a second\n", stored, control.On, control.MaxRowsPerSecond)
-	floor, horizonGuard := server.GetCloseEvidenceRetentionGuardFloor(ctx)
-	fmt.Printf("Close evidence guard floor: %s (horizon guard installed: %t)\n", floor, horizonGuard)
+	floor, windowGuard := server.GetCloseEvidenceRetentionGuardFloor(ctx)
+	fmt.Printf("Close evidence guard floor: %s (window guard installed: %t)\n", floor, windowGuard)
 }
 
 // The brake fields and removal the options ask for. A mode other than on or
@@ -874,8 +896,8 @@ func dbUsageArchiveExport(opts docopt.Opts) {
 	server.Raise(err)
 	control := server.NarrowProviderUsageArchiveExportControl(stored, settings)
 	fmt.Printf("Usage archive export control: %v\n", stored)
-	fmt.Printf("Next retention pass: mode %s, close time floor %s (in force now: %s), up to %d weeks a pass",
-		control.Mode, control.CloseTimeFloor.Format(time.DateOnly), control.EffectiveFloor(server.NowUtc()).Format(time.RFC3339), control.MaxWeeksPerPass)
+	fmt.Printf("Next retention pass: mode %s, close time floor %s (in force now: %s, or earlier while an SN epoch is not yet recorded), up to %d weeks a pass",
+		control.Mode, control.CloseTimeFloorText(), control.EffectiveFloor(server.NowUtc()).Format(time.RFC3339), control.MaxWeeksPerPass)
 	if control.Invalid != "" {
 		fmt.Printf("; off because %s", control.Invalid)
 	}
@@ -885,8 +907,8 @@ func dbUsageArchiveExport(opts docopt.Opts) {
 // The export control fields and removal the options ask for. Every value is
 // checked as the retention pass narrows it (server.NarrowProviderUsageArchiveExportControl),
 // so the command refuses what the pass would read as off: a mode other than on,
-// dry_run or off, a floor that is not YYYY-MM-DD, and a weekly brake outside 1
-// to the settings' most. --remove with fields is refused.
+// dry_run or off, a floor that is neither YYYY-MM-DD nor rolling, and a weekly
+// brake outside 1 to the settings' most. --remove with fields is refused.
 func usageArchiveExportControlChange(opts docopt.Opts, settings *server.ProviderUsageArchiveExportSettings) (fields map[string]string, remove bool, err error) {
 	fields = map[string]string{}
 	remove, _ = opts.Bool("--remove")
@@ -897,8 +919,8 @@ func usageArchiveExportControlChange(opts docopt.Opts, settings *server.Provider
 		fields[server.ProviderUsageArchiveExportControlFieldMode] = mode
 	}
 	if floor, _ := opts.String("--close-time-floor"); floor != "" {
-		if _, parseErr := time.Parse(time.DateOnly, floor); parseErr != nil {
-			return nil, false, fmt.Errorf("--close-time-floor must be YYYY-MM-DD, not %q", floor)
+		if _, parseErr := time.Parse(time.DateOnly, floor); parseErr != nil && floor != server.ProviderUsageArchiveExportRollingFloor {
+			return nil, false, fmt.Errorf("--close-time-floor must be YYYY-MM-DD or %s, not %q", server.ProviderUsageArchiveExportRollingFloor, floor)
 		}
 		fields[server.ProviderUsageArchiveExportControlFieldCloseTimeFloor] = floor
 	}
@@ -937,6 +959,65 @@ func dbReindexIndex(opts docopt.Opts) {
 	if err != nil {
 		panic(err)
 	}
+}
+
+// dbContractLegacyCompact rewrites each legacy leaf of the partitioned
+// contract tables down to the row versions it still holds
+// (server.CompactContractLegacyPartition; CONTRACT-PARTITION-CUTOVER-NOW.md
+// 4.6), smallest first: S1's admission, count and CLUSTER, under a bound of
+// 100,000 live rows a leaf and a statement bound of a few seconds. It deletes
+// no row, and never detaches or drops the legacy partition. Run it once the
+// contract horizon reaper has passed the cutover day and the legacy's primary
+// keys are rebuilt, in a quiet minute: statements that read a leaf wait behind
+// its rewrite, up to their 2 s lock bound. --dry-run counts and admits only.
+// A leaf that waits is printed with the reason, untouched; rerun later.
+func dbContractLegacyCompact(opts docopt.Opts) {
+	settings, err := contractLegacyCompactOptions(opts)
+	if err != nil {
+		panic(err)
+	}
+	report, err := server.CompactContractLegacyPartition(context.Background(), settings, func(format string, args ...any) {
+		fmt.Printf(format+"\n", args...)
+	})
+	if report != nil {
+		fmt.Printf("legacy partition of the cutover day %s\n", report.CutoverDay.Format(time.DateOnly))
+		for _, leaf := range report.Leaves {
+			fmt.Printf("leaf %s bytes_before %d bytes_after %d statistics_live_rows %d live_rows %d compacted %t reason %q\n",
+				leaf.Leaf, leaf.BytesBefore, leaf.BytesAfter, leaf.StatisticsLiveRows, leaf.LiveRows, leaf.Compacted, leaf.Reason)
+		}
+	}
+	if err != nil {
+		panic(err)
+	}
+}
+
+// The legacy compaction's bounds the options ask for. Durations are Go
+// durations; the compaction refuses bounds past a few seconds of lock.
+func contractLegacyCompactOptions(opts docopt.Opts) (settings *server.ContractLegacyCompactionSettings, err error) {
+	settings = server.DefaultContractLegacyCompactionSettings()
+	settings.DryRun, _ = opts.Bool("--dry-run")
+	if table, _ := opts.String("--table"); table != "" {
+		settings.Tables = []string{table}
+	}
+	if value, _ := opts.String("--max-rows"); value != "" {
+		if settings.MaxCompactRows, err = strconv.ParseInt(value, 10, 64); err != nil {
+			return nil, fmt.Errorf("--max-rows: %w", err)
+		}
+	}
+	if value, _ := opts.String("--count-timeout"); value != "" {
+		if settings.CountTimeout, err = time.ParseDuration(value); err != nil {
+			return nil, fmt.Errorf("--count-timeout: %w", err)
+		}
+	}
+	if value, _ := opts.String("--compact-timeout"); value != "" {
+		if settings.CompactTimeout, err = time.ParseDuration(value); err != nil {
+			return nil, fmt.Errorf("--compact-timeout: %w", err)
+		}
+	}
+	if err = settings.Validate(); err != nil {
+		return nil, err
+	}
+	return settings, nil
 }
 
 // The index and the rebuild's bounds the options ask for. Durations are Go

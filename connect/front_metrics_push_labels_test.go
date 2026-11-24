@@ -30,7 +30,12 @@ func TestFrontMetricsPushUnderStatsPushGrouping(t *testing.T) {
 		frontQuicHandshakesCounter,
 		frontHttpServerErrorsCounter,
 		frontTlsHandshakesCounter,
+		frontTlsHandshakeOffersCounter,
 		frontQuicConnectionsByFamilyCounter,
+		frontQuicRetriesCounter,
+		frontWhodisResponsesCounter,
+		frontWhodisWriteSecondsHistogram,
+		connectQuicUnvalidatedHandshakesGauge,
 	)
 	// a synthetic value in every series, so the deletes after can't touch a
 	// series another test counts in
@@ -38,20 +43,28 @@ func TestFrontMetricsPushUnderStatsPushGrouping(t *testing.T) {
 	frontSocketsUpGauge.WithLabelValues(interfaceName, "ipv4", "tcp", "443").Set(4)
 	frontSocketRestartsCounter.WithLabelValues(interfaceName, "ipv4", "udp", "443").Inc()
 	frontSocketBindFailuresCounter.WithLabelValues(interfaceName, "ipv4", "udp", "443").Inc()
-	frontQuicConnectionsCounter.WithLabelValues(interfaceName, frontQuicResultHandshakeFailed, frontQuicHandshakeReasonIdleTimeout).Inc()
-	frontQuicHandshakesCounter.WithLabelValues(interfaceName, frontQuicVersionV1, "true").Inc()
-	frontQuicConnectionsByFamilyCounter.WithLabelValues(interfaceName, frontFamilyIpv6, frontQuicResultConnect).Inc()
+	frontQuicConnectionsCounter.WithLabelValues(interfaceName, frontPortWhodis, frontQuicResultHandshakeFailed, frontQuicHandshakeReasonIdleTimeout, frontQuicHandshakeClassHelloOnly).Inc()
+	frontQuicHandshakesCounter.WithLabelValues(interfaceName, frontPortWhodis, frontQuicVersionV1, "true").Inc()
+	frontQuicConnectionsByFamilyCounter.WithLabelValues(interfaceName, frontPortWhodis, frontFamilyIpv6, frontQuicResultConnect).Inc()
+	frontQuicRetriesCounter.WithLabelValues(interfaceName, frontPortWhodis).Inc()
+	frontWhodisResponsesCounter.WithLabelValues(interfaceName, frontFamilyIpv4).Inc()
+	frontWhodisWriteSecondsHistogram.WithLabelValues(interfaceName, frontFamilyIpv4).Observe(0.001)
 	frontHttpServerErrorsCounter.WithLabelValues(interfaceName, frontHttpErrorTlsHandshake, frontTlsHandshakeReasonClosed).Inc()
 	frontTlsHandshakesCounter.WithLabelValues(frontTlsVersionTls13, "true", interfaceName).Inc()
+	frontTlsHandshakeOffersCounter.WithLabelValues(frontTlsAlpnNone, "false", interfaceName, "none", "legacy").Inc()
 	defer func() {
 		frontSocketsUpGauge.DeleteLabelValues(interfaceName, "ipv4", "tcp", "443")
 		frontSocketRestartsCounter.DeleteLabelValues(interfaceName, "ipv4", "udp", "443")
 		frontSocketBindFailuresCounter.DeleteLabelValues(interfaceName, "ipv4", "udp", "443")
-		frontQuicConnectionsCounter.DeleteLabelValues(interfaceName, frontQuicResultHandshakeFailed, frontQuicHandshakeReasonIdleTimeout)
-		frontQuicHandshakesCounter.DeleteLabelValues(interfaceName, frontQuicVersionV1, "true")
-		frontQuicConnectionsByFamilyCounter.DeleteLabelValues(interfaceName, frontFamilyIpv6, frontQuicResultConnect)
+		frontQuicConnectionsCounter.DeleteLabelValues(interfaceName, frontPortWhodis, frontQuicResultHandshakeFailed, frontQuicHandshakeReasonIdleTimeout, frontQuicHandshakeClassHelloOnly)
+		frontQuicHandshakesCounter.DeleteLabelValues(interfaceName, frontPortWhodis, frontQuicVersionV1, "true")
+		frontQuicConnectionsByFamilyCounter.DeleteLabelValues(interfaceName, frontPortWhodis, frontFamilyIpv6, frontQuicResultConnect)
+		frontQuicRetriesCounter.DeleteLabelValues(interfaceName, frontPortWhodis)
+		frontWhodisResponsesCounter.DeleteLabelValues(interfaceName, frontFamilyIpv4)
+		frontWhodisWriteSecondsHistogram.DeleteLabelValues(interfaceName, frontFamilyIpv4)
 		frontHttpServerErrorsCounter.DeleteLabelValues(interfaceName, frontHttpErrorTlsHandshake, frontTlsHandshakeReasonClosed)
 		frontTlsHandshakesCounter.DeleteLabelValues(frontTlsVersionTls13, "true", interfaceName)
+		frontTlsHandshakeOffersCounter.DeleteLabelValues(frontTlsAlpnNone, "false", interfaceName, "none", "legacy")
 	}()
 
 	pushServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -175,6 +175,8 @@ var routeAccessNetworkTables = []string{
 	// prepares an operation row and queues the network's index review
 	"network_session_operation",
 	"network_session_index_outbox",
+	// a served drift test allocation (lag.dev/DRIFTTEST.md P2)
+	"lag_drift_test",
 }
 
 var routeAccessUserTables = []string{
@@ -283,6 +285,8 @@ func routeAccessAdminRequests(self *routeAccessDbFixture, victimClientId server.
 		"GET /network/client-data-caps":           {path: "/network/client-data-caps?limit=100"},
 		"GET /network/embed":                      {path: "/network/embed"},
 		"POST /network/client-acl-group":          {path: "/network/client-acl-group", body: map[string]any{"client_id": victimClientId, "acl_group": "default"}},
+		"POST /lag/drift-test":                    {path: "/lag/drift-test", body: map[string]any{"client_ip": "198.51.100.42"}},
+		"GET /lag/drift-test":                     {path: "/lag/drift-test?drift_test_id=" + server.NewId().String()},
 		"GET /pay/gamma/settings":                 {path: "/pay/gamma/settings"},
 		"POST /pay/gamma/settings":                {path: "/pay/gamma/settings", body: map[string]any{"auto_renew": false, "auto_topup": false}},
 		"GET /wallet/balance":                     {path: "/wallet/balance"},

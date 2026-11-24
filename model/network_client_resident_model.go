@@ -1,10 +1,7 @@
 package model
 
 import (
-	"bytes"
 	"context"
-	"encoding/gob"
-	"fmt"
 	"time"
 
 	"github.com/urnetwork/glog"
@@ -26,24 +23,32 @@ type NetworkClientResident struct {
 	ResidentInternalPorts []int     `json:"resident_internal_ports"`
 }
 
-// use gob encoding for `NetworkClientResident` which is more compact than json
+// A `NetworkClientResident` record is gob, which is more compact than json, or
+// the typed format (network_client_resident_codec.go). Readers read both.
 
+// The text of the key without fmt: every resident lookup builds it, and fmt
+// boxed the id and ran its printer for it (CPUOPT7.md §12).
 func residentKey(clientId server.Id) string {
-	return fmt.Sprintf("ncr_%s", clientId)
+	return "ncr_" + clientId.String()
 }
 
+// The resident of a record in either format, nil for an empty one. A record
+// that cannot be read is an error.
 func loadResident(residentBytes []byte) (*NetworkClientResident, error) {
 	if len(residentBytes) == 0 {
 		return nil, nil
 	}
-	b := bytes.NewBuffer(residentBytes)
-	e := gob.NewDecoder(b)
-	var resident NetworkClientResident
-	err := e.Decode(&resident)
-	if err != nil {
-		return nil, err
-	}
-	return &resident, nil
+	return decodeNetworkClientResident(residentBytes)
+}
+
+// Testing_ResidentRecord is a client's resident record as stored, in its
+// format, for tests of the writers.
+func Testing_ResidentRecord(ctx context.Context, clientId server.Id) []byte {
+	var record []byte
+	server.Redis(ctx, func(r server.RedisClient) {
+		record, _ = r.Get(ctx, residentKey(clientId)).Bytes()
+	})
+	return record
 }
 
 func GetResidentForClient(ctx context.Context, clientId server.Id, ttl time.Duration) (resident *NetworkClientResident) {
@@ -67,17 +72,29 @@ func GetResidentForClientWithInstance(ctx context.Context, clientId server.Id, i
 	return
 }
 
-// replace an existing resident with the given, or if there was already a replacement, return it
+// replace an existing resident with the given, or if there was already a replacement, return it.
+// The nomination is written as gob, which every reader reads.
 func NominateResident(
 	ctx context.Context,
 	residentIdToReplace *server.Id,
 	nomination *NetworkClientResident,
 	ttl time.Duration,
 ) (nominated bool) {
-	b := bytes.NewBuffer(nil)
-	e := gob.NewEncoder(b)
-	e.Encode(nomination)
-	nominationBytes := b.Bytes()
+	return NominateResidentWithFormat(ctx, residentIdToReplace, nomination, ttl, NetworkClientResidentFormatGob)
+}
+
+// NominateResident with the nomination written in format. Connect chooses the
+// format by its settings (connect/exchange_record_format.go). The record it
+// replaces may be in either format: a replacement compares the exact bytes it
+// read, so it replaces only the record it read, whatever its format.
+func NominateResidentWithFormat(
+	ctx context.Context,
+	residentIdToReplace *server.Id,
+	nomination *NetworkClientResident,
+	ttl time.Duration,
+	format NetworkClientResidentFormat,
+) (nominated bool) {
+	nominationBytes := encodeNetworkClientResident(format, nomination)
 
 	server.Redis(ctx, func(r server.RedisClient) {
 		key := residentKey(nomination.ClientId)

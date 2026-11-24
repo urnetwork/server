@@ -62,7 +62,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	quic "github.com/quic-go/quic-go"
+	quic "github.com/urnetwork/quic-go"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
@@ -243,7 +243,7 @@ func newTestLbAltEnv(t testing.TB, envSettings *testLbAltEnvSettings) *testLbAlt
 	env.settings = DefaultFrontServerSettings()
 	env.settings.ListenPacket = env.binds.listenPacket
 	env.settings.Listen = env.binds.listen
-	env.settings.connectionResultObserverForTest = func(portKind string, result string, reason string) {
+	env.settings.connectionResultObserverForTest = func(interfaceName string, portKind string, result string, reason string, class string) {
 		select {
 		case env.quicResults <- portKind + " " + result:
 		default:

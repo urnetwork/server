@@ -1030,7 +1030,9 @@ func TestVerifyRefusedAtTheCapLeavesTheCodeUnused(t *testing.T) {
 		addUnverifiedUserAuth(t, ctx, user, added)
 		normalAdded, _ := NormalUserAuthV1(&added)
 		members := fillLiveSessions(t, ctx, network, 1000)
-		code, err := AuthVerifyCreateCode(AuthVerifyCreateCodeArgs{UserAuth: added}, session.Testing_CreateClientSession(ctx, nil))
+		// the code a password sign-in with the phone sends on this network:
+		// signed out, only that verifies a sign-in added to an account
+		code, err := AuthVerifyCreateCode(AuthVerifyCreateCodeArgs{UserAuth: added, PasswordUserId: &user}, session.Testing_CreateClientSession(ctx, nil))
 		server.Raise(err)
 		args := AuthVerifyArgs{UserAuth: added, VerifyCode: *code.VerifyCode}
 		result, err := AuthVerify(args, session.Testing_CreateClientSession(ctx, nil))

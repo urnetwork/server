@@ -39,6 +39,7 @@ func TestStreamHopListenerCloseAndWaitJoinsAdmittedCallback(t *testing.T) {
 			time.Hour,
 			0,
 			GetStreamHops,
+			nil,
 		)
 		listener.afterCloseWaitForTest = func() {
 			select {
@@ -214,6 +215,7 @@ func TestStreamHopListenerPrunesInactiveAdjacentClients(t *testing.T) {
 			func(event *StreamHopEvent) { events <- event },
 			time.Hour,
 			0,
+			nil,
 		)
 		listener.Resync()
 		var initialEvent *StreamHopEvent
@@ -410,7 +412,7 @@ func TestStream(t *testing.T) {
 				fmt.Printf("-")
 			},
 		)
-		l := newStreamHopListener(ctx, clientId, c.Event, 200*time.Millisecond, 5, GetStreamHops)
+		l := newStreamHopListener(ctx, clientId, c.Event, 200*time.Millisecond, 5, GetStreamHops, nil)
 		defer l.CloseAndWait()
 
 		var wg sync.WaitGroup
@@ -493,7 +495,7 @@ func TestStream(t *testing.T) {
 				removeCount.Add(1)
 			},
 		)
-		l2 := newStreamHopListener(ctx, clientId, c2.Event, 200*time.Millisecond, 5, GetStreamHops)
+		l2 := newStreamHopListener(ctx, clientId, c2.Event, 200*time.Millisecond, 5, GetStreamHops, nil)
 		defer l2.CloseAndWait()
 
 		// cover a full listener poll cycle (5s) so the assertion does not
@@ -673,7 +675,7 @@ func TestCompanionStreamCloseLifecycle(t *testing.T) {
 			func(hop StreamHop) {},
 			func(hop StreamHop) {},
 		)
-		l := newStreamHopListener(ctx, intermediaryId, c.Event, 200*time.Millisecond, 5, GetStreamHops)
+		l := newStreamHopListener(ctx, intermediaryId, c.Event, 200*time.Millisecond, 5, GetStreamHops, nil)
 		defer l.CloseAndWait()
 
 		originContractId := server.NewId()
@@ -751,6 +753,7 @@ func TestStreamHopCorrectiveReadRepairsMissedExpiry(t *testing.T) {
 			100*time.Millisecond,
 			1,
 			GetStreamHops,
+			nil,
 		)
 		defer listener.CloseAndWait()
 		listener.Resync()
@@ -880,7 +883,7 @@ func TestStreamHopFlushRecovery(t *testing.T) {
 			func(hop StreamHop) {},
 			func(hop StreamHop) {},
 		)
-		l := newStreamHopListener(ctx, clientId, c.Event, 200*time.Millisecond, 5, GetStreamHops)
+		l := newStreamHopListener(ctx, clientId, c.Event, 200*time.Millisecond, 5, GetStreamHops, nil)
 		defer l.CloseAndWait()
 
 		// a hop involving clientId; the listener syncs it

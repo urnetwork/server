@@ -70,7 +70,6 @@ var giftPurchaseRefusalCodes = []string{
 	GammaErrorCodeInsufficientGamma,
 	GammaErrorCodeDailyCapExceeded,
 	GammaErrorCodeDailyCapTooLow,
-	GammaErrorCodeWrongSpender,
 	GammaErrorCodeNoDeposit,
 	GammaErrorCodeInvalidAmount,
 	GammaErrorCodeMintTooSmall,

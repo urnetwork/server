@@ -1093,16 +1093,22 @@ const playPurchaseCreditEndTimesLimit = 1000
 
 // GetPlayPurchaseCreditEndTimesInTx is the end of each Pro window the
 // network's Play purchase was credited, oldest first, up to the latest
-// playPurchaseCreditEndTimesLimit. The Play sales notice reads it before the
+// playPurchaseCreditEndTimesLimit. The Play credit gate reads it before the
 // next credit is added, to tell a newly charged window from one Play only
-// moved.
+// moved, which grants nothing (controller playCreditWindowInTx).
 //
 // It reads the purchase's subscription_renewal rows, which nothing prunes.
 // Its transfer_balance rows are no history: RemoveCompletedContracts deletes
 // a balance 7 days after it ends, so a trial converting after an account hold
 // or a renewal after a week of Play's pending days would be measured from a
-// partial history. A grace period's hold records no revenue and is left out.
-// A data pack's credit writes no renewal row, so it has no history here.
+// partial history. A hold records no revenue and is left out: a grace
+// period's, or a day Play added while a charge was pending. So is a row an end
+// path cut (a refund, a revocation, a terminal poll): it no longer holds the
+// window it was credited for, and a later credit of that window is owed
+// again. A credit since paid_end_time ends a day past it; a cut row ends
+// sooner. An older row has no paid end, and one cut within a day of its start
+// ends before its start plus the day. A data plan's credit writes no renewal
+// row, so it has no history here (GetPlayPurchaseDataCreditEndTimesInTx).
 func GetPlayPurchaseCreditEndTimesInTx(tx server.PgTx, ctx context.Context, networkId server.Id, purchaseToken string) []time.Time {
 	endTimes := []time.Time{}
 	if purchaseToken == "" {
@@ -1119,7 +1125,11 @@ func GetPlayPurchaseCreditEndTimesInTx(tx server.PgTx, ctx context.Context, netw
 			subscription_type = $2 AND
 			market = $3 AND
 			purchase_token = $4 AND
-			0 < net_revenue_nano_cents
+			0 < net_revenue_nano_cents AND
+			CASE
+				WHEN paid_end_time IS NULL THEN start_time + $6::interval < end_time
+				ELSE paid_end_time + $6::interval <= end_time
+			END
 		ORDER BY end_time DESC
 		LIMIT $5
 		`,
@@ -1128,6 +1138,61 @@ func GetPlayPurchaseCreditEndTimesInTx(tx server.PgTx, ctx context.Context, netw
 		SubscriptionMarketGoogle,
 		purchaseToken,
 		playPurchaseCreditEndTimesLimit,
+		playCreditGraceInterval(),
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var endTime time.Time
+			server.Raise(result.Scan(&endTime))
+			endTimes = append(endTimes, endTime.UTC())
+		}
+	})
+	slices.Reverse(endTimes)
+	return endTimes
+}
+
+// The day a Play credit's window runs past the store's expiry
+// (controller.SubscriptionGracePeriod), as a SQL interval.
+func playCreditGraceInterval() string {
+	return fmt.Sprintf("%d seconds", int64(legacyRenewalStoreGrace/time.Second))
+}
+
+// GetPlayPurchaseDataCreditEndTimesInTx is the end of each window the
+// network's Play purchase of a data plan was credited, oldest first, up to the
+// latest playPurchaseCreditEndTimesLimit: the data balances the purchase
+// carries. A data plan writes no renewal row, so these are its only history,
+// and RemoveCompletedContracts deletes each 7 days after it ends. That still
+// holds the window before a day Play adds while a renewal's charge is
+// pending, which ends a day past that window's expiry, so the credit gate can
+// tell the day from the charge that follows it (controller
+// playCreditWindowInTx); a purchase whose balances are all gone reads as
+// new, and its next window is credited. A balance an end path cut within a
+// day of its start holds no window and is left out, as in
+// GetPlayPurchaseCreditEndTimesInTx.
+func GetPlayPurchaseDataCreditEndTimesInTx(tx server.PgTx, ctx context.Context, networkId server.Id, purchaseToken string) []time.Time {
+	endTimes := []time.Time{}
+	if purchaseToken == "" {
+		return endTimes
+	}
+	result, err := tx.Query(
+		ctx,
+		`
+		/* play-purchase-data-credit-end-times */
+		SELECT end_time
+		FROM transfer_balance
+		WHERE
+			network_id = $1 AND
+			purchase_token = $2 AND
+			NOT pro AND
+			0 < start_balance_byte_count AND
+			start_time + $4::interval < end_time
+		ORDER BY end_time DESC
+		LIMIT $3
+		`,
+		networkId,
+		purchaseToken,
+		playPurchaseCreditEndTimesLimit,
+		playCreditGraceInterval(),
 	)
 	server.WithPgResult(result, err, func() {
 		for result.Next() {

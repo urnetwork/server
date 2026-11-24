@@ -165,6 +165,10 @@ func newSdkBrowsingSetupFixture(t testing.TB, plan *nativeBrowsingPressurePlan, 
 		device.SetTransportSettings(&sdk.TransportSettings{Mode: sdk.TransportModeH1})
 	}
 	device.SetRouteLocal(false)
+	// The baselines measure a device without post-quantum encryption, the
+	// app default before 2026-11-24, and these providers are not probed
+	// modern: an explicit profile keeps them comparable.
+	device.SetPerformanceProfile(&sdk.PerformanceProfile{WindowType: sdk.WindowTypeAuto})
 	specs := sdk.NewProviderSpecList()
 	specs.Add(&sdk.ProviderSpec{BestAvailable: true})
 	device.SetDestination(&sdk.ConnectLocation{ConnectLocationId: &sdk.ConnectLocationId{BestAvailable: true}}, specs)

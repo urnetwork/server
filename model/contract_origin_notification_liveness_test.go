@@ -52,12 +52,16 @@ func testTimedContractOriginOwner(ctx context.Context, opened chan<- testTimedCo
 	return newContractOriginNotifications(ctx, DefaultContractOriginNotificationSettings(),
 		func(_ context.Context, channel string) (contractOriginSubscription, error) {
 			subscription := &testTimedContractOriginSubscription{testContractOriginSubscription: newTestContractOriginSubscription()}
+			subscription.channel = channel
 			if pingResponse != nil {
 				subscription.pingResponse = func() any { return pingResponse(channel) }
 			}
-			opened <- testTimedContractOriginOpen{channel: channel, subscription: subscription}
+			select {
+			case opened <- testTimedContractOriginOpen{channel: channel, subscription: subscription}:
+			default:
+			}
 			return subscription, nil
-		}, func(context.Context, string, string) error { return nil })
+		}, func(context.Context, []contractOriginPublication) error { return nil })
 }
 
 func TestContractOriginNotificationsRejoinAfterShardUnsubscribe(t *testing.T) {
@@ -70,7 +74,7 @@ func TestContractOriginNotificationsRejoinAfterShardUnsubscribe(t *testing.T) {
 		first := <-opened
 		first.subscription.events <- &redis.Subscription{Kind: "ssubscribe", Channel: first.channel}
 		synctest.Wait()
-		update := watch.Update()
+		update, _ := watch.Update()
 		first.subscription.events <- &redis.Subscription{Kind: "sunsubscribe", Channel: first.channel}
 		synctest.Wait()
 		select {
@@ -106,7 +110,7 @@ func TestContractOriginNotificationsIgnoreUnrelatedUnsubscribe(t *testing.T) {
 		connection := <-opened
 		connection.subscription.events <- &redis.Subscription{Kind: "ssubscribe", Channel: connection.channel}
 		synctest.Wait()
-		update := watch.Update()
+		update, _ := watch.Update()
 		connection.subscription.events <- &redis.Subscription{Kind: "sunsubscribe", Channel: "synthetic-unowned-channel"}
 		synctest.Wait()
 		select {
@@ -180,7 +184,7 @@ func TestContractOriginNotificationsKeepHealthyIdleConnection(t *testing.T) {
 		connection := <-opened
 		connection.subscription.events <- &redis.Subscription{Kind: "ssubscribe", Channel: connection.channel}
 		synctest.Wait()
-		update := watch.Update()
+		update, _ := watch.Update()
 		time.Sleep(10 * time.Second)
 		synctest.Wait()
 		if connection.subscription.pings.Load() < 5 {
@@ -212,7 +216,7 @@ func TestContractOriginNotificationsIncomingMessagesProveLiveness(t *testing.T) 
 		connection := <-opened
 		connection.subscription.events <- &redis.Subscription{Kind: "ssubscribe", Channel: connection.channel}
 		synctest.Wait()
-		update := watch.Update()
+		update, _ := watch.Update()
 		time.Sleep(10 * time.Second)
 		synctest.Wait()
 		select {
@@ -259,7 +263,7 @@ func TestContractOriginNotificationsPaceFailedSubscriptions(t *testing.T) {
 			func(context.Context, string) (contractOriginSubscription, error) {
 				attempts.Add(1)
 				return nil, errors.New("synthetic subscription unavailable")
-			}, func(context.Context, string, string) error { return nil })
+			}, func(context.Context, []contractOriginPublication) error { return nil })
 		defer owner.Close()
 		watch := owner.Watch(server.NewId(), server.NewId())
 		defer watch.Close()

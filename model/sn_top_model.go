@@ -127,9 +127,11 @@ type SnTopTrailEvidence struct {
 }
 
 // Adds one non-seed hop of a complete trail, seen deduplicating each
-// provider's prefixes. A hop that recorded the zero hash, as a provider that
-// declared a proxy egress records (PinVerifyHopEgressIpHash), counts as a hop
-// and names its network, but it shows no prefix, as the validator scores it.
+// provider's prefixes. A hop that recorded the zero hash counts as a hop and
+// names its network, but shows no prefix, as every validator path scores it.
+// Hops confirmed under the proxied-egress mark (2026-11-19 to 2026-11-21,
+// reverted) recorded the zero hash; read as a prefix, it would be one unit
+// shared by every network that had such a hop in the tempo.
 func (self *SnTopTrailEvidence) addHop(seen map[server.Id]map[[32]byte]bool, clientId server.Id, networkId *server.Id, prefixHash []byte) {
 	if len(prefixHash) != 32 {
 		return

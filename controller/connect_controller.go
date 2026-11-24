@@ -34,10 +34,17 @@ var errContractDestinationInactiveAtWrite = fmt.Errorf("%w: %v", errContractDest
 type contractOriginFenceKey struct{}
 
 // Carries the update channel that the companion origin wait armed immediately
-// before its final authoritative read, from newContract back to
-// CreateContract. Written and read by the one synchronous request.
+// before its final authoritative read, and whether that read was fenced, from
+// newContract back to CreateContract, with the wait's watch. CreateContract
+// closes the watch only after it has recorded the verdict, whose refusal then
+// holds the pair: until then an origin edge must still find the pair
+// registered, to close the fence or remove the stored refusal
+// (CPUOPT7-ORIGIN-DELIVERY.md §1.7). Written and read by the one synchronous
+// request.
 type contractOriginFence struct {
 	update <-chan struct{}
+	fenced bool
+	watch  *model.ContractOriginWatch
 }
 
 var MinContractTransferByteCount = func() model.ByteCount {
@@ -889,14 +896,20 @@ func CreateContract(
 		destinationOwner:     relationshipDetails.DestinationOwner,
 		senderRole:           createContract.SenderRole,
 	}
-	// A missing-origin refusal needs the fence its origin read armed; a
+	// A missing-origin refusal needs the fence its origin read armed, and only a
+	// fenced read's is stored (`model.ContractOriginWatch.Update`); a
 	// destination refusal has none (an inactive client is never reactivated).
-	recordRouteRejection := func(cause model.ContractRouteRejectionCause, fence <-chan struct{}) {
+	recordRouteRejection := func(cause model.ContractRouteRejectionCause, fence <-chan struct{}, fenced bool) {
 		if !routeRejectable || notifications == nil || ctx.Err() != nil {
 			return
 		}
 		result := "unstored"
-		if notifications.RecordRouteRejection(clientId, destinationId, createContract.Companion, model.ContractRouteRejection{
+		if cause == model.ContractRouteMissingOrigin && !fenced {
+			// read before its pair's subscription was acknowledged
+			contractRouteRejectionCounter.WithLabelValues(rejectionCause, result).Inc()
+			return
+		}
+		if recordContractRouteRejection(notifications, clientId, destinationId, createContract.Companion, model.ContractRouteRejection{
 			Cause:          cause,
 			ResolutionPath: resolution.path,
 			Relationship:   relationshipDetails,
@@ -921,7 +934,7 @@ func CreateContract(
 			errContractDestinationInactive,
 			resolution,
 		)
-		recordRouteRejection(model.ContractRouteDestinationInactive, nil)
+		recordRouteRejection(model.ContractRouteDestinationInactive, nil, false)
 		contractError := protocol.ContractError_Reliability
 		result := &protocol.CreateContractResult{Error: &contractError}
 		frame, err := connect.ToFrame(result, connect.DefaultProtocolVersion)
@@ -993,14 +1006,27 @@ func CreateContract(
 		originCloseLinger := max(contractManagerSettings.OriginContractLinger, model.CompanionOriginCloseLinger)
 		leaveOrigin := server.EnterContractCreationStage(ctx, server.ContractStageCompanionOrigin)
 		companionOriginLookupCounter.WithLabelValues("initial").Inc()
+		lookups := 1
 		// armed immediately before the read
-		fence := originWatch.Update()
+		fence, fenced := originWatch.Update()
 		originExists := companionOriginExists(ctx, clientId, destinationId, originCloseLinger)
+		// A miss read before the pair's subscription was acknowledged may have
+		// missed an origin whose edge went out before it, so it decides nothing
+		// on its own: the pair subscribes, and once that is acknowledged, one
+		// more read armed after it decides, fenced. Without the acknowledgement
+		// in time the miss is answered and not stored.
+		if !originExists && !fenced && ctx.Err() == nil && originWatch.AwaitRegistration(ctx) {
+			companionOriginWakeCounter.WithLabelValues("registration").Inc()
+			companionOriginLookupCounter.WithLabelValues("registration").Inc()
+			lookups += 1
+			fence, fenced = originWatch.Update()
+			originExists = companionOriginExists(ctx, clientId, destinationId, originCloseLinger)
+		}
 		leaveOrigin()
 		if originExists {
 			originWatch.Close()
 		} else {
-			companionOriginLookupHistogram.Observe(1)
+			companionOriginLookupHistogram.Observe(float64(lookups))
 			server.RecordContractCompanionOriginOutcome(ctx, server.ContractCompanionOriginMissing)
 			rejectionCause = "missing_companion_origin"
 			recordContractFailureResolved(
@@ -1013,7 +1039,7 @@ func CreateContract(
 			)
 			// a watch the owner declined armed nothing to fence the verdict
 			if fence != nil {
-				recordRouteRejection(model.ContractRouteMissingOrigin, fence)
+				recordRouteRejection(model.ContractRouteMissingOrigin, fence, fenced)
 			}
 			contractError := contractResultError(model.ErrMissingCompanionOrigin)
 			frame, err := connect.ToFrame(&protocol.CreateContractResult{Error: &contractError}, connect.DefaultProtocolVersion)
@@ -1079,6 +1105,9 @@ func CreateContract(
 	}
 
 	originFence := &contractOriginFence{}
+	// the companion wait's watch, which newContract hands over, outlives the
+	// record of its verdict below
+	defer func() { originFence.watch.Close() }()
 	contractId, transferByteCount, priority, streamId, expirationTime, err := nextContract(context.WithValue(ctx, contractOriginFenceKey{}, originFence), clientId, createContract, companion, provideMode, contractManagerSettings)
 	// server.Logger().Printf("CONTROL CREATE CONTRACT TRANSFER BYTE COUNT %d %d %d\n", model.ByteCount(createContract.TransferByteCount), transferByteCount, uint64(transferByteCount))
 
@@ -1100,10 +1129,13 @@ func CreateContract(
 		// Only the exact verdicts, never one joined with another failure.
 		switch {
 		case err == model.ErrMissingCompanionOrigin && originFence.update != nil:
-			recordRouteRejection(model.ContractRouteMissingOrigin, originFence.update)
+			recordRouteRejection(model.ContractRouteMissingOrigin, originFence.update, originFence.fenced)
 		case err == errContractDestinationInactiveAtWrite || err == errContractDestinationInactive:
-			recordRouteRejection(model.ContractRouteDestinationInactive, nil)
+			recordRouteRejection(model.ContractRouteDestinationInactive, nil, false)
 		}
+		// the verdict is recorded, and its refusal holds the pair, so the wait's
+		// watch may let go of it
+		originFence.watch.Close()
 		contractError := contractResultError(err)
 		result := &protocol.CreateContractResult{
 			Error: &contractError,
@@ -1117,6 +1149,8 @@ func CreateContract(
 		return []*protocol.Frame{frame}, nil
 	}
 
+	// a contract records no verdict
+	originFence.watch.Close()
 	leaveResponse := server.EnterContractCreationStage(ctx, server.ContractStageResponse)
 	defer leaveResponse()
 	if err := ctx.Err(); err != nil {
@@ -1250,11 +1284,14 @@ func nextContract(
 
 // The lifecycle lookup, Stream fallback origin lookup, provide secret read,
 // degradation valve, and escrow and zero escrow creation CreateContract and
-// newContract perform. Tests replace them to check, without a database, which
-// byte count the controller requests and signs for a given escrow, which
-// creation path it takes, and which reads a refusal skips.
+// newContract perform, and the record of a route refusal. Tests replace them
+// to check, without a database, which byte count the controller requests and
+// signs for a given escrow, which creation path it takes, and which reads a
+// refusal skips, and wrap the record to deliver an origin edge just before a
+// verdict is recorded.
 var findActiveClientPairNetworks = model.FindActiveClientPairNetworks
 var companionOriginExists = model.CompanionOriginExists
+var recordContractRouteRejection = (*model.ContractOriginNotifications).RecordRouteRejection
 var getProvideSecretKey = model.GetProvideSecretKey
 var zeroContractCost = model.ZeroContractCost
 var createTransferEscrow = model.CreateTransferEscrow
@@ -1415,17 +1452,29 @@ func newContract(
 		// ~111-661ms of the losing request) and nothing when the origin
 		// already exists.
 		originWatch := model.GetContractOriginNotifications(ctx).Watch(destinationId, sourceId)
-		defer originWatch.Close()
 		// The wait arms the watch immediately before each authoritative read;
 		// the last armed channel fences a missing-origin refusal (see
 		// CreateContract). A nil watch arms nothing, so nothing is recorded.
 		originFence, _ := ctx.Value(contractOriginFenceKey{}).(*contractOriginFence)
+		if originFence != nil {
+			// CreateContract records the verdict after this returns, and closes
+			// the watch only then (see `contractOriginFence`)
+			originFence.watch = originWatch
+		} else {
+			defer originWatch.Close()
+		}
 		armOriginRead := func() <-chan struct{} {
-			update := originWatch.Update()
+			update, fenced := originWatch.Update()
 			if originFence != nil {
-				originFence.update = update
+				originFence.update, originFence.fenced = update, fenced
 			}
 			return update
+		}
+		// a read that missed before the pair's subscription was acknowledged
+		// re-reads once it is (`registration`)
+		missedOriginRead := func() <-chan struct{} {
+			registration, _ := originWatch.Missed()
+			return registration
 		}
 		// A closed origin anchors companions until its original deadline, not
 		// only for the client library's linger after its close. The reply path
@@ -1462,7 +1511,7 @@ func newContract(
 				)
 			}
 			return escrow, err
-		}, armOriginRead)
+		}, companionOriginWaitEvents{arm: armOriginRead, missed: missedOriginRead})
 		leaveOrigin()
 		if err != nil {
 			returnErr = err

@@ -670,8 +670,10 @@ func TestNarrowStClientKeyHistoryRetentionControl(t *testing.T) {
 }
 
 // A pass resumes from its cursor, so a record older than the cursor that came
-// due mid-pass waits for the next pass; a short batch ends the pass and the
-// next starts at the oldest record.
+// due mid-pass waits for the next pass, or for the pass's start over at the
+// oldest record once it is DeletePassRestartInterval old
+// (TestGoneStClientKeyHistoryReachesRecordsWrittenBehindItsCursor); a short
+// batch ends the pass and the next starts at the oldest record.
 func TestGoneStClientKeyHistoryResumesFromItsCursor(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()

@@ -28,6 +28,23 @@
 // client to still have a row, read it as an anti-join of all of
 // st_client_key_gone with all of network_client, and a single batch ran 30
 // minutes on Main holding its snapshot.
+// What a batch deletes is bounded by history rows, not clients: at most
+// DeleteBatchRowCount registrations, so a client that rotated its key hundreds
+// of times goes over several batches: its heads, then its history in chunks,
+// then its record, an order the guard admits. The cursor moves only past
+// clients whose every row is gone. Until 2026-11-23 a batch deleted the whole
+// history of its page's due clients in one statement; from 2026-11-21 the page
+// at the cursor held 500 clients with 73,879 registrations, every run's first
+// batch was canceled at its 5 s statement bound and rolled back, and nothing
+// was deleted for two days while every run reported success
+// (DBDISK-RETENTION-REVIEW.md §3.3). A batch that runs into a bound now fails
+// its run.
+// A pass also starts over at the oldest record once it is
+// DeletePassRestartInterval old. The reap of retired children records them
+// gone as of their deactivation, 30 days earlier, so their records are written
+// behind a cursor that has already passed those times; until 2026-11-23 they
+// waited for the pass to reach the horizon, which on Main it never did again
+// (55.3M of the 56.5M due records on 2026-11-23).
 // Functions are safe concurrently.
 package model
 
@@ -42,6 +59,7 @@ import (
 	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/urnetwork/glog"
@@ -62,17 +80,34 @@ type StClientKeyHistoryRetentionSettings struct {
 	// Gone records the deletes examine per second while the brake sets no rate,
 	// and so the most clients they delete per second: a cautious start, so a
 	// backlog that comes due at once, such as the 2026-10-24..27 records,
-	// drains under watch. The brake raises it.
+	// drains under watch. The brake raises it. A batch counts the records it
+	// read or the registrations it deleted, whichever is more, so the rate
+	// also bounds the registrations deleted per second.
 	DefaultDeleteClientsPerSecond float64
 	// The highest rate the brake can set.
 	MaxDeleteClientsPerSecond float64
 	// Bounds each brake and horizon control read.
 	ControlTimeout time.Duration
 	// Gone records one delete batch reads, in (gone_time, client_id) order
-	// after the pass's cursor: the most it deletes, and the bound on what it
-	// examines, whatever share of the records is due and however many of
-	// their clients still have a row.
+	// after the pass's cursor: the most clients it deletes, and the bound on
+	// what it examines, whatever share of the records is due and however many
+	// of their clients still have a row.
 	DeleteBatchCount int
+	// History rows one delete batch deletes at most, from its page's due
+	// clients in order, so what a batch deletes, and so its time, is bounded
+	// by rows however many registrations a client owns. A client with more
+	// rows than remain in a batch keeps the rest, and its record, for the next
+	// batch, and the cursor stays before it. Positive.
+	DeleteBatchRowCount int
+	// A delete pass that began this long ago starts over at the oldest record
+	// at the next run, so a record written behind the cursor, such as a reaped
+	// child gone as of its deactivation 30 days earlier, waits at most about
+	// this long. A start over reads past the index entries of the records
+	// deleted since the table's last vacuum once.
+	DeletePassRestartInterval time.Duration
+	// Due records the probe after each run's deletes counts at most, for the
+	// due gauge the stall alert reads. Non-positive skips the probe.
+	DueProbeLimit int
 	// heads one discovery transaction reads
 	DiscoverBatchCount int
 	// a discovery pass starts this long after the last one completed
@@ -108,9 +143,20 @@ func DefaultStClientKeyHistoryRetentionSettings() *StClientKeyHistoryRetentionSe
 		MaxDeleteClientsPerSecond:     2000,
 		ControlTimeout:                2 * time.Second,
 		DeleteBatchCount:              500,
-		DiscoverBatchCount:            10000,
-		DiscoverInterval:              7 * 24 * time.Hour,
-		RunBudget:                     4 * time.Minute,
+		// A page of single-registration clients whole. On Main the history
+		// delete took 163 ms on average for a page (about 3,000 rows a second)
+		// and one canceled attempt got through about 61k rows in its 5 s
+		// (2026-11-23), so 1,000 rows take a third of a second to a tenth of
+		// that: well inside the 5 s statement bound
+		DeleteBatchRowCount: 1000,
+		// at 1,000 a second the deletes of an hour, about 2.4M records, are
+		// what a start over reads past; locally 1M unvacuumed deleted entries
+		// took 90 ms to read past, and 4 ms once marked
+		DeletePassRestartInterval: time.Hour,
+		DueProbeLimit:             1000000,
+		DiscoverBatchCount:        10000,
+		DiscoverInterval:          7 * 24 * time.Hour,
+		RunBudget:                 4 * time.Minute,
 		// tens of times a page's measured time, and seconds of snapshot at most
 		BatchTimeout:          10 * time.Second,
 		BatchStatementTimeout: 5 * time.Second,
@@ -123,7 +169,8 @@ func DefaultStClientKeyHistoryRetentionSettings() *StClientKeyHistoryRetentionSe
 // probe network_client, and its locks st_client_key_gone, by key once per
 // record of its page, so no misestimate can plan them as a join of whole
 // tables, as the 2026-11-16 batch was planned: a merge anti-join of all of
-// st_client_key_gone with all of network_client. Neither table is joined any
+// st_client_key_gone with all of network_client. Its history reads and deletes
+// probe st_client_key_history by key the same way. No table is joined any
 // other way in these transactions.
 const stClientKeyHistoryRetentionPlanSql = `SET LOCAL enable_hashjoin = off; SET LOCAL enable_mergejoin = off`
 
@@ -195,13 +242,18 @@ func (self *StClientKeyHistoryRetentionSettings) runHorizon(brake *StClientKeyHi
 
 // Where the next run resumes.
 type StClientKeyHistoryRetentionCursor struct {
-	// the last gone record a delete pass examined, in (gone_time, client_id)
-	// order, deleted or not; nil starts a pass at the oldest record. A pass
-	// ends when a batch reads a short page, so the next one rereads what an
-	// earlier batch passed over (a record another transaction held, or one
-	// whose client still had a row).
+	// the last gone record a delete pass is done with, in (gone_time,
+	// client_id) order: deleted, or passed over because another transaction
+	// held it or its client still had a row; never one whose client still has
+	// history to delete. Nil starts a pass at the oldest record. A pass ends
+	// when a batch reads a short page and finishes it, so the next one rereads
+	// what an earlier batch passed over.
 	DeleteAfterGoneTime *time.Time `json:"delete_after_gone_time,omitempty"`
 	DeleteAfterClientId *server.Id `json:"delete_after_client_id,omitempty"`
+	// when the current delete pass began at the oldest record. A pass that
+	// began DeletePassRestartInterval ago, or whose start is unknown (a cursor
+	// from before 2026-11-23), starts over there at the next run.
+	DeletePassStartTime *time.Time `json:"delete_pass_start_time,omitempty"`
 	// the last head client a discovery pass read; nil starts a pass
 	DiscoverAfterClientId *server.Id `json:"discover_after_client_id,omitempty"`
 	// when the last complete discovery pass ended
@@ -210,7 +262,7 @@ type StClientKeyHistoryRetentionCursor struct {
 
 // Why a run's deletes ended.
 const (
-	// a batch read a short page: nothing more is due
+	// a batch read a short page and finished it: nothing more is due
 	StClientKeyHistoryRetentionStopDue = "due"
 	// the delete half of the run budget is spent
 	StClientKeyHistoryRetentionStopBudget = "budget"
@@ -220,21 +272,50 @@ const (
 	StClientKeyHistoryRetentionStopBrakeUnread = "brake_unread"
 	StClientKeyHistoryRetentionStopCanceled    = "canceled"
 	// a batch ran into one of its bounds (BatchTimeout, BatchStatementTimeout,
-	// BatchLockTimeout) and rolled back; the next run retries its page, and
-	// this run discovers nothing either
+	// BatchLockTimeout) and rolled back; the run fails, the next run retries
+	// from the cursor of the batches that committed, and this run discovers
+	// nothing either
 	StClientKeyHistoryRetentionStopBatchBound = "batch_bound"
 )
+
+var stClientKeyHistoryRetentionStops = []string{
+	StClientKeyHistoryRetentionStopDue,
+	StClientKeyHistoryRetentionStopBudget,
+	StClientKeyHistoryRetentionStopBrakeOff,
+	StClientKeyHistoryRetentionStopBrakeUnread,
+	StClientKeyHistoryRetentionStopCanceled,
+	StClientKeyHistoryRetentionStopBatchBound,
+}
+
+var stClientKeyHistoryRetentionRunsCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "urnetwork_client_key_history_retention_runs_total",
+	Help: "Runs of the key history retention's deletes, by why they ended; batch_bound is a batch that ran into its bound and rolled back, which fails the run",
+}, []string{"stop"})
+
+func init() {
+	for _, stop := range stClientKeyHistoryRetentionStops {
+		stClientKeyHistoryRetentionRunsCounter.WithLabelValues(stop)
+	}
+	prometheus.MustRegister(stClientKeyHistoryRetentionRunsCounter)
+}
 
 type StClientKeyHistoryRetentionReport struct {
 	// how long after its client went history was deleted in this run
 	Horizon time.Duration
 	// why the deletes ended, one of StClientKeyHistoryRetentionStop*
 	DeleteStop string
-	// gone records the delete batches read, deleted or not
+	// the delete pass started over at the oldest record at the run's start:
+	// it had run DeletePassRestartInterval, or its start was unknown
+	DeletePassRestarted bool
+	// gone records the delete batches read, deleted or not; a page a batch
+	// did not finish is read again
 	ExaminedRecordCount int64
-	// gone clients whose history was deleted
+	// gone clients whose every registration, head and record went
 	RemovedClientCount  int64
 	RemovedHistoryCount int64
+	// records due at the run's end, at most DueProbeLimit; -1 when the probe
+	// did not run or did not complete
+	DueRecordCount int64
 	// clients the discovery found gone without a record of when
 	DiscoveredClientCount int64
 	// a discovery page ran into one of its bounds and rolled back; the pass
@@ -244,7 +325,14 @@ type StClientKeyHistoryRetentionReport struct {
 	More bool
 }
 
-// One delete batch: a page of the records gone longer than the retention,
+// A delete batch or a discovery page ran into its bound and rolled back. The
+// run fails: the task reports it, and its retry resumes from the cursor of
+// what committed.
+func (self *StClientKeyHistoryRetentionReport) Bounded() bool {
+	return self.DeleteStop == StClientKeyHistoryRetentionStopBatchBound || self.DiscoverBounded
+}
+
+// One delete batch's page: the records gone longer than the retention,
 // oldest first, after the pass's cursor, then the page's records whose client
 // has no row, which the batch locks to delete. The page is a range of
 // st_client_key_gone_gone_time cut at the page size before any client is
@@ -254,8 +342,8 @@ type StClientKeyHistoryRetentionReport struct {
 // generic plan knows the page is small. The cursor keeps a pass from reading
 // again the index entries of the records earlier batches deleted, which stay
 // until vacuum. Both bounds repeat the guard's floor on the database clock,
-// so a batch never holds a row the guard refuses. One row: the page's record
-// count, the due clients and the page's last record; none for an empty page.
+// so a batch never holds a row the guard refuses. One row: the page's records
+// in order, as clients and gone times, and its due clients.
 const stClientKeyHistoryRetentionBatchSqlTemplate = `
 	WITH page AS MATERIALIZED (
 		SELECT client_id, gone_time
@@ -278,17 +366,11 @@ const stClientKeyHistoryRetentionBatchSqlTemplate = `
 				WHERE network_client.client_id = st_client_key_gone.client_id
 			)
 		FOR UPDATE OF st_client_key_gone SKIP LOCKED
-	), bound AS (
-		SELECT gone_time, client_id FROM page
-		ORDER BY gone_time DESC, client_id DESC
-		LIMIT 1
 	)
 	SELECT
-		(SELECT count(*) FROM page),
-		ARRAY(SELECT client_id FROM due),
-		bound.gone_time,
-		bound.client_id
-	FROM bound
+		ARRAY(SELECT client_id FROM page ORDER BY gone_time, client_id),
+		ARRAY(SELECT gone_time FROM page ORDER BY gone_time, client_id),
+		ARRAY(SELECT client_id FROM due)
 `
 
 // The first page of a pass, or with resumed a page after the cursor ($2, $3),
@@ -303,6 +385,82 @@ func stClientKeyHistoryRetentionBatchSql(batchCount int, resumed bool) string {
 		"{{cursor}}", cursor,
 		"{{limit}}", strconv.Itoa(batchCount),
 	).Replace(stClientKeyHistoryRetentionBatchSqlTemplate)
+}
+
+// The registrations one batch deletes: the first rows of its due clients ($1,
+// in page order), at most the limit. A nested loop over the array probes the
+// primary key by client and stops at the limit, so a batch reads and deletes
+// at most that many rows however many a client owns. The array's order only
+// decides which clients go first: the batch learns which clients it finished
+// from the table. Its size is part of the statement, as the page's is.
+const stClientKeyHistoryRetentionRowsSqlTemplate = `
+	SELECT history.client_id, history.domain_hash, history.generation
+	FROM unnest($1::uuid[]) AS due(client_id)
+	CROSS JOIN LATERAL (
+		SELECT
+			st_client_key_history.client_id,
+			st_client_key_history.domain_hash,
+			st_client_key_history.generation
+		FROM st_client_key_history
+		WHERE st_client_key_history.client_id = due.client_id
+		LIMIT {{limit}}
+	) AS history
+	LIMIT {{limit}}
+`
+
+// At most rowCount registrations of the due clients.
+func stClientKeyHistoryRetentionRowsSql(rowCount int) string {
+	return strings.NewReplacer(
+		"{{limit}}", strconv.Itoa(rowCount),
+	).Replace(stClientKeyHistoryRetentionRowsSqlTemplate)
+}
+
+// Every head of the clients ($1) whose registrations the batch deletes: a
+// head names a registration, and the guard admits a history delete only once
+// its client has none.
+const stClientKeyHistoryRetentionDeleteHeadsSql = `
+	DELETE FROM st_client_key_head WHERE client_id = ANY($1)
+`
+
+// The registrations the batch read, each by its primary key.
+const stClientKeyHistoryRetentionDeleteRowsSql = `
+	DELETE FROM st_client_key_history
+	USING unnest($1::uuid[], $2::bytea[], $3::bigint[]) AS doomed(client_id, domain_hash, generation)
+	WHERE
+		st_client_key_history.client_id = doomed.client_id AND
+		st_client_key_history.domain_hash = doomed.domain_hash AND
+		st_client_key_history.generation = doomed.generation
+`
+
+// The records of the due clients ($1) that have no registration left: the
+// clients the batch finished, which its cursor may pass.
+const stClientKeyHistoryRetentionDeleteRecordsSql = `
+	DELETE FROM st_client_key_gone
+	WHERE
+		client_id = ANY($1) AND
+		NOT EXISTS (
+			SELECT 1 FROM st_client_key_history
+			WHERE st_client_key_history.client_id = st_client_key_gone.client_id
+		)
+	RETURNING client_id
+`
+
+// The records due at $1, at most a limit, through the gone_time index: those
+// whose client still has a row count too (none on Main's 2026-11-23 sample).
+const stClientKeyHistoryDueProbeSqlTemplate = `
+	SELECT count(*) FROM (
+		SELECT 1 FROM st_client_key_gone
+		WHERE
+			gone_time < $1 AND
+			gone_time < (now() AT TIME ZONE 'UTC') - st_client_key_history_retention_floor()
+		LIMIT {{limit}}
+	) AS due
+`
+
+func stClientKeyHistoryDueProbeSql(limit int) string {
+	return strings.NewReplacer(
+		"{{limit}}", strconv.Itoa(limit),
+	).Replace(stClientKeyHistoryDueProbeSqlTemplate)
 }
 
 // A discovery page of heads in client order, recording when a client without
@@ -348,17 +506,19 @@ func stClientKeyHistoryDiscoverPageSql(batchCount int, resumed bool) string {
 }
 
 // Deletes the key history of clients gone longer than the retention, then
-// continues the discovery pass of clients gone without a record, each in
-// short transactions until the run budget is spent. The deletes are paced by
-// the records their batches read, so a region of records the batches cannot
-// delete is walked at the same pace.
+// probes what is still due and continues the discovery pass of clients gone
+// without a record, each in short transactions until the run budget is spent.
+// The deletes are paced by the records their batches read or the rows they
+// deleted, whichever is more, so a region of records the batches cannot
+// delete is walked at the same pace, and a client with many rows goes at the
+// same rate in rows.
 func RemoveGoneStClientKeyHistory(
 	ctx context.Context,
 	now time.Time,
 	cursor StClientKeyHistoryRetentionCursor,
 	settings *StClientKeyHistoryRetentionSettings,
 ) (report *StClientKeyHistoryRetentionReport, next StClientKeyHistoryRetentionCursor) {
-	report = &StClientKeyHistoryRetentionReport{}
+	report = &StClientKeyHistoryRetentionReport{DueRecordCount: -1}
 	next = cursor
 	start := time.Now()
 	deleteDeadline := start.Add(settings.RunBudget / 2)
@@ -372,48 +532,24 @@ func RemoveGoneStClientKeyHistory(
 	}
 	report.Horizon = settings.runHorizon(runBrake)
 	minGoneTime := now.Add(-report.Horizon).UTC()
-	pace := newRetentionPace()
-	for {
-		select {
-		case <-ctx.Done():
-			report.More = true
-			report.DeleteStop = StClientKeyHistoryRetentionStopCanceled
-			return
-		default:
+
+	// a pass that has run its interval, or whose start is unknown, starts
+	// over at the oldest record, which reaches the records written behind it
+	if next.DeleteAfterGoneTime != nil || next.DeleteAfterClientId != nil {
+		if next.DeletePassStartTime == nil || !now.Before(next.DeletePassStartTime.Add(settings.DeletePassRestartInterval)) {
+			next.DeleteAfterGoneTime, next.DeleteAfterClientId, next.DeletePassStartTime = nil, nil, nil
+			report.DeletePassRestarted = true
 		}
-		// the brake, before every batch
-		brake, err := GetStClientKeyHistoryRetentionControl(ctx, settings)
-		if err != nil {
-			glog.V(1).Infof("[ckh]retention control unread, deleting nothing more this run: %s\n", err)
-			report.DeleteStop = StClientKeyHistoryRetentionStopBrakeUnread
-			break
-		}
-		if !brake.On {
-			report.DeleteStop = StClientKeyHistoryRetentionStopBrakeOff
-			break
-		}
-		batch, bounded := removeGoneStClientKeyHistoryBatch(ctx, minGoneTime, next.DeleteAfterGoneTime, next.DeleteAfterClientId, settings)
-		if bounded {
-			// the cursor stays, so the next run retries the page
-			report.DeleteStop = StClientKeyHistoryRetentionStopBatchBound
-			return
-		}
-		report.ExaminedRecordCount += batch.examinedCount
-		report.RemovedClientCount += int64(len(batch.clientIds))
-		report.RemovedHistoryCount += batch.historyCount
-		removeGoneClientPublicKeys(ctx, batch.clientIds)
-		if batch.examinedCount < int64(settings.DeleteBatchCount) {
-			// the pass is complete; the next starts at the oldest record
-			next.DeleteAfterGoneTime, next.DeleteAfterClientId = nil, nil
-			report.DeleteStop = StClientKeyHistoryRetentionStopDue
-			break
-		}
-		next.DeleteAfterGoneTime, next.DeleteAfterClientId = &batch.lastGoneTime, &batch.lastClientId
-		if !pace.WaitAfter(ctx, int(batch.examinedCount), brake.MaxClientsPerSecond, deleteDeadline) || !time.Now().Before(deleteDeadline) {
-			report.More = true
-			report.DeleteStop = StClientKeyHistoryRetentionStopBudget
-			break
-		}
+	}
+
+	settings.removeGone(ctx, now, minGoneTime, deleteDeadline, report, &next)
+	stClientKeyHistoryRetentionRunsCounter.WithLabelValues(report.DeleteStop).Inc()
+	if report.DeleteStop == StClientKeyHistoryRetentionStopCanceled {
+		return
+	}
+	report.DueRecordCount = settings.probeDue(ctx, minGoneTime)
+	if report.DeleteStop == StClientKeyHistoryRetentionStopBatchBound {
+		return
 	}
 
 	if next.DiscoverAfterClientId == nil && next.DiscoverCompleteTime != nil && now.Before(next.DiscoverCompleteTime.Add(settings.DiscoverInterval)) {
@@ -447,22 +583,101 @@ func RemoveGoneStClientKeyHistory(
 	}
 }
 
-// What one committed batch read and removed, and the last record of its page:
-// the cursor of the batch after it.
-type goneStClientKeyHistoryBatch struct {
-	examinedCount int64
-	clientIds     []server.Id
-	historyCount  int64
-	lastGoneTime  time.Time
-	lastClientId  server.Id
+// The run's deletes: batches from the cursor until a batch finishes a short
+// page, the delete half of the budget is spent, the brake stops them or a
+// batch runs into its bound, each paced to the brake's rate. Sets the report's
+// stop and counts, and moves next past what the committed batches finished.
+func (self *StClientKeyHistoryRetentionSettings) removeGone(
+	ctx context.Context,
+	now time.Time,
+	minGoneTime time.Time,
+	deadline time.Time,
+	report *StClientKeyHistoryRetentionReport,
+	next *StClientKeyHistoryRetentionCursor,
+) {
+	pace := newRetentionPace()
+	for {
+		select {
+		case <-ctx.Done():
+			report.More = true
+			report.DeleteStop = StClientKeyHistoryRetentionStopCanceled
+			return
+		default:
+		}
+		// the brake, before every batch
+		brake, err := GetStClientKeyHistoryRetentionControl(ctx, self)
+		if err != nil {
+			glog.V(1).Infof("[ckh]retention control unread, deleting nothing more this run: %s\n", err)
+			report.DeleteStop = StClientKeyHistoryRetentionStopBrakeUnread
+			return
+		}
+		if !brake.On {
+			report.DeleteStop = StClientKeyHistoryRetentionStopBrakeOff
+			return
+		}
+		passStart := next.DeleteAfterGoneTime == nil || next.DeleteAfterClientId == nil
+		batch, bounded := removeGoneStClientKeyHistoryBatch(ctx, minGoneTime, next.DeleteAfterGoneTime, next.DeleteAfterClientId, self)
+		if bounded {
+			// the cursor stays, so the retry rereads the page
+			report.DeleteStop = StClientKeyHistoryRetentionStopBatchBound
+			return
+		}
+		report.ExaminedRecordCount += batch.examinedCount
+		report.RemovedClientCount += batch.removedClientCount
+		report.RemovedHistoryCount += batch.historyCount
+		removeGoneClientPublicKeys(ctx, batch.headClientIds)
+		if batch.passComplete {
+			// the next pass starts at the oldest record
+			next.DeleteAfterGoneTime, next.DeleteAfterClientId, next.DeletePassStartTime = nil, nil, nil
+			report.DeleteStop = StClientKeyHistoryRetentionStopDue
+			return
+		}
+		if passStart && next.DeletePassStartTime == nil {
+			passStartTime := now
+			next.DeletePassStartTime = &passStartTime
+		}
+		if 0 < batch.advancedCount {
+			lastGoneTime, lastClientId := batch.lastGoneTime, batch.lastClientId
+			next.DeleteAfterGoneTime, next.DeleteAfterClientId = &lastGoneTime, &lastClientId
+		}
+		if !pace.WaitAfter(ctx, int(max(batch.examinedCount, batch.historyCount)), brake.MaxClientsPerSecond, deadline) || !time.Now().Before(deadline) {
+			report.More = true
+			report.DeleteStop = StClientKeyHistoryRetentionStopBudget
+			return
+		}
+	}
 }
 
-// One short transaction (boundedTx): the page and its due records, then heads
-// first, since a retained head marks a complete archived history
-// (db_client_key_policy_history.go), then the history, then the records. The
-// page comes after (afterGoneTime, afterClientId), the start of the pass when
-// nil. bounded is true when the transaction ran into one of its bounds and
-// rolled back, removing nothing; any other raise propagates.
+// What one committed batch read and removed, and where its cursor moved.
+type goneStClientKeyHistoryBatch struct {
+	// records the page read
+	examinedCount int64
+	// due clients whose heads the batch deleted with some or all of their
+	// registrations
+	headClientIds []server.Id
+	// due clients whose every registration, head and record are gone
+	removedClientCount int64
+	historyCount       int64
+	// records of the page, from its start, that the batch is done with:
+	// deleted, or passed over, up to the first due client with registrations
+	// left
+	advancedCount int64
+	// the last of those, the cursor of the batch after it, while
+	// advancedCount is positive
+	lastGoneTime time.Time
+	lastClientId server.Id
+	// the page was short and the batch finished it: the pass is complete
+	passComplete bool
+}
+
+// One short transaction (boundedTx): the page and its due records, then at
+// most DeleteBatchRowCount of their registrations, the due clients in page
+// order: the heads of the clients those belong to first, since a retained
+// head marks a complete archived history (db_client_key_policy_history.go),
+// then the registrations, then the records of the due clients with none left.
+// The page comes after (afterGoneTime, afterClientId), the start of the pass
+// when nil. bounded is true when the transaction ran into one of its bounds
+// and rolled back, removing nothing; any other raise propagates.
 func removeGoneStClientKeyHistoryBatch(
 	ctx context.Context,
 	minGoneTime time.Time,
@@ -480,12 +695,11 @@ func removeGoneStClientKeyHistoryBatch(
 			bounded = true
 		}
 	}()
-	var removedHeadCount, removedGoneCount int64
+	var removedHeadCount int64
 	settings.boundedTx(ctx, func(txCtx context.Context, tx server.PgTx) {
 		// an attempt that does not commit removed nothing
 		batch = goneStClientKeyHistoryBatch{}
 		removedHeadCount = 0
-		removedGoneCount = 0
 
 		server.RaisePgResult(tx.Exec(txCtx, `SET LOCAL urnetwork.client_key_history_retention = 'on'`))
 		var row pgx.Row
@@ -494,42 +708,112 @@ func removeGoneStClientKeyHistoryBatch(
 		} else {
 			row = tx.QueryRow(txCtx, stClientKeyHistoryRetentionBatchSql(settings.DeleteBatchCount, true), minGoneTime, afterGoneTime.UTC(), *afterClientId)
 		}
-		var clientIds []server.Id
-		err := row.Scan(&batch.examinedCount, &clientIds, &batch.lastGoneTime, &batch.lastClientId)
-		if errors.Is(err, pgx.ErrNoRows) {
-			// an empty page: nothing after the cursor is due
-			batch = goneStClientKeyHistoryBatch{}
-			return
+		var pageClientIds []server.Id
+		var pageGoneTimes []time.Time
+		var dueClientIds []server.Id
+		server.Raise(row.Scan(&pageClientIds, &pageGoneTimes, &dueClientIds))
+		if len(pageClientIds) != len(pageGoneTimes) {
+			server.Raise(fmt.Errorf("key history retention page has %d clients and %d gone times", len(pageClientIds), len(pageGoneTimes)))
 		}
-		server.Raise(err)
-		if len(clientIds) == 0 {
-			return
+		batch.examinedCount = int64(len(pageClientIds))
+		due := map[server.Id]bool{}
+		for _, clientId := range dueClientIds {
+			due[clientId] = true
 		}
-		headTag := server.RaisePgResult(tx.Exec(
-			txCtx,
-			`DELETE FROM st_client_key_head WHERE client_id = ANY($1)`,
-			clientIds,
-		))
-		tag := server.RaisePgResult(tx.Exec(
-			txCtx,
-			`DELETE FROM st_client_key_history WHERE client_id = ANY($1)`,
-			clientIds,
-		))
-		goneTag := server.RaisePgResult(tx.Exec(
-			txCtx,
-			`DELETE FROM st_client_key_gone WHERE client_id = ANY($1)`,
-			clientIds,
-		))
-		batch.clientIds = clientIds
-		batch.historyCount = tag.RowsAffected()
-		removedHeadCount = headTag.RowsAffected()
-		removedGoneCount = goneTag.RowsAffected()
+		// the due clients in page order
+		pageDueClientIds := []server.Id{}
+		for _, clientId := range pageClientIds {
+			if due[clientId] {
+				pageDueClientIds = append(pageDueClientIds, clientId)
+			}
+		}
+
+		removed := map[server.Id]bool{}
+		if 0 < len(pageDueClientIds) {
+			rowClientIds := []server.Id{}
+			rowDomainHashes := [][]byte{}
+			rowGenerations := []int64{}
+			result, err := tx.Query(txCtx, stClientKeyHistoryRetentionRowsSql(settings.DeleteBatchRowCount), pageDueClientIds)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var clientId server.Id
+					var domainHash []byte
+					var generation int64
+					server.Raise(result.Scan(&clientId, &domainHash, &generation))
+					rowClientIds = append(rowClientIds, clientId)
+					rowDomainHashes = append(rowDomainHashes, domainHash)
+					rowGenerations = append(rowGenerations, generation)
+				}
+			})
+			headClientIds := []server.Id{}
+			seen := map[server.Id]bool{}
+			for _, clientId := range rowClientIds {
+				if !seen[clientId] {
+					seen[clientId] = true
+					headClientIds = append(headClientIds, clientId)
+				}
+			}
+			if 0 < len(headClientIds) {
+				headTag := server.RaisePgResult(tx.Exec(txCtx, stClientKeyHistoryRetentionDeleteHeadsSql, headClientIds))
+				historyTag := server.RaisePgResult(tx.Exec(
+					txCtx,
+					stClientKeyHistoryRetentionDeleteRowsSql,
+					rowClientIds,
+					rowDomainHashes,
+					rowGenerations,
+				))
+				removedHeadCount = headTag.RowsAffected()
+				batch.historyCount = historyTag.RowsAffected()
+				batch.headClientIds = headClientIds
+			}
+			result, err = tx.Query(txCtx, stClientKeyHistoryRetentionDeleteRecordsSql, pageDueClientIds)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var clientId server.Id
+					server.Raise(result.Scan(&clientId))
+					removed[clientId] = true
+				}
+			})
+			batch.removedClientCount = int64(len(removed))
+		}
+
+		// the cursor passes the page's records up to the first due client
+		// with registrations left
+		for i, clientId := range pageClientIds {
+			if due[clientId] && !removed[clientId] {
+				break
+			}
+			batch.advancedCount = int64(i + 1)
+			batch.lastGoneTime, batch.lastClientId = pageGoneTimes[i].UTC(), clientId
+		}
+		batch.passComplete = batch.advancedCount == batch.examinedCount && batch.examinedCount < int64(settings.DeleteBatchCount)
 	})
 	// counted once the batch committed
 	countRetentionDeletedRows(RetentionTableStClientKeyHead, removedHeadCount)
 	countRetentionDeletedRows(RetentionTableStClientKeyHistory, batch.historyCount)
-	countRetentionDeletedRows(RetentionTableStClientKeyGone, removedGoneCount)
+	countRetentionDeletedRows(RetentionTableStClientKeyGone, batch.removedClientCount)
 	return
+}
+
+// Counts the records due at minGoneTime, at most DueProbeLimit, in one bounded
+// transaction, and publishes the count as the gone records' due rows. -1 when
+// the probe is off or did not complete; the gauge then keeps its last count.
+// A probe that fails never fails the run, whose deletes have committed.
+func (self *StClientKeyHistoryRetentionSettings) probeDue(ctx context.Context, minGoneTime time.Time) (dueCount int64) {
+	if self.DueProbeLimit <= 0 {
+		return -1
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			glog.Infof("[ckh]the due probe did not complete; its gauge keeps its last count: %s\n", server.ErrorJsonNoStack(r))
+			dueCount = -1
+		}
+	}()
+	self.boundedTx(ctx, func(txCtx context.Context, tx server.PgTx) {
+		server.Raise(tx.QueryRow(txCtx, stClientKeyHistoryDueProbeSql(self.DueProbeLimit), minGoneTime).Scan(&dueCount))
+	})
+	recordRetentionDueRows(RetentionTableStClientKeyGone, dueCount, time.Now())
+	return dueCount
 }
 
 // One discovery transaction (boundedTx). lastClientId is the page's last head

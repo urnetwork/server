@@ -3,10 +3,17 @@ package controller
 // Pay with Gamma: the Subtensor chain reader and writer (mmm/BTCPAY.md §18).
 //
 // Gamma is SN25's dollar-valued service credit. A customer mints it into the
-// deposit at the hotkey we assigned their account; our spender charges that
-// deposit with spend_gamma, through the GammaSpend proxy key in the vault; and
-// a purchase is credited only on our own finalized GammaSpent that carries
-// the charge's reference. This file is everything that touches the chain:
+// deposit at the hotkey we assigned their account. Since runtime 493 a deposit
+// is spent only by its own hotkey: spend_gamma(service, netuid, amount),
+// signed by the deposit hotkey, burns the amount and adds it to what that
+// hotkey has spent at the service (GammaSpent, a total that only grows). The
+// spend pays no fee, so the hotkey needs no TAO. We hold the deposit hotkeys'
+// keys (each derived from the deposit seed, gamma_config.go), so the biller
+// signs each charge as the deposit's own hotkey, at our service. A purchase is
+// credited only on our own finalized GammaSpent: the event our extrinsic
+// emitted, found by the extrinsic's hash. Runtime 493 retired the spender, the
+// GammaSpend proxy and the spend reference. This file is everything that
+// touches the chain:
 //
 //   - one JSON-RPC transport over HTTP, tried in order over the configured
 //     endpoints (the archive node by default, st.yml's subtensor gateway)
@@ -17,13 +24,18 @@ package controller
 //   - a shape check of every call, event, storage item and signed extension
 //     the Gamma code reads or writes. A runtime whose shapes differ is
 //     unsupported: the biller pauses and says so (metrics, the terms
-//     endpoint), it never crash-loops and never decodes on a guess.
-//   - typed reads: deposits, services, the TAO/USD oracle, the gamma flags,
-//     the spender's proxies, accounts, hotkey owners
-//   - the one write: Proxy.proxy(spender, GammaSpend,
-//     SubtensorModule.spend_gamma(25, entries)), signed by the billing key with
-//     a mortal era born at a finalized block, so a batch that is not included
-//     within its era can be proven dead and its charges re-batched safely.
+//     endpoint), it never crash-loops and never decodes on a guess. A runtime
+//     older than the oldest supported spec is retired: its blocks are read for
+//     the few events whose fields kept their names, and nothing is charged
+//     or credited from them.
+//   - typed reads: deposits, services, what a hotkey spent at a service, the
+//     TAO/USD oracle, the gamma flags, accounts, hotkey owners
+//   - the chain's own judgment of a signed extrinsic, before it is recorded
+//     or sent (TaggedTransactionQueue_validate_transaction)
+//   - the one write: SubtensorModule.spend_gamma(service, 25, amount), signed
+//     by the deposit's hotkey with a mortal era born at a finalized block, so
+//     a spend that is not included within its era can be proven dead and its
+//     charge sent again safely.
 //
 // The block reader is not Gamma-specific: it is meant to be shared with the
 // plain-TAO reader of the crypto rail (BTCPAY.md §17.3), which needs the same
@@ -84,15 +96,18 @@ func init() {
 // nano-dollars (model.NanoCents) is its amount in gamma units.
 const gammaUnitsPerGamma = 1_000_000_000
 
-// The chain's limits (PR #3300; the Gamma guide).
+// The chain's limits (PR #3300; the Gamma guide of runtime 493).
 const (
-	gammaMaxSpendsPerCall = 512
 	// a mint needs a TAO/USD feed at most this many blocks old
 	gammaPriceMaxAgeBlocks = 300
 	// the smallest mint, in gamma units (0.1 gamma)
 	gammaMinMintUnits = 100_000_000
-	// Proxy.ProxyType::GammaSpend
-	gammaSpendProxyTypeName = "GammaSpend"
+	// the smallest spend that leaves a balance (0.1 gamma); a smaller one must
+	// empty the deposit
+	gammaMinSpendUnits = 100_000_000
+	// the oldest runtime whose Gamma shapes this code reads and writes: 493
+	// spends from the deposit's hotkey. Older runtimes are retired.
+	gammaMinSupportedSpec = 493
 )
 
 // ----- the transport -----
@@ -226,11 +241,20 @@ func (self *gammaRuntime) Supported() error {
 	return nil
 }
 
+// Retired reports whether the runtime predates the oldest supported spec
+// (gammaMinSupportedSpec) and its metadata still decodes its events: a block
+// it ran is read only for the events whose fields kept their names (a mint or
+// a move into a hotkey, a plain TAO transfer), and nothing in it is charged
+// or credited. A runtime newer than the reviewed ones is never retired: it
+// pauses the biller.
+func (self *gammaRuntime) Retired() bool {
+	return self.shapeErr != nil && self.SpecVersion < gammaMinSupportedSpec && self.events != nil
+}
+
 // gammaShape is what the Gamma code reads from a supported runtime's
 // metadata.
 type gammaShape struct {
-	subtensorPallet     uint8
-	gammaSpendProxyType uint8
+	subtensorPallet uint8
 	// SubtensorModule error index -> name
 	subtensorErrors map[uint8]string
 }
@@ -271,42 +295,43 @@ func newGammaRuntime(specVersion uint32, transactionVersion uint32, metadataHex 
 
 // The shapes every call, event and storage item the Gamma code uses must
 // have, as gammaTypeShape writes them (newtypes such as NetUid and
-// GammaBalance unwrapped). Reviewed against runtimes 488 and 490.
+// GammaBalance unwrapped). Reviewed against runtime 493 (subtensor v493,
+// "Spend gamma from the deposit's hotkey"); runtimes 488 to 492, with the
+// spender model, are retired.
 var gammaRequiredCalls = map[string][]string{
-	"SubtensorModule.spend_gamma": {"netuid:u16", "spends:vec<([u8;32],u64,[u8;32])>"},
-	"Proxy.proxy":                 {"real:multiaddress", "force_proxy_type:option<proxytype>", "call:runtimecall"},
+	"SubtensorModule.spend_gamma": {"service:[u8;32]", "netuid:u16", "amount:u64"},
 }
 
 var gammaRequiredEvents = map[string][]string{
-	"SubtensorModule.GammaSpent":        {"netuid:u16", "coldkey:[u8;32]", "hotkey:[u8;32]", "spender:[u8;32]", "amount:u64", "reference:[u8;32]"},
-	"SubtensorModule.GammaSpendSkipped": {"netuid:u16", "hotkey:[u8;32]", "spender:[u8;32]", "amount:u64", "reference:[u8;32]", "reason:dispatcherror"},
+	"SubtensorModule.GammaSpent": {"netuid:u16", "hotkey:[u8;32]", "service:[u8;32]", "amount:u64"},
 	"SubtensorModule.GammaMinted": {
-		"netuid:u16", "coldkey:[u8;32]", "hotkey:[u8;32]", "spender:[u8;32]", "daily_spend_cap:option<u64>",
+		"netuid:u16", "coldkey:[u8;32]", "hotkey:[u8;32]", "daily_spend_cap:option<u64>",
 		"tao:u64", "alpha:u64", "value:u64", "gamma:u64",
 	},
-	"SubtensorModule.GammaMoved":            {"netuid:u16", "coldkey:[u8;32]", "origin_hotkey:[u8;32]", "destination_hotkey:[u8;32]", "amount:u64"},
-	"Proxy.ProxyAdded":                      {"delegator:[u8;32]", "delegatee:[u8;32]", "proxy_type:proxytype", "delay:u32"},
-	"Proxy.ProxyRemoved":                    {"delegator:[u8;32]", "delegatee:[u8;32]", "proxy_type:proxytype", "delay:u32"},
-	"Balances.Transfer":                     {"from:[u8;32]", "to:[u8;32]", "amount:u64"},
-	"TransactionPayment.TransactionFeePaid": {"who:[u8;32]", "actual_fee:u64", "tip:u64"},
+	"SubtensorModule.GammaMoved": {"netuid:u16", "coldkey:[u8;32]", "origin_hotkey:[u8;32]", "destination_hotkey:[u8;32]", "amount:u64"},
+	"Balances.Transfer":          {"from:[u8;32]", "to:[u8;32]", "amount:u64"},
 }
 
 var gammaRequiredStorage = map[string]string{
-	"SubtensorModule.GammaDeposits":      "composite{coldkey:[u8;32],spender:[u8;32],balance:u64,daily_spend_cap:option<composite{cap:u64,bucket:(u64,u64)}>}",
-	"SubtensorModule.Services":           "composite{url:vec<u8>,spender:[u8;32]}",
+	"SubtensorModule.GammaDeposits":      "composite{coldkey:[u8;32],balance:u64,daily_spend_cap:option<composite{cap:u64,bucket:(u64,u64)}>}",
+	"SubtensorModule.Services":           "composite{url:vec<u8>}",
+	"SubtensorModule.GammaSpent":         "u64",
 	"SubtensorModule.TaoUsdPrice":        "composite{accepted:u64,feed:u64,fed_at:u64}",
 	"SubtensorModule.GammaEnabled":       "bool",
 	"SubtensorModule.SubnetGammaEnabled": "bool",
 	"SubtensorModule.SubnetOwnerHotkey":  "[u8;32]",
 	"SubtensorModule.Owner":              "[u8;32]",
-	"Proxy.Proxies":                      "(vec<composite{delegate:[u8;32],proxy_type:proxytype,delay:u32}>,u64)",
 	"System.Account":                     "composite{nonce:u32,consumers:u32,providers:u32,sufficients:u32,data:composite{free:u64,reserved:u64,frozen:u64,flags:u128}}",
 }
 
-// The skip reasons spend_gamma_entry gives, by SubtensorModule error name.
-var gammaSkipReasonErrors = []string{
+// The errors that stop a spend (gamma.rs gamma_deposit_after_spend), by
+// SubtensorModule error name. The transaction extension refuses such a spend
+// before it enters a block, so none of them is ever an event; the biller
+// checks the same rules itself before it signs (gammaSpendRefusal), and a
+// runtime that lost one of them changed the rules.
+var gammaSpendErrors = []string{
+	"ServiceDoesNotExist",
 	"GammaDepositDoesNotExist",
-	"NotGammaDepositSpender",
 	"AmountTooLow",
 	"InsufficientGammaBalance",
 	"GammaDepositDailySpendCapExceeded",
@@ -418,7 +443,7 @@ func gammaCheckShape(meta *types.Metadata) (*gammaShape, error) {
 			}
 		}
 	}
-	for _, name := range gammaSkipReasonErrors {
+	for _, name := range gammaSpendErrors {
 		found := false
 		for _, errorName := range shape.subtensorErrors {
 			if errorName == name {
@@ -428,29 +453,6 @@ func gammaCheckShape(meta *types.Metadata) (*gammaShape, error) {
 		if !found {
 			problems = append(problems, "no SubtensorModule error "+name)
 		}
-	}
-
-	// Proxy.ProxyType::GammaSpend, found through the proxy call's argument
-	proxyTypeFound := false
-	if pallet := pallets["Proxy"]; pallet != nil && pallet.HasCalls {
-		for _, variant := range variants(pallet.Calls.Type.Int64()) {
-			if string(variant.Name) != "proxy" || len(variant.Fields) != 3 {
-				continue
-			}
-			option, ok := m.EfficientLookup[variant.Fields[1].Type.Int64()]
-			if !ok || !option.Def.IsVariant || len(option.Def.Variant.Variants) != 2 || len(option.Def.Variant.Variants[1].Fields) != 1 {
-				continue
-			}
-			for _, proxyType := range variants(option.Def.Variant.Variants[1].Fields[0].Type.Int64()) {
-				if string(proxyType.Name) == gammaSpendProxyTypeName && len(proxyType.Fields) == 0 {
-					shape.gammaSpendProxyType = uint8(proxyType.Index)
-					proxyTypeFound = true
-				}
-			}
-		}
-	}
-	if !proxyTypeFound {
-		problems = append(problems, "no ProxyType::GammaSpend")
 	}
 
 	// every signed extension is one the signer encodes, or adds nothing
@@ -778,11 +780,13 @@ type gammaEvent struct {
 	Fields registry.DecodedFields
 }
 
-// Events are a block's events, decoded with the runtime that emitted them.
-// An event the runtime's metadata cannot decode fails the whole block: an
-// event stream has no lengths, so nothing after it could be trusted.
+// Events are a block's events, decoded with the runtime that emitted them: a
+// supported runtime, or a retired one (whose events the caller reads only by
+// fields that kept their names). An event the runtime's metadata cannot
+// decode fails the whole block: an event stream has no lengths, so nothing
+// after it could be trusted.
 func (self *gammaChain) Events(ctx context.Context, block *gammaBlock) ([]*gammaEvent, error) {
-	if err := block.Runtime.Supported(); err != nil {
+	if err := block.Runtime.Supported(); err != nil && !block.Runtime.Retired() {
 		return nil, err
 	}
 	key, err := types.CreateStorageKey(block.Runtime.Meta, "System", "Events")
@@ -902,117 +906,45 @@ func gammaEventUint(event *gammaEvent, name string) (uint64, error) {
 	return gammaDecodedUint(value)
 }
 
-// gammaSpendEvent is a GammaSpent or a GammaSpendSkipped.
+// gammaSpendEvent is a GammaSpent: a hotkey spent from its deposit at a
+// service. It carries no reference: which spend is ours is told by the
+// extrinsic that emitted it (Event.ExtrinsicIndex).
 type gammaSpendEvent struct {
-	Event     *gammaEvent
-	Skipped   bool
-	Netuid    uint16
-	Coldkey   [32]byte
-	Hotkey    [32]byte
-	Spender   [32]byte
-	Amount    uint64
-	Reference [32]byte
-	// skipped: the SubtensorModule error name, or "other"
-	Reason string
+	Event   *gammaEvent
+	Netuid  uint16
+	Hotkey  [32]byte
+	Service [32]byte
+	Amount  uint64
 }
 
-func gammaSpendEventFrom(runtime *gammaRuntime, event *gammaEvent) (*gammaSpendEvent, error) {
-	spend := &gammaSpendEvent{Event: event}
-	switch event.Name {
-	case "SubtensorModule.GammaSpent":
-	case "SubtensorModule.GammaSpendSkipped":
-		spend.Skipped = true
-	default:
+func gammaSpendEventFrom(event *gammaEvent) (*gammaSpendEvent, error) {
+	if event.Name != "SubtensorModule.GammaSpent" {
 		return nil, fmt.Errorf("%s is not a spend", event.Name)
 	}
+	spend := &gammaSpendEvent{Event: event}
 	netuid, err := gammaEventUint(event, "netuid")
 	if err != nil {
 		return nil, err
 	}
 	spend.Netuid = uint16(netuid)
-	if !spend.Skipped {
-		if spend.Coldkey, err = gammaEventBytes32(event, "coldkey"); err != nil {
-			return nil, err
-		}
-	}
 	if spend.Hotkey, err = gammaEventBytes32(event, "hotkey"); err != nil {
 		return nil, err
 	}
-	if spend.Spender, err = gammaEventBytes32(event, "spender"); err != nil {
+	if spend.Service, err = gammaEventBytes32(event, "service"); err != nil {
 		return nil, err
 	}
 	if spend.Amount, err = gammaEventUint(event, "amount"); err != nil {
 		return nil, err
 	}
-	if spend.Reference, err = gammaEventBytes32(event, "reference"); err != nil {
-		return nil, err
-	}
-	if spend.Skipped {
-		spend.Reason = "other"
-		if value, ok := gammaEventField(event.Fields, "reason"); ok {
-			if moduleIndex, errorIndex, ok := gammaModuleError(value); ok &&
-				runtime.shape != nil && moduleIndex == runtime.shape.subtensorPallet {
-				if name, ok := runtime.shape.subtensorErrors[errorIndex]; ok {
-					spend.Reason = name
-				}
-			}
-		}
-	}
 	return spend, nil
-}
-
-// gammaModuleError finds the pallet and error index of a decoded
-// DispatchError::Module.
-func gammaModuleError(value any) (moduleIndex uint8, errorIndex uint8, ok bool) {
-	fields, isFields := value.(registry.DecodedFields)
-	if !isFields {
-		return 0, 0, false
-	}
-	var indexValue, errorValue any
-	haveIndex, haveError := false, false
-	for _, field := range fields {
-		if field == nil {
-			continue
-		}
-		switch {
-		case field.Name == "index" || strings.HasSuffix(field.Name, ".index"):
-			indexValue, haveIndex = field.Value, true
-		case field.Name == "error" || strings.HasSuffix(field.Name, ".error"):
-			errorValue, haveError = field.Value, true
-		}
-	}
-	if haveIndex && haveError {
-		index, err := gammaDecodedUint(indexValue)
-		if err != nil {
-			return 0, 0, false
-		}
-		items, isItems := gammaLeaf(errorValue).([]any)
-		if !isItems || len(items) == 0 {
-			return 0, 0, false
-		}
-		first, isByte := items[0].(types.U8)
-		if !isByte {
-			return 0, 0, false
-		}
-		return uint8(index), uint8(first), true
-	}
-	for _, field := range fields {
-		if field == nil {
-			continue
-		}
-		if moduleIndex, errorIndex, ok := gammaModuleError(field.Value); ok {
-			return moduleIndex, errorIndex, true
-		}
-	}
-	return 0, 0, false
 }
 
 // ----- storage reads -----
 
-// gammaDeposit is a GammaDeposits entry.
+// gammaDeposit is a GammaDeposits entry. Since runtime 493 it names no
+// spender: only its hotkey spends it.
 type gammaDeposit struct {
 	Coldkey [32]byte
-	Spender [32]byte
 	Balance uint64
 	// nil: no daily spend cap
 	DailySpendCap *uint64
@@ -1024,35 +956,59 @@ type gammaDeposit struct {
 // gammaGammaRefillBlocks is how many blocks a daily cap takes to refill.
 const gammaRefillBlocks = 7200
 
-// Spendable is what a spend can take from the deposit at block now: the
-// balance within what its daily cap allows (gamma.rs gamma_allowance).
+// Spendable is the most one spend can take from the deposit at block now
+// (gamma_info.rs gamma_deposit_info): the balance within what its daily cap
+// allows (gamma.rs gamma_allowance), or 0 when that is below the least a
+// spend takes and short of the balance.
 func (self *gammaDeposit) Spendable(now uint64) uint64 {
-	if self.DailySpendCap == nil {
-		return self.Balance
+	spendable := self.Balance
+	if self.DailySpendCap != nil {
+		limit := *self.DailySpendCap
+		elapsed := uint64(0)
+		if self.BucketBlock < now {
+			elapsed = now - self.BucketBlock
+		}
+		refill := new(big.Int).Div(
+			new(big.Int).Mul(new(big.Int).SetUint64(limit), new(big.Int).SetUint64(elapsed)),
+			big.NewInt(gammaRefillBlocks),
+		)
+		allowance := new(big.Int).Add(new(big.Int).SetUint64(self.BucketAvailable), refill)
+		if allowance.Cmp(new(big.Int).SetUint64(limit)) > 0 {
+			allowance.SetUint64(limit)
+		}
+		spendable = min(self.Balance, allowance.Uint64())
 	}
-	limit := *self.DailySpendCap
-	elapsed := uint64(0)
-	if self.BucketBlock < now {
-		elapsed = now - self.BucketBlock
+	if spendable < gammaMinSpendUnits && spendable != self.Balance {
+		return 0
 	}
-	refill := new(big.Int).Div(
-		new(big.Int).Mul(new(big.Int).SetUint64(limit), new(big.Int).SetUint64(elapsed)),
-		big.NewInt(gammaRefillBlocks),
-	)
-	allowance := new(big.Int).Add(new(big.Int).SetUint64(self.BucketAvailable), refill)
-	if allowance.Cmp(new(big.Int).SetUint64(limit)) > 0 {
-		allowance.SetUint64(limit)
+	return spendable
+}
+
+// gammaSpendRefusal is why the chain would refuse a spend of amount from the
+// deposit at block now, by the rules of gamma.rs gamma_deposit_after_spend,
+// as the API's error code; "" when it would pass. deposit is nil when there
+// is none at the hotkey. (The service is checked by the readiness.)
+func gammaSpendRefusal(deposit *gammaDeposit, amount uint64, now uint64) string {
+	switch {
+	case deposit == nil:
+		return GammaErrorCodeNoDeposit
+	case amount == 0 || amount < gammaMinSpendUnits && amount != deposit.Balance:
+		return GammaErrorCodeInvalidAmount
+	case deposit.Balance < amount:
+		return GammaErrorCodeInsufficientGamma
+	case deposit.DailySpendCap != nil && *deposit.DailySpendCap < amount:
+		return GammaErrorCodeDailyCapTooLow
+	case deposit.Spendable(now) < amount:
+		return GammaErrorCodeDailyCapExceeded
 	}
-	return min(self.Balance, allowance.Uint64())
+	return ""
 }
 
 func gammaDecodeDeposit(raw []byte) (*gammaDeposit, error) {
-	decoder := scale.NewDecoder(bytes.NewReader(raw))
+	reader := bytes.NewReader(raw)
+	decoder := scale.NewDecoder(reader)
 	deposit := &gammaDeposit{}
 	if err := decoder.Read(deposit.Coldkey[:]); err != nil {
-		return nil, err
-	}
-	if err := decoder.Read(deposit.Spender[:]); err != nil {
 		return nil, err
 	}
 	var balance types.U64
@@ -1080,6 +1036,9 @@ func gammaDecodeDeposit(raw []byte) (*gammaDeposit, error) {
 	default:
 		return nil, fmt.Errorf("bad option tag %d", hasCap)
 	}
+	if 0 < reader.Len() {
+		return nil, fmt.Errorf("GammaDeposits has %d bytes past its fields", reader.Len())
+	}
 	return deposit, nil
 }
 
@@ -1100,23 +1059,22 @@ func (self *gammaChain) Deposit(ctx context.Context, runtime *gammaRuntime, at t
 	return gammaDecodeDeposit(raw)
 }
 
-// gammaService is a Services entry.
+// gammaService is a Services entry: since runtime 493, its url only.
 type gammaService struct {
-	Url     string
-	Spender [32]byte
+	Url string
 }
 
 func gammaDecodeService(raw []byte) (*gammaService, error) {
-	decoder := scale.NewDecoder(bytes.NewReader(raw))
+	reader := bytes.NewReader(raw)
+	decoder := scale.NewDecoder(reader)
 	var url []byte
 	if err := decoder.Decode(&url); err != nil {
 		return nil, err
 	}
-	service := &gammaService{Url: string(url)}
-	if err := decoder.Read(service.Spender[:]); err != nil {
-		return nil, err
+	if 0 < reader.Len() {
+		return nil, fmt.Errorf("Services has %d bytes past its url", reader.Len())
 	}
-	return service, nil
+	return &gammaService{Url: string(url)}, nil
 }
 
 // Service is the service published under a hotkey, or nil.
@@ -1130,6 +1088,24 @@ func (self *gammaChain) Service(ctx context.Context, runtime *gammaRuntime, at t
 		return nil, err
 	}
 	return gammaDecodeService(raw)
+}
+
+// Spent is what a hotkey has spent at a service, in gamma units: the
+// GammaSpent total, which only grows (until the subnet is dissolved, which
+// clears it). Absent is 0.
+func (self *gammaChain) Spent(ctx context.Context, runtime *gammaRuntime, at types.Hash, netuid uint16, service [32]byte, hotkey [32]byte) (uint64, error) {
+	key, err := types.CreateStorageKey(runtime.Meta, "SubtensorModule", "GammaSpent", gammaNetuidArg(netuid), service[:], hotkey[:])
+	if err != nil {
+		return 0, err
+	}
+	raw, err := self.Storage(ctx, key, at)
+	if err != nil || raw == nil {
+		return 0, err
+	}
+	if len(raw) != 8 {
+		return 0, fmt.Errorf("GammaSpent is %d bytes, not 8", len(raw))
+	}
+	return binary.LittleEndian.Uint64(raw), nil
 }
 
 // gammaTaoUsdPrice is the oracle's TaoUsdPrice: gamma units per TAO.
@@ -1199,69 +1175,12 @@ func (self *gammaChain) AccountId(ctx context.Context, runtime *gammaRuntime, at
 	return &out, nil
 }
 
-// gammaProxyDefinition is one of an account's proxies.
-type gammaProxyDefinition struct {
-	Delegate  [32]byte
-	ProxyType uint8
-	Delay     uint32
-}
-
-func gammaDecodeProxies(raw []byte) ([]gammaProxyDefinition, error) {
-	decoder := scale.NewDecoder(bytes.NewReader(raw))
-	count, err := decoder.DecodeUintCompact()
-	if err != nil {
-		return nil, err
-	}
-	if 32 < count.Uint64() {
-		return nil, fmt.Errorf("%d proxies", count.Uint64())
-	}
-	out := []gammaProxyDefinition{}
-	for i := uint64(0); i < count.Uint64(); i++ {
-		var definition gammaProxyDefinition
-		if err := decoder.Read(definition.Delegate[:]); err != nil {
-			return nil, err
-		}
-		proxyType, err := decoder.ReadOneByte()
-		if err != nil {
-			return nil, err
-		}
-		definition.ProxyType = proxyType
-		var delay types.U32
-		if err := decoder.Decode(&delay); err != nil {
-			return nil, err
-		}
-		definition.Delay = uint32(delay)
-		out = append(out, definition)
-	}
-	return out, nil
-}
-
-// Proxies are an account's proxies.
-func (self *gammaChain) Proxies(ctx context.Context, runtime *gammaRuntime, at types.Hash, account [32]byte) ([]gammaProxyDefinition, error) {
-	key, err := types.CreateStorageKey(runtime.Meta, "Proxy", "Proxies", account[:])
-	if err != nil {
-		return nil, err
-	}
-	raw, err := self.Storage(ctx, key, at)
-	if err != nil || raw == nil {
-		return nil, err
-	}
-	return gammaDecodeProxies(raw)
-}
-
-// gammaAccount is the part of System.Account the biller reads.
+// gammaAccount is the part of System.Account the biller reads: a deposit
+// hotkey's nonce (its free balance is plain TAO sent there by mistake).
 type gammaAccount struct {
 	Nonce  uint32
 	Free   uint64
 	Frozen uint64
-}
-
-// Usable is what the account can pay fees from.
-func (self *gammaAccount) Usable() uint64 {
-	if self.Free < self.Frozen {
-		return 0
-	}
-	return self.Free - self.Frozen
 }
 
 func gammaDecodeAccount(raw []byte) (*gammaAccount, error) {
@@ -1343,57 +1262,100 @@ func gammaDecodeSimMint(runtime *gammaRuntime, raw []byte) (*gammaSimMint, error
 	return nil, fmt.Errorf("sim_mint_gamma answered tag %d", raw[0])
 }
 
+// ----- the chain's judgment of a transaction -----
+
+// gammaValidity is TaggedTransactionQueue_validate_transaction's answer: the
+// chain's own judgment, at a block, of whether a signed extrinsic would enter
+// the next one. Nothing is submitted.
+type gammaValidity struct {
+	Valid bool
+	// invalid: the TransactionValidityError, as "invalid/<InvalidTransaction>"
+	// (custom codes as "invalid/custom/<code>") or "unknown/<UnknownTransaction>"
+	Verdict string
+}
+
+// The InvalidTransaction variants, by index (sp-runtime transaction_validity).
+var gammaInvalidTransactions = []string{
+	"call", "payment", "future", "stale", "bad_proof", "ancient_birth_block",
+	"exhausts_resources", "custom", "bad_mandatory", "mandatory_validation",
+	"bad_signer", "indeterminate_implicit", "unknown_origin",
+}
+
+// The UnknownTransaction variants, by index.
+var gammaUnknownTransactions = []string{"cannot_lookup", "no_unsigned_validator", "custom"}
+
+// Refused reports whether the chain refused the spend's call itself (a custom
+// error: the transaction extension's checks of the deposit, the service and
+// the amount), not its signature, nonce or era.
+func (self *gammaValidity) Refused() bool {
+	return !self.Valid && strings.HasPrefix(self.Verdict, "invalid/custom/")
+}
+
+// NonceUsed reports whether the extrinsic's nonce was already used.
+func (self *gammaValidity) NonceUsed() bool {
+	return !self.Valid && self.Verdict == "invalid/stale"
+}
+
+func gammaDecodeValidity(raw []byte) (*gammaValidity, error) {
+	if len(raw) == 0 {
+		return nil, errors.New("empty validate_transaction answer")
+	}
+	switch raw[0] {
+	case 0:
+		// Ok(ValidTransaction { priority, requires, provides, longevity, propagate })
+		return &gammaValidity{Valid: true}, nil
+	case 1:
+		if len(raw) < 3 {
+			return nil, fmt.Errorf("validate_transaction Err is %d bytes", len(raw))
+		}
+		names := gammaInvalidTransactions
+		kind := "invalid"
+		switch raw[1] {
+		case 0:
+		case 1:
+			names, kind = gammaUnknownTransactions, "unknown"
+		default:
+			return nil, fmt.Errorf("validate_transaction answered error kind %d", raw[1])
+		}
+		if int(raw[2]) < len(names) {
+			verdict := kind + "/" + names[raw[2]]
+			if names[raw[2]] == "custom" && 4 <= len(raw) {
+				verdict = fmt.Sprintf("%s/custom/%d", kind, raw[3])
+			}
+			return &gammaValidity{Verdict: verdict}, nil
+		}
+		return &gammaValidity{Verdict: fmt.Sprintf("%s/%d", kind, raw[2])}, nil
+	}
+	return nil, fmt.Errorf("validate_transaction answered tag %d", raw[0])
+}
+
+// ValidateTransaction asks the chain, at a block, whether a signed extrinsic
+// would be valid in the next one, as a transaction from outside the node.
+func (self *gammaChain) ValidateTransaction(ctx context.Context, encoded []byte, at types.Hash) (*gammaValidity, error) {
+	// (TransactionSource::External, the extrinsic, the block hash)
+	args := append([]byte{2}, encoded...)
+	args = append(args, at[:]...)
+	raw, err := self.StateCall(ctx, "TaggedTransactionQueue_validate_transaction", args, at)
+	if err != nil {
+		return nil, err
+	}
+	return gammaDecodeValidity(raw)
+}
+
 // ----- the spend -----
 
-// gammaSpendEntry is one spend_gamma entry.
-type gammaSpendEntry struct {
-	Hotkey    [32]byte
-	Amount    uint64
-	Reference [32]byte
-}
-
-// gammaSpendEntryScale is how an entry encodes: (AccountId, GammaBalance,
-// [u8; 32]).
-type gammaSpendEntryScale struct {
-	Hotkey    [32]byte
-	Amount    types.U64
-	Reference [32]byte
-}
-
-// gammaSpendCall is Proxy.proxy(spender, Some(GammaSpend),
-// SubtensorModule.spend_gamma(netuid, entries)): the billing key spends as
-// the spender's GammaSpend proxy.
-func gammaSpendCall(runtime *gammaRuntime, netuid uint16, spender [32]byte, entries []gammaSpendEntry) (types.Call, error) {
+// gammaSpendCall is SubtensorModule.spend_gamma(service, netuid, amount): the
+// deposit's own hotkey, the signer, spends amount at the service. It pays no
+// fee (Pays::No), so the hotkey needs no TAO, and the chain refuses a spend
+// that would fail before it enters a block.
+func gammaSpendCall(runtime *gammaRuntime, service [32]byte, netuid uint16, amount uint64) (types.Call, error) {
 	if err := runtime.Supported(); err != nil {
 		return types.Call{}, err
 	}
-	if len(entries) == 0 || gammaMaxSpendsPerCall < len(entries) {
-		return types.Call{}, fmt.Errorf("a spend takes 1 to %d entries, not %d", gammaMaxSpendsPerCall, len(entries))
+	if amount == 0 {
+		return types.Call{}, errors.New("a spend of nothing")
 	}
-	inner, err := gammaInnerSpendCall(runtime, netuid, entries)
-	if err != nil {
-		return types.Call{}, err
-	}
-	real, err := types.NewMultiAddressFromAccountID(spender[:])
-	if err != nil {
-		return types.Call{}, err
-	}
-	return types.NewCall(
-		runtime.Meta,
-		"Proxy.proxy",
-		real,
-		types.NewOption[types.U8](types.U8(runtime.shape.gammaSpendProxyType)),
-		inner,
-	)
-}
-
-// gammaInnerSpendCall is SubtensorModule.spend_gamma(netuid, entries).
-func gammaInnerSpendCall(runtime *gammaRuntime, netuid uint16, entries []gammaSpendEntry) (types.Call, error) {
-	spends := make([]gammaSpendEntryScale, 0, len(entries))
-	for _, entry := range entries {
-		spends = append(spends, gammaSpendEntryScale{Hotkey: entry.Hotkey, Amount: types.U64(entry.Amount), Reference: entry.Reference})
-	}
-	return types.NewCall(runtime.Meta, "SubtensorModule.spend_gamma", types.U16(netuid), spends)
+	return types.NewCall(runtime.Meta, "SubtensorModule.spend_gamma", service, types.U16(netuid), types.U64(amount))
 }
 
 // gammaMortalEra is a mortal era of period blocks born at block birth: the
@@ -1416,15 +1378,15 @@ func gammaMortalEra(birth uint64, period uint64) (types.ExtrinsicEra, error) {
 	}, nil
 }
 
-// gammaSigned is a signed spend batch, ready to submit and to persist.
+// gammaSigned is a signed spend, ready to submit and to persist.
 type gammaSigned struct {
 	Encoded []byte
 	Hash    types.Hash
 }
 
-// gammaSignSpend signs a call with the billing key: a mortal era born at a
-// finalized block (birthNumber, birthHash), the given nonce, no tip and no
-// metadata hash.
+// gammaSignSpend signs a call with the deposit hotkey's key: a mortal era born
+// at a finalized block (birthNumber, birthHash), the hotkey's nonce, no tip
+// and no metadata hash.
 func gammaSignSpend(
 	runtime *gammaRuntime,
 	genesis types.Hash,

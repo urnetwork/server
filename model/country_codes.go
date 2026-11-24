@@ -40,10 +40,27 @@ var countryAlpha3ToAlpha2 = map[string]string{
 	"ZWE": "ZW", "XKX": "XK",
 }
 
+// Every alpha-2 code of countryAlpha3ToAlpha2: the ISO 3166-1 assignment
+// (isoCountryNames) and Kosovo's XK, which the ip databases use.
+var countryAlpha2Codes = func() map[string]bool {
+	codes := map[string]bool{}
+	for _, alpha2 := range countryAlpha3ToAlpha2 {
+		codes[alpha2] = true
+	}
+	return codes
+}()
+
 // CountryCodeFromAlpha3 converts an ISO alpha-3 code (any case) to alpha-2, or ""
 // when unknown.
 func CountryCodeFromAlpha3(alpha3 string) string {
 	return countryAlpha3ToAlpha2[strings.ToUpper(strings.TrimSpace(alpha3))]
+}
+
+// IsCountryCode reports whether the code (any case) is the alpha-2 code of a
+// country (countryAlpha2Codes). Two letters that name none, such as a
+// database's EU or A1, are not one.
+func IsCountryCode(code string) bool {
+	return countryAlpha2Codes[NormalizeCountryCode(code)]
 }
 
 // CountryCodeFromStorefront accepts either an alpha-2 or an alpha-3 code (the App

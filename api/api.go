@@ -4,7 +4,6 @@ import (
 	"github.com/urnetwork/server/api/handlers"
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
-	"github.com/urnetwork/server/oauth"
 	"github.com/urnetwork/server/router"
 	"time"
 )
@@ -315,6 +314,8 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		router.NewRoute("POST", "/pay/gamma/status", handlers.GammaPaymentStatus),
 		router.NewRoute("GET", "/pay/gamma/settings", handlers.GammaSettings),
 		router.NewRoute("POST", "/pay/gamma/settings", handlers.GammaSetSettings),
+		router.NewRoute("POST", "/pay/gamma/claim/challenge", handlers.GammaClaimChallenge),
+		router.NewRoute("POST", "/pay/gamma/claim", handlers.GammaClaim),
 		router.NewRoute("GET", "/wallet/balance", handlers.WalletBalance),
 		router.NewRoute("POST", "/wallet/validate-address", handlers.WalletValidateAddress),
 		router.NewRoute("POST", "/wallet/circle-init", handlers.WalletCircleInit),
@@ -491,5 +492,5 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 	}
 
 	// every route is classified by credential (route_authz.go, AUTHZ1.md)
-	return applyRouteAccess(append(routes, oauth.Routes()...))
+	return applyRouteAccess(append(routes, oauthRoutes()...))
 }

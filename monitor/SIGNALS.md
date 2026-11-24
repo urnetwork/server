@@ -8563,8 +8563,10 @@ Probe: `contract-partition-retention-blocked`
 Why: once the contract tables are partitioned, size is bounded only by
 retention. Since S1 (server/CONTRACT-PARTITION.md, 2026-11-17)
 `maintain_contract_partitions` retires a day 6 hours after its upper bound
-passes the contract horizon reaper's horizon: 35 days while the reaper's mode
-is on, otherwise R = 13 weeks (`ContractRetention`). It deletes no row: the
+passes the contract horizon reaper's horizon: its control's `horizonDays`, 14
+to 91 days (18 for the C1 transition, server/CONTRACT-PARTITION-CUTOVER-NOW.md),
+while the reaper's mode is on, otherwise R = 13 weeks (`ContractRetention`).
+It deletes no row: the
 reaper alone deletes contracts, by its keep rules, archiving their usage. Once
 the reaper has emptied a day, the task rewrites each leaf down to the rows the
 reaper keeps (CLUSTER, MVCC-safe) and drops the six partitions together once
@@ -8573,7 +8575,7 @@ rows the reaper keeps, a day the reaper has not emptied, a vacuum or long
 transaction holding a leaf, more live rows than a compaction moves, or deleted
 rows that the oldest open transaction of any database still keeps from
 CLUSTER. The check below still judges at R plus 2 weeks, so it names days held
-far past S1's 35 days and 6 hours: kept rows nothing releases (the legacy
+far past S1's horizon and 6 hours: kept rows nothing releases (the legacy
 partition's contracts under attribution review), the reaper off, or the task
 stopped.
 

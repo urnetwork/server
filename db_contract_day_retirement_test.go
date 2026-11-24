@@ -37,25 +37,33 @@ func testContractTxWith(ctx context.Context, callback func(PgTx), options ...any
 }
 
 // A day expires RetireDelay (6 hours) past the reaper's horizon while ctx
-// carries one (the reaper's mode is on), clamped to [35, 91] days, and at the
+// carries one (the reaper's mode is on), clamped to [14, 91] days, and at the
 // 91 days of ContractRetention otherwise; never later than ContractRetention.
 // The family's ranges are UTC days and its RangeExpired follows this, so a day
-// 35 days and 6 hours past its end expires at a 35-day horizon. Before S1 the
-// family declared no RangeExpired, and every range waited 91 days: 13-17 TiB
-// at Main's 140-180 GiB a day; with weeks, a range waited up to 7 days more.
+// 35 days and 6 hours past its end expires at a 35-day horizon, and one 18
+// days and 6 hours past its end at the C1 transition's 18 days (owner,
+// 2026-11-23), which the 35-day floor before held to 35 days and 6 hours.
+// Before S1 the family declared no RangeExpired, and every range waited 91
+// days: 13-17 TiB at Main's 140-180 GiB a day; with weeks, a range waited up
+// to 7 days more.
 func TestContractDayRetentionFollowsTheReaperHorizon(t *testing.T) {
 	ctx := context.Background()
 	settings := DefaultContractDayRetirementSettings()
 	connect.AssertEqual(t, ContractDayRetention(ctx), ContractRetention)
 	for horizon, want := range map[time.Duration]time.Duration{
 		35 * testDay:  35 * testDay,
-		20 * testDay:  ContractDayRetentionFloor,
+		20 * testDay:  20 * testDay,
+		18 * testDay:  18 * testDay,
+		14 * testDay:  14 * testDay,
+		13 * testDay:  ContractDayRetentionFloor,
+		time.Hour:     ContractDayRetentionFloor,
 		60 * testDay:  60 * testDay,
 		120 * testDay: ContractRetention,
 	} {
 		connect.AssertEqual(t, ContractDayRetention(WithContractHorizon(ctx, horizon)), want)
 	}
 	connect.AssertEqual(t, contractDayExpiry(WithContractHorizon(ctx, 35*testDay), settings), 35*testDay+settings.RetireDelay)
+	connect.AssertEqual(t, contractDayExpiry(WithContractHorizon(ctx, 18*testDay), settings), 18*testDay+settings.RetireDelay)
 	connect.AssertEqual(t, contractDayExpiry(WithContractHorizon(ctx, ContractRetention), settings), ContractRetention)
 	connect.AssertEqual(t, contractDayExpiry(ctx, settings), ContractRetention)
 
@@ -78,8 +86,21 @@ func TestContractDayRetentionFollowsTheReaperHorizon(t *testing.T) {
 	// the legacy partition retires the same way, from the cutover day
 	legacy := PartitionRange{Upper: day.Lower, Legacy: true}
 	connect.AssertEqual(t, contractPartitionFamily.IsExpired(horizonCtx, day.Lower.Add(35*testDay+settings.RetireDelay), legacy), true)
-	// the shortest retention is the reaper's floor
-	connect.AssertEqual(t, ContractDayRetentionFloor, 35*testDay)
+	// at the transition's 18 days a day expires 18 days and 6 hours past its
+	// end, and so does the legacy partition past the cutover day
+	transitionCtx := WithContractHorizon(ctx, 18*testDay)
+	at = day.Upper.Add(18*testDay + settings.RetireDelay)
+	connect.AssertEqual(t, contractPartitionFamily.IsExpired(transitionCtx, at.Add(-time.Second), day), false)
+	connect.AssertEqual(t, contractPartitionFamily.IsExpired(transitionCtx, at, day), true)
+	connect.AssertEqual(t, contractPartitionFamily.IsExpired(transitionCtx, day.Lower.Add(18*testDay+settings.RetireDelay-time.Second), legacy), false)
+	connect.AssertEqual(t, contractPartitionFamily.IsExpired(transitionCtx, day.Lower.Add(18*testDay+settings.RetireDelay), legacy), true)
+	// below the floor a day waits for the floor
+	belowCtx := WithContractHorizon(ctx, 13*testDay)
+	connect.AssertEqual(t, contractPartitionFamily.IsExpired(belowCtx, day.Upper.Add(13*testDay+settings.RetireDelay), day), false)
+	connect.AssertEqual(t, contractPartitionFamily.IsExpired(belowCtx, day.Upper.Add(14*testDay+settings.RetireDelay), day), true)
+	// the shortest retention is the reaper's floor (model's
+	// TestContractDayRetentionFloorIsTheReaperFloor)
+	connect.AssertEqual(t, ContractDayRetentionFloor, 14*testDay)
 }
 
 // Each lock a retirement step requests waits at most a second, and its work
@@ -185,9 +206,9 @@ func testContractDayExists(t testing.TB, ctx context.Context, r PartitionRange) 
 }
 
 // A day the reaper emptied is compacted and dropped once its upper bound is
-// the reaper's horizon (35 days) and 6 hours past, while the reaper's mode is
-// on: not before, and not at that age without the horizon, when it waits for
-// 91 days. The build before S1 kept every range 91 days.
+// the reaper's horizon (here its floor, 14 days) and 6 hours past, while the
+// reaper's mode is on: not before, and not at that age without the horizon,
+// when it waits for 91 days. The build before S1 kept every range 91 days.
 func TestContractDayRetiresAtTheReaperHorizon(t *testing.T) {
 	DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()

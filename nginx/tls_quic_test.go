@@ -1,9 +1,9 @@
 package nginx
 
-// QUIC TLS config tests, over real QUIC handshakes on loopback through the
-// vendored quic-go, as connect's public sockets serve them: alt's ALPN rule,
-// which names get a certificate, and session resumption across sockets that
-// share the base config (D6c).
+// QUIC TLS config tests, over real QUIC handshakes on loopback through
+// URnetwork's quic-go, as connect's public sockets serve them: alt's ALPN
+// rule, which names get a certificate, and session resumption across sockets
+// that share the base config (D6c).
 
 import (
 	"crypto/tls"
@@ -184,54 +184,70 @@ func (self *testLocalAddrConn) LocalAddr() net.Addr {
 	return self.localAddr
 }
 
-// The QUIC config counts each ClientHello once, never by its name: by the
-// port kind its local port is among the route table's listen ports, by
-// whether it offered h3, and by its name's class. A served name counts under
+// The QUIC config counts each ClientHello once, never by its name or an
+// address: by the interface whose address its local address is in the route
+// table, an IPv4-mapped one included, other for any other address; by the
+// port kind its local port is among the route table's listen ports; by
+// whether it offered h3; and by its name's class. A served name counts under
 // its class, a served wildcard over an alt label included; the retired alt's
 // alt, alt-v4 and alt-v6 on any domain as alt; another name the front
 // doesn't serve as unknown, a lone alt label among them; and no name, or one
 // nginx's rule refuses, as none. Only a served name gets a config.
-func TestQuicTlsConfigCountsClientHellosByPortNameClassAndH3(t *testing.T) {
+func TestQuicTlsConfigCountsClientHellosByInterfacePortNameClassAndH3(t *testing.T) {
 	vault := newTestTlsVault(t)
 	metrics := newFrontMetrics(prometheus.NewRegistry())
 	_, quicTlsConfig := vault.newTlsConfigsWithMetrics(t, DefaultTlsSettings(), metrics)
 	listen := vault.routeTable.Listen
-	// a ClientHello's connection, with the local address of a socket bound
-	// to port
-	udpConn := func(port int) net.Conn {
-		return &testLocalAddrConn{localAddr: &net.UDPAddr{IP: net.IPv4(192, 0, 2, 1), Port: port}}
+	eth1, ok := vault.routeTable.Interface("eth1")
+	if !ok || eth1.Ipv4 == "" || eth1.Ipv6 == "" {
+		t.Fatal("the route fixture's eth1 needs both families")
 	}
+	eth2, ok := vault.routeTable.Interface("eth2")
+	if !ok || eth2.Ipv4 == "" {
+		t.Fatal("the route fixture's eth2 needs IPv4")
+	}
+	// a ClientHello's connection, with the local address of a socket bound
+	// to address and port
+	udpConn := func(address string, port int) net.Conn {
+		return &testLocalAddrConn{localAddr: &net.UDPAddr{IP: net.ParseIP(address), Port: port}}
+	}
+	// an address no interface has
+	const otherAddress = "192.0.2.1"
+	// eth2's IPv4 address as an IPv4-mapped IPv6 one, as a dual-stack socket
+	// reports it
+	eth2Mapped := "::ffff:" + eth2.Ipv4
 	h3 := []string{tlsNextProtoH3}
 	cases := []struct {
-		serverName string
-		offered    []string
-		conn       net.Conn
-		port       string
-		nameClass  string
-		h3Offered  string
+		serverName    string
+		offered       []string
+		conn          net.Conn
+		interfaceName string
+		port          string
+		nameClass     string
+		h3Offered     string
 	}{
-		{serverName: "test-api.service.example", offered: h3, conn: udpConn(listen.QuicPort), port: tlsQuicPortQuic, nameClass: "api", h3Offered: "true"},
-		{serverName: "test-api.service.example", offered: []string{"h2", "h3"}, conn: udpConn(listen.WhodisPort), port: tlsQuicPortWhodis, nameClass: "api", h3Offered: "true"},
-		{serverName: "a.g1.connect.service.example", offered: nil, conn: udpConn(listen.QuicPort), port: tlsQuicPortQuic, nameClass: "connect", h3Offered: "false"},
-		{serverName: "alt.connect.service.example", offered: nil, conn: udpConn(listen.WhodisPort), port: tlsQuicPortWhodis, nameClass: "connect", h3Offered: "false"},
-		{serverName: "test-mcp.service.example", offered: []string{"h2"}, conn: udpConn(listen.QuicPort), port: tlsQuicPortQuic, nameClass: "forwarded", h3Offered: "false"},
-		{serverName: "test-lb.service.example", offered: h3, conn: udpConn(listen.QuicPort), port: tlsQuicPortQuic, nameClass: "lb", h3Offered: "true"},
-		{serverName: "old-api.service.example", offered: h3, conn: udpConn(listen.QuicPort), port: tlsQuicPortQuic, nameClass: "redirect", h3Offered: "true"},
-		{serverName: "alt.service.example", offered: h3, conn: udpConn(listen.QuicPort), port: tlsQuicPortQuic, nameClass: tlsQuicNameClassAlt, h3Offered: "true"},
-		{serverName: "ALT-V4.other.example", offered: nil, conn: udpConn(listen.WhodisPort), port: tlsQuicPortWhodis, nameClass: tlsQuicNameClassAlt, h3Offered: "false"},
-		{serverName: "alt-v6.unknown.example", offered: h3, conn: udpConn(listen.WhodisPort), port: tlsQuicPortWhodis, nameClass: tlsQuicNameClassAlt, h3Offered: "true"},
-		{serverName: "alt", offered: h3, conn: udpConn(listen.QuicPort), port: tlsQuicPortQuic, nameClass: tlsQuicNameClassUnknown, h3Offered: "true"},
-		{serverName: "alternative.example", offered: nil, conn: udpConn(listen.QuicPort), port: tlsQuicPortQuic, nameClass: tlsQuicNameClassUnknown, h3Offered: "false"},
-		{serverName: "x.alt.example", offered: nil, conn: udpConn(listen.QuicPort), port: tlsQuicPortQuic, nameClass: tlsQuicNameClassUnknown, h3Offered: "false"},
-		{serverName: "unknown.example", offered: h3, conn: udpConn(listen.HttpPort), port: tlsQuicPortOther, nameClass: tlsQuicNameClassUnknown, h3Offered: "true"},
-		{serverName: "", offered: h3, conn: udpConn(listen.QuicPort), port: tlsQuicPortQuic, nameClass: tlsQuicNameClassNone, h3Offered: "true"},
-		{serverName: "test-api..service.example", offered: nil, conn: udpConn(listen.WhodisPort), port: tlsQuicPortWhodis, nameClass: tlsQuicNameClassNone, h3Offered: "false"},
-		// no local address to read the port from
-		{serverName: "test-api.service.example", offered: h3, conn: nil, port: tlsQuicPortOther, nameClass: "api", h3Offered: "true"},
-		{serverName: "test-api.service.example", offered: h3, conn: &testLocalAddrConn{localAddr: &net.TCPAddr{Port: listen.QuicPort}}, port: tlsQuicPortOther, nameClass: "api", h3Offered: "true"},
+		{serverName: "test-api.service.example", offered: h3, conn: udpConn(eth1.Ipv4, listen.QuicPort), interfaceName: "eth1", port: tlsQuicPortQuic, nameClass: "api", h3Offered: "true"},
+		{serverName: "test-api.service.example", offered: []string{"h2", "h3"}, conn: udpConn(eth1.Ipv6, listen.WhodisPort), interfaceName: "eth1", port: tlsQuicPortWhodis, nameClass: "api", h3Offered: "true"},
+		{serverName: "a.g1.connect.service.example", offered: nil, conn: udpConn(eth2.Ipv4, listen.QuicPort), interfaceName: "eth2", port: tlsQuicPortQuic, nameClass: "connect", h3Offered: "false"},
+		{serverName: "alt.connect.service.example", offered: nil, conn: udpConn(eth2Mapped, listen.WhodisPort), interfaceName: "eth2", port: tlsQuicPortWhodis, nameClass: "connect", h3Offered: "false"},
+		{serverName: "test-mcp.service.example", offered: []string{"h2"}, conn: udpConn(otherAddress, listen.QuicPort), interfaceName: tlsQuicInterfaceOther, port: tlsQuicPortQuic, nameClass: "forwarded", h3Offered: "false"},
+		{serverName: "test-lb.service.example", offered: h3, conn: udpConn(eth1.Ipv4, listen.QuicPort), interfaceName: "eth1", port: tlsQuicPortQuic, nameClass: "lb", h3Offered: "true"},
+		{serverName: "old-api.service.example", offered: h3, conn: udpConn(eth1.Ipv4, listen.QuicPort), interfaceName: "eth1", port: tlsQuicPortQuic, nameClass: "redirect", h3Offered: "true"},
+		{serverName: "alt.service.example", offered: h3, conn: udpConn(eth1.Ipv4, listen.QuicPort), interfaceName: "eth1", port: tlsQuicPortQuic, nameClass: tlsQuicNameClassAlt, h3Offered: "true"},
+		{serverName: "ALT-V4.other.example", offered: nil, conn: udpConn(eth1.Ipv4, listen.WhodisPort), interfaceName: "eth1", port: tlsQuicPortWhodis, nameClass: tlsQuicNameClassAlt, h3Offered: "false"},
+		{serverName: "alt-v6.unknown.example", offered: h3, conn: udpConn(eth1.Ipv6, listen.WhodisPort), interfaceName: "eth1", port: tlsQuicPortWhodis, nameClass: tlsQuicNameClassAlt, h3Offered: "true"},
+		{serverName: "alt", offered: h3, conn: udpConn(eth1.Ipv4, listen.QuicPort), interfaceName: "eth1", port: tlsQuicPortQuic, nameClass: tlsQuicNameClassUnknown, h3Offered: "true"},
+		{serverName: "alternative.example", offered: nil, conn: udpConn(eth1.Ipv4, listen.QuicPort), interfaceName: "eth1", port: tlsQuicPortQuic, nameClass: tlsQuicNameClassUnknown, h3Offered: "false"},
+		{serverName: "x.alt.example", offered: nil, conn: udpConn(eth1.Ipv4, listen.QuicPort), interfaceName: "eth1", port: tlsQuicPortQuic, nameClass: tlsQuicNameClassUnknown, h3Offered: "false"},
+		{serverName: "unknown.example", offered: h3, conn: udpConn(eth1.Ipv4, listen.HttpPort), interfaceName: "eth1", port: tlsQuicPortOther, nameClass: tlsQuicNameClassUnknown, h3Offered: "true"},
+		{serverName: "", offered: h3, conn: udpConn(eth1.Ipv4, listen.QuicPort), interfaceName: "eth1", port: tlsQuicPortQuic, nameClass: tlsQuicNameClassNone, h3Offered: "true"},
+		{serverName: "test-api..service.example", offered: nil, conn: udpConn(eth1.Ipv4, listen.WhodisPort), interfaceName: "eth1", port: tlsQuicPortWhodis, nameClass: tlsQuicNameClassNone, h3Offered: "false"},
+		// no local address to read the interface and port from
+		{serverName: "test-api.service.example", offered: h3, conn: nil, interfaceName: tlsQuicInterfaceOther, port: tlsQuicPortOther, nameClass: "api", h3Offered: "true"},
+		{serverName: "test-api.service.example", offered: h3, conn: &testLocalAddrConn{localAddr: &net.TCPAddr{IP: net.ParseIP(eth1.Ipv4), Port: listen.QuicPort}}, interfaceName: tlsQuicInterfaceOther, port: tlsQuicPortOther, nameClass: "api", h3Offered: "true"},
 	}
 	servedClasses := map[string]bool{"api": true, "connect": true, "forwarded": true, "lb": true, "redirect": true}
-	wantCounts := map[[3]string]float64{}
+	wantCounts := map[[4]string]float64{}
 	for _, c := range cases {
 		config, err := quicTlsConfig.GetConfigForClient(&tls.ClientHelloInfo{
 			ServerName:      c.serverName,
@@ -245,10 +261,10 @@ func TestQuicTlsConfigCountsClientHellosByPortNameClassAndH3(t *testing.T) {
 		} else if !errors.Is(err, ErrTlsNoCertificate) {
 			t.Errorf("sni %q: %v, want ErrTlsNoCertificate", c.serverName, err)
 		}
-		wantCounts[[3]string{c.port, c.nameClass, c.h3Offered}] += 1
+		wantCounts[[4]string{c.interfaceName, c.port, c.nameClass, c.h3Offered}] += 1
 	}
 	for labels, wantCount := range wantCounts {
-		if count := testutil.ToFloat64(metrics.quicClientHellos.WithLabelValues(labels[0], labels[1], labels[2])); count != wantCount {
+		if count := testutil.ToFloat64(metrics.quicClientHellos.WithLabelValues(labels[0], labels[1], labels[2], labels[3])); count != wantCount {
 			t.Errorf("%v counted %v ClientHellos, want %v", labels, count, wantCount)
 		}
 	}
@@ -258,8 +274,9 @@ func TestQuicTlsConfigCountsClientHellosByPortNameClassAndH3(t *testing.T) {
 }
 
 // A real QUIC handshake is counted once, as quic-go's ClientHelloInfo gives
-// it: the local port of the socket that read it, here one the route table
-// doesn't list, so other. A handshake that fails is counted all the same.
+// it: the local address of the socket that read it, here an address and a
+// port the route table doesn't list, so other for both. A handshake that
+// fails is counted all the same.
 func TestQuicTlsConfigCountsEachRealClientHelloOnce(t *testing.T) {
 	vault := newTestTlsVault(t)
 	metrics := newFrontMetrics(prometheus.NewRegistry())
@@ -278,10 +295,10 @@ func TestQuicTlsConfigCountsEachRealClientHelloOnce(t *testing.T) {
 	}, nil); err == nil {
 		t.Fatal("an alt name completed its handshake")
 	}
-	if count := testutil.ToFloat64(metrics.quicClientHellos.WithLabelValues(tlsQuicPortOther, "api", "true")); count != 1 {
+	if count := testutil.ToFloat64(metrics.quicClientHellos.WithLabelValues(tlsQuicInterfaceOther, tlsQuicPortOther, "api", "true")); count != 1 {
 		t.Fatalf("the api handshake counted %v times", count)
 	}
-	if count := testutil.ToFloat64(metrics.quicClientHellos.WithLabelValues(tlsQuicPortOther, tlsQuicNameClassAlt, "false")); count != 1 {
+	if count := testutil.ToFloat64(metrics.quicClientHellos.WithLabelValues(tlsQuicInterfaceOther, tlsQuicPortOther, tlsQuicNameClassAlt, "false")); count != 1 {
 		t.Fatalf("the alt handshake counted %v times", count)
 	}
 	if seriesCount := testutil.CollectAndCount(metrics.quicClientHellos); seriesCount != 2 {

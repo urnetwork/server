@@ -11927,6 +11927,25 @@ var migrations = []any{
 	newSqlMigration(competitionEpochThreeExecutorBuilderCorrectionSql()),
 	newSqlMigration(competitionEpochThreeGoofeAdmissionSql()),
 	newSqlMigration(competitionEpochThreeGoofeArchiveBindingCorrectionSql()),
+
+	// The per client and day record of probed exits that differ from every
+	// network their provider connects from: a new table, which no running
+	// release reads or writes.
+	newSqlMigration(providerEgressExitDaySchemaSql),
+
+	// What decided each purchase's price tier, on the crypto, Gamma and
+	// Solana Pay intents (price_tier_evidence_schema.go): one nullable jsonb
+	// column on each, which no running release reads or writes.
+	newSqlMigration(priceTierEvidenceSchemaSql),
+
+	// Close evidence retention at its own window (owner, 2026-11-23: 7 days;
+	// db_contract_close_evidence_horizon.go): the evidence guard admits the
+	// retention delete of a report accepted more than 7 days ago, in place of
+	// 35. It replaces the guard's function body only: no table lock, no scan.
+	// Every delete a running release makes stays admitted, and a release from
+	// before it reads the new body as 91 days and deletes less, so it applies
+	// before or after the deploy.
+	newSqlMigration(contractCloseReportEvidenceWindowGuardSql),
 }
 
 // The deleted_network backfill (the migration above): every network an App

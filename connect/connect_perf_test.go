@@ -53,6 +53,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"fmt"
+	mathrand "math/rand/v2"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -62,6 +63,7 @@ import (
 	"runtime"
 	"runtime/pprof"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -114,6 +116,110 @@ func perfTestEnv() *server.TestEnv {
 	}
 }
 
+// An opt-in census of the runtime timer changes the measured phases make, by
+// site and horizon (connect timer_census.go, CPUOPT7.md §11): set
+// CONNECT_PERF_TIMER_CENSUS to report each phase's rates as [perfcensus]
+// lines. Every change is counted, so a run that reports it carries the
+// census's cost in its own numbers.
+func startPerfTimerCensus(t testing.TB) func() {
+	if os.Getenv("CONNECT_PERF_TIMER_CENSUS") == "" {
+		return func() {}
+	}
+	stop, err := connectserver.Testing_StartTimerCensus()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return stop
+}
+
+// An opt-in ballast of far-off runtime timers on every P, as a connect
+// process's heaps hold about 60k a P (CPUOPT7.md §10.3.1), so each phase's CPU
+// profile shows what the heap walks its timer changes set off cost:
+// CONNECT_PERF_TIMER_BALLAST=<timers a P>. Each timer sits beside a filler
+// allocation and has a random deadline, so a walk misses cache as a server's
+// does. Returns the stop.
+func startPerfTimerBallast(t testing.TB) func() {
+	timerCount, _ := strconv.Atoi(os.Getenv("CONNECT_PERF_TIMER_BALLAST"))
+	if timerCount <= 0 {
+		return func() {}
+	}
+	workerCount := runtime.GOMAXPROCS(0)
+	workerTimers := make([][]*time.Timer, workerCount)
+	workerFillers := make([][][]byte, workerCount)
+	var setup sync.WaitGroup
+	for worker := range workerCount {
+		setup.Add(1)
+		go func() {
+			defer setup.Done()
+			for i := range timerCount {
+				workerTimers[worker] = append(workerTimers[worker], time.AfterFunc(time.Hour+time.Duration(mathrand.Int64N(int64(time.Hour))), func() {}))
+				workerFillers[worker] = append(workerFillers[worker], make([]byte, 512))
+				if i%1024 == 0 {
+					runtime.Gosched()
+				}
+			}
+		}()
+	}
+	setup.Wait()
+	fmt.Printf("[perf]timer ballast %d a P over %d Ps\n", timerCount, workerCount)
+	return func() {
+		for _, timers := range workerTimers {
+			for _, timer := range timers {
+				timer.Stop()
+			}
+		}
+		runtime.KeepAlive(workerFillers)
+	}
+}
+
+// One measured span of the census, nil counts when no census runs.
+type perfTimerCensusSpan struct {
+	startTime time.Time
+	before    map[string]map[string]float64
+}
+
+func newPerfTimerCensusSpan() *perfTimerCensusSpan {
+	return &perfTimerCensusSpan{
+		startTime: time.Now(),
+		before:    server.Testing_TimerCensusCounts(),
+	}
+}
+
+// Prints the rate of each site and horizon over the span, largest first.
+func (self *perfTimerCensusSpan) report(label string) {
+	if self.before == nil {
+		return
+	}
+	after := server.Testing_TimerCensusCounts()
+	elapsed := time.Since(self.startTime).Seconds()
+	type censusRate struct {
+		site      string
+		horizon   string
+		perSecond float64
+	}
+	rates := []censusRate{}
+	for site, horizonCounts := range after {
+		for horizon, count := range horizonCounts {
+			if delta := count - self.before[site][horizon]; 0 < delta {
+				rates = append(rates, censusRate{site: site, horizon: horizon, perSecond: delta / elapsed})
+			}
+		}
+	}
+	slices.SortFunc(rates, func(a censusRate, b censusRate) int {
+		switch {
+		case a.perSecond < b.perSecond:
+			return 1
+		case b.perSecond < a.perSecond:
+			return -1
+		default:
+			return strings.Compare(a.site+a.horizon, b.site+b.horizon)
+		}
+	})
+	for _, rate := range rates {
+		fmt.Printf("[perfcensus]%s span=%.1fs site=%s horizon=%s rate=%.1f/s\n", label, elapsed, rate.site, rate.horizon, rate.perSecond)
+	}
+}
+
 type perfReceivedMessage struct {
 	sourceId   server.Id
 	index      uint32
@@ -143,6 +249,8 @@ func testConnectPerformance(t testing.TB, enableContracts bool) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	defer startPerfTimerCensus(t)()
+	defer startPerfTimerBallast(t)()
 
 	fmt.Printf("[perf]mode=%s go=%s cpus=%d gomaxprocs=%d\n", modeName, runtime.Version(), runtime.NumCPU(), runtime.GOMAXPROCS(0))
 
@@ -837,7 +945,9 @@ func testConnectPerformance(t testing.TB, enableContracts bool) {
 			runtime.SetMutexProfileFraction(5)
 		}
 		stopCpu := startCpuProfile(label)
+		censusSpan := newPerfTimerCensusSpan()
 		blast(label, clientA, destinationB, statsB, contentSize, perfBlastDuration, false)
+		censusSpan.report(modeName + "-" + label)
 		stopCpu()
 		if profileMutex {
 			writeProfile("mutex", label)
@@ -850,13 +960,17 @@ func testConnectPerformance(t testing.TB, enableContracts bool) {
 	// one-way fire-and-forget throughput: isolates the ack path cost
 	{
 		stopCpu := startCpuProfile("noack1024")
+		censusSpan := newPerfTimerCensusSpan()
 		blast("noack1024", clientA, destinationB, statsB, 1024, perfBlastDuration, true)
+		censusSpan.report(modeName + "-noack1024")
 		stopCpu()
 	}
 
 	// bidirectional throughput
 	{
 		stopCpu := startCpuProfile("bidi1024")
+		censusSpan := newPerfTimerCensusSpan()
+		defer censusSpan.report(modeName + "-bidi1024")
 		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() {
@@ -1071,6 +1185,7 @@ func testConnectCarrierPerformance(t testing.TB, ctx context.Context, pathName s
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	label := fmt.Sprintf("path=%s carrier=%s", pathName, carrierCase.name)
+	defer startPerfTimerCensus(t)()
 
 	type perfCarrierClient struct {
 		peer      *perfCarrierPeer
@@ -1264,6 +1379,8 @@ func testConnectCarrierPerformance(t testing.TB, ctx context.Context, pathName s
 	floorsMet := func() bool {
 		return 0 < bestEchoRttP50 && bestEchoRttP50 <= maxEchoRttP50 && minMessageRate <= bestMessageRate
 	}
+	censusSpan := newPerfTimerCensusSpan()
+	defer censusSpan.report(fmt.Sprintf("path=%s-carrier=%s", pathName, carrierCase.name))
 	for run := 0; run < perfCarrierRunCount || (!floorsMet() && run < perfCarrierRunCount+mcPerfExtraRunCount); run += 1 {
 		measuredRun := measure(run)
 		if bestEchoRttP50 == 0 || measuredRun.echoRttP50 < bestEchoRttP50 {

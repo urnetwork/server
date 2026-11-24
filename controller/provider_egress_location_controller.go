@@ -6,8 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/urnetwork/glog"
-
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/probeverdict"
@@ -185,11 +183,6 @@ func providerEgressVerdict(
 // A submission without exit_ip is the retired vendor-consensus shape. It is
 // refused rather than stored: the prober and the server deploy together, and a
 // country an older prober asserted is not the server's own lookup.
-//
-// The provider is then judged by the exit (judgeProviderEgressExit): its ARIN
-// Quality and country are the exit's, and an exit in none of the networks it
-// connects from counts it at no unit. A replayed submission repeats the
-// judgement, so a retry completes one that failed part way.
 func SubmitProviderEgressLocation(
 	ctx context.Context,
 	args *SubmitProviderEgressLocationArgs,
@@ -247,48 +240,9 @@ func SubmitProviderEgressLocation(
 	// it, so this parse cannot fail.
 	if addr, err := netip.ParseAddr(strings.TrimSpace(args.ExitIp)); err == nil {
 		model.SetProviderEgressKey(ctx, args.ClientId, addr, args.ObservedAt)
-		// the provider is judged by this exit (model/provider_egress_exit_model.go)
-		judgeProviderEgressExit(ctx, args.ClientId, addr.Unmap(), args.ObservedAt, exit.Location.LocationId)
 	}
 
 	return &SubmitProviderEgressLocationResult{LocationId: exit.Location.LocationId}, nil
-}
-
-// Classifies the exit with this process's ARIN pair, exactly as a connection's
-// own address is classified (setArinConnectionFacts), and judges the provider
-// by it (model.JudgeProviderEgressExit), placed at locationId. A failed lookup
-// leaves the exit unclassified: the provider's connections keep their own
-// facts, and the exit still decides the mark and their place. The address is
-// dropped here.
-func judgeProviderEgressExit(
-	ctx context.Context,
-	clientId server.Id,
-	exitIp netip.Addr,
-	observedAt time.Time,
-	locationId server.Id,
-) {
-	judgement := model.ProviderEgressExitJudgement{
-		ObservedAt: observedAt.UTC(),
-	}
-	if latest, old, err := arinInfoPairForAddr(exitIp); err == nil {
-		scores := &model.ConnectionLocationScores{}
-		setArinConnectionFacts(scores, latest, old)
-		judgement.ArinNonQuality = scores.ArinNonQuality
-		judgement.ArinQualityVerified = scores.ArinQualityVerified
-		judgement.ArinDatabaseBuildEpoch = scores.ArinDatabaseBuildEpoch
-		if scores.ArinLookupAt != nil {
-			judgement.ArinLookupAt = *scores.ArinLookupAt
-		}
-		judgement.ArinOldNonQuality = scores.ArinOldNonQuality
-		judgement.ArinOldQualityVerified = scores.ArinOldQualityVerified
-		judgement.ArinOldDatabaseBuildEpoch = scores.ArinOldDatabaseBuildEpoch
-	} else {
-		// the error names no address
-		glog.Infof("[pel][%s]exit ARIN lookup failed; judging without its facts. err = %s\n", clientId, err)
-	}
-	// connections that closed up to the allowed prober clock skew before the
-	// probe still count as live at it
-	model.JudgeProviderEgressExit(ctx, clientId, exitIp, judgement, locationId, MaxProviderEgressLocationSubmissionSkew)
 }
 
 // maxProbeFailureLen bounds the failure class as submitted:

@@ -23,7 +23,7 @@ var companionOriginLookupCounter = prometheus.NewCounterVec(prometheus.CounterOp
 }, []string{"source"})
 var companionOriginWakeCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "urnetwork_connect_companion_origin_wait_wakes_total",
-	Help: "Companion-origin waits woken by an event, timed fallback, deadline, or caller cancellation",
+	Help: "Companion-origin waits woken by an event, timed fallback, deadline, caller cancellation, or the acknowledgement of the pair's subscription after a read that missed before it (registration)",
 }, []string{"source"})
 var companionOriginLookupHistogram = prometheus.NewHistogram(prometheus.HistogramOpts{
 	Name:    "urnetwork_connect_companion_origin_lookups_per_request",
@@ -32,10 +32,10 @@ var companionOriginLookupHistogram = prometheus.NewHistogram(prometheus.Histogra
 })
 
 func init() {
-	for _, source := range []string{"initial", "event", "fallback", "deadline"} {
+	for _, source := range []string{"initial", "event", "fallback", "deadline", "registration"} {
 		companionOriginLookupCounter.WithLabelValues(source)
 	}
-	for _, source := range []string{"event", "fallback", "deadline", "cancel"} {
+	for _, source := range []string{"event", "fallback", "deadline", "cancel", "registration"} {
 		companionOriginWakeCounter.WithLabelValues(source)
 	}
 	prometheus.MustRegister(companionOriginLookupCounter, companionOriginWakeCounter, companionOriginLookupHistogram)
@@ -69,14 +69,32 @@ type companionOriginLookup interface {
 	Lookup(context.Context, bool, func() (*model.TransferEscrow, error)) (*model.TransferEscrow, error)
 }
 
+// The event sources of one wait. arm takes the pair's event channel immediately
+// before each authoritative read. missed, after a read that found no origin,
+// returns the channel that closes once the pair's subscription is acknowledged
+// (`model.ContractOriginWatch.Missed`), or nil when that read was fenced or no
+// subscription is coming. Either may be nil.
+type companionOriginWaitEvents struct {
+	arm    func() <-chan struct{}
+	missed func() <-chan struct{}
+}
+
 // Only an absent origin is retryable. A successful creation is returned exactly
 // once, even if the caller's context expires during its committed transaction.
 // A request marked by `withCompanionOriginSingleLookup` never retries.
+//
+// The reads keep their schedule: the first at once, the next 100ms after it
+// started, then every 500ms, and a final read at the 3s deadline. An event
+// brings a read forward, but never closer than 100ms to the previous one. So
+// does the acknowledgement of the pair's subscription after a read that missed
+// before it (`registration`): an origin whose edge was published before the
+// subscription applied is found by that read, which therefore runs no later
+// than the fallback's, and later reads are fenced.
 func waitForCompanionOrigin(
 	ctx context.Context,
 	shared companionOriginLookup,
 	createEscrow func() (*model.TransferEscrow, error),
-	updates ...func() <-chan struct{},
+	events companionOriginWaitEvents,
 ) (*model.TransferEscrow, error) {
 	deadline := time.Now().Add(CompanionOriginWaitTimeout)
 	attempts := 0
@@ -106,8 +124,8 @@ func waitForCompanionOrigin(
 			continue
 		}
 		var update <-chan struct{}
-		if len(updates) > 0 && updates[0] != nil {
-			update = updates[0]()
+		if events.arm != nil {
+			update = events.arm()
 		}
 		// Subscribe immediately before the authoritative read. A commit or
 		// subscription acknowledgement during that read remains observable.
@@ -139,6 +157,10 @@ func waitForCompanionOrigin(
 		if single || !time.Now().Before(deadline) {
 			return nil, err
 		}
+		var registration <-chan struct{}
+		if events.missed != nil {
+			registration = events.missed()
+		}
 		fallback := companionOriginFallbackTimeout
 		if attempts == 1 {
 			fallback = CompanionOriginWaitPollTimeout
@@ -150,6 +172,8 @@ func waitForCompanionOrigin(
 			return nil, ctx.Err()
 		case <-update:
 			source = "event"
+		case <-registration:
+			source = "registration"
 		case <-time.After(wait):
 			source = "fallback"
 			if !time.Now().Before(deadline) {

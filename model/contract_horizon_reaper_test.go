@@ -96,7 +96,8 @@ func TestNarrowContractHorizonControl(t *testing.T) {
 			mode: ContractHorizonModeOff, rate: 200, batchSize: 2000},
 		{name: "unparsable mode is off", fields: map[string]string{"mode": "yes"}, mutate: func(s *ContractHorizonSettings) { s.DefaultMode = ContractHorizonModeOn },
 			mode: ContractHorizonModeOff, rate: 200, batchSize: 2000},
-		{name: "rate raised to the ceiling", fields: map[string]string{"mode": "on", "maxRowsPerSecond": "50000"}, mode: ContractHorizonModeOn, rate: 2000, batchSize: 2000},
+		{name: "rate raised to the ceiling", fields: map[string]string{"mode": "on", "maxRowsPerSecond": "50000"}, mode: ContractHorizonModeOn, rate: 5000, batchSize: 2000},
+		{name: "rate raised inside the ceiling", fields: map[string]string{"mode": "on", "maxRowsPerSecond": "3000"}, mode: ContractHorizonModeOn, rate: 3000, batchSize: 2000},
 		{name: "rate lowered", fields: map[string]string{"mode": "on", "maxRowsPerSecond": "25.5"}, mode: ContractHorizonModeOn, rate: 25.5, batchSize: 2000},
 		{name: "zero rate is off", fields: map[string]string{"mode": "on", "maxRowsPerSecond": "0"}, mode: ContractHorizonModeOff, rate: 0, batchSize: 2000},
 		{name: "negative rate is off", fields: map[string]string{"mode": "on", "maxRowsPerSecond": "-5"}, mode: ContractHorizonModeOff, rate: -5, batchSize: 2000},
@@ -138,7 +139,7 @@ func TestParseContractHorizonMode(t *testing.T) {
 }
 
 // Pure: the code's horizon is the owner's 91 days. A shorter setting applies
-// down to the reaper's 35-day floor and no closer, and the floor is the
+// down to the reaper's 14-day floor and no closer, and the floor is the
 // reaper's own: server.ContractRetention, which the partition drop and the
 // other retentions share, stays 91 days.
 func TestContractHorizonNeverBelowFloor(t *testing.T) {
@@ -155,11 +156,19 @@ func TestContractHorizonNeverBelowFloor(t *testing.T) {
 		t.Fatal("a 40-day horizon setting was not applied", settings.horizon())
 	}
 	settings.Horizon = 30 * 24 * time.Hour
-	if settings.horizon() != 35*24*time.Hour {
+	if settings.horizon() != 30*24*time.Hour {
+		t.Fatal("a 30-day horizon setting was not applied", settings.horizon())
+	}
+	settings.Horizon = 18 * 24 * time.Hour
+	if settings.horizon() != 18*24*time.Hour {
+		t.Fatal("an 18-day horizon setting was not applied", settings.horizon())
+	}
+	settings.Horizon = 13 * 24 * time.Hour
+	if settings.horizon() != 14*24*time.Hour {
 		t.Fatal("a horizon setting below the floor was not raised to it", settings.horizon())
 	}
 	settings.Horizon = 0
-	if settings.horizon() != 35*24*time.Hour {
+	if settings.horizon() != 14*24*time.Hour {
 		t.Fatal("a zero horizon setting was not raised to the floor", settings.horizon())
 	}
 	settings.Horizon = 120 * 24 * time.Hour

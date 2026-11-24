@@ -1,7 +1,7 @@
 package nginx
 
 // The front's api handler over a real http3 server, for what depends on
-// the vendored http3 (third_party/quic-go): the forwarder's per-read body
+// URnetwork's http3 (../quic-go): the forwarder's per-read body
 // timeout reaches an h3 request's stream through http.ResponseController.
 
 import (
@@ -13,15 +13,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/http3"
+	"github.com/urnetwork/quic-go"
+	"github.com/urnetwork/quic-go/http3"
 )
 
 // On h3 the forwarder bounds each read of a request body by
-// client_body_timeout, as on h1 and h2: the vendored http3's ResponseWriter
-// takes a read deadline through http.ResponseController, which sets it on
-// the request's stream, so a body that stalls past the timeout is a 408,
-// not a wait for the request's context.
+// client_body_timeout, as on h1 and h2: the ResponseWriter of the quic-go
+// fork's http3 takes a read deadline through http.ResponseController, which
+// sets it on the request's stream, so a body that stalls past the timeout is
+// a 408, not a wait for the request's context.
 func TestNewFrontH3BoundsEachBodyReadByTheClientBodyTimeout(t *testing.T) {
 	const clientBodyTimeout = 200 * time.Millisecond
 	vault := newTestTlsVault(t)

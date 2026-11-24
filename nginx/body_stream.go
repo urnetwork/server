@@ -177,9 +177,9 @@ func (self *forwardStreamedBody) Read(p []byte) (int, error) {
 	}
 	self.readBytes += int64(n)
 	if err == io.EOF && 0 <= self.declaredLength && self.readBytes < self.declaredLength {
-		// a body that ended short of its declared length, which the vendored
-		// http3 reports as the stream's end (bodyStore.read): a client-side
-		// failure, which ends the request with nginx's 400
+		// a body that ended short of its declared length, which the quic-go
+		// fork's http3 reports as the stream's end (bodyStore.read): a
+		// client-side failure, which ends the request with nginx's 400
 		self.fail(&bodyRefusal{status: http.StatusBadRequest, reason: bodyRefusalIncomplete})
 		return n, io.ErrUnexpectedEOF
 	}

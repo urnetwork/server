@@ -20,7 +20,7 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/quic-go/quic-go/http3"
+	"github.com/urnetwork/quic-go/http3"
 )
 
 // A body reader that hands out its bytes in chunks and counts what was
@@ -499,7 +499,7 @@ func TestBodyStoreSpillWriteFailure(t *testing.T) {
 }
 
 // A body whose reads end, without an error, short of its declared length, as
-// the vendored http3 ends one at the stream's end, is nginx's 400, and
+// the quic-go fork's http3 ends one at the stream's end, is nginx's 400, and
 // nothing stays held; one that ends at its length, whether that read reports
 // the end or not, is stored.
 func TestBodyStoreRefusesABodyEndingShortOfItsLength(t *testing.T) {

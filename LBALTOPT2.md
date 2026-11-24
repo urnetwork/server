@@ -450,6 +450,152 @@ Ranked by impact over effort, with risk.
 - `./grafana` with promtool;
 - R15's own suites.
 
+### 8.1 R14's second half: logical timers on a sweep
+
+Server branch `feat/connect-timer-sweep-1120`, not merged or deployed. It shrinks the heaps the walks visit (§3.4) by taking a connection's logical timers out of them. Socket deadlines and heartbeats stay as they are.
+
+**The sweep** (`internal/timersweep`):
+- **One per process.** `newExchange` makes it. The handler gives it to every announcement and authorization lease, and the exchange's residents and forwards use it.
+- **Sharded:** one hashed timing wheel per P, GOMAXPROCS shards, each with its own lock. New timers take the shards in turn. A wheel has 1024 slots of one tick, so a rotation is 102.4 s, and a deadline further out waits in its slot through the earlier passes.
+- **Fixed tick, 100 ms.** A timer fires at the first tick boundary at or after its deadline: never early, and at most 100 ms late, before the scheduling delay every timer has. A timer re-armed when it fires drifts by at most a tick a period. A ticker keeps its cadence from its start, as a `time.Ticker` does.
+- **Driven by one runtime timer per shard,** re-armed only after it fires. A timer that's in no heap when it's re-armed is simply added, so the drivers never set off a walk. A shard's driver runs only while the shard holds an armed timer, so an idle sweep has no goroutine and no runtime timer, and needs no close.
+- **A fire never blocks the sweep.** It's a non-blocking send on the owner's one-slot channel, made under the shard's lock, and the owner's goroutine does the work. A fire the owner hasn't received absorbs later ones. The sweep never calls owner code or logging.
+- **Cancellation and teardown:** each owner stops its timer as it returns. Arming, re-arming and stopping each unlink or link one entry, O(1), and a stopped timer leaves no entry behind. As with a Go 1.23 timer, `Reset` and `Stop` discard a fire not yet received, so no stale fire arrives after either returns.
+- **Memory:** an 80-byte timer and its 112-byte channel, 192 bytes in two allocations, plus each shard's 8 KiB of slots. A runtime timer with its channel takes 248 bytes in three.
+- **Without a sweep,** an owner built directly, as tests build them, gives each timer a sweep of its own. Its tick is the process's for a wait of 1.6 s or more, and a sixteenth of a shorter wait, so a test that compresses a 30 s round to 50 ms keeps the sweep's proportions. Inside a synctest bubble that sweep's driver stays in the bubble.
+
+**Converted.** Each fires at its deadline or at most 100 ms after it, never before:
+
+| Timer | Deadline | Why a 100 ms delay is harmless |
+|---|---|---|
+| Announce window, two halves | 2.5 s each | Registration comes at most 200 ms later. The pending marker has 5 s of slack beyond the window. |
+| Announce sync round | 30 s, retries up to 120 s | A round's stats cover the time since the last round ended, so a late round loses nothing, and a 30.1 s round still starts inside the previous 60 s block, which the rollup hasn't drained. |
+| Announce test schedule | 12–24 h, random | Against a random 12–24 h. |
+| Announce verify egress refresh | 2 min | The lease lives 10 min. |
+| Passive speed sample | 5 s window | A window runs 5.0–5.1 s, and the sample divides by its measured length. |
+| Resident idle watch | 300 s from the last activity | An idle resident lives at most 100 ms longer. Activity still moves the deadline, and retirement never comes before it. |
+| Resident registration refresh | 75 s after the last refresh | The registration's ttl is 300 s. |
+| Resident stream grant republish | every 30 s from the resident's start | A grant's lease is 90 s. |
+| Forward idle watch | 3 min from the last payload | An idle forward lives at most 100 ms longer, never ending before its deadline. |
+| Lease horizon | the credential's horizon | The horizon already carries the 30 s clock leeway past the token's expiry, and a recheck also retires a credential past it. |
+| Lease recheck ticker | every 60 s from the lease's start | A lease's deadline is 90 s after its last check starts. |
+
+**Left as they are:**
+- **Socket deadlines,** native, by the 2026-10-30 rule (CPUOPT-KEEPALIVE.md).
+- **Heartbeats:** the h1 writer's ping, reset per idle transition; the exchange writer's pinger (`newExchangePinger`); and a forward's ping worker (`handleExchangeConnection`, the 81k in §3.4). Each promises the peer a frame at least every ping interval, and the exchange's TCP keepalive starts probing 1 s after a missed ping. A tick late would break that promise. Arming a tick early would keep it, at about 1% more pings, but that's a change to a heartbeat and isn't made here.
+- **Per-message bounds:** a forward's write timer (`runWithResidentLookup`) bounds one send into a full queue, and it's in a heap only while such a send waits.
+- **The client library's timers** (`resetOrCreateTimer`, `sequenceDeadlineTimer`) and quic-go's.
+- **Retries during an outage:** the measurement write retry and the lease's unanswered-recheck retry, which run only after a failure.
+- **`registerWhenResident`,** whose first poll is 100 ms: a tick would double it, and it lives at most 30 s.
+- **A resident's stream hop and network peer listeners** (`model`), one of each per resident: jittered polls, every 10 min in production as the backstop to key events. They're the next candidates, but they're in `model`, outside this change.
+
+**Measured** on an Apple M1 Max, 10 cores, shared with other sessions' builds and tests (load averages 110–260). The figures compare the two sides of the change; they don't predict production.
+
+- **Runtime timers a simulated connection holds** (`TestConnectionTimerCensus`, 64 connections on the local stack, counted 8 s in). A connection is a resident nominated on the production path, one forward from it, an announcement with verify refreshes on, and a lease with a credential horizon:
+
+  | | main `68c19400d` | This branch |
+  |---|---|---|
+  | The converted owners' runtime timers | 10.00 | 0 |
+  | Their sweep timers | 0 | 10.00 |
+  | Every runtime timer the connections made | 13.61 | 3.27 |
+
+  Before, the announcement held 4 (rounds, test schedule, verify refresh, passive samples), the lease 2, the resident 3 and the forward 1. What's left is the resident's client's send sequence deadline and route write timer, 2.0 a connection, the stream hop listener's poll, 1.0, and the sweep's 10 drivers, 0.16 a connection here.
+- **One heap walk** (`BenchmarkTimerHeapWalkCost`): one P, its heap at §3.4's 55,000 timers before and 31,786 after, the table's 42% taken out, with random deadlines so the walk misses cache as a server's does. Each op moves a pending timer ahead of the rest, so the P walks its heap.
+  - CPU a walk: 367–412 µs before and 131–179 µs after, over six runs of 3,000 walks each; 389 and 143 µs over 100,000.
+  - `runtime.(*timers).check` is 78–95% of the benchmark's CPU on both sides. Over 3,000 walks it fell from 0.97–1.16 s to 0.35–0.49 s.
+  - That's about 7 ns a timer before and 5 ns after: the smaller heap stays in cache better, so the CPU falls further than the timer count, by 60–64%. If production's walks scale between the two, `timers.check`'s 10–12% of connect would fall by 42–64% at the same walk rate, before R14's first half lowers the rate.
+- **The sweep's own cost:**
+  - arming and stopping a timer, 31–63 ns an op on 10 Ps in parallel, without allocating, about twice a runtime timer's 15–21 ns;
+  - a fire and its receipt, the owner's wake included, 1.0–1.5 µs of CPU, against 0.83–0.96 µs for a runtime channel timer (4,096 owners, 1 ms tick);
+  - the drivers' ticks over 550,000 armed timers, 15–26 µs a shard tick, or 2.7–4.7 ns a timer a second: about 2 ms a second for a process's 600,000;
+  - memory, 192 bytes and 2 allocations a timer with its channel, against 248 bytes and 3 for a runtime timer.
+
+**Tested:**
+- `internal/timersweep`, under the race detector: synctest tests that a timer fires at the first tick at or after its deadline, never early and less than a tick late, through `Reset` and `Stop` (none leaves a stale fire, even at the deadline's own instant), wheel rotations and a deadline past the wheel's range; that a ticker keeps its cadence; that an owner that never receives doesn't hold up the sweep; and that a shard's driver runs only while it holds a timer. In real time, a driver held for three rotations fires every due timer once, and owners on every shard arm, reset and stop at once.
+- **Each converted owner,** in a synctest bubble, with its deadline between two ticks: it fires at its deadline or at most a tick after it, never before, and its timer leaves the sweep when the owner ends. That's the resident's and the forward's idle watches, the registration refresh, the passive samples, and the lease's horizon and recheck cadence. The stream grant republish is checked for its one ticker on the sweep, whose cadence the package's tests cover. The announcement's window, rounds, test schedule and verify refreshes run in `run()`, which needs the database and Redis, so they're tested in real time on the local stack, each fire against its own arm.
+- **The wiring:** the exchange makes the sweep, the handler gives it to its announcements, and h1 and h3 transports' leases wait on it.
+- **The existing tests,** with the timer counts of the announce round and passive sample tests now asserting no runtime timers.
+- **Suites, on the local stack:** `internal/timersweep` with `-race`; the whole `session` package (25 minutes); and 522 of server connect's tests, every announce, resident, forward, client-close, exchange, move, peer, session, stream, transport-auth and timer test (29 minutes). The connect run first found a test fixture's resident without an exchange, whose stream grant ticker now gets a sweep of its own, and two announce tests that compress a 30 s round to 50–100 ms, which a timer's own sweep now scales its tick for.
+
+## 9. Results and decisions, 2026-11-21 to 2026-11-22
+
+This section records what shipped from §5 and what it measured. §1–§8 are left as written on 2026-11-20.
+
+### 9.1 Status of each recommendation
+
+| R | Status | Where |
+|---|---|---|
+| R13 | Live since 11-20 | connect hotfix 1104116030 |
+| R14 | Live. The first half since 11-20; the sweep (§8.1) since 11-21, and its authorization lease timers since 11-22 | hotfix 1104287110, then main builds |
+| R15 | Live. (a)–(c) since 11-20. (d), the identity limit, since 11-22 07:33–07:40Z, at 120 requests a minute, a burst of 60 and an address factor of 20 | §9.3 |
+| R16 | Measured and fixed (§9.2) | warp bca1f62, vault bb92ce9 |
+| R17 | Dropped (owner, 11-22) once R16 had balanced the blocks | – |
+| R18 | Announce batching on main (d6d0d9ac7). A session's six exchange queues grow as they fill (4e4ac9e34): its setup allocates 108 KB, not 698 KB | live from 11-22 |
+| R19 | Live since 11-21 | hotfix 1104287110 |
+| R20 | (a) and (b): a phone's h3 carriers claim 923,532 bytes each, not 2 MiB, and an h3 transport the budget can't admit is carried on h1 (connect f4d102a8, sdk 6ad9a88a). quic-go became its own module, `github.com/urnetwork/quic-go` at `../quic-go`; server removed its copy (db272dde3). (c) is not done. (d) became the whodis diagnosis (§9.4) | apps with the next sdk release |
+| R21, R23 | On main with R18 (d6d0d9ac7) | live from 11-22 |
+| R22 | (a), session ticket keys shared by every front: live since 11-22 06:27Z (vault 9bf6107). (b), the offer counters: live since 11-21 | §9.3 |
+| R24 | On main since 11-20 (32c46f14e) | – |
+
+### 9.2 R16: the block imbalance was our own proxy fleet
+
+- **Finding (11-21):** one IPv4 /29 held about 110k of connect's 258k connections (43%), every one on g2 or g4.
+  - Every client behind it was a server/proxy "resident proxy" DeviceLocal, one connection each, spread across 24k networks.
+  - They dial connect's public URL and reach the front through our own routers' NAT, from our public /27. Hashing that /29 with the client IP pepper matched it to the /27's addresses, with no address printed.
+  - The split hashed new flows by source address alone (§3.9), so the whole fleet landed on two blocks.
+- **Fix:** `lb.lb_alt_port_hash_sources` in services.yml (warp bca1f62).
+  - New TCP flows from the listed prefixes hash by source address and source port.
+  - UDP stays address-hashed: the proxy pins its DeviceLocals to h1, and QUIC must keep its block across NAT rebinding, since `ConnGroup` moves a connection only within one block.
+  - The /27 is listed (vault bb92ce9).
+- **Rollout (11-22, 02:54–03:15Z):** warpctl was installed with `WARP_SKIP_SERVICES=1 run-edges.sh`, then `run-lb-unit.sh` ran on each of the 10 interfaces, one at a time.
+- **Result:** after the next connect roll, the blocks carry 66–73k connections each, against 35k/87k/36k/97k on 11-21. The proxy fleet is spread at 31–36k a block.
+
+### 9.3 The connect rolls of 11-22, tickets and identity limits
+
+- **Roll 1:** 2026.11.21-outerwerld+1104998540 (server a65bf5cd1) went out at 06:27–06:37Z, in two waves. It carried R18/R21/R23, R20's quic-go switch and the lease timers on the sweep. Shared ticket keys took effect as each block restarted.
+- **Roll 2:** 2026.11.22-outerwerld+1105316750 (server 45a8de9c6) went out at 07:33–07:40Z. It added the growable queues and the whodis server fixes.
+  - The identity limit needs the connect block's runner to render it into the route file. The runners had run warpctl from 11-20 06:06Z, which predates that rendering.
+  - So each wave's runners were stopped, the new target was set, and the runners were started on warpctl bca1f62. Each block cycled once.
+- **Superseded:** the release 2026.11.22+1105365180 replaced both builds from 13:30Z.
+
+**Measured,** with all drains done:
+
+| | Before | After |
+|---|---|---|
+| PSK offers resumed (R22 (a)) | about 36% (§3.8) | 98–99.9% |
+| Front refusals | about 1.8k/s, of which about 1.5k/s were address requests | 0.5–0.9k/s; address requests near 0 |
+| Identity refusals | – | 420–880/s, mostly api class |
+| api 2xx | 6.8k/s | 6.6–7.4k/s |
+| connect JWT rejections | about 3.6/s | about 3.6/s |
+| connect CPU per Gbps, edges 0/1/3/4 (08:44Z vs a day earlier) | 8.45 cores | 8.39 cores |
+| connect allocation | 2.5 GB/s | 1.7 GB/s (−33%) |
+| GC pause time | – | −31% |
+
+The growable queues' per-message cost and the identity checks roughly offset the GC savings: CPU per Gbps is flat.
+
+### 9.4 whodis: clients abandoned their own handshakes
+
+- **The failure:** about 98% of whodis handshakes failed, 97% of them at the front's 30 s idle timeout. Connect-class QUIC on 443 completed about 98% on the same sockets, so the network path wasn't the cause.
+- **Causes:**
+  - a phone's memory-budget race cancelled the attempt in flight at every 250 ms stagger, where a whodis handshake needs 0.4–1 s;
+  - desktop parallel blocks and hedges cancelled the slower whodis dialer;
+  - the h3 gate cancelled in-flight h3dns attempts;
+  - the quic-go fork dropped a cancelled dial without a CONNECTION_CLOSE, so the server waited out its idle timeout.
+- **Fixes:**
+  - **Clients** (connect b67da3eb and quic-go 83a1e6f8): an attempt that hears alt is kept; desktops start whodis beside the others after 3 s if nothing has connected; the h3 gate keeps an in-flight h3dns dial; a cancelled dial sends a CONNECTION_CLOSE.
+  - **Extender DNS-carrier port race** (connect 1ee839f8): the same rule, with a 1 s stagger and a 2 s stall.
+  - **Server** (f7643f4fb): unpaced whodis replies, a 10 s whodis handshake idle timeout, an `interface` label and a failure `class` (hello_only, reply_unacked, abandoned) on the front's QUIC counts, Retries, and an unvalidated-handshake gauge.
+  - The client fixes reach the apps with the next sdk release.
+- **Deferred:** the router items (UDP 4053 on edge-0/1, IPv6 53/4053), until the routers move to the new router push.
+
+### 9.5 Open
+
+- R20 (c): split the `signature` rejection into a bounded label.
+- The TCP camouflage race keeps its 250 ms stagger (connect `net_extender_camouflage.go`).
+- An extender dial's request phase doesn't observe cancellation.
+- The OSV scan of the fork reports 14 unknown findings from its minimum golang.org/x versions; the owner chose not to raise them now.
+- The whodis counters, after the client fixes ship, will show what's left.
+
 ## Appendix A. Queries and profile commands
 
 **Queries.** Instant queries over the window, at its end, against Mimir. LBALTOPT1 Appendix A has the CPU, traffic and runtime queries. New here:

@@ -231,8 +231,8 @@ func (self *localTransportPumpFixture) close() {
 		// the done result is consumed; keep it readable for later checks
 		testLink.done <- localTransportDetachNone
 	}
-	returnReadyPooledMessages(self.transport.send)
-	returnReadyPooledMessages(self.transport.receive)
+	returnQueuedPooledMessages(self.transport.send)
+	returnQueuedPooledMessages(self.transport.receive)
 	if err := self.resident.CloseAndWait(context.Background()); err != nil {
 		self.t.Error(err)
 	}
@@ -254,16 +254,15 @@ func (self *localTransportTestLink) reason(t testing.TB) localTransportDetachRea
 
 // Receives the next message a pump delivers to queue, failing if the link
 // detaches before the delivery.
-func (self *localTransportTestLink) receive(t testing.TB, queue <-chan []byte, description string) []byte {
+func (self *localTransportTestLink) receive(t testing.TB, queue pooledMessageSource, description string) []byte {
 	t.Helper()
 	select {
-	case message := <-queue:
+	case message := <-queue.head():
+		queue.received()
 		return message
 	case <-self.link.ctx.Done():
-		select {
-		case message := <-queue:
+		if message, result := queue.tryReceive(); result == messageQueueReceived {
 			return message
-		default:
 		}
 		t.Fatalf("%s: the link detached before the delivery", description)
 		return nil
@@ -361,17 +360,18 @@ func TestLocalTransportPumpsKeepFrameOrderAndBatches(t *testing.T) {
 		residentMessage := newLocalTransportTestMessage(messageIndex, 40+messageIndex%500)
 		witnesses = append(witnesses, retainResidentPoolWitness(clientMessage), retainResidentPoolWitness(residentMessage))
 		wantBytes += 2*exchangeIOFrameHeaderByteCount + len(clientMessage) + len(residentMessage)
-		f.transport.send <- clientMessage
+		f.transport.send.sendForTest(clientMessage)
 		testLink.routeSend <- residentMessage
 	}
 	sentBefore := snapshotLocalTransportIO("sent", "data")
 	receivedBefore := snapshotLocalTransportIO("received", "data")
 	f.run(testLink)
 
-	read := func(queue <-chan []byte, wantByteCount func(int) int, description string) {
+	read := func(queue pooledMessageSource, wantByteCount func(int) int, description string) {
 		for messageIndex := range messageCount {
 			select {
-			case message := <-queue:
+			case message := <-queue.head():
+				queue.received()
 				if got := localTransportTestMessageIndex(message); got != messageIndex || len(message) != wantByteCount(messageIndex) {
 					t.Fatalf("%s message %d = index %d len %d, want len %d", description, messageIndex, got, len(message), wantByteCount(messageIndex))
 				}
@@ -381,7 +381,7 @@ func TestLocalTransportPumpsKeepFrameOrderAndBatches(t *testing.T) {
 			}
 		}
 	}
-	read(testLink.routeReceive, func(i int) int { return 20 + i%300 }, "client to resident")
+	read(pooledMessageChannel(testLink.routeReceive), func(i int) int { return 20 + i%300 }, "client to resident")
 	read(f.transport.receive, func(i int) int { return 40 + i%500 }, "resident to client")
 
 	batchLock.Lock()
@@ -437,19 +437,19 @@ func TestLocalTransportBatchDeadlineStallsDetach(t *testing.T) {
 		f := newLocalTransportPumpFixture(t, context.Background(), localTransportTestSettings(), 0)
 		defer f.close()
 		testLink := f.attach()
-		f.transport.send <- newLocalTransportTestMessage(1, 64)
+		f.transport.send.sendForTest(newLocalTransportTestMessage(1, 64))
 		f.run(testLink)
 		synctest.Wait()
 		time.Sleep(f.settings.WriteTimeout - time.Nanosecond)
-		clientconnect.MessagePoolReturn(testLink.receive(t, testLink.routeReceive, "a batch 1 ns inside its budget"))
+		clientconnect.MessagePoolReturn(testLink.receive(t, pooledMessageChannel(testLink.routeReceive), "a batch 1 ns inside its budget"))
 		synctest.Wait()
 		if !testLink.attached() {
 			t.Fatal("a batch delivered inside its budget detached the link")
 		}
-		f.transport.send <- newLocalTransportTestMessage(2, 64)
+		f.transport.send.sendForTest(newLocalTransportTestMessage(2, 64))
 		synctest.Wait()
 		time.Sleep(f.settings.WriteTimeout - time.Nanosecond)
-		clientconnect.MessagePoolReturn(testLink.receive(t, testLink.routeReceive, "the next batch 1 ns inside its own budget"))
+		clientconnect.MessagePoolReturn(testLink.receive(t, pooledMessageChannel(testLink.routeReceive), "the next batch 1 ns inside its own budget"))
 		synctest.Wait()
 		if !testLink.attached() {
 			t.Fatal("the next batch did not get a whole budget of its own")
@@ -463,7 +463,7 @@ func TestLocalTransportBatchDeadlineStallsDetach(t *testing.T) {
 		testLink := f.attach()
 		message := newLocalTransportTestMessage(1, 64)
 		witness := retainResidentPoolWitness(message)
-		f.transport.send <- message
+		f.transport.send.sendForTest(message)
 		dropsBefore, dropBytesBefore := snapshotLocalTransportDrops(receiveQueueBoundaryLocalTransportSend)
 		detachesBefore := snapshotLocalTransportDetaches(localTransportDetachWriteTimeout)
 		f.run(testLink)
@@ -493,12 +493,12 @@ func TestLocalTransportBatchDeadlineStallsDetach(t *testing.T) {
 		f := newLocalTransportPumpFixture(t, context.Background(), localTransportTestSettings(), 0)
 		defer f.close()
 		testLink := f.attach()
-		f.transport.send <- newLocalTransportTestMessage(1, 64)
-		f.transport.send <- newLocalTransportTestMessage(2, 64)
+		f.transport.send.sendForTest(newLocalTransportTestMessage(1, 64))
+		f.transport.send.sendForTest(newLocalTransportTestMessage(2, 64))
 		f.run(testLink)
 		synctest.Wait()
 		time.Sleep(10 * time.Second)
-		clientconnect.MessagePoolReturn(testLink.receive(t, testLink.routeReceive, "the first message of a shared budget"))
+		clientconnect.MessagePoolReturn(testLink.receive(t, pooledMessageChannel(testLink.routeReceive), "the first message of a shared budget"))
 		synctest.Wait()
 		time.Sleep(f.settings.WriteTimeout - 10*time.Second - time.Nanosecond)
 		synctest.Wait()
@@ -519,10 +519,10 @@ func TestLocalTransportBatchDeadlineStallsDetach(t *testing.T) {
 		testLink := f.attach()
 		f.run(testLink)
 		time.Sleep(time.Hour)
-		f.transport.send <- newLocalTransportTestMessage(1, 64)
+		f.transport.send.sendForTest(newLocalTransportTestMessage(1, 64))
 		synctest.Wait()
 		time.Sleep(f.settings.WriteTimeout - time.Nanosecond)
-		clientconnect.MessagePoolReturn(testLink.receive(t, testLink.routeReceive, "a batch after an idle hour"))
+		clientconnect.MessagePoolReturn(testLink.receive(t, pooledMessageChannel(testLink.routeReceive), "a batch after an idle hour"))
 		synctest.Wait()
 		if !testLink.attached() {
 			t.Fatal("a batch after an idle hour did not get its whole budget")
@@ -532,65 +532,125 @@ func TestLocalTransportBatchDeadlineStallsDetach(t *testing.T) {
 
 // The resident pump has the same bound into the transport's receive queue,
 // whose consumer is the client's writer. A stalled writer is modeled as a
-// consumer that stops reading a full queue.
+// consumer that stops reading a full queue. At bound 1 the queue is a channel;
+// at bound 3 it keeps its messages after the first in its ring, and the pump
+// waits as one of its senders.
 func TestLocalTransportResidentPumpDeadline(t *testing.T) {
 	warmLocalTransportPool()
-	settings := func() *ExchangeSettings {
-		settings := localTransportTestSettings()
-		settings.ExchangeBufferSize = 1
-		return settings
-	}
+	for _, bound := range []int{1, 3} {
+		settings := func() *ExchangeSettings {
+			settings := localTransportTestSettings()
+			settings.ExchangeBufferSize = bound
+			return settings
+		}
 
-	// healthy: the writer resumes 1 ns before the deadline
-	synctest.Test(t, func(t *testing.T) {
-		f := newLocalTransportPumpFixture(t, context.Background(), settings(), 16)
-		defer f.close()
-		testLink := f.attach()
-		f.transport.receive <- newLocalTransportTestMessage(0, 64)
-		testLink.routeSend <- newLocalTransportTestMessage(1, 64)
-		f.run(testLink)
-		synctest.Wait()
-		time.Sleep(f.settings.WriteTimeout - time.Nanosecond)
-		for messageIndex := range 2 {
-			message := testLink.receive(t, f.transport.receive, "a resident batch 1 ns inside its budget")
-			if localTransportTestMessageIndex(message) != messageIndex {
-				t.Fatalf("resident message %d out of order", messageIndex)
+		// healthy: the writer resumes 1 ns before the deadline
+		synctest.Test(t, func(t *testing.T) {
+			f := newLocalTransportPumpFixture(t, context.Background(), settings(), 16)
+			defer f.close()
+			testLink := f.attach()
+			for index := range bound {
+				f.transport.receive.sendForTest(newLocalTransportTestMessage(index, 64))
 			}
-			clientconnect.MessagePoolReturn(message)
-		}
-		synctest.Wait()
-		if !testLink.attached() {
-			t.Fatal("a resident batch delivered inside its budget detached the link")
-		}
-	})
+			testLink.routeSend <- newLocalTransportTestMessage(bound, 64)
+			f.run(testLink)
+			synctest.Wait()
+			time.Sleep(f.settings.WriteTimeout - time.Nanosecond)
+			for messageIndex := range bound + 1 {
+				message := testLink.receive(t, f.transport.receive, "a resident batch 1 ns inside its budget")
+				if localTransportTestMessageIndex(message) != messageIndex {
+					t.Fatalf("bound %d: resident message %d out of order", bound, messageIndex)
+				}
+				clientconnect.MessagePoolReturn(message)
+			}
+			synctest.Wait()
+			if !testLink.attached() {
+				t.Fatalf("bound %d: a resident batch delivered inside its budget detached the link", bound)
+			}
+		})
 
-	// stalled: detaches at exactly WriteTimeout
-	synctest.Test(t, func(t *testing.T) {
-		f := newLocalTransportPumpFixture(t, context.Background(), settings(), 16)
-		defer f.close()
-		testLink := f.attach()
-		f.transport.receive <- newLocalTransportTestMessage(0, 64)
-		message := newLocalTransportTestMessage(1, 64)
-		witness := retainResidentPoolWitness(message)
-		testLink.routeSend <- message
-		dropsBefore, _ := snapshotLocalTransportDrops(receiveQueueBoundaryLocalTransportReceive)
-		f.run(testLink)
-		synctest.Wait()
-		time.Sleep(f.settings.WriteTimeout - time.Nanosecond)
-		synctest.Wait()
-		if !testLink.attached() {
-			t.Fatal("the link detached before the resident batch's budget ended")
-		}
-		time.Sleep(time.Nanosecond)
-		synctest.Wait()
-		if testLink.attached() || testLink.reason(t) != localTransportDetachWriteTimeout {
-			t.Fatal("a resident batch blocked for its whole budget did not detach with write_timeout")
-		}
-		requireResidentPoolOwnerReturned(t, witness, "stalled resident batch")
-		if drops, _ := snapshotLocalTransportDrops(receiveQueueBoundaryLocalTransportReceive); drops-dropsBefore != 1 {
-			t.Errorf("stalled resident batch drops = %v, want 1", drops-dropsBefore)
-		}
-	})
+		// stalled: detaches at exactly WriteTimeout
+		synctest.Test(t, func(t *testing.T) {
+			f := newLocalTransportPumpFixture(t, context.Background(), settings(), 16)
+			defer f.close()
+			testLink := f.attach()
+			for index := range bound {
+				f.transport.receive.sendForTest(newLocalTransportTestMessage(index, 64))
+			}
+			message := newLocalTransportTestMessage(bound, 64)
+			witness := retainResidentPoolWitness(message)
+			testLink.routeSend <- message
+			dropsBefore, _ := snapshotLocalTransportDrops(receiveQueueBoundaryLocalTransportReceive)
+			f.run(testLink)
+			synctest.Wait()
+			time.Sleep(f.settings.WriteTimeout - time.Nanosecond)
+			synctest.Wait()
+			if !testLink.attached() {
+				t.Fatalf("bound %d: the link detached before the resident batch's budget ended", bound)
+			}
+			time.Sleep(time.Nanosecond)
+			synctest.Wait()
+			if testLink.attached() || testLink.reason(t) != localTransportDetachWriteTimeout {
+				t.Fatalf("bound %d: a resident batch blocked for its whole budget did not detach with write_timeout", bound)
+			}
+			requireResidentPoolOwnerReturned(t, witness, "stalled resident batch")
+			if drops, _ := snapshotLocalTransportDrops(receiveQueueBoundaryLocalTransportReceive); drops-dropsBefore != 1 {
+				t.Errorf("bound %d: stalled resident batch drops = %v, want 1", bound, drops-dropsBefore)
+			}
+		})
+	}
+}
+
+// A transport's receive queue that closed under the resident pump refuses its
+// batch, where a channel send would have panicked: the batch is returned and
+// counted, and the link detaches with transport_done, as when the transport
+// ends. The queue closes before the delivery at a channel's bound and above
+// it, and above bound 1 also while the pump waits for room, as its sender.
+func TestLocalTransportResidentPumpRefusedByAClosedQueue(t *testing.T) {
+	warmLocalTransportPool()
+	for _, c := range []struct {
+		bound        int
+		whileWaiting bool
+	}{
+		{bound: 1},
+		{bound: 3},
+		{bound: 3, whileWaiting: true},
+	} {
+		synctest.Test(t, func(t *testing.T) {
+			settings := localTransportTestSettings()
+			settings.ExchangeBufferSize = c.bound
+			f := newLocalTransportPumpFixture(t, context.Background(), settings, 16)
+			defer f.close()
+			testLink := f.attach()
+			if c.whileWaiting {
+				for index := range c.bound {
+					f.transport.receive.sendForTest(newLocalTransportTestMessage(index, 64))
+				}
+			} else {
+				f.transport.receive.close()
+			}
+			message := newLocalTransportTestMessage(c.bound, 64)
+			witness := retainResidentPoolWitness(message)
+			testLink.routeSend <- message
+			dropsBefore, _ := snapshotLocalTransportDrops(receiveQueueBoundaryLocalTransportReceive)
+			f.run(testLink)
+			synctest.Wait()
+			if c.whileWaiting {
+				if !testLink.attached() {
+					t.Fatalf("bound %d: the link detached before its waiting delivery was refused", c.bound)
+				}
+				f.transport.receive.close()
+				synctest.Wait()
+			}
+			if testLink.attached() || testLink.reason(t) != localTransportDetachTransportDone {
+				t.Fatalf("bound %d waiting %t: a closed receive queue did not detach the link with transport_done", c.bound, c.whileWaiting)
+			}
+			requireResidentPoolOwnerReturned(t, witness, "batch refused by a closed queue")
+			if drops, _ := snapshotLocalTransportDrops(receiveQueueBoundaryLocalTransportReceive); drops-dropsBefore != 1 {
+				t.Errorf("bound %d waiting %t: refused batch drops = %v, want 1", c.bound, c.whileWaiting, drops-dropsBefore)
+			}
+		})
+	}
 }
 
 // An oversized message fails its whole batch before any delivery, as a failed
@@ -623,10 +683,10 @@ func TestLocalTransportMaxMessageLenTearsDown(t *testing.T) {
 		failed := [][]byte{newLocalTransportTestMessage(1, 64), clientconnect.MessagePoolGet(c.oversizeLen)}
 		witnesses := retainLocalTransportPooledWitnesses(failed)
 		for _, message := range failed {
-			f.transport.send <- message
+			f.transport.send.sendForTest(message)
 		}
-		f.transport.send <- newLocalTransportTestMessage(3, 64)
-		f.transport.send <- newLocalTransportTestMessage(4, 64)
+		f.transport.send.sendForTest(newLocalTransportTestMessage(3, 64))
+		f.transport.send.sendForTest(newLocalTransportTestMessage(4, 64))
 		dropsBefore, dropBytesBefore := snapshotLocalTransportDrops(receiveQueueBoundaryLocalTransportSend)
 		detachesBefore := snapshotLocalTransportDetaches(localTransportDetachMaxMessageLen)
 		f.run(first)
@@ -674,7 +734,7 @@ func TestLocalTransportMaxMessageLenTearsDown(t *testing.T) {
 		if reason := third.waitDetach(t, c.name+" oversized resident batch"); reason != localTransportDetachMaxMessageLen {
 			t.Fatalf("%s: resident detach reason = %d, want max_message_len", c.name, reason)
 		}
-		if 0 < len(f.transport.receive) {
+		if 0 < f.transport.receive.len() {
 			t.Errorf("%s: a message of the failed resident batch was delivered", c.name)
 		}
 		requireResidentPoolOwnersReturned(t, residentWitnesses, c.name+" failed resident batch")
@@ -698,16 +758,16 @@ func TestLocalTransportZeroLengthIsPing(t *testing.T) {
 		clientPing := clientconnect.MessagePoolGet(0)
 		residentPing := clientconnect.MessagePoolGet(0)
 		witnesses := [][]byte{retainResidentPoolWitness(clientPing), retainResidentPoolWitness(residentPing)}
-		f.transport.send <- clientPing
-		f.transport.send <- newLocalTransportTestMessage(1, 64)
+		f.transport.send.sendForTest(clientPing)
+		f.transport.send.sendForTest(newLocalTransportTestMessage(1, 64))
 		testLink.routeSend <- residentPing
 		pingSentBefore := snapshotLocalTransportIO("sent", "ping")
 		pingReceivedBefore := snapshotLocalTransportIO("received", "ping")
 		f.run(testLink)
 		synctest.Wait()
 
-		if len(testLink.routeReceive) != 1 || len(f.transport.receive) != 0 {
-			t.Fatalf("delivered %d to the resident and %d to the client, want only the data message", len(testLink.routeReceive), len(f.transport.receive))
+		if len(testLink.routeReceive) != 1 || f.transport.receive.len() != 0 {
+			t.Fatalf("delivered %d to the resident and %d to the client, want only the data message", len(testLink.routeReceive), f.transport.receive.len())
 		}
 		if message := <-testLink.routeReceive; localTransportTestMessageIndex(message) != 1 {
 			t.Error("the data message after the ping was not delivered")
@@ -826,8 +886,8 @@ func TestLocalTransportBackpressure(t *testing.T) {
 			}
 			synctest.Wait()
 		}
-		if blocked != 1 || len(testLink.routeReceive) != 2 || len(f.transport.send) != 4 {
-			t.Fatalf("blocked=%d route=%d send=%d, want a blocked pump over full queues", blocked, len(testLink.routeReceive), len(f.transport.send))
+		if blocked != 1 || len(testLink.routeReceive) != 2 || f.transport.send.len() != 4 {
+			t.Fatalf("blocked=%d route=%d send=%d, want a blocked pump over full queues", blocked, len(testLink.routeReceive), f.transport.send.len())
 		}
 		waiting := make(chan struct{})
 		f.transport.beforeReliableReceiveWaitForTest = func() { close(waiting) }
@@ -901,7 +961,7 @@ func TestLocalTransportPoolOwnershipUnderTeardown(t *testing.T) {
 			load: func(f *localTransportPumpFixture, testLink *localTransportTestLink) [][]byte {
 				batch, witnesses := messages(0, 5)
 				for _, message := range batch {
-					f.transport.send <- message
+					f.transport.send.sendForTest(message)
 				}
 				return witnesses
 			},
@@ -921,7 +981,7 @@ func TestLocalTransportPoolOwnershipUnderTeardown(t *testing.T) {
 			load: func(f *localTransportPumpFixture, testLink *localTransportTestLink) [][]byte {
 				batch, witnesses := messages(0, 5)
 				for _, message := range batch {
-					f.transport.send <- message
+					f.transport.send.sendForTest(message)
 				}
 				return witnesses
 			},
@@ -941,7 +1001,7 @@ func TestLocalTransportPoolOwnershipUnderTeardown(t *testing.T) {
 			load: func(f *localTransportPumpFixture, testLink *localTransportTestLink) [][]byte {
 				batch, witnesses := messages(0, 5)
 				for _, message := range batch {
-					f.transport.send <- message
+					f.transport.send.sendForTest(message)
 				}
 				return witnesses
 			},
@@ -961,7 +1021,7 @@ func TestLocalTransportPoolOwnershipUnderTeardown(t *testing.T) {
 			},
 			load: func(f *localTransportPumpFixture, testLink *localTransportTestLink) [][]byte {
 				queued, witnesses := messages(0, 1)
-				f.transport.receive <- queued[0]
+				f.transport.receive.sendForTest(queued[0])
 				resident, residentWitnesses := messages(1, 6)
 				for _, message := range resident {
 					testLink.routeSend <- message
@@ -1181,10 +1241,10 @@ func TestLocalTransportKillSwitchPacedDetach(t *testing.T) {
 		// its send queue
 		held := newLocalTransportTestMessage(0, 64)
 		heldWitness := retainResidentPoolWitness(held)
-		base.transport.send <- held
+		base.transport.send.sendForTest(held)
 		synctest.Wait()
 		for messageIndex := 1; messageIndex <= 3; messageIndex++ {
-			base.transport.send <- newLocalTransportTestMessage(messageIndex, 64)
+			base.transport.send.sendForTest(newLocalTransportTestMessage(messageIndex, 64))
 		}
 		dropsBefore, _ := snapshotLocalTransportDrops(receiveQueueBoundaryLocalTransportSend)
 		disabledBefore := snapshotLocalTransportDetaches(localTransportDetachDisabled)
@@ -1243,11 +1303,11 @@ func TestLocalTransportKillSwitchPacedDetach(t *testing.T) {
 		if drops, _ := snapshotLocalTransportDrops(receiveQueueBoundaryLocalTransportSend); drops-dropsBefore != 1 {
 			t.Errorf("drops = %v, want the one held message", drops-dropsBefore)
 		}
-		if len(base.transport.send) != 3 {
-			t.Fatalf("the send queue holds %d, want the 3 messages for the next link", len(base.transport.send))
+		if base.transport.send.len() != 3 {
+			t.Fatalf("the send queue holds %d, want the 3 messages for the next link", base.transport.send.len())
 		}
 		for messageIndex := 1; messageIndex <= 3; messageIndex++ {
-			message := <-base.transport.send
+			message, _ := base.transport.send.receiveForTest()
 			if localTransportTestMessageIndex(message) != messageIndex {
 				t.Errorf("send queue message %d out of order", messageIndex)
 			}
@@ -1531,7 +1591,7 @@ func TestLocalTransportPumpRaiseDetachesAndReturnsTheBatch(t *testing.T) {
 			message := newLocalTransportTestMessage(index, 64)
 			witnesses = append(witnesses, retainResidentPoolWitness(message))
 			if c.direction == localTransportDirectionClient {
-				f.transport.send <- message
+				f.transport.send.sendForTest(message)
 			} else {
 				testLink.routeSend <- message
 			}
@@ -1554,7 +1614,7 @@ func TestLocalTransportPumpRaiseDetachesAndReturnsTheBatch(t *testing.T) {
 		if snapshotLocalTransportDetaches(localTransportDetachRaised)-raisedBefore != 1 {
 			t.Errorf("%s: raised detach not counted", c.name)
 		}
-		if 0 < len(testLink.routeReceive) || 0 < len(f.transport.receive) {
+		if 0 < len(testLink.routeReceive) || 0 < f.transport.receive.len() {
 			t.Errorf("%s: a message of the raised batch was delivered", c.name)
 		}
 		f.close()
@@ -1578,7 +1638,7 @@ func TestLocalTransportCanceledPumpStopsGathering(t *testing.T) {
 	testLink := f.attach()
 	const queued = 300
 	for index := range queued {
-		f.transport.send <- newLocalTransportTestMessage(index, 64)
+		f.transport.send.sendForTest(newLocalTransportTestMessage(index, 64))
 	}
 	gathered := 0
 	f.exchange.beforeLocalTransportGatherForTest = func(_ *localTransportLink, direction localTransportDirection) {
@@ -1595,8 +1655,8 @@ func TestLocalTransportCanceledPumpStopsGathering(t *testing.T) {
 	if reason := testLink.waitDetach(t, "a pump canceled mid-gather"); reason != localTransportDetachTransportDone {
 		t.Fatalf("detach reason = %d, want transport_done", reason)
 	}
-	if gathered != 1 || len(f.transport.send) != queued-1 {
-		t.Fatalf("gathered %d with %d left queued, want the one it held and %d left", gathered, len(f.transport.send), queued-1)
+	if gathered != 1 || f.transport.send.len() != queued-1 {
+		t.Fatalf("gathered %d with %d left queued, want the one it held and %d left", gathered, f.transport.send.len(), queued-1)
 	}
 }
 
@@ -1633,7 +1693,7 @@ func TestLocalTransportDetachRemovesRoutesBeforeTheDrain(t *testing.T) {
 		header := ExchangeHeader{Op: ExchangeOpTransport, ClientId: resident.clientId, ResidentId: resident.residentId}
 		transport := newResidentTransport(ctx, exchange, header, resident.clientId, resident.instanceId)
 		// the client's writer is stalled: its receive queue is full
-		transport.receive <- newLocalTransportTestMessage(1000, 64)
+		transport.receive.sendForTest(newLocalTransportTestMessage(1000, 64))
 		link := exchange.attachLocalTransport(transport.ctx, header)
 		if link == nil {
 			t.Fatal("attach refused")
@@ -1699,7 +1759,7 @@ func TestLocalTransportDetachRemovesRoutesBeforeTheDrain(t *testing.T) {
 		if err := resident.CloseAndWait(context.Background()); err != nil {
 			t.Error(err)
 		}
-		returnReadyPooledMessages(transport.receive)
-		returnReadyPooledMessages(transport.send)
+		returnQueuedPooledMessages(transport.receive)
+		returnQueuedPooledMessages(transport.send)
 	})
 }

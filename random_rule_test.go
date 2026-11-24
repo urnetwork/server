@@ -119,7 +119,7 @@ func randomRuleFindings(fset *token.FileSet, file *ast.File, path string, allowl
 func TestRandomnessRule(t *testing.T) {
 	allowlist := randomRuleAllowlist{
 		paths: []string{
-			// vendored forks of pgx and quic-go
+			// vendored forks of pgx and go-redis
 			"third_party/",
 			// the latency simulator, whose seeded go 1 generators reproduce its
 			// recorded runs and baselines exactly

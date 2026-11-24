@@ -17,6 +17,17 @@ package model
 // advertise the relationship mode, refuses an identical request for at most
 // the timeout. The client then asks again and reads PostgreSQL as before.
 //
+// Each refusal in the ring holds its reverse pair in the origin notification
+// owner (CPUOPT7-ORIGIN-DELIVERY.md): the pair's channel stays subscribed while
+// the refusal lives, so its origin edge reaches this owner. A refusal takes its
+// hold before it is stored, and every way it leaves the ring (replacement,
+// eviction, expiry, an edge, a resync, close) hands its pair back for release
+// outside the ring's lock. A missing-origin refusal comes only from a fenced
+// read (`ContractOriginWatch.Update`), whose watch holds the pair until the
+// refusal holds it. A destination refusal subscribes when it is stored, so an
+// edge published before that subscription applies does not reach it, as one
+// published during its read does not: it lives at most its timeout.
+//
 // A refusal whose lifecycle read found the destination row present and
 // inactive is terminal, so it is kept apart in two bounded generations with a
 // long timeout instead of the ring (see `contractTerminalRouteRejections`).
@@ -126,22 +137,24 @@ func newContractRouteRejectionKey(sourceId server.Id, destinationId server.Id, c
 	}
 }
 
-func (self *contractRouteRejections) get(key contractRouteRejectionKey) (ContractRouteRejection, bool) {
+// An expired entry is removed, and released reports that its pair's hold is
+// the caller's to release.
+func (self *contractRouteRejections) get(key contractRouteRejectionKey) (rejection ContractRouteRejection, ok bool, released bool) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	if self.closed {
-		return ContractRouteRejection{}, false
+		return ContractRouteRejection{}, false, false
 	}
 	entry, ok := self.entries[key]
 	if !ok {
-		return ContractRouteRejection{}, false
+		return ContractRouteRejection{}, false, false
 	}
 	if !time.Now().Before(entry.validUntil) {
 		// its slot is discarded when it reaches the head
 		delete(self.entries, key)
-		return ContractRouteRejection{}, false
+		return ContractRouteRejection{}, false, true
 	}
-	return entry.rejection, true
+	return entry.rejection, true, false
 }
 
 // A closed fence means an origin edge for the pair arrived after the verdict's
@@ -149,25 +162,32 @@ func (self *contractRouteRejections) get(key contractRouteRejectionKey) (Contrac
 // edges close the fence before they remove entries (see `notifyBucket`), and
 // the fence is checked under the same lock as the insert, so a verdict is
 // either refused here or removed by that edge. A nil fence never closes.
-func (self *contractRouteRejections) put(key contractRouteRejectionKey, rejection ContractRouteRejection, fence <-chan struct{}) bool {
+// The caller holds the pair for the new entry. released lists the pairs of
+// the entries this replaced, evicted or expired, one each, for the caller to
+// release; an entry that is not stored is the caller's to release too.
+func (self *contractRouteRejections) put(key contractRouteRejectionKey, rejection ContractRouteRejection, fence <-chan struct{}) (stored bool, released [][32]byte) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	if self.closed || self.maxEntries <= 0 || self.timeout <= 0 {
-		return false
+		return false, nil
 	}
 	select {
 	case <-fence:
-		return false
+		return false, nil
 	default:
 	}
 	// read the clock under the lock so slot order stays expiry order
 	now := time.Now()
-	self.expireWithLock(now)
+	released = self.expireWithLock(now, released)
 	if self.slots == nil {
 		self.slots = make([]contractRouteRejectionSlot, self.maxEntries)
 	}
 	if self.count == self.maxEntries {
-		self.popWithLock()
+		released = self.popWithLock(released)
+	}
+	if _, ok := self.entries[key]; ok {
+		// the replaced entry's slot is discarded when it reaches the head
+		released = append(released, key.originPair)
 	}
 	self.sequence += 1
 	self.entries[key] = contractRouteRejectionEntry{
@@ -180,57 +200,92 @@ func (self *contractRouteRejections) put(key contractRouteRejectionKey, rejectio
 		sequence: self.sequence,
 	}
 	self.count += 1
-	return true
+	return true, released
 }
 
-func (self *contractRouteRejections) popWithLock() {
+func (self *contractRouteRejections) popWithLock(released [][32]byte) [][32]byte {
 	slot := self.slots[self.head]
 	if entry, ok := self.entries[slot.key]; ok && entry.sequence == slot.sequence {
 		delete(self.entries, slot.key)
+		released = append(released, slot.key.originPair)
 	}
 	self.slots[self.head] = contractRouteRejectionSlot{}
 	self.head = (self.head + 1) % self.maxEntries
 	self.count -= 1
+	return released
 }
 
-func (self *contractRouteRejections) expireWithLock(now time.Time) {
+func (self *contractRouteRejections) expireWithLock(now time.Time, released [][32]byte) [][32]byte {
 	for 0 < self.count {
 		slot := self.slots[self.head]
 		if entry, ok := self.entries[slot.key]; ok && entry.sequence == slot.sequence && now.Before(entry.validUntil) {
-			return
+			return released
 		}
-		self.popWithLock()
+		released = self.popWithLock(released)
 	}
+	return released
+}
+
+// Removes the expired entries, returning their pairs to release.
+func (self *contractRouteRejections) expire(now time.Time) [][32]byte {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if self.closed {
+		return nil
+	}
+	return self.expireWithLock(now, nil)
 }
 
 // Removes both request shapes of a route whose reverse pair had an origin edge.
-func (self *contractRouteRejections) invalidate(originPair [32]byte) {
+// removed is whether a refusal still within its timeout was removed; released
+// lists the pair once for each removed entry.
+func (self *contractRouteRejections) invalidate(originPair [32]byte) (removed bool, released [][32]byte) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
-	delete(self.entries, contractRouteRejectionKey{originPair: originPair, companion: false})
-	delete(self.entries, contractRouteRejectionKey{originPair: originPair, companion: true})
+	for _, companion := range [2]bool{false, true} {
+		key := contractRouteRejectionKey{originPair: originPair, companion: companion}
+		entry, ok := self.entries[key]
+		if !ok {
+			continue
+		}
+		delete(self.entries, key)
+		released = append(released, originPair)
+		// an expired entry waits for its slot to reach the head
+		if !removed && time.Now().Before(entry.validUntil) {
+			removed = true
+		}
+	}
+	return removed, released
 }
 
-// Removes every route in a bucket whose subscription may have missed edges.
-func (self *contractRouteRejections) invalidateBucket(index int) {
+// Removes every route in a bucket whose subscription may have missed edges,
+// returning their pairs to release.
+func (self *contractRouteRejections) invalidateBucket(index int) (released [][32]byte) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	for key := range self.entries {
-		if int(key.originPair[0])%contractOriginBucketCount == index {
+		if contractOriginBucketIndex(key.originPair) == index {
 			delete(self.entries, key)
+			released = append(released, key.originPair)
 		}
 	}
+	return released
 }
 
 // After close no edge can remove an entry, so none is stored or replayed.
-func (self *contractRouteRejections) close() {
+// Returns the pairs of the entries it dropped.
+func (self *contractRouteRejections) close() (released [][32]byte) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	self.closed = true
+	for key := range self.entries {
+		released = append(released, key.originPair)
+	}
 	clear(self.entries)
 	self.slots = nil
 	self.head = 0
 	self.count = 0
+	return released
 }
 
 type contractTerminalRouteRejection struct {
@@ -337,17 +392,23 @@ func (self *ContractOriginNotifications) RouteRejection(
 		return ContractRouteRejection{}, false
 	}
 	key := newContractRouteRejectionKey(sourceId, destinationId, companion)
-	if rejection, ok := self.routeRejections.get(key); ok {
+	rejection, ok, released := self.routeRejections.get(key)
+	if ok {
 		return rejection, true
+	}
+	if released {
+		self.releaseRefusalHolds([][32]byte{key.originPair})
 	}
 	return self.terminalRouteRejections.get(key)
 }
 
 // Records a deterministic refusal for identical requests. A missing-origin
 // verdict passes the update channel its watch armed immediately before the
-// final origin read (see `waitForCompanionOrigin`); a destination verdict has
-// no fence. A terminal refusal goes to its own registry, everything else to
-// the ring. Returns whether the refusal was stored.
+// final origin read (see `waitForCompanionOrigin`), and only a fenced read's
+// (`ContractOriginWatch.Update`); a destination verdict has no fence. A
+// terminal refusal goes to its own registry, everything else to the ring,
+// holding its reverse pair first. Past the owner's MaxHeldPairs a ring refusal
+// is not stored. Returns whether the refusal was stored.
 func (self *ContractOriginNotifications) RecordRouteRejection(
 	sourceId server.Id,
 	destinationId server.Id,
@@ -362,5 +423,17 @@ func (self *ContractOriginNotifications) RecordRouteRejection(
 	if rejection.Terminal() {
 		return self.terminalRouteRejections.put(key, rejection)
 	}
-	return self.routeRejections.put(key, rejection, fence)
+	if self.routeRejections.maxEntries <= 0 || self.routeRejections.timeout <= 0 {
+		// a disabled ring holds nothing
+		return false
+	}
+	if !self.holdRefusalPair(key.originPair) {
+		return false
+	}
+	stored, released := self.routeRejections.put(key, rejection, fence)
+	if !stored {
+		released = append(released, key.originPair)
+	}
+	self.releaseRefusalHolds(released)
+	return stored
 }

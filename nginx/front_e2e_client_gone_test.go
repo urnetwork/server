@@ -15,8 +15,8 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
-	"github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/http3"
+	"github.com/urnetwork/quic-go"
+	"github.com/urnetwork/quic-go/http3"
 )
 
 // The front's request count of the api service with no block, by protocol
@@ -141,7 +141,7 @@ func TestFrontE2eClientResetMidBodyIsRecordedWithNoStatus(t *testing.T) {
 // as a client gone mid-body gets on h1 and h2. Its body is refused as
 // canceled and the request recorded with no status, on a buffered route,
 // which no block sees, and on a streamed one, whose block gets the body cut
-// short. The vendored http3 fails the read with the client's reset and
+// short. The quic-go fork's http3 fails the read with the client's reset and
 // never ends the request's context for it, so the front answered a 400 and
 // counted an incomplete body. The barriers: on the buffered route the body's
 // spill file, which the front creates once the body has passed its memory

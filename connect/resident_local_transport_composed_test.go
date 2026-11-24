@@ -215,18 +215,14 @@ func newLocalTransportComposedFixture(t testing.TB, local bool, mutate func(*Exc
 	go func() {
 		defer f.forwarders.Done()
 		for {
-			select {
-			case <-ctx.Done():
+			message, result := f.transport.receive.receiveWait(ctx.Done())
+			if result != messageQueueReceived {
 				return
-			case message, ok := <-f.transport.receive:
-				if !ok {
-					return
-				}
-				f.queueMessages.Add(1)
-				f.queueBytes.Add(int64(len(message)))
-				if sendPooledReceive(ctx.Done(), nil, deviceReceive, message, clientconnect.CarrierReliabilityReliable) != pooledMessageSendDelivered {
-					return
-				}
+			}
+			f.queueMessages.Add(1)
+			f.queueBytes.Add(int64(len(message)))
+			if sendPooledReceive(ctx.Done(), nil, pooledMessageChannel(deviceReceive), message, clientconnect.CarrierReliabilityReliable) != pooledMessageSendDelivered {
+				return
 			}
 		}
 	}()

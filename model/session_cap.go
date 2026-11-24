@@ -82,8 +82,10 @@ func clientCapSessionExemptUntilInTx(ctx context.Context, tx server.PgTx, networ
 	// Within the mint budget, as the mint's registration: a Redis that does
 	// not answer is a mint Redis does not register, which falls back to an
 	// untagged or unextended token (owner decision 3) rather than holding the
-	// mint's transaction for RedisAuth's two seconds and failing it.
-	redisCtx, cancelRedis := context.WithTimeout(ctx, session.SessionMintRedisBudget)
+	// mint's transaction for RedisAuth's two seconds and failing it. The
+	// hosted proxy's own session mint sets a budget of its own
+	// (session.MintHostedSession).
+	redisCtx, cancelRedis := context.WithTimeout(ctx, session.SessionMintRedisBudgetFor(ctx))
 	exemptUntil, err := ClientCapExemptUntil(redisCtx, networkId, clientId, now)
 	cancelRedis()
 	if err != nil {

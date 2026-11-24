@@ -47,7 +47,7 @@ Inputs were selected from Ubuntu snapshot `20260927T000000Z`.
 
 | Services | Additional or updated packages per target |
 | --- | --- |
-| API, Alt, Connect, Gossip, MCP | `ca-certificates` `20260601~24.04.1`; `openssl` and `libssl3t64` `3.0.13-0ubuntu3.15` |
+| API, Connect, Gossip, MCP | `ca-certificates` `20260601~24.04.1`; `openssl` and `libssl3t64` `3.0.13-0ubuntu3.15` |
 | Proxy | The same three packages plus curl `8.5.0-2ubuntu10.15` and its complete selected dependency/recommendation closure: 22 packages per target |
 | Taskworker | The same three packages plus the headless shell's libraries, fontconfig's configuration and `unzip` `6.0-28ubuntu4.1`, with their dependency closure: 39 packages per target |
 

@@ -41,8 +41,10 @@ func TestRedisDialOutageOnEveryMasterKeepsAuthenticationAccepting(t *testing.T) 
 	const networks = 64
 	// how long any one caller may take: a budget for each Redis step it makes
 	// (an api check and its last-used sample; a connect handshake's final
-	// check and its authority publication), plus scheduling
+	// check and its authority publication), plus scheduling. The hosted parent
+	// makes one record read, within the hosted path's budget.
 	bound := 2*RevocationCheckBudget + time.Second
+	bounds := map[string]time.Duration{"hosted parent": HostedRevocationCheckBudget + time.Second}
 
 	clients := make([]*ByJwt, networks)
 	children := make([]*ByJwt, networks)
@@ -107,7 +109,7 @@ func TestRedisDialOutageOnEveryMasterKeepsAuthenticationAccepting(t *testing.T) 
 			run("api client", func() error { return authenticate(clients[i]) }),
 			run("api session", func() error { return authenticate(sessions[i]) }),
 			run("connect admission", func() error {
-				lease, err := StartConnectionAuthorizationLease(WithStateQuerySource(t.Context(), StateQueryConnectH1), clients[i], server.NewId(), 1, func(code int) { retired.Store(i, code) })
+				lease, err := StartConnectionAuthorizationLease(WithStateQuerySource(t.Context(), StateQueryConnectH1), clients[i], server.NewId(), 1, nil, func(code int) { retired.Store(i, code) })
 				if err == nil {
 					resultLock.Lock()
 					leases = append(leases, lease)
@@ -136,8 +138,12 @@ func TestRedisDialOutageOnEveryMasterKeepsAuthenticationAccepting(t *testing.T) 
 		t.Fatalf("%d of %d callers were refused during the outage, first: %s", len(failures), 4*networks, failures[0])
 	}
 	for name, elapsed := range slowest {
-		if bound < elapsed {
-			t.Errorf("the slowest %s took %s, want at most %s", name, elapsed, bound)
+		limit := bound
+		if hosted, ok := bounds[name]; ok {
+			limit = hosted
+		}
+		if limit < elapsed {
+			t.Errorf("the slowest %s took %s, want at most %s", name, elapsed, limit)
 		}
 	}
 

@@ -11,10 +11,17 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
+// How often a resident republishes its streams' grants.
+const streamAuthorizationRepublishInterval = 30 * time.Second
+
 // Authorization failures defer the initial reset so surviving streams are not
 // retired by a partial read. Later failures remain bounded by receiver leases.
+//
+// The grants are republished every 30 s on the exchange's timer sweep, each at
+// most one sweep tick late, against a grant lease of
+// session.AuthorizationLeaseDuration (LBALTOPT2.md §8.1).
 func (self *Resident) runStreamAuthorizations(snapshots <-chan []model.StreamHop) {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := self.timerSweep().NewTicker(streamAuthorizationRepublishInterval)
 	defer ticker.Stop()
 	hops := map[server.Id]model.StreamHop{}
 	sent := map[server.Id]model.StreamAuthorization{}
@@ -47,6 +54,7 @@ func (self *Resident) runStreamAuthorizations(snapshots <-chan []model.StreamHop
 				continue
 			}
 			open := streamHopToProtocol(hop)
+			open.PathHasIntermediaries = &grant.HasIntermediaries
 			if !grant.Legacy {
 				open.AuthorizationGeneration = grant.Generation.Bytes()
 				open.AuthorizationLeaseMillis = grant.LeaseMillis

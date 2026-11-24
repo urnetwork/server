@@ -22,7 +22,8 @@ package connect
 // net/http logs handshake failures and handler panics with the client's
 // address, so each server's error log counts them instead; a panic is still
 // logged, with the address cut out. The TLS listener reports each handshake
-// that completes, which is counted by version, resumption and protocol.
+// that completes, which is counted by version, resumption and protocol, and
+// again by what its ClientHello offered (LBALTOPT2 R22).
 
 import (
 	"context"
@@ -39,6 +40,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/glog"
+	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/nginx"
 )
 
@@ -92,15 +94,21 @@ func (self *frontTcpRun) serve() error {
 }
 
 // Counts one TLS handshake on a public TCP socket that completed, by version,
-// whether it resumed a session and the application protocol. Called once per
+// whether it resumed a session and the application protocol, and by the
+// protocol, the resumption and what its ClientHello offered. Called once per
 // connection, on its serving goroutine, before its first request.
-func (self *frontServer) countTlsHandshake(connectionState tls.ConnectionState) {
+func (self *frontServer) countTlsHandshake(connectionState tls.ConnectionState, clientOffer nginx.TlsClientOffer) {
 	version := frontTlsVersionLabel(connectionState.Version)
 	resumed := strconv.FormatBool(connectionState.DidResume)
 	alpn := frontTlsAlpnLabel(connectionState.NegotiatedProtocol)
 	frontTlsHandshakesCounter.WithLabelValues(version, resumed, alpn).Inc()
+	nameClass, resumption, versions := clientOffer.Labels()
+	frontTlsHandshakeOffersCounter.WithLabelValues(alpn, resumed, nameClass, resumption, versions).Inc()
 	if observer := self.settings.tlsHandshakeObserverForTest; observer != nil {
 		observer(version, resumed, alpn)
+	}
+	if observer := self.settings.tlsHandshakeOfferObserverForTest; observer != nil {
+		observer(alpn, resumed, nameClass, resumption, versions)
 	}
 }
 
@@ -339,6 +347,7 @@ func (self *frontTrackedConn) Write(p []byte) (int, error) {
 			}
 			self.boundWriteCount += 1
 			self.boundWriteDeadline = time.Now().Add(self.sendTimeout)
+			server.CountTimerDeadlineAfter(server.TimerCensusSiteFrontWriteBound, self.sendTimeout)
 			self.Conn.SetWriteDeadline(self.boundWriteDeadline)
 			return true
 		}()
@@ -352,6 +361,7 @@ func (self *frontTrackedConn) Write(p []byte) (int, error) {
 				defer self.stateLock.Unlock()
 				self.boundWriteCount -= 1
 				if self.boundWriteCount == 0 && self.ownerWriteDeadline.IsZero() {
+					server.CountTimerStop(server.TimerCensusSiteFrontWriteBound)
 					self.Conn.SetWriteDeadline(time.Time{})
 				}
 			}()
@@ -369,21 +379,31 @@ func (self *frontTrackedConn) Write(p []byte) (int, error) {
 }
 
 // Records the owner's deadline and gives it to the socket, except that a
-// zero one leaves a bounded write in flight its bound.
+// zero one leaves a bounded write in flight its bound. The deadline the socket
+// gets is counted in the timer census.
 func (self *frontTrackedConn) SetWriteDeadline(deadline time.Time) error {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	self.ownerWriteDeadline = deadline
 	if deadline.IsZero() && 0 < self.boundWriteCount {
+		server.CountTimerDeadline(server.TimerCensusSiteFrontWriteDeadline, self.boundWriteDeadline)
 		return self.Conn.SetWriteDeadline(self.boundWriteDeadline)
 	}
+	server.CountTimerDeadline(server.TimerCensusSiteFrontWriteDeadline, deadline)
 	return self.Conn.SetWriteDeadline(deadline)
+}
+
+// The socket's, counted in the timer census: every read deadline net/http,
+// h2, TLS and the h1 transport set on a public connection.
+func (self *frontTrackedConn) SetReadDeadline(deadline time.Time) error {
+	server.CountTimerDeadline(server.TimerCensusSiteFrontReadDeadline, deadline)
+	return self.Conn.SetReadDeadline(deadline)
 }
 
 // The read deadline, and the write deadline as SetWriteDeadline records it.
 // net/http's hijack clears both through it.
 func (self *frontTrackedConn) SetDeadline(deadline time.Time) error {
-	if err := self.Conn.SetReadDeadline(deadline); err != nil {
+	if err := self.SetReadDeadline(deadline); err != nil {
 		return err
 	}
 	return self.SetWriteDeadline(deadline)

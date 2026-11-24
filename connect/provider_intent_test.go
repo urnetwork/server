@@ -17,7 +17,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/prometheus/client_golang/prometheus/testutil"
-	quic "github.com/quic-go/quic-go"
+	quic "github.com/urnetwork/quic-go"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
@@ -249,6 +249,7 @@ func newTestingProviderIntentCheck(ctx context.Context, store *testingProviderIn
 		connectTransportH1,
 		DefaultProviderIntentCheckSettings(),
 		store,
+		nil,
 	)
 }
 
@@ -373,7 +374,7 @@ func TestProviderIntentCheckRestartsStoppedChain(t *testing.T) {
 // the observation loop.
 func TestProviderIntentCheckDefaultsUnsetSettings(t *testing.T) {
 	for _, settings := range []*ProviderIntentCheckSettings{nil, {}} {
-		check := newProviderIntentCheckWithStore(t.Context(), server.NewId(), server.NewId(), connectTransportH1, settings, &testingProviderIntentStore{})
+		check := newProviderIntentCheckWithStore(t.Context(), server.NewId(), server.NewId(), connectTransportH1, settings, &testingProviderIntentStore{}, nil)
 		connect.AssertEqual(t, *check.settings, *DefaultProviderIntentCheckSettings())
 	}
 }
@@ -414,6 +415,11 @@ type providerIntentTestServer struct {
 
 // Serves until the test ends.
 func newProviderIntentTestServer(t testing.TB, ctx context.Context) *providerIntentTestServer {
+	return newProviderIntentTestServerWithSettings(t, ctx, func(*ConnectHandlerSettings) {})
+}
+
+// Serves with the handler settings adjusted, until the test ends.
+func newProviderIntentTestServerWithSettings(t testing.TB, ctx context.Context, adjust func(*ConnectHandlerSettings)) *providerIntentTestServer {
 	exchangeSettings := DefaultExchangeSettings()
 	exchangeSettings.KeyEventDelivery.Enabled = false
 	exchange := NewExchange(
@@ -440,6 +446,7 @@ func newProviderIntentTestServer(t testing.TB, ctx context.Context) *providerInt
 	settings.EnableProxyProtocol = false
 	settings.TransportTlsSettings.EnableSelfSign = true
 	settings.TransportTlsSettings.DefaultHostName = "127.0.0.1"
+	adjust(settings)
 	handler := NewConnectHandlerWithPacketConns(ctx, handlerId, exchange, settings, ConnectHandlerPacketConns{
 		H3: h3PacketConn,
 	})

@@ -86,8 +86,8 @@ func (self *GammaChargeSkippedTemplate) ReasonText() string {
 		return "the deposit holds less gamma than the price."
 	case GammaErrorCodeDailyCapExceeded:
 		return "the deposit's daily spend cap does not allow the price now."
-	case GammaErrorCodeWrongSpender:
-		return "the deposit names another spender."
+	case GammaErrorCodeDailyCapTooLow:
+		return "the deposit's daily spend cap is below the price."
 	case GammaErrorCodeNoDeposit:
 		return "there is no deposit at the hotkey."
 	case "spend_failed":
@@ -100,10 +100,8 @@ func (self *GammaChargeSkippedTemplate) FixText() string {
 	switch self.Reason {
 	case GammaErrorCodeInsufficientGamma, GammaErrorCodeNoDeposit:
 		return "Mint more SN25 Gamma into the deposit hotkey below, or turn the automatic charge off through the API."
-	case GammaErrorCodeDailyCapExceeded:
+	case GammaErrorCodeDailyCapExceeded, GammaErrorCodeDailyCapTooLow:
 		return "Raise the deposit's daily spend cap to at least " + self.AmountGamma + " gamma, or remove it."
-	case GammaErrorCodeWrongSpender:
-		return "Point the deposit back at URnetwork's service with btcli gamma set-spender --netuid 25 --hotkey <the deposit hotkey> --service-hotkey " + self.ServiceHotkey + "."
 	}
 	return "Check the deposit with btcli query gamma-deposit --netuid 25 --hotkey <the deposit hotkey>."
 }

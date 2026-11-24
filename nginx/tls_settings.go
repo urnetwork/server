@@ -6,8 +6,8 @@ package nginx
 // `ssl_ecdh_curve X25519:prime256v1:secp384r1`), with the parity differences
 // LBALT-IMPL.md §4 accepts: X25519MLKEM768 is offered first, and TLS 1.2
 // keeps only the ECDHE AES-GCM suites, since Go has no finite-field DHE.
-// Session tickets are Go's per-process default (D6c), so nothing here sets
-// them.
+// Session tickets are Go's per-process default (D6c) unless
+// SessionTicketSecrets sets keys every front shares (tls_ticket.go).
 
 import (
 	"crypto/tls"
@@ -29,6 +29,13 @@ type TlsSettings struct {
 	// own, which is the order listed. Empty means Go's defaults, which add the
 	// other ML-KEM hybrids and P-521.
 	CurvePreferences []tls.CurveID
+	// the secrets of the session ticket keys every front that holds them
+	// shares, by UTC day (LBALTOPT2 R22 (a); tls_ticket.go): at most
+	// TlsTicketSecretMaxCount, each of at least TlsTicketSecretMinBytes, the
+	// first deriving the key that encrypts new tickets and the others keys
+	// that only decrypt. Empty, the default, keeps Go's automatic
+	// per-process keys (D6c). Secret: never logged or labeled.
+	SessionTicketSecrets [][]byte
 }
 
 // A new instance on every call, with nginx's policy.

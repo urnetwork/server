@@ -839,6 +839,51 @@ func CreateSolanaPaymentIntentWithUniqueAmount(
 	return amountUsd, nil
 }
 
+// CreateSolanaPlanPaymentIntentWithUniqueAmount is
+// CreateSolanaPaymentIntentWithUniqueAmount for a plan the server priced at a
+// regional tier: the intent keeps what decided the tier (json,
+// controller.PriceTierEvidence; "" for nothing) in the same transaction.
+func CreateSolanaPlanPaymentIntentWithUniqueAmount(
+	ctx context.Context,
+	reference string,
+	networkId server.Id,
+	priceUsd float64,
+	subscriptionPlan string,
+	expiresAt time.Time,
+	pickSuffixMicro func() int64,
+	priceTierEvidenceJson string,
+) (amountUsd float64, err error) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		amountUsd, err = CreateSolanaPaymentIntentWithUniqueAmountInTx(
+			tx,
+			ctx,
+			reference,
+			&networkId,
+			priceUsd,
+			subscriptionPlan,
+			expiresAt,
+			pickSuffixMicro,
+		)
+		if err != nil || priceTierEvidenceJson == "" {
+			return
+		}
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				UPDATE solana_payment_intent
+				SET price_tier_evidence = $2::jsonb
+				WHERE payment_reference = $1
+			`,
+			reference,
+			priceTierEvidenceJson,
+		))
+	})
+	if err != nil {
+		return 0, err
+	}
+	return amountUsd, nil
+}
+
 // CreateSolanaPaymentIntentWithUniqueAmountInTx is
 // CreateSolanaPaymentIntentWithUniqueAmount in the caller's transaction.
 // networkId is nil for a USDC data code bought without a network: the crypto
@@ -1075,7 +1120,8 @@ func SolanaMatchNoteNetworkIds(note string) []server.Id {
 //   - a plan's renewal gets a fresh random transaction id. The renewal is
 //     keyed by the reference, or by the signature for the credits of
 //     2025-09-06 to 2025-09-09, and neither finds it after;
-//   - the intent loses its network, and its times are truncated to the day;
+//   - the intent loses its network and the evidence of its price tier (the
+//     network's countries), and its times are truncated to the day;
 //   - the reconciliation events about its payment (store solana, evidence
 //     its signature) lose their network;
 //   - the unfulfilled payments about it lose their network, also in the
@@ -1163,6 +1209,7 @@ func UnlinkSolanaPaymentIntents(ctx context.Context, cutoff time.Time, limit int
 				`
 					UPDATE solana_payment_intent
 					SET network_id = NULL,
+						price_tier_evidence = NULL,
 						created_at = date_trunc('day', created_at),
 						expires_at = date_trunc('day', expires_at)
 					WHERE payment_reference = ANY($1)

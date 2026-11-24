@@ -129,7 +129,7 @@ func TestExchangeConnectionNilOutcomeObserverAllocatesZero(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	settings := DefaultExchangeSettings()
-	connection := &ExchangeConnection{ctx: ctx, send: make(chan []byte, settings.ExchangeBufferSize)}
+	connection := &ExchangeConnection{ctx: ctx, send: newMessageQueue(settings.ExchangeBufferSize)}
 	if settings.beforeExchangeConnectionRunForTest != nil || connection.afterSendMessageForTest != nil {
 		t.Fatal("private observations are not nil by default")
 	}
@@ -142,7 +142,7 @@ func TestExchangeConnectionNilOutcomeObserverAllocatesZero(t *testing.T) {
 		if connection.sendMessage(nil, message, timer, settings.WriteTimeout) != pooledMessageSendDelivered {
 			panic("ready observer control refused")
 		}
-		<-connection.send
+		connection.send.tryReceive()
 	})
 	if allocations != 0 {
 		t.Fatalf("nil observer admitted path allocated %g times per message", allocations)
@@ -155,7 +155,7 @@ func BenchmarkExchangeConnectionSendMessageNilOutcomeObserver(b *testing.B) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	settings := DefaultExchangeSettings()
-	connection := &ExchangeConnection{ctx: ctx, send: make(chan []byte, settings.ExchangeBufferSize)}
+	connection := &ExchangeConnection{ctx: ctx, send: newMessageQueue(settings.ExchangeBufferSize)}
 	message := []byte("nil-observer-benchmark")
 	timer := time.NewTimer(0)
 	defer timer.Stop()
@@ -165,6 +165,6 @@ func BenchmarkExchangeConnectionSendMessageNilOutcomeObserver(b *testing.B) {
 		if connection.sendMessage(nil, message, timer, settings.WriteTimeout) != pooledMessageSendDelivered {
 			b.Fatal("ready observer benchmark refused")
 		}
-		<-connection.send
+		connection.send.tryReceive()
 	}
 }

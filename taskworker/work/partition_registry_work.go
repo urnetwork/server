@@ -19,9 +19,11 @@ import (
 // downtime its first run catches up at once. The retention chain analyzes the
 // parents and closed leaves and retires expired ranges, carrying each family's
 // resume state from run to run. A family with its own task leaves either part
-// to it (AnalyzeByOwnTask, RetireByOwnTask). The close evidence weeks expire at
-// the contract horizon, read from the horizon reaper's control once per run
-// (model.WithContractHorizonControl).
+// to it (AnalyzeByOwnTask, RetireByOwnTask). The provider work session weeks
+// expire at the contract horizon, read from the horizon reaper's control once
+// per run (model.WithContractHorizonControl), and the close evidence weeks at
+// the evidence's own window while its brake is on, read once per run too
+// (server.WithCloseEvidenceRetentionControl).
 
 // Cadences and budgets of the two chains.
 type PartitionRegistryTaskSettings struct {
@@ -138,8 +140,8 @@ func MaintainPartitionRetention(
 	maintainPartitionRetention *MaintainPartitionRetentionArgs,
 	clientSession *session.ClientSession,
 ) (*MaintainPartitionRetentionResult, error) {
-	// both controls are read once, before any transaction
-	ctx := server.WithProviderUsageArchiveExportControl(model.WithContractHorizonControl(clientSession.Ctx))
+	// the controls are read once, before any transaction
+	ctx := server.WithCloseEvidenceRetentionControl(server.WithProviderUsageArchiveExportControl(model.WithContractHorizonControl(clientSession.Ctx)))
 	exportActive := server.ProviderUsageArchiveExportActive(ctx)
 	report, state := server.MaintainPartitionRetention(
 		ctx,

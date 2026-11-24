@@ -59,6 +59,8 @@ var revokingStatementOwners = map[string]struct {
 	"model/auth_model.go:AuthPasswordSet":                                   {hooks: []string{"RotateCredentialRecordsInTx"}},
 	// bringyourctl network sign-out-all runs the password reset's rotation
 	"model/network_sign_out_model.go:CommitNetworkSignOut": {hooks: []string{"RotateCredentialRecordsInTx"}},
+	// so does handing an unverified sign-up to the verifier of its address
+	"model/auth_verify_claim.go:takeOverAccountInTx": {hooks: []string{"RotateCredentialRecordsInTx"}},
 }
 
 func TestEveryRevokingStatementWritesTheRevocationRecord(t *testing.T) {

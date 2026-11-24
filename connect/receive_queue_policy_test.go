@@ -2,6 +2,7 @@ package connect
 
 import (
 	"context"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -17,105 +18,187 @@ import (
 	"github.com/urnetwork/server"
 )
 
-func TestSendPooledReceiveUnreliableRefusesWithOwnership(t *testing.T) {
-	destination := make(chan []byte, 1)
-	destination <- clientconnect.MessagePoolGet(1)
-	defer func() { clientconnect.MessagePoolReturn(<-destination) }()
-	message := clientconnect.MessagePoolGet(173)
-	witness := clientconnect.MessagePoolShareReadOnly(message)
-	result := sendPooledReceive(
-		make(chan struct{}),
-		nil,
-		destination,
-		message,
-		clientconnect.CarrierReliabilityUnreliable,
-	)
-	if result != pooledMessageSendDropped {
-		t.Fatalf("full datagram queue result=%d, want dropped", result)
+// A receive boundary's destination for a policy test: an edge queue, or a
+// resident's route channel, with a channel's send and receive.
+type receivePolicyDestination struct {
+	name        string
+	capacity    int
+	destination pooledMessageDestination
+	send        func([]byte)
+	receive     func() []byte
+}
+
+// Each kind of destination at each capacity: a queue of capacity 1 is a
+// channel, and above 1 it keeps its messages after the first in its ring.
+func receivePolicyDestinationsForTest() []receivePolicyDestination {
+	destinations := []receivePolicyDestination{}
+	for _, capacity := range []int{1, 3} {
+		queue := newMessageQueue(capacity)
+		channel := make(chan []byte, capacity)
+		destinations = append(destinations, receivePolicyDestination{
+			name:        fmt.Sprintf("queue/%d", capacity),
+			capacity:    capacity,
+			destination: queue,
+			send: func(message []byte) {
+				queue.sendForTest(message)
+			},
+			receive: func() []byte {
+				message, _ := queue.receiveForTest()
+				return message
+			},
+		}, receivePolicyDestination{
+			name:        fmt.Sprintf("channel/%d", capacity),
+			capacity:    capacity,
+			destination: pooledMessageChannel(channel),
+			send: func(message []byte) {
+				channel <- message
+			},
+			receive: func() []byte {
+				return <-channel
+			},
+		})
 	}
-	if !clientconnect.MessagePoolReturn(witness) {
-		t.Fatal("datagram refusal retained pooled bytes")
+	return destinations
+}
+
+// Fills the destination with capacity messages.
+func (self receivePolicyDestination) fill() {
+	for range self.capacity {
+		self.send(clientconnect.MessagePoolGet(1))
+	}
+}
+
+// Returns capacity messages to the pool.
+func (self receivePolicyDestination) drain() {
+	for range self.capacity {
+		clientconnect.MessagePoolReturn(self.receive())
+	}
+}
+
+func TestSendPooledReceiveUnreliableRefusesWithOwnership(t *testing.T) {
+	for _, d := range receivePolicyDestinationsForTest() {
+		d.fill()
+		message := clientconnect.MessagePoolGet(173)
+		witness := clientconnect.MessagePoolShareReadOnly(message)
+		result := sendPooledReceive(
+			make(chan struct{}),
+			nil,
+			d.destination,
+			message,
+			clientconnect.CarrierReliabilityUnreliable,
+		)
+		if result != pooledMessageSendDropped {
+			t.Fatalf("%s: full datagram queue result=%d, want dropped", d.name, result)
+		}
+		if !clientconnect.MessagePoolReturn(witness) {
+			t.Fatalf("%s: datagram refusal retained pooled bytes", d.name)
+		}
+		d.drain()
 	}
 }
 
 func TestSendPooledReceiveReliableWaitsThenDelivers(t *testing.T) {
-	destination := make(chan []byte, 1)
-	destination <- clientconnect.MessagePoolGet(1)
-	message := clientconnect.MessagePoolGet(181)
-	witness := clientconnect.MessagePoolShareReadOnly(message)
-	result := pooledMessageSendDropped
-	done := make(chan struct{})
-	waiting := make(chan struct{})
-	go func() {
-		defer close(done)
-		result = sendPooledReceive(
-			make(chan struct{}),
-			nil,
-			destination,
-			message,
-			clientconnect.CarrierReliabilityReliable,
-			func() { close(waiting) },
-		)
-	}()
-	<-waiting
-	select {
-	case <-done:
-		t.Fatal("reliable handoff returned while its queue was full")
-	default:
-	}
-	clientconnect.MessagePoolReturn(<-destination)
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("reliable handoff did not resume when capacity opened")
-	}
-	if result != pooledMessageSendDelivered {
-		t.Fatalf("resumed reliable handoff result=%d, want delivered", result)
-	}
-	clientconnect.MessagePoolReturn(<-destination)
-	if !clientconnect.MessagePoolReturn(witness) {
-		t.Fatal("delivered reliable message has an unexpected pooled owner")
+	for _, d := range receivePolicyDestinationsForTest() {
+		d.fill()
+		message := clientconnect.MessagePoolGet(181)
+		witness := clientconnect.MessagePoolShareReadOnly(message)
+		result := pooledMessageSendDropped
+		done := make(chan struct{})
+		waiting := make(chan struct{})
+		go func() {
+			defer close(done)
+			result = sendPooledReceive(
+				make(chan struct{}),
+				nil,
+				d.destination,
+				message,
+				clientconnect.CarrierReliabilityReliable,
+				func() { close(waiting) },
+			)
+		}()
+		<-waiting
+		select {
+		case <-done:
+			t.Fatalf("%s: reliable handoff returned while its queue was full", d.name)
+		default:
+		}
+		clientconnect.MessagePoolReturn(d.receive())
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatalf("%s: reliable handoff did not resume when capacity opened", d.name)
+		}
+		if result != pooledMessageSendDelivered {
+			t.Fatalf("%s: resumed reliable handoff result=%d, want delivered", d.name, result)
+		}
+		d.drain()
+		if !clientconnect.MessagePoolReturn(witness) {
+			t.Fatalf("%s: delivered reliable message has an unexpected pooled owner", d.name)
+		}
 	}
 }
 
 func TestSendPooledReceiveReliableCancellationReturnsOwnership(t *testing.T) {
-	destination := make(chan []byte, 1)
-	destination <- clientconnect.MessagePoolGet(1)
-	defer func() { clientconnect.MessagePoolReturn(<-destination) }()
-	ctxDone := make(chan struct{})
-	message := clientconnect.MessagePoolGet(191)
-	witness := clientconnect.MessagePoolShareReadOnly(message)
-	result := pooledMessageSendDelivered
-	done := make(chan struct{})
-	waiting := make(chan struct{})
-	go func() {
-		defer close(done)
-		result = sendPooledReceive(
-			ctxDone,
-			nil,
-			destination,
-			message,
+	for _, d := range receivePolicyDestinationsForTest() {
+		d.fill()
+		ctxDone := make(chan struct{})
+		message := clientconnect.MessagePoolGet(191)
+		witness := clientconnect.MessagePoolShareReadOnly(message)
+		result := pooledMessageSendDelivered
+		done := make(chan struct{})
+		waiting := make(chan struct{})
+		go func() {
+			defer close(done)
+			result = sendPooledReceive(
+				ctxDone,
+				nil,
+				d.destination,
+				message,
+				clientconnect.CarrierReliabilityReliable,
+				func() { close(waiting) },
+			)
+		}()
+		<-waiting
+		select {
+		case <-done:
+			t.Fatalf("%s: reliable handoff returned before cancellation", d.name)
+		default:
+		}
+		close(ctxDone)
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatalf("%s: reliable handoff ignored cancellation", d.name)
+		}
+		if result != pooledMessageSendDone {
+			t.Fatalf("%s: canceled reliable handoff result=%d, want done", d.name, result)
+		}
+		if !clientconnect.MessagePoolReturn(witness) {
+			t.Fatalf("%s: canceled reliable handoff retained pooled bytes", d.name)
+		}
+		d.drain()
+	}
+}
+
+// A closed destination queue is a completed lifecycle: the boundary returns
+// the message to the pool and reports done, on either lane.
+func TestSendPooledReceiveClosedQueueReturnsOwnership(t *testing.T) {
+	for _, capacity := range []int{0, 1, 4} {
+		for _, reliability := range []clientconnect.CarrierReliability{
 			clientconnect.CarrierReliabilityReliable,
-			func() { close(waiting) },
-		)
-	}()
-	<-waiting
-	select {
-	case <-done:
-		t.Fatal("reliable handoff returned before cancellation")
-	default:
-	}
-	close(ctxDone)
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("reliable handoff ignored cancellation")
-	}
-	if result != pooledMessageSendDone {
-		t.Fatalf("canceled reliable handoff result=%d, want done", result)
-	}
-	if !clientconnect.MessagePoolReturn(witness) {
-		t.Fatal("canceled reliable handoff retained pooled bytes")
+			clientconnect.CarrierReliabilityUnreliable,
+		} {
+			queue := newMessageQueue(capacity)
+			queue.close()
+			message := clientconnect.MessagePoolGet(193)
+			witness := clientconnect.MessagePoolShareReadOnly(message)
+			if result := sendPooledReceive(nil, nil, queue, message, reliability); result != pooledMessageSendDone {
+				t.Fatalf("capacity %d reliability %d: closed queue result=%d, want done", capacity, reliability, result)
+			}
+			if !clientconnect.MessagePoolReturn(witness) {
+				t.Fatalf("capacity %d reliability %d: closed queue refusal retained pooled bytes", capacity, reliability)
+			}
+		}
 	}
 }
 
@@ -123,7 +206,7 @@ func benchmarkSendPooledReceiveReady(
 	benchmark *testing.B,
 	reliability clientconnect.CarrierReliability,
 ) {
-	destination := make(chan []byte, 1)
+	destination := newMessageQueue(1)
 	message := []byte{1}
 	benchmark.ReportAllocs()
 	benchmark.ResetTimer()
@@ -132,7 +215,7 @@ func benchmarkSendPooledReceiveReady(
 		if result != pooledMessageSendDelivered {
 			benchmark.Fatalf("ready handoff result=%d, want delivered", result)
 		}
-		<-destination
+		destination.tryReceive()
 	}
 }
 
@@ -148,7 +231,7 @@ func benchmarkResidentTransportSendReceivedReady(
 	benchmark *testing.B,
 	reliability clientconnect.CarrierReliability,
 ) {
-	destination := make(chan []byte, 1)
+	destination := newMessageQueue(1)
 	transport := &ResidentTransport{ctx: context.Background(), send: destination}
 	message := []byte{1}
 	benchmark.ReportAllocs()
@@ -158,7 +241,7 @@ func benchmarkResidentTransportSendReceivedReady(
 		if result != pooledMessageSendDelivered {
 			benchmark.Fatalf("ready resident handoff result=%d, want delivered", result)
 		}
-		<-destination
+		destination.tryReceive()
 	}
 }
 
@@ -180,50 +263,55 @@ func BenchmarkResidentTransportSendReceivedReadyUnreliable(benchmark *testing.B)
 // full reliable exchange queue must preserve 0,1 order instead of dropping 1
 // and letting a later frame pin Transfer recovery behind an artificial gap.
 func TestReliableExchangeQueueSaturationPreservesFramedOrder(t *testing.T) {
-	destination := make(chan []byte, 1)
-	first := clientconnect.MessagePoolGet(8)
-	first[0] = 0
-	second := clientconnect.MessagePoolGet(8)
-	second[0] = 1
-	destination <- first
-	result := pooledMessageSendDropped
-	done := make(chan struct{})
-	waiting := make(chan struct{})
-	go func() {
-		defer close(done)
-		result = sendPooledReceive(
-			make(chan struct{}),
-			nil,
-			destination,
-			second,
-			clientconnect.CarrierReliabilityReliable,
-			func() { close(waiting) },
-		)
-	}()
-	<-waiting
-	select {
-	case <-done:
-		t.Fatal("second reliable frame bypassed full queue")
-	default:
+	for _, d := range receivePolicyDestinationsForTest() {
+		for marker := range d.capacity {
+			message := clientconnect.MessagePoolGet(8)
+			message[0] = byte(marker)
+			d.send(message)
+		}
+		last := clientconnect.MessagePoolGet(8)
+		last[0] = byte(d.capacity)
+		result := pooledMessageSendDropped
+		done := make(chan struct{})
+		waiting := make(chan struct{})
+		go func() {
+			defer close(done)
+			result = sendPooledReceive(
+				make(chan struct{}),
+				nil,
+				d.destination,
+				last,
+				clientconnect.CarrierReliabilityReliable,
+				func() { close(waiting) },
+			)
+		}()
+		<-waiting
+		select {
+		case <-done:
+			t.Fatalf("%s: last reliable frame bypassed full queue", d.name)
+		default:
+		}
+		got := d.receive()
+		if got[0] != 0 {
+			t.Fatalf("%s: first framed marker=%d want=0", d.name, got[0])
+		}
+		clientconnect.MessagePoolReturn(got)
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatalf("%s: last reliable frame did not resume", d.name)
+		}
+		if result != pooledMessageSendDelivered {
+			t.Fatalf("%s: last framed result=%d want delivered", d.name, result)
+		}
+		for marker := 1; marker <= d.capacity; marker += 1 {
+			got = d.receive()
+			if int(got[0]) != marker {
+				t.Fatalf("%s: framed marker=%d want=%d", d.name, got[0], marker)
+			}
+			clientconnect.MessagePoolReturn(got)
+		}
 	}
-	got := <-destination
-	if got[0] != 0 {
-		t.Fatalf("first framed marker=%d want=0", got[0])
-	}
-	clientconnect.MessagePoolReturn(got)
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("second reliable frame did not resume")
-	}
-	if result != pooledMessageSendDelivered {
-		t.Fatalf("second framed result=%d want delivered", result)
-	}
-	got = <-destination
-	if got[0] != 1 {
-		t.Fatalf("second framed marker=%d want=1", got[0])
-	}
-	clientconnect.MessagePoolReturn(got)
 }
 
 // A queue refusal consumes a complete message without writing its stream bytes.
@@ -247,9 +335,12 @@ func TestExchangeGenerationKeepsCompleteRefusalButStopsDone(t *testing.T) {
 
 func TestResidentTransportReceiveAdmissionUsesExactLane(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	destination := make(chan []byte, 1)
-	destination <- clientconnect.MessagePoolGet(1)
-	defer func() { clientconnect.MessagePoolReturn(<-destination) }()
+	destination := newMessageQueue(1)
+	destination.sendForTest(clientconnect.MessagePoolGet(1))
+	defer func() {
+		message, _ := destination.receiveForTest()
+		clientconnect.MessagePoolReturn(message)
+	}()
 	transport := &ResidentTransport{ctx: ctx, send: destination}
 	waiting := make(chan struct{})
 	transport.beforeReliableReceiveWaitForTest = func() { close(waiting) }

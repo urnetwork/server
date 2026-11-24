@@ -266,7 +266,7 @@ func runExchangeQueueRefusal(t *testing.T, op ExchangeOp, kind exchangeQueueRefu
 		q.connection = q.takePublished()
 		q.expectOutcome(pooledMessageSendDelivered, "first original")
 		q.waitEvent(q.firstDequeued, "real writer's first pre-write batch")
-		if cap(q.connection.send) != exchangeQueueRefusalCapacity ||
+		if q.connection.send.capacity() != exchangeQueueRefusalCapacity ||
 			q.connection.header.Op != op ||
 			q.connection.afterSendDequeueForTest == nil {
 			t.Fatal("constructor did not publish the real default-capacity writer")
@@ -405,7 +405,28 @@ func (self *exchangeQueueRefusalFixture) configure() {
 			parent, f.exchange, endpoint.id, endpoint.resident.instanceId,
 			clientconnect.TransferCarrierProperties{ReceiveReliability: clientconnect.CarrierReliabilityReliable},
 		)
-		endpoint.toClient, endpoint.toResident = self.transport.receive, self.transport.send
+		// The client reads its routes as channels. A bridge takes each message
+		// from the transport's receive queue, as the edge's socket writer does,
+		// and hands it to the client's route unbuffered. The client's sends
+		// reach the transport through deliverOutgoing, never toResident.
+		toClient := make(chan []byte)
+		f.workers.Add(1)
+		go func() {
+			defer f.workers.Done()
+			for {
+				message, result := self.transport.receive.receiveWait(f.ctx.Done())
+				if result != messageQueueReceived {
+					return
+				}
+				select {
+				case toClient <- message:
+				case <-f.ctx.Done():
+					clientconnect.MessagePoolReturn(message)
+					return
+				}
+			}
+		}()
+		endpoint.toClient, endpoint.toResident = toClient, nil
 		return true
 	}
 	f.startNativeForward = func(source, destination *p2OriginEndpoint, forward *ResidentForward) bool {

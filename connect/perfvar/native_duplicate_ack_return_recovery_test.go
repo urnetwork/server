@@ -192,6 +192,26 @@ func (self *nativeDuplicateAckRecoveryState) start() error {
 	return nil
 }
 
+// Install the native ingress and observe each original before the consuming bridge call.
+func (self *nativeDuplicateAckRecoveryState) installNativeBridge(path *fullTunPath, mixedBroker *nativeMixedAckBroker) {
+	path.nativeIngressForTest = true
+	path.bridgeSends.observeAdmission = true
+	if mixedBroker != nil {
+		mixedBroker.bind(path)
+	}
+	path.beforeBridgeSendBatchForTest = func(packets [][]byte) {
+		for _, packet := range packets {
+			self.observeOutgoing(packet, false)
+		}
+	}
+}
+
+// Apply measured ACK accounting only while the exact indexed native bridge is observed.
+func (self *fullTunPath) beginNativeDuplicateAckAccounting() func() {
+	previous := self.setAllowDeviceNativeAckPressure(self.bridgeSends.observeAdmission)
+	return func() { self.setAllowDeviceNativeAckPressure(previous) }
+}
+
 // Healthy native delivery retains the original full-TUN/H1 bulk/probe gates.
 func TestFullTunNativeDownloadHealthyReturnWithoutReplay(t *testing.T) {
 	testFullTunNativeDownloadDuplicateAckRecovery(t, false)
@@ -240,18 +260,7 @@ func testFullTunNativeDownloadDuplicateAckRecoveryMode(t *testing.T, loss bool, 
 			},
 			afterStage: func(stage fullTunConstructionStage, path *fullTunPath) error {
 				if stage == fullTunConstructionStageMultiClient {
-					path.nativeIngressForTest = true
-					if !loss && !controlledMixed {
-						path.bridgeSends.observeAdmission = true
-					}
-					if mixedBroker != nil {
-						mixedBroker.bind(path)
-					}
-					path.beforeBridgeSendBatchForTest = func(packets [][]byte) {
-						for _, packet := range packets {
-							state.observeOutgoing(packet, false)
-						}
-					}
+					state.installNativeBridge(path, mixedBroker)
 				}
 				return nil
 			},
@@ -273,10 +282,7 @@ func testFullTunNativeDownloadDuplicateAckRecoveryMode(t *testing.T, loss bool, 
 			}
 		}()
 		path := fixture.path
-		// Only the plain healthy control accounts for native ACK pressure and
-		// exact unwritten retry supersession.
-		previousNativePressure := path.setAllowDeviceNativeAckPressure(!loss && !controlledMixed)
-		defer path.setAllowDeviceNativeAckPressure(previousNativePressure)
+		defer path.beginNativeDuplicateAckAccounting()()
 		_, native := any(path.multiClient).(nativeBrowsingResultsClient)
 		if !native || returnResendTimeout <= 0 {
 			t.Fatalf("native capability or actual provider timer absent: native=%t timeout=%s", native, returnResendTimeout)
@@ -498,5 +504,99 @@ func testFullTunNativeDownloadDuplicateAckRecoveryMode(t *testing.T, loss bool, 
 	})
 	if deferredCausalFailure != "" {
 		t.Fatalf("%s", deferredCausalFailure)
+	}
+}
+
+// All four diagnostic modes use the same measured bridge and lifecycle boundaries.
+// Genuine ready-only feedback remains a raw failure; an admitted error stays fatal.
+func TestNativeDuplicateAckRecoveryAccountsReadyFeedback(t *testing.T) {
+	tracker := newSendPackLifecycleTracker()
+	t.Cleanup(tracker.close)
+	observer := tracker.newObserver()
+	deviceId, providerId := clientconnect.NewId(), clientconnect.NewId()
+	publish := func(token uint64, first, terminal error) perfvarPackFailureCounts {
+		event := clientconnect.SendPackLifecycleObservation{
+			ClientId: deviceId, DestinationId: providerId, Token: token, AckRequired: true,
+			MessageType: protocol.MessageType_IpIpPacketToProvider,
+			Phase:       clientconnect.SendPackLifecyclePhaseStarted,
+		}
+		observer(event)
+		event.Phase, event.Err = clientconnect.SendPackLifecyclePhaseFirstRouteWrite, first
+		observer(event)
+		event.Phase, event.Err = clientconnect.SendPackLifecyclePhaseTerminal, terminal
+		observer(event)
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		defer cancel()
+		boundary, ok := tracker.workloadBoundary(ctx)
+		if !ok || !tracker.waitThrough(ctx, boundary) {
+			t.Fatal("native diagnostic could not join its exact lifecycle receipts")
+		}
+		return snapshotPerfvarPackFailures(&fullTunPath{devicePackSends: tracker})
+	}
+	ready := &clientconnect.SendPackAdmissionError{
+		Boundary: "pack-admission", NativeReadyPureTcpAck: true, Err: clientconnect.ErrSendPackNotAdmitted,
+	}
+	pressure := publish(1, ready, ready)
+	admittedError := publish(2, nil, context.Canceled)
+	if pressure != (perfvarPackFailureCounts{deviceFailureCount: 1, deviceNativeReadyPureAckRefusalCount: 1}) ||
+		admittedError != (perfvarPackFailureCounts{deviceFailureCount: 2, deviceNativeReadyPureAckRefusalCount: 1}) {
+		t.Fatalf("exact native refusal or independent admitted terminal lost its raw outcome: %+v %+v", pressure, admittedError)
+	}
+
+	nat := clientconnect.NewLocalUserNatWithDefaults(t.Context(), "native ACK diagnostic observer")
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := nat.CloseAndWait(ctx); err != nil {
+			t.Error(err)
+		}
+	})
+	ack := make([]byte, 40)
+	ack[0], ack[3], ack[8], ack[9], ack[32], ack[33] = 0x45, 40, 64, 6, 0x50, 0x10
+	copy(ack[12:16], net.IPv4(192, 0, 2, 1).To4())
+	copy(ack[16:20], net.IPv4(198, 51, 100, 1).To4())
+	data := append(append([]byte(nil), ack...), 1)
+	data[3] = byte(len(data))
+	for _, mode := range []struct {
+		name        string
+		loss, mixed bool
+	}{
+		{name: "healthy"},
+		{name: "loss", loss: true},
+		{name: "mixed healthy", mixed: true},
+		{name: "mixed loss", loss: true, mixed: true},
+	} {
+		state := &nativeDuplicateAckRecoveryState{loss: mode.loss}
+		path := &fullTunPath{bridgeSends: newFullTunBridgeSendTracker(), appTun: &clientconnect.Tun{}, providerLocalNat: nat}
+		var broker *nativeMixedAckBroker
+		if mode.mixed {
+			broker = newNativeMixedAckBroker(state, mode.loss)
+		}
+		state.installNativeBridge(path, broker)
+		if broker != nil {
+			t.Cleanup(broker.natUnsubscribe)
+			t.Cleanup(broker.natBatchUnsubscribe)
+		}
+		reset := path.beginNativeDuplicateAckAccounting()
+		before := path.bridgeSends.batchSnapshot()
+		sendFullTunBridgeBatch(path.bridgeSends, [][]byte{ack, data}, 0, nil, func(_ [][]byte, accepted []bool) int {
+			accepted[1] = true
+			return 1
+		})
+		bridge := observeFullTunBridgeBatches(before, path.bridgeSends.batchSnapshot())
+		path.setActivePackFailureFloor(perfvarCarrierBoundary{})
+		err := path.validateMeasuredPackFailures(perfvarCarrierBoundary{packFailures: pressure})
+		if err != nil || bridge.AdmissionInvalid || bridge.AdmissionOffered != [2]uint64{1, 1} ||
+			bridge.AdmissionAccepted != [2]uint64{0, 1} || bridge.AdmissionRefused != [2]uint64{1, 0} {
+			t.Errorf("%s: exact native ACK pressure lost its measured evidence: bridge=%+v err=%v", mode.name, bridge, err)
+		}
+		if err := path.validateMeasuredPackFailures(perfvarCarrierBoundary{packFailures: admittedError}); err == nil {
+			t.Errorf("%s: exact native ACK pressure concealed an admitted terminal", mode.name)
+		}
+		reset()
+		path.setActivePackFailureFloor(perfvarCarrierBoundary{})
+		if err := path.validateMeasuredPackFailures(perfvarCarrierBoundary{packFailures: pressure}); err == nil {
+			t.Errorf("%s: native pressure permission survived its measured scope", mode.name)
+		}
 	}
 }

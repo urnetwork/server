@@ -20,12 +20,12 @@ import (
 	"testing"
 	"time"
 
-	quic "github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/http3"
-	http3qlog "github.com/quic-go/quic-go/http3/qlog"
-	"github.com/quic-go/quic-go/qlog"
-	"github.com/quic-go/quic-go/qlogwriter"
-	"github.com/quic-go/quic-go/quicvarint"
+	quic "github.com/urnetwork/quic-go"
+	"github.com/urnetwork/quic-go/http3"
+	http3qlog "github.com/urnetwork/quic-go/http3/qlog"
+	"github.com/urnetwork/quic-go/qlog"
+	"github.com/urnetwork/quic-go/qlogwriter"
+	"github.com/urnetwork/quic-go/quicvarint"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
 
@@ -1077,11 +1077,11 @@ func TestFrontDrainEndsDespiteAnApiStreamWhoseHeadersNeverArrive(t *testing.T) {
 // and the forced close then closes every h3 server before its transport. An
 // upstream h3 server still shutting down gracefully when its transport
 // destroyed the connection would spin its accept loop, one GOAWAY writer per
-// pass, for as long as the connection is closed but not done; the vendored
-// http3 ends the loop there too, so the close order and the vendored loop
-// each keep the burst away. With every connection held in that window, the
-// close may leave at most a few goroutines per connection: quic-go's destroy
-// waits once per connection id.
+// pass, for as long as the connection is closed but not done; the quic-go
+// fork's http3 ends the loop there too, so the close order and the fork's
+// loop each keep the burst away. With every connection held in that window,
+// the close may leave at most a few goroutines per connection: quic-go's
+// destroy waits once per connection id.
 func TestFrontCloseStartsNoGoroutineBurstPerApiConnection(t *testing.T) {
 	const (
 		connectionCount         = 32
@@ -1169,7 +1169,7 @@ func TestFrontCloseStartsNoGoroutineBurstPerApiConnection(t *testing.T) {
 // A client that closes its api connection after the drain's GOAWAY, as a
 // client should, gets no second GOAWAY. The connection's h3 server finishes
 // serving it while quic-go is still closing it, with the close window held
-// open: the vendored http3 ends its graceful accept loop there, where
+// open: the quic-go fork's http3 ends its graceful accept loop there, where
 // upstream's spun, one GOAWAY writer per pass, until the window closed.
 func TestFrontDrainSendsOneH3GoawayWhenTheClientCloses(t *testing.T) {
 	trace := newTestFrontConnectionTrace(true)

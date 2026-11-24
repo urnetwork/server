@@ -752,6 +752,637 @@
           "legendFormat": "{{host}}"
         }
       ]
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "connect connections by block: share at addresses over 10, 100 and 1,000",
+      "description": "Of each block's active connect connections (h1 upgrades and QUIC), the share held by source addresses with more than 10, 100 or 1,000 of them. warpctl's split hashes the whole source address, so a block whose surplus sits on a few addresses shows a high share here (LBALTOPT2 R16). No address is a label.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 64
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "custom": {
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (block, over) (urnetwork_front_connect_address_connections{env=\"$env\",block=~\"$block\",host=~\"$host\",over!=\"0\"}) / ignoring (over) group_left sum by (block) (urnetwork_front_connect_address_connections{env=\"$env\",block=~\"$block\",host=~\"$host\",over=\"0\"})",
+          "legendFormat": "{{block}} over {{over}}"
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "connect source addresses over 10, 100 and 1,000 connections",
+      "description": "Source addresses holding more than 10, 100 or 1,000 active connect connections, by block, summed over hosts (LBALTOPT2 R16).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 64
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (block, over) (urnetwork_front_connect_addresses{env=\"$env\",block=~\"$block\",host=~\"$host\",over!=\"0\"})",
+          "legendFormat": "{{block}} over {{over}}"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "type": "timeseries",
+      "title": "connect connections and source addresses by block",
+      "description": "Every active connect connection through the front, and every source address holding one, by block (over 0 of the R16 gauges).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 72
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (block) (urnetwork_front_connect_address_connections{env=\"$env\",block=~\"$block\",host=~\"$host\",over=\"0\"})",
+          "legendFormat": "{{block}} connections"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (block) (urnetwork_front_connect_addresses{env=\"$env\",block=~\"$block\",host=~\"$host\",over=\"0\"})",
+          "legendFormat": "{{block}} addresses"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "TLS full handshakes / s by client offer",
+      "description": "Completed TLS handshakes over TCP that didn't resume, by the protocol negotiated (none: the client offered none) and what the ClientHello offered: the class of its server name (none without one), what it offered to resume with (psk, psk_modes, ticket, none) and its supported_versions (_grease: lists GREASE, as browsers do; legacy: no extension) (LBALTOPT2 R22).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 72
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (alpn, name_class, resumption, versions) (rate(urnetwork_connect_front_tls_handshake_offers_total{env=\"$env\",block=~\"$block\",host=~\"$host\",resumed=\"false\"}[$__rate_interval]))",
+          "legendFormat": "{{alpn}} {{name_class}} {{resumption}} {{versions}}"
+        }
+      ]
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "TLS handshakes / s by resumption offer and outcome",
+      "description": "Completed TLS handshakes over TCP by what the client offered to resume with and whether it resumed: psk that didn't resume is a ticket this block's keys can't open, from another block or host, a restart or an older day (LBALTOPT2 R22).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 80
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (resumption, resumed) (rate(urnetwork_connect_front_tls_handshake_offers_total{env=\"$env\",block=~\"$block\",host=~\"$host\"}[$__rate_interval]))",
+          "legendFormat": "{{resumption}} resumed={{resumed}}"
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "announce batches / s and mean items a batch, by kind",
+      "description": "Batches of live connection announcement I/O a second, by kind, and the mean items a batch: sync_read, the sync rounds' provide key change and provide mode reads; verify_egress_lease, the verify egress lease refreshes; reliability_stats, the rounds' stats writes; measurement_write, the measurement snapshots. Each item was its own round trips before (LBALTOPT2 R18).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 80
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (kind) (rate(urnetwork_connect_announce_batches_total{env=\"$env\",block=~\"$block\",host=~\"$host\"}[$__rate_interval]))",
+          "legendFormat": "{{kind}} batches/s"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (kind) (rate(urnetwork_connect_announce_batch_items_total{env=\"$env\",block=~\"$block\",host=~\"$host\"}[$__rate_interval])) / sum by (kind) (rate(urnetwork_connect_announce_batches_total{env=\"$env\",block=~\"$block\",host=~\"$host\"}[$__rate_interval]))",
+          "legendFormat": "{{kind}} items/batch"
+        }
+      ]
+    },
+    {
+      "id": 23,
+      "type": "timeseries",
+      "title": "announce batches failed as a whole / s, by kind",
+      "description": "Announcement batches that failed as a whole, an outage of their database or Redis: each of their items failed, and its connection counted it as its own read or write failure (connection_sync_read_failures_total, connection_worker_failures_total) and retried on its own backoff (LBALTOPT2 R18).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 88
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (kind) (rate(urnetwork_connect_announce_batch_raises_total{env=\"$env\",block=~\"$block\",host=~\"$host\"}[$__rate_interval]))",
+          "legendFormat": "{{kind}}"
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "type": "timeseries",
+      "title": "exchange frames per socket call, by op and direction",
+      "description": "Exchange link frames over socket calls: sent, frames a write or writev carries; received, frames a read of the link's buffered reader takes. A call that waits in the poller is still one call (LBALTOPT2 R21).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 88
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (op, direction) (rate(urnetwork_connect_exchange_io_frames_total{env=\"$env\",block=~\"$block\",host=~\"$host\"}[$__rate_interval])) / sum by (op, direction) (rate(urnetwork_connect_exchange_io_calls_total{env=\"$env\",block=~\"$block\",host=~\"$host\"}[$__rate_interval]))",
+          "legendFormat": "{{op}} {{direction}}"
+        }
+      ]
+    },
+    {
+      "id": 25,
+      "type": "timeseries",
+      "title": "whodis handshake failures / s by reason and class",
+      "description": "Failed whodis handshakes by reason and by how far they got, from each connection's quic-go trace: hello_only, nothing but a close arrived from the client after the front's flight (the client gave up, or what it sent was lost); reply_unacked, the client kept sending and never acknowledged the flight (the flight was likely lost); abandoned, the client acknowledged the flight or closed with a TLS alert. The two whodis ports, 53 and 4053, share one socket, so they are counted together.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 96
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (reason, class) (rate(urnetwork_connect_front_quic_connections_total{env=\"$env\",block=~\"$block\",host=~\"$host\",port=\"whodis\",result=\"handshake_failed\"}[$__rate_interval]))",
+          "legendFormat": "{{reason}} {{class}}"
+        }
+      ]
+    },
+    {
+      "id": 26,
+      "type": "timeseries",
+      "title": "QUIC handshakes completed, share of accepted connections, by group",
+      "description": "Completed handshakes over accepted connections for each socket group: interface, port kind and block (with the host). A group whose share falls while the others hold is one whose clients, or whose path, differ.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 96
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (host, block, interface, port) (rate(urnetwork_connect_front_quic_handshakes_total{env=\"$env\",block=~\"$block\",host=~\"$host\"}[$__rate_interval])) / sum by (host, block, interface, port) (rate(urnetwork_connect_front_quic_connections_total{env=\"$env\",block=~\"$block\",host=~\"$host\"}[$__rate_interval]))",
+          "legendFormat": "{{host}} {{block}} {{interface}} {{port}}"
+        }
+      ]
+    },
+    {
+      "id": 27,
+      "type": "timeseries",
+      "title": "whodis DNS responses / s by group",
+      "description": "DNS responses each whodis socket group wrote: every QUIC packet the front sends on whodis is one or more, through the group's one decode53 translation, which writes unpaced.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 104
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (host, block, interface, family) (rate(urnetwork_connect_front_whodis_responses_total{env=\"$env\",block=~\"$block\",host=~\"$host\"}[$__rate_interval]))",
+          "legendFormat": "{{host}} {{block}} {{interface}} {{family}}"
+        }
+      ]
+    },
+    {
+      "id": 28,
+      "type": "timeseries",
+      "title": "whodis write wait by group, p50 and p99",
+      "description": "How long quic-go waited on each packet it wrote to a whodis group's translation: the encoder's queue and the socket writes, and any pace. Unpaced, it stays near the cost of the writes.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 104
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.5, sum by (host, block, interface, family, le) (rate(urnetwork_connect_front_whodis_write_seconds_bucket{env=\"$env\",block=~\"$block\",host=~\"$host\"}[$__rate_interval])))",
+          "legendFormat": "p50 {{host}} {{block}} {{interface}} {{family}}"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.99, sum by (host, block, interface, family, le) (rate(urnetwork_connect_front_whodis_write_seconds_bucket{env=\"$env\",block=~\"$block\",host=~\"$host\"}[$__rate_interval])))",
+          "legendFormat": "p99 {{host}} {{block}} {{interface}} {{family}}"
+        }
+      ]
+    },
+    {
+      "id": 29,
+      "type": "timeseries",
+      "title": "QUIC Retries / s by interface and port",
+      "description": "Retries the front asked of new sources once the block held its limit of handshakes from unvalidated addresses (H3MaxUnvalidatedHandshakeCount); quic-go drops the Initial instead when its queue of Retries is full.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 112
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (host, interface, port) (rate(urnetwork_connect_front_quic_retries_total{env=\"$env\",block=~\"$block\",host=~\"$host\"}[$__rate_interval]))",
+          "legendFormat": "{{host}} {{interface}} {{port}}"
+        }
+      ]
+    },
+    {
+      "id": 30,
+      "type": "timeseries",
+      "title": "QUIC handshakes from unvalidated addresses, by block",
+      "description": "The handshakes connect's QUIC listeners, its own and the front's, hold from addresses not yet validated: the count the Retry limit bounds.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 112
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (host, block) (urnetwork_connect_quic_unvalidated_handshakes{env=\"$env\",block=~\"$block\",host=~\"$host\"})",
+          "legendFormat": "{{host}} {{block}}"
+        }
+      ]
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "QUIC ClientHellos / s by interface and port",
+      "description": "Every QUIC ClientHello the fronts read, by the interface whose address it arrived at and its port kind; other for an address no interface has.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 120
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (host, interface, port) (rate(urnetwork_front_quic_client_hellos_total{env=\"$env\",block=~\"$block\",host=~\"$host\"}[$__rate_interval]))",
+          "legendFormat": "{{host}} {{interface}} {{port}}"
+        }
+      ]
     }
   ]
 }

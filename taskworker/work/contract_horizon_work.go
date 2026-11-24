@@ -10,8 +10,9 @@ import (
 )
 
 // Contract row retention past the reaper's horizon
-// (model.RemoveContractsPastHorizon): the owner's 91 days, or as few as 35
-// once the runtime control's horizonDays shortens it. One chain: each run
+// (model.RemoveContractsPastHorizon): the owner's 91 days, or as few as 14
+// (model.ContractHorizonFloor) once the runtime control's horizonDays
+// shortens it. One chain: each run
 // reaps from its cursor for a bounded budget and returns where it stopped;
 // Post hands that cursor to the next run, soon while the pass has work left,
 // and after the idle interval once it reaches the horizon or finds the reaper
@@ -88,9 +89,11 @@ func RemoveContractsPastHorizon(
 
 // The next run waits the idle interval: the pass reached the horizon, the
 // reaper is off or its control unreadable, or it only dry runs, which never
-// advances its cursor and would otherwise reread the same contracts at once.
+// advances its cursor and would otherwise reread the same contracts at once;
+// unless the zero-byte pass is on and stopped short of its horizon, which the
+// next run takes up at once.
 func contractHorizonRunIdle(report *model.ContractHorizonReport) bool {
-	return report.CaughtUp || report.Idle() || report.Mode == model.ContractHorizonModeDryRun
+	return report.Idle() || (report.CaughtUp || report.Mode == model.ContractHorizonModeDryRun) && !report.ZeroByteBehind
 }
 
 func RemoveContractsPastHorizonPost(

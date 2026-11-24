@@ -36,6 +36,7 @@ func TestEmailTemplatesRender(t *testing.T) {
 		{&AuthPasswordSetTemplate{}, true},
 		{&NetworkWelcomeTemplate{}, true},
 		{&SubscriptionEndedTemplate{}, true},
+		{&SubscriptionEndedTemplate{DataOnly: true}, true},
 		{&ProviderUpgradeNoticeTemplate{NetworkName: "Synthetic network"}, false},
 		{&EpochEarningsTemplate{
 			Epoch:          42,

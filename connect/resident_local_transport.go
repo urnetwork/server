@@ -868,12 +868,14 @@ func (self *localTransportLink) close(pumps *sync.WaitGroup) localTransportDetac
 }
 
 // One direction of a link: the batch writer of an exchange socket, with a
-// queue in place of the socket. Owned by its pump goroutine.
+// queue in place of the socket. Owned by its pump goroutine. Its source and
+// destination are a transport's or forward's queue on one side and a
+// resident's route channel on the other.
 type localTransportPump struct {
 	link        *localTransportLink
 	direction   localTransportDirection
-	source      <-chan []byte
-	destination chan<- []byte
+	source      pooledMessageSource
+	destination pooledMessageDestination
 	// the receive queue boundary that counts the messages this pump drops
 	dropBoundary string
 	// ends the link when the source queue is closed
@@ -902,7 +904,8 @@ func (self *localTransportPump) run() {
 		select {
 		case <-self.link.ctx.Done():
 			return
-		case message, ok := <-self.source:
+		case message, ok := <-self.source.head():
+			self.source.received()
 			if !ok {
 				self.sourceClosed()
 				return
@@ -935,29 +938,17 @@ func (self *localTransportPump) deliverBatch(first []byte) bool {
 	if beforeGather := link.exchange.beforeLocalTransportGatherForTest; beforeGather != nil {
 		beforeGather(link, self.direction)
 	}
-	batchByteCount := ByteCount(len(first))
-	open := true
-gather:
-	for open && len(self.batch) < settings.ExchangeWriteBatchCount && batchByteCount < settings.ExchangeWriteBatchByteCount {
-		// A link that has ended takes no more from its source, so the next
-		// link carries the rest.
-		select {
-		case <-link.ctx.Done():
-			break gather
-		default:
-		}
-		select {
-		case next, nextOk := <-self.source:
-			if !nextOk {
-				open = false
-			} else {
-				self.batch = append(self.batch, next)
-				batchByteCount += ByteCount(len(next))
-			}
-		default:
-			break gather
-		}
-	}
+	// A link that has ended takes no more from its source, so the next link
+	// carries the rest.
+	batch, _, drained := self.source.tryReceiveBatch(
+		self.batch,
+		ByteCount(len(first)),
+		settings.ExchangeWriteBatchCount,
+		settings.ExchangeWriteBatchByteCount,
+		link.ctx.Done(),
+	)
+	self.batch = batch
+	open := !drained
 	if afterGather := link.exchange.afterLocalTransportGatherForTest; afterGather != nil {
 		afterGather(link, self.direction, len(self.batch))
 	}
@@ -1003,14 +994,22 @@ gather:
 			pingCount += 1
 			continue
 		}
-		select {
-		case self.destination <- message:
+		switch self.destination.trySend(message) {
+		case messageQueueSent:
 			owned = messageIndex + 1
 			self.release(charge)
 			dataFrameCount += 1
 			dataByteCount += len(message)
 			continue
-		default:
+		case messageQueueClosed:
+			// Only a transport's receive queue closes under a pump, when the
+			// transport ends: so does the link, and the batch is returned.
+			if timer != nil {
+				timer.Stop()
+			}
+			recordLocalTransportFrames(op, dataFrameCount, dataByteCount, pingCount)
+			link.detach(localTransportDetachTransportDone)
+			return false
 		}
 		// The delivery would block. One timer serves the rest of the batch,
 		// for exactly the budget it has left.
@@ -1021,19 +1020,24 @@ gather:
 			beforeBlock(link, self.direction)
 		}
 		blockStartTime := time.Now()
-		select {
-		case self.destination <- message:
+		switch self.destination.sendWait(message, link.ctx.Done(), nil, timer.C) {
+		case messageQueueSent:
 			owned = messageIndex + 1
 			self.release(charge)
 			exchangeLocalBlockedSeconds[op].Observe(time.Since(blockStartTime).Seconds())
 			dataFrameCount += 1
 			dataByteCount += len(message)
-		case <-timer.C:
+		case messageQueueTimedOut:
 			exchangeLocalBlockedSeconds[op].Observe(time.Since(blockStartTime).Seconds())
 			recordLocalTransportFrames(op, dataFrameCount, dataByteCount, pingCount)
 			link.detach(localTransportDetachWriteTimeout)
 			return false
-		case <-link.ctx.Done():
+		case messageQueueClosed:
+			timer.Stop()
+			recordLocalTransportFrames(op, dataFrameCount, dataByteCount, pingCount)
+			link.detach(localTransportDetachTransportDone)
+			return false
+		default:
 			timer.Stop()
 			recordLocalTransportFrames(op, dataFrameCount, dataByteCount, pingCount)
 			return false
@@ -1092,7 +1096,7 @@ func (self *ResidentTransport) runLocal(link *localTransportLink) (reason localT
 	residentPump := &localTransportPump{
 		link:         link,
 		direction:    localTransportDirectionResident,
-		source:       link.routeSend,
+		source:       pooledMessageChannel(link.routeSend),
 		destination:  self.receive,
 		dropBoundary: receiveQueueBoundaryLocalTransportReceive,
 		sourceClosed: func() {
@@ -1109,7 +1113,7 @@ func (self *ResidentTransport) runLocal(link *localTransportLink) (reason localT
 		link:         link,
 		direction:    localTransportDirectionClient,
 		source:       self.send,
-		destination:  link.routeReceive,
+		destination:  pooledMessageChannel(link.routeReceive),
 		dropBoundary: receiveQueueBoundaryLocalTransportSend,
 		sourceClosed: func() {
 			// a closed send queue closes the transport, as it does an

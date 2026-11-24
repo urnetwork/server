@@ -23,7 +23,7 @@ import (
 	"sync/atomic"
 
 	"github.com/gorilla/websocket"
-	quic "github.com/quic-go/quic-go"
+	quic "github.com/urnetwork/quic-go"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/urnetwork/glog"
@@ -81,6 +81,20 @@ var h3ListenerFailuresCounter = prometheus.NewCounterVec(
 		Help:      "QUIC listener failures by transport and lifecycle stage",
 	},
 	[]string{"transport", "stage"},
+)
+
+// The handshakes the connect handlers' QUIC listeners hold from addresses not
+// yet validated, the count their unvalidated-handshake limit bounds
+// (connectQuicHandshakeLimit), across every handler of the process: one in
+// production. Past the limit a new source must answer a Retry
+// (urnetwork_connect_front_quic_retries_total).
+var connectQuicUnvalidatedHandshakesGauge = prometheus.NewGauge(
+	prometheus.GaugeOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "quic_unvalidated_handshakes",
+		Help:      "QUIC handshakes the connect handler's listeners, its own and the lb_alt front's, hold from source addresses not yet validated: past H3MaxUnvalidatedHandshakeCount a new source must first answer a Retry",
+	},
 )
 
 var defaultConnectH3DatagramStats = &connect.H3DatagramStats{}
@@ -250,6 +264,18 @@ const (
 	connectH3WriteBatchMaxByteCount    = 64 * 1024
 )
 
+// The payload index of one ready batch on a framed writer. It escaped to the
+// heap on every write, passed through the writer's interface: 768 bytes a
+// write, 6% of connect's allocation in a production profile (LBALTOPT2.md
+// §3.5, R23). The framed writer copies each payload into its own scratch and
+// keeps no reference to the index (FramedMessageConn.WriteMessages), so an
+// index returns to the pool, cleared, when its write returns.
+var connectH1FramedPayloadsPool = sync.Pool{
+	New: func() any {
+		return new([connectH1WriteBatchMaxMessageCount][]byte)
+	},
+}
+
 func connectH1WriteBatchCanDrain(messageCount int, messageByteCount int) bool {
 	return messageCount < connectH1WriteBatchMaxMessageCount &&
 		messageByteCount < connectH1WriteBatchDrainByteCount
@@ -330,7 +356,7 @@ func writeConnectH1UserReadyBatch(
 	ctx context.Context,
 	writer connectH1WebSocketWriter,
 	writeBatch connectH1WriteBatch,
-	receive <-chan []byte,
+	receive *messageQueue,
 	firstMessage []byte,
 	firstOpen bool,
 	writeTimeout time.Duration,
@@ -347,23 +373,20 @@ func writeConnectH1UserReadyBatch(
 	open = true
 	framedWriter, framed := writer.(interface{ WriteMessages([][]byte) error })
 	if writeBatch != nil || framed {
-	drainReady:
-		for connectH1WriteBatchCanDrain(messageCount, messageByteCount) {
-			select {
-			case <-ctx.Done():
-				open = false
-				break drainReady
-			case message, nextOpen := <-receive:
-				if !nextOpen {
-					open = false
-					break drainReady
-				}
-				messageStorage[messageCount] = message
-				messageCount += 1
-				messageByteCount += len(message)
-			default:
-				break drainReady
-			}
+		// the drain takes ready messages under one lock of the queue, and a
+		// done context ends it. The queue is concrete so that the storage
+		// stays on the stack.
+		batch, batchByteCount, drained := receive.tryReceiveBatch(
+			messageStorage[:messageCount],
+			ByteCount(messageByteCount),
+			connectH1WriteBatchMaxMessageCount,
+			connectH1WriteBatchDrainByteCount,
+			ctx.Done(),
+		)
+		messageCount = len(batch)
+		messageByteCount = int(batchByteCount)
+		if drained || ctx.Err() != nil {
+			open = false
 		}
 	}
 	defer func() {
@@ -382,21 +405,26 @@ func writeConnectH1UserReadyBatch(
 		var spans [connectH1WriteBatchMaxMessageCount]h1RelayLineageSpan
 		for index, message := range messageStorage[:messageCount] {
 			if len(message) > 16 {
-				spans[index] = beginH1RelayLineage("edge_h1_write_begin", server.Id{}, server.Id{}, message, len(receive), cap(receive))
+				spans[index] = beginH1RelayLineage("edge_h1_write_begin", server.Id{}, server.Id{}, message, receive.len(), receive.capacity())
 			}
 		}
 		defer func() {
 			for _, span := range spans[:messageCount] {
-				span.end("edge_h1_write_end", err == nil, len(receive), cap(receive))
+				span.end("edge_h1_write_end", err == nil, receive.len(), receive.capacity())
 			}
 		}()
 	}
 
-	if err = writer.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
+	if err = setConnectH1WriteDeadline(writer, writeTimeout); err != nil {
 		return open, err
 	}
 	if framed {
-		var payloads [connectH1WriteBatchMaxMessageCount][]byte
+		payloads := connectH1FramedPayloadsPool.Get().(*[connectH1WriteBatchMaxMessageCount][]byte)
+		// runs before the deferred return of the messages it indexes
+		defer func() {
+			clear(payloads[:])
+			connectH1FramedPayloadsPool.Put(payloads)
+		}()
 		n := 0
 		for _, message := range messageStorage[:messageCount] {
 			if len(message) > 16 {
@@ -456,6 +484,7 @@ func init() {
 	prometheus.MustRegister(h3ListenerUpGauge)
 	prometheus.MustRegister(h3ListenerRestartsCounter)
 	prometheus.MustRegister(h3ListenerFailuresCounter)
+	prometheus.MustRegister(connectQuicUnvalidatedHandshakesGauge)
 	prometheus.MustRegister(newConnectH3DatagramCollector(defaultConnectH3DatagramStats))
 }
 
@@ -800,7 +829,7 @@ func (self *connectQuicHandshakeLimit) verifySourceAddress(net.Addr) bool {
 // quic.Transport.ConnContext. quic-go cancels ctx when the connection closes.
 // The returned context carries the release AwaitQuicHandshake runs once the
 // handshake completes; the close runs it otherwise, and only the first of the
-// two counts.
+// two counts. The process's gauge follows the count.
 func (self *connectQuicHandshakeLimit) connContext(
 	ctx context.Context,
 	info *quic.ClientInfo,
@@ -809,10 +838,15 @@ func (self *connectQuicHandshakeLimit) connContext(
 		return ctx, nil
 	}
 	self.count.Add(1)
-	stop := context.AfterFunc(ctx, func() { self.count.Add(-1) })
+	connectQuicUnvalidatedHandshakesGauge.Inc()
+	stop := context.AfterFunc(ctx, func() {
+		self.count.Add(-1)
+		connectQuicUnvalidatedHandshakesGauge.Dec()
+	})
 	release := func() {
 		if stop() {
 			self.count.Add(-1)
+			connectQuicUnvalidatedHandshakesGauge.Dec()
 		}
 	}
 	return context.WithValue(ctx, connectQuicHandshakeReleaseKey{}, release), nil
@@ -1092,6 +1126,13 @@ func newConnectHandlerWithPacketConns(
 	// The exchange flag is the single drain-excuse switch: the exchange side
 	// writes the markers on drain, the announce side consumes them.
 	settings.ConnectionAnnounceSettings.EnableDrainExcuse = exchange.settings.EnableDrainExcuse
+	// One timer sweep per process: the announcements' and the authorization
+	// leases' logical timers share the exchange's (LBALTOPT2.md §8.1).
+	settings.ConnectionAnnounceSettings.timerSweep = exchange.timerSweep
+	// One batcher per handler: its announcements' sync round reads and stats
+	// writes, verify egress lease refreshes and measurement writes that come
+	// due together share their round trips (LBALTOPT2.md R18).
+	settings.ConnectionAnnounceSettings.batcher = newConnectionAnnounceBatcher(&settings.ConnectionAnnounceSettings.Batch)
 
 	h := &ConnectHandler{
 		ctx:                   cancelCtx,
@@ -1361,9 +1402,31 @@ func (self *ConnectHandler) WaitForIdle(ctx context.Context) bool {
 	}
 }
 
+// Sets the H1 connection's read deadline timeout from now, counted in the
+// timer census: on a socket whose read timer is pending or a zombie, a move.
+func setConnectH1ReadDeadline(ws connect.H1MessageConn, timeout time.Duration) error {
+	server.CountTimerDeadlineAfter(server.TimerCensusSiteH1ReadDeadline, timeout)
+	return ws.SetReadDeadline(time.Now().Add(timeout))
+}
+
+// Sets the H1 connection's write deadline timeout from now, counted in the
+// timer census.
+func setConnectH1WriteDeadline(writer interface{ SetWriteDeadline(time.Time) error }, timeout time.Duration) error {
+	server.CountTimerDeadlineAfter(server.TimerCensusSiteH1WriteDeadline, timeout)
+	return writer.SetWriteDeadline(time.Now().Add(timeout))
+}
+
+// Re-arms a transport writer's heartbeat timer for interval, counted at site in
+// the timer census. A select the writer woke from on a message left the timer
+// in its P's heap as a zombie, so the Reset may move it.
+func resetConnectPingTimer(pingTimer *time.Timer, interval time.Duration, site server.TimerCensusSite) {
+	server.CountTimerReset(site, interval)
+	pingTimer.Reset(interval)
+}
+
 // A rejected H1 deadline must stop the operation before the socket is read.
 func readConnectH1AuthWithDeadline(ws connect.H1MessageConn, timeout time.Duration) (int, []byte, error) {
-	if err := ws.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+	if err := setConnectH1ReadDeadline(ws, timeout); err != nil {
 		return 0, nil, err
 	}
 	return ws.ReadMessage()
@@ -1383,14 +1446,14 @@ func connectH1TransportDelayResponseHeader(enableTransportDelay bool, headerAuth
 }
 
 func echoConnectH1AuthWithDeadline(ws connect.H1MessageConn, timeout time.Duration, authFrameBytes []byte) error {
-	if err := ws.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
+	if err := setConnectH1WriteDeadline(ws, timeout); err != nil {
 		return err
 	}
 	return ws.WriteMessage(websocket.BinaryMessage, authFrameBytes)
 }
 
 func readConnectH1PooledWithDeadline(ws connect.H1MessageConn, timeout time.Duration, maximum int64) (int, []byte, error) {
-	if err := ws.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+	if err := setConnectH1ReadDeadline(ws, timeout); err != nil {
 		return 0, nil, err
 	}
 	return connect.ReadH1PooledMessage(ws, maximum)
@@ -1772,7 +1835,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	}
 	// the lease's final check before admission is one of the handshake's queries
 	lease, leaseErr := session.StartConnectionAuthorizationLease(
-		session.WithStateQuerySource(handleCtx, session.StateQueryConnectH1), byJwt, connectionId, auth.StreamLeaseVersion, closeAuthorization)
+		session.WithStateQuerySource(handleCtx, session.StateQueryConnectH1), byJwt, connectionId, auth.StreamLeaseVersion, self.exchange.timerSweep, closeAuthorization)
 	if leaseErr != nil {
 		h1Observation.result = connectH1ResultStateRefused
 		status := http.StatusUnauthorized
@@ -1888,6 +1951,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 				clientId,
 				connectTransportH1,
 				&self.settings.ProviderIntentCheckSettings,
+				self.exchange.timerSweep,
 			)
 			if !providerIntentCheck.Start() {
 				h1Observation.close(connectH1CloseClientLimit)
@@ -1905,7 +1969,6 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			clientId,
 			clientAddress,
 			ipFamilyIntent,
-			egressProxyFromHeader(r.Header),
 			auth.AppVersion,
 			self.handlerId,
 			self.connectionReconcile,
@@ -1974,7 +2037,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 				messageType, message, err := readConnectH1PooledWithDeadline(ws, self.settings.ReadTimeout, int64(self.settings.FramerSettings.MaxMessageLen+4))
 				var trace h1RelayLineageSpan
 				if h1RelayLineageTraceEnabled {
-					trace = beginH1RelayLineage("edge_h1_read", clientId, connectionId, message, len(residentTransport.send), cap(residentTransport.send))
+					trace = beginH1RelayLineage("edge_h1_read", clientId, connectionId, message, residentTransport.send.len(), residentTransport.send.capacity())
 				}
 				if err != nil {
 					h1Observation.readError(err)
@@ -2046,7 +2109,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 						connect.NoteTransportDelayHandoff(ws, time.Since(handoffStartTime))
 					}
 					if h1RelayLineageTraceEnabled {
-						trace.end("edge_h1_admit", sendResult == pooledMessageSendDelivered, len(residentTransport.send), cap(residentTransport.send))
+						trace.end("edge_h1_admit", sendResult == pooledMessageSendDelivered, residentTransport.send.len(), residentTransport.send.capacity())
 					}
 					if sendResult == pooledMessageSendDone {
 						return
@@ -2081,7 +2144,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 				if returnToPool {
 					defer connect.MessagePoolReturn(message)
 				}
-				err := ws.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
+				err := setConnectH1WriteDeadline(ws, self.settings.WriteTimeout)
 				if err == nil {
 					err = ws.WriteMessage(websocket.BinaryMessage, message)
 				}
@@ -2180,30 +2243,32 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 						return
 					case <-residentTransport.Done():
 						return
-					case message, ok := <-residentTransport.receive:
-						if !writeUser(message, ok) {
+					default:
+					}
+					if message, result := residentTransport.receive.tryReceive(); result != messageQueueEmpty {
+						if !writeUser(message, result == messageQueueReceived) {
 							return
 						}
-					default:
 					}
 					continue
 				}
 
 				// fast path without arming the ping timer. A pending kick is
-				// selected here too, so continuous traffic cannot starve it.
+				// checked first, so continuous traffic cannot starve it.
 				select {
-				case message, ok := <-residentTransport.receive:
-					if !writeUser(message, ok) {
-						return
-					}
-					continue
 				case cause := <-kickRequest:
 					writeKick(cause)
 					return
 				default:
 				}
+				if message, result := residentTransport.receive.tryReceive(); result != messageQueueEmpty {
+					if !writeUser(message, result == messageQueueReceived) {
+						return
+					}
+					continue
+				}
 
-				pingTimer.Reset(self.settings.heartbeatInterval(pingTracker))
+				resetConnectPingTimer(pingTimer, self.settings.heartbeatInterval(pingTracker), server.TimerCensusSiteH1PingTimer)
 				select {
 				case <-handleCtx.Done():
 					return
@@ -2212,7 +2277,8 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 				case cause := <-kickRequest:
 					writeKick(cause)
 					return
-				case message, ok := <-residentTransport.receive:
+				case message, ok := <-residentTransport.receive.head():
+					residentTransport.receive.received()
 					if !writeUser(message, ok) {
 						return
 					}
@@ -2822,7 +2888,7 @@ func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier Resi
 			}
 			// the lease's final check before admission is one of the handshake's queries
 			lease, leaseErr = session.StartConnectionAuthorizationLease(
-				session.WithStateQuerySource(handleCtx, session.StateQueryConnectH3), byJwt, connectionId, auth.StreamLeaseVersion, closeAuthorization)
+				session.WithStateQuerySource(handleCtx, session.StateQueryConnectH3), byJwt, connectionId, auth.StreamLeaseVersion, self.exchange.timerSweep, closeAuthorization)
 			if leaseErr != nil {
 				if !connectAuthDependencyUnavailable(leaseErr) {
 					return refused(leaseErr)
@@ -2904,6 +2970,7 @@ func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier Resi
 				clientId,
 				connectTransportH3,
 				&self.settings.ProviderIntentCheckSettings,
+				self.exchange.timerSweep,
 			)
 			if !providerIntentCheck.Start() {
 				kickClientLimit(clientLimitKickCauseProviderIntent)
@@ -2918,8 +2985,6 @@ func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier Resi
 			clientId,
 			clientAddress,
 			ipFamilyIntent,
-			// h3 never carries a proxied transport (transport_egress_proxy.go)
-			false,
 			appVersion,
 			self.handlerId,
 			self.connectionReconcile,
@@ -3148,7 +3213,7 @@ func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier Resi
 		// batching path.
 		var streamSend chan []byte
 		var streamSendBudget *connect.H3HybridStreamSendBudget
-		streamInput := (<-chan []byte)(residentTransport.receive)
+		var streamInput pooledMessageSource = residentTransport.receive
 		if useH3Datagrams {
 			datagramSettings := self.settings.H3DatagramSettings
 			streamSend = make(chan []byte, datagramSettings.HybridStreamQueueMessageCount)
@@ -3157,7 +3222,7 @@ func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier Resi
 				datagramSettings.HybridStreamQueueByteCount(),
 				self.settings.H3DatagramStats,
 			)
-			streamInput = streamSend
+			streamInput = pooledMessageChannel(streamSend)
 		}
 		releaseStreamMessage := func(message []byte) {
 			if streamSendBudget != nil {
@@ -3213,21 +3278,23 @@ func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier Resi
 					case <-handleCtx.Done():
 						receiveOpen = false
 						break drainReady
-					case message, ok := <-streamInput:
-						if !ok {
-							receiveOpen = false
-							break drainReady
-						}
-						framedByteCount := len(message) + 4 + delayHeaderByteCount
-						if connectH3WriteBatchMaxByteCount < batchByteCount+framedByteCount {
-							pendingMessage = message
-							break drainReady
-						}
-						messages = append(messages, message)
-						batchByteCount += framedByteCount
 					default:
+					}
+					message, result := streamInput.tryReceive()
+					switch result {
+					case messageQueueEmpty:
+						break drainReady
+					case messageQueueDrained:
+						receiveOpen = false
 						break drainReady
 					}
+					framedByteCount := len(message) + 4 + delayHeaderByteCount
+					if connectH3WriteBatchMaxByteCount < batchByteCount+framedByteCount {
+						pendingMessage = message
+						break drainReady
+					}
+					messages = append(messages, message)
+					batchByteCount += framedByteCount
 				}
 
 				if writeBatchStorage == nil {
@@ -3263,7 +3330,7 @@ func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier Resi
 			pingTimer := time.NewTimer(0)
 			defer pingTimer.Stop()
 			resetPingTimer := func() {
-				pingTimer.Reset(self.settings.heartbeatInterval(pingTracker))
+				resetConnectPingTimer(pingTimer, self.settings.heartbeatInterval(pingTracker), server.TimerCensusSiteH3PingTimer)
 			}
 			resetPingTimer()
 			defer func() {
@@ -3278,7 +3345,8 @@ func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier Resi
 					select {
 					case <-handleCtx.Done():
 						return
-					case nextMessage, ok := <-streamInput:
+					case nextMessage, ok := <-streamInput.head():
+						streamInput.received()
 						if !ok {
 							return
 						}
@@ -3334,37 +3402,33 @@ func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier Resi
 					}
 				}
 				for {
-					select {
-					case <-handleCtx.Done():
+					message, result := residentTransport.receive.receiveWait(handleCtx.Done())
+					if result != messageQueueReceived {
 						return
-					case message, ok := <-residentTransport.receive:
-						if !ok {
+					}
+					// the delay header rides inside the envelope
+					useDatagram := self.settings.H3DatagramSettings.UseDatagramForPathWithHeader(
+						len(message),
+						maxDatagramByteCount,
+						delayHeaderByteCount,
+					)
+					if useDatagram {
+						useStream, sendErr := sendDatagramMessage(message)
+						if sendErr != nil {
+							connect.MessagePoolReturn(message)
+							if glog.V(2) {
+								glog.Infof("[ts]H3 DATAGRAM error = %s\n", sendErr)
+							}
 							return
 						}
-						// the delay header rides inside the envelope
-						useDatagram := self.settings.H3DatagramSettings.UseDatagramForPathWithHeader(
-							len(message),
-							maxDatagramByteCount,
-							delayHeaderByteCount,
-						)
-						if useDatagram {
-							useStream, sendErr := sendDatagramMessage(message)
-							if sendErr != nil {
-								connect.MessagePoolReturn(message)
-								if glog.V(2) {
-									glog.Infof("[ts]H3 DATAGRAM error = %s\n", sendErr)
-								}
-								return
-							}
-							if !useStream {
-								announce.SendMessage(ByteCount(len(message)))
-								connect.MessagePoolReturn(message)
-								continue
-							}
+						if !useStream {
+							announce.SendMessage(ByteCount(len(message)))
+							connect.MessagePoolReturn(message)
+							continue
 						}
-						if !offerStream(message) {
-							return
-						}
+					}
+					if !offerStream(message) {
+						return
 					}
 				}
 			})

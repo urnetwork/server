@@ -128,7 +128,7 @@ func awaitRouteRejectionBucket(t testing.TB, ctx context.Context, sourceId serve
 	deadline := time.After(time.Minute)
 	for {
 		// the counter rises before the acknowledgement bumps the watch
-		update := watch.Update()
+		update, _ := watch.Update()
 		if before < originSubscriptionsAcknowledged(t) {
 			return
 		}
@@ -391,7 +391,7 @@ func TestCreateContractMissingOriginAcrossItsCommitIsNotRecorded(t *testing.T) {
 		companionOriginExists = func(ctx context.Context, _ server.Id, _ server.Id, _ time.Duration) bool {
 			watch := model.GetContractOriginNotifications(ctx).Watch(destinationId, sourceId)
 			defer watch.Close()
-			edge := watch.Update()
+			edge, _ := watch.Update()
 			// the window's new forward contract, through this owner
 			origin, err := model.CreateTransferEscrow(ctx, destinationNetworkId, destinationId, sourceNetworkId, sourceId, model.ByteCount(1024*1024))
 			if err != nil || origin == nil {
@@ -476,9 +476,9 @@ func TestCreateContractInactiveDestinationRefusalOutlivesTheRing(t *testing.T) {
 
 // An old provider returns traffic to a window whose forward contract passed
 // its deadline, as a non-companion request the destination settles as a
-// Stream companion. Its one origin lookup decides the refusal before the
-// destination's metadata and the endpoint lifecycle reads, which only a
-// contract needs.
+// Stream companion. Its origin lookup, and the one re-check its pair's new
+// subscription needs, decide the refusal before the destination's metadata
+// and the endpoint lifecycle reads, which only a contract needs.
 func TestCreateContractStreamFallbackDecidesMissingOriginBeforeContractReads(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, closeOwner := newRouteRejectionOwnerContext(context.Background())
@@ -511,8 +511,11 @@ func TestCreateContractStreamFallbackDecidesMissingOriginBeforeContractReads(t *
 				originReads += 1
 			}
 		}
-		if originReads != 1 {
-			t.Fatalf("the refusal made %d origin reads, want 1: %q", originReads, reads)
+		// The first read ran before the pair's subscription was acknowledged,
+		// so one more read, fenced by the acknowledgement, decides the stored
+		// refusal (CPUOPT7-ORIGIN-DELIVERY.md §4.1).
+		if originReads != 2 {
+			t.Fatalf("the refusal made %d origin reads, want 2: %q", originReads, reads)
 		}
 		if secretReads != 0 {
 			t.Fatalf("the refusal read the provide secret %d times, want 0", secretReads)

@@ -13,14 +13,14 @@ import (
 
 // Partition maintenance and retention of the contract tables
 // (CONTRACT-PARTITION.md; see server.MaintainContractPartitions). Before the
-// cutover a run only guards a prepared cutover and removes expired close
-// evidence, so this build is safe on either side of the cutover. The evidence
-// goes at the contract horizon, read from the horizon reaper's control once
-// per run (model.WithContractHorizonControl), at the pace of its own brake,
-// read before every batch (server.RemoveExpiredCloseEvidence). The contract
-// days retire at the same horizon (S1, server.ContractDayRetention): a day the
-// reaper has emptied is compacted down to the rows the reaper keeps and
-// dropped once it holds none.
+// cutover a run only guards a prepared cutover, so this build is safe on
+// either side of the cutover. The contract days retire at the contract
+// horizon, read from the horizon reaper's control once per run
+// (model.WithContractHorizonControl; S1, server.ContractDayRetention): a day
+// the reaper has emptied is compacted down to the rows the reaper keeps and
+// dropped once it holds none. The close evidence row deletes it ran until
+// 2026-11-23 are their own chain (RemoveExpiredCloseEvidence); its cursor
+// keeps their old position unread, for a build from before then.
 
 type MaintainContractPartitionsArgs struct {
 	Cursor server.ContractRetentionCursor `json:"cursor"`
@@ -61,16 +61,13 @@ func MaintainContractPartitions(
 		maintainContractPartitions.Cursor,
 		maintainContractPartitionsBudget,
 	)
-	if 0 < len(report.Created) || 0 < len(report.Compacted) || 0 < len(report.Dropped) || 0 < report.EvidenceRemoved || report.AbandonedCutover || report.AbandonedEvidenceCutover {
+	if 0 < len(report.Created) || 0 < len(report.Compacted) || 0 < len(report.Dropped) || report.AbandonedCutover || report.AbandonedEvidenceCutover {
 		glog.Infof(
-			"[cp]created %v, compacted %v, dropped %v, rows kept by day %v, removed %d close evidence rows at a retention of %s (stop %s), abandoned cutover %t, abandoned close evidence cutover %t\n",
+			"[cp]created %v, compacted %v, dropped %v, rows kept by day %v, abandoned cutover %t, abandoned close evidence cutover %t\n",
 			report.Created,
 			report.Compacted,
 			report.Dropped,
 			report.Kept,
-			report.EvidenceRemoved,
-			report.EvidenceRetention,
-			report.EvidenceStop,
 			report.AbandonedCutover,
 			report.AbandonedEvidenceCutover,
 		)

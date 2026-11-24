@@ -35,7 +35,7 @@ type nativeMixedAckBrokerObservation struct {
 	ControlledProviderAcks, ProviderTemplatePackets                                                int
 	ProviderAckPackets, ProviderAckFrontierAdvances                                                int
 	ProviderAckFrontier, ProviderBodyAckedBytes                                                    uint32
-	NativeGroups, DataAccepted, DataRefused                                                        int
+	NativeGroups, DataAccepted, DataRefused, CoveredDataCollapsed                                  int
 	GroupPacketHistogram                                                                           [5]uint64
 	AckGroupHistogram                                                                              [4]uint64
 	FirstFourObserved, FirstFourBeforeReplay                                                       bool
@@ -326,6 +326,7 @@ func (self *nativeMixedAckBroker) sendAcks(acks [][]byte) {
 		capacityBytes += cap(packet)
 	}
 	var fullAccepted [4]bool
+	var collapsed, readinessRefused uint64
 	send := func(_ [][]byte, accepted []bool) int {
 		var sameControl [3]bool
 		entryElapsed := time.Since(started)
@@ -342,7 +343,20 @@ func (self *nativeMixedAckBroker) sendAcks(acks [][]byte) {
 			}
 			self.stateLock.Unlock()
 		}
+		// The bridge serializes original native offers on this client. Within
+		// this offer only the covered DATA at index zero can collapse. Join its
+		// indexed result to the collapse count and rule out ready refusal in
+		// the healthy control, where every ACK must be admitted.
+		var beforeCollapse, beforeReadiness uint64
+		if !self.loss {
+			beforeCollapse = self.path.multiClient.TcpCollapseDropCount()
+			beforeReadiness = self.path.multiClient.NativeAdmissionRefusalCount()
+		}
 		count := self.send(group[:len(acks)+1], fullAccepted[:len(acks)+1])
+		if !self.loss {
+			collapsed = self.path.multiClient.TcpCollapseDropCount() - beforeCollapse
+			readinessRefused = self.path.multiClient.NativeAdmissionRefusalCount() - beforeReadiness
+		}
 		exitElapsed := time.Since(started)
 		fullCount, ackCount := 0, 0
 		for index, admitted := range fullAccepted[:len(acks)+1] {
@@ -380,11 +394,7 @@ func (self *nativeMixedAckBroker) sendAcks(acks [][]byte) {
 	self.observation.AckGroupHistogram[len(acks)]++
 	self.observation.AckAccepted += ackCount
 	self.observation.AckRefused += len(acks) - ackCount
-	if fullAccepted[0] {
-		self.observation.DataAccepted++
-	} else {
-		self.observation.DataRefused++
-	}
+	self.recordTemplateAdmissionWithLock(fullAccepted[0], collapsed, readinessRefused)
 	if beforeReplay {
 		self.observation.AckOfferedBeforeReplay += len(acks)
 	}
@@ -397,6 +407,24 @@ func (self *nativeMixedAckBroker) sendAcks(acks [][]byte) {
 	self.observation.MaximumOwnedPacketBytes = max(self.observation.MaximumOwnedPacketBytes, packetBytes)
 	self.observation.MaximumOwnedCapacityBytes = max(self.observation.MaximumOwnedCapacityBytes, capacityBytes)
 	self.stateLock.Unlock()
+}
+
+func (self *nativeMixedAckBroker) recordTemplateAdmissionWithLock(accepted bool, collapsed, readinessRefused uint64) {
+	expectedCollapse := uint64(0)
+	if accepted {
+		self.observation.DataAccepted++
+	} else {
+		self.observation.DataRefused++
+		expectedCollapse = 1
+	}
+	if self.loss {
+		return
+	}
+	if readinessRefused != 0 || collapsed != expectedCollapse {
+		self.observation.Invalid = true
+		return
+	}
+	self.observation.CoveredDataCollapsed += int(expectedCollapse)
 }
 
 // Earlier nonselected members keep their dispatch order. This is still a
@@ -549,10 +577,97 @@ func (self *nativeMixedAckBroker) reportAfterClose(t testing.TB, loss bool) {
 		t.Errorf("controlled mixed native ownership or actual-work receipt invalid: %+v", observation)
 	}
 	if !loss && (observation.AckPackets != 3 || observation.NativeGroups != 3 || observation.AckAccepted != 3 ||
-		observation.DataAccepted != 3 || observation.DataRefused != 0 || observation.ProviderTemplatePackets != 3 || observation.ControlledProviderAcks != 3 ||
+		observation.DataAccepted+observation.DataRefused != observation.NativeGroups ||
+		observation.DataRefused != observation.CoveredDataCollapsed ||
+		observation.ProviderTemplatePackets != observation.DataAccepted || observation.ControlledProviderAcks != 3 ||
 		observation.AckRefused != 0 || observation.ProviderAckFrontierAdvances == 0 ||
 		observation.ProviderBodyAckedBytes < 2*1024*1024 || observation.ProviderBodyAckedBytes > 2*1024*1024+1) {
 		t.Errorf("controlled mixed native healthy work was not equal: %+v", observation)
+	}
+}
+
+type nativeMixedAckBrokerTestReporter struct {
+	testing.TB
+	failures []string
+}
+
+func (self *nativeMixedAckBrokerTestReporter) Errorf(format string, args ...any) {
+	self.failures = append(self.failures, fmt.Sprintf(format, args...))
+}
+
+func testNativeMixedAckBrokerHealthyFixture() *nativeMixedAckBroker {
+	const base = 100
+	broker := newNativeMixedAckBroker(&nativeDuplicateAckRecoveryState{base: base}, false)
+	broker.providerFrontierSet = true
+	broker.observation.TemplateCopies = 1
+	broker.observation.TemplateReturns = 1
+	broker.observation.CoveredBeforeOriginRelease = true
+	broker.observation.ApplicationMtu = 1500
+	broker.observation.MaximumOwnedRoots = 2
+	broker.observation.MaximumOwnedPacketBytes = 93
+	broker.observation.AckPackets = 3
+	broker.observation.AckAccepted = 3
+	broker.observation.ControlledProviderAcks = 3
+	broker.observation.ProviderAckFrontierAdvances = 3
+	broker.observation.ProviderAckFrontier = base + 2*1024*1024 + 1
+	broker.observation.NativeGroups = 3
+	broker.observation.ProviderTemplatePackets = 2
+	broker.observation.CompletionReceipts = 1
+	return broker
+}
+
+func TestNativeMixedAckBrokerReportsCoveredTemplateCollapse(t *testing.T) {
+	broker := testNativeMixedAckBrokerHealthyFixture()
+	broker.recordTemplateAdmissionWithLock(false, 1, 0)
+	broker.recordTemplateAdmissionWithLock(true, 0, 0)
+	broker.recordTemplateAdmissionWithLock(true, 0, 0)
+
+	reporter := &nativeMixedAckBrokerTestReporter{TB: t}
+	broker.reportAfterClose(reporter, false)
+	if len(reporter.failures) != 0 {
+		t.Fatalf("verified covered template collapse rejected equal healthy work: %v", reporter.failures)
+	}
+}
+
+func TestNativeMixedAckBrokerRejectsUnprovedTemplateOutcome(t *testing.T) {
+	for _, test := range []struct {
+		name                            string
+		templateAccepted                bool
+		collapseCount, readinessRefused uint64
+		providerTemplates               int
+		providerAckReceipts             int
+	}{
+		{name: "missing collapse", providerTemplates: 2, providerAckReceipts: 3},
+		{name: "ambiguous collapse", collapseCount: 2, providerTemplates: 2, providerAckReceipts: 3},
+		{name: "native ready refusal", collapseCount: 1, readinessRefused: 1, providerTemplates: 2, providerAckReceipts: 3},
+		{name: "accepted with collapse", templateAccepted: true, collapseCount: 1, providerTemplates: 3, providerAckReceipts: 3},
+		{name: "extra provider template", collapseCount: 1, providerTemplates: 3, providerAckReceipts: 3},
+		{name: "missing provider template", collapseCount: 1, providerTemplates: 1, providerAckReceipts: 3},
+		{name: "missing exact ACK receipt", collapseCount: 1, providerTemplates: 2, providerAckReceipts: 2},
+	} {
+		broker := testNativeMixedAckBrokerHealthyFixture()
+		broker.recordTemplateAdmissionWithLock(test.templateAccepted, test.collapseCount, test.readinessRefused)
+		broker.recordTemplateAdmissionWithLock(true, 0, 0)
+		broker.recordTemplateAdmissionWithLock(true, 0, 0)
+		broker.observation.ProviderTemplatePackets = test.providerTemplates
+		broker.observation.ControlledProviderAcks = test.providerAckReceipts
+
+		reporter := &nativeMixedAckBrokerTestReporter{TB: t}
+		broker.reportAfterClose(reporter, false)
+		if len(reporter.failures) == 0 {
+			t.Errorf("%s passed the healthy work verdict", test.name)
+		}
+	}
+}
+
+func TestNativeMixedAckBrokerPreservesLossTemplateAccounting(t *testing.T) {
+	broker := newNativeMixedAckBroker(&nativeDuplicateAckRecoveryState{}, true)
+	broker.recordTemplateAdmissionWithLock(false, 0, 0)
+	broker.recordTemplateAdmissionWithLock(true, 0, 0)
+	observation := broker.snapshot()
+	if observation.Invalid || observation.DataAccepted != 1 || observation.DataRefused != 1 ||
+		observation.CoveredDataCollapsed != 0 {
+		t.Fatalf("loss mode did not keep the original indexed DATA outcomes: %+v", observation)
 	}
 }
 

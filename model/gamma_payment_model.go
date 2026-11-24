@@ -1044,7 +1044,11 @@ type GammaPaymentIntent struct {
 	OfferApplied             bool
 	PriceUsdNanoCents        NanoCents
 	RegularPriceUsdNanoCents NanoCents
-	Email                    string
+	// what decided a bought plan's tier, json (controller.PriceTierEvidence);
+	// "" for a data pack, a gift and an automatic intent, which renews at the
+	// account's tier
+	PriceTierEvidenceJson string
+	Email                 string
 	// a renewal: the new term starts when the old one ends
 	TermStartTime      *time.Time
 	CreateTime         time.Time
@@ -1079,14 +1083,15 @@ func (self *GammaPaymentIntent) MatchesStatusToken(tokenHash []byte) bool {
 const gammaPaymentIntentColumns = `
 	intent_id, status_token_hash, extra_status_token_hashes, network_id,
 	hotkey, purpose, period_key, reference, delivery, item, tier,
-	offer_applied, price_usd_nano_cents, regular_price_usd_nano_cents, email,
-	term_start_time, create_time, expires_at, credited_at, balance_id,
-	balance_code_id, credit_failure_count, voided_at
+	offer_applied, price_usd_nano_cents, regular_price_usd_nano_cents,
+	price_tier_evidence::text, email, term_start_time, create_time,
+	expires_at, credited_at, balance_id, balance_code_id,
+	credit_failure_count, voided_at
 `
 
 func scanGammaPaymentIntent(result pgx.Rows) *GammaPaymentIntent {
 	intent := &GammaPaymentIntent{}
-	var tier, email *string
+	var tier, priceTierEvidence, email *string
 	server.Raise(result.Scan(
 		&intent.IntentId,
 		&intent.StatusTokenHash,
@@ -1102,6 +1107,7 @@ func scanGammaPaymentIntent(result pgx.Rows) *GammaPaymentIntent {
 		&intent.OfferApplied,
 		&intent.PriceUsdNanoCents,
 		&intent.RegularPriceUsdNanoCents,
+		&priceTierEvidence,
 		&email,
 		&intent.TermStartTime,
 		&intent.CreateTime,
@@ -1114,6 +1120,9 @@ func scanGammaPaymentIntent(result pgx.Rows) *GammaPaymentIntent {
 	))
 	if tier != nil {
 		intent.Tier = *tier
+	}
+	if priceTierEvidence != nil {
+		intent.PriceTierEvidenceJson = *priceTierEvidence
 	}
 	if email != nil {
 		intent.Email = *email
@@ -1144,9 +1153,9 @@ func CreateGammaPaymentIntentInTx(tx server.PgTx, ctx context.Context, intent *G
 				intent_id, status_token_hash, network_id, hotkey, purpose,
 				period_key, reference, delivery, item, tier, offer_applied,
 				price_usd_nano_cents, regular_price_usd_nano_cents, email,
-				term_start_time, create_time, expires_at
+				term_start_time, create_time, expires_at, price_tier_evidence
 			)
-			SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
+			SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18::jsonb
 			WHERE EXISTS (SELECT 1 FROM network WHERE network.network_id = $3)
 			ON CONFLICT DO NOTHING
 		`,
@@ -1167,6 +1176,7 @@ func CreateGammaPaymentIntentInTx(tx server.PgTx, ctx context.Context, intent *G
 		intent.TermStartTime,
 		intent.CreateTime,
 		intent.ExpiresAt,
+		nullIfEmptyString(intent.PriceTierEvidenceJson),
 	))
 	return tag.RowsAffected() == 1
 }
@@ -2242,32 +2252,41 @@ type GammaAlarm struct {
 // was already recorded.
 func AddGammaAlarm(ctx context.Context, alarmKey string, kind string, blockNumber *int64, detail string, now time.Time) (added bool) {
 	server.Tx(ctx, func(tx server.PgTx) {
-		tag := server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-				INSERT INTO gamma_alarm (alarm_key, kind, block_number, detail, create_time)
-				VALUES ($1, $2, $3, $4, $5)
-				ON CONFLICT DO NOTHING
-			`,
-			alarmKey,
-			kind,
-			blockNumber,
-			detail,
-			now,
-		))
-		added = tag.RowsAffected() == 1
+		added = AddGammaAlarmInTx(tx, ctx, alarmKey, kind, blockNumber, detail, now)
 	})
 	return
 }
 
-// ListGammaAlarms are the alarms since a time, newest first.
+// AddGammaAlarmInTx records an alarm, or a record of the watcher's (a direct
+// payment), once per key; added = false when the key was there.
+func AddGammaAlarmInTx(tx server.PgTx, ctx context.Context, alarmKey string, kind string, blockNumber *int64, detail string, now time.Time) (added bool) {
+	tag := server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			INSERT INTO gamma_alarm (alarm_key, kind, block_number, detail, create_time)
+			VALUES ($1, $2, $3, $4, $5)
+			ON CONFLICT DO NOTHING
+		`,
+		alarmKey,
+		kind,
+		blockNumber,
+		detail,
+		now,
+	))
+	return tag.RowsAffected() == 1
+}
+
+// ListGammaAlarms are the alarms since a time, newest first. Direct payments,
+// recorded in the same table for their claims (GammaRecordKindDirectPayment),
+// are records and not alarms.
 func ListGammaAlarms(ctx context.Context, since time.Time, limit int) (alarms []*GammaAlarm) {
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
-			`SELECT alarm_key, kind, block_number, detail, create_time FROM gamma_alarm WHERE $1 <= create_time ORDER BY create_time DESC LIMIT $2`,
+			`SELECT alarm_key, kind, block_number, detail, create_time FROM gamma_alarm WHERE $1 <= create_time AND kind <> $3 ORDER BY create_time DESC LIMIT $2`,
 			since,
 			limit,
+			GammaRecordKindDirectPayment,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {

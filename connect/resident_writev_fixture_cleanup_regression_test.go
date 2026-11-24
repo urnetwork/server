@@ -106,8 +106,8 @@ func newExchangeWritevCleanupSocketFixture(
 		conn:          socket,
 		sendBuffer:    NewDefaultExchangeBuffer(settings),
 		receiveBuffer: NewReceiveOnlyExchangeBuffer(settings),
-		send:          make(chan []byte, settings.ExchangeBufferSize),
-		receive:       make(chan []byte, settings.ExchangeBufferSize),
+		send:          newMessageQueue(settings.ExchangeBufferSize),
+		receive:       newMessageQueue(settings.ExchangeBufferSize),
 		settings:      settings,
 		header:        ExchangeHeader{Op: ExchangeOpTransport},
 	}

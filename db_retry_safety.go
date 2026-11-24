@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net"
 	"sync/atomic"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -28,6 +29,25 @@ func (self *pgWriteTrackedConn) Write(p []byte) (int, error) {
 		self.writtenByteCount.Add(uint64(n))
 	}
 	return n, err
+}
+
+// The deadlines pgx sets, counted in the timer census (timer_census.go): pgx
+// sets one only when a query's context ends (its context watcher), at once,
+// and clears it after, and gives a closing connection 15 s. TLS sets its
+// deadlines through these too.
+func (self *pgWriteTrackedConn) SetDeadline(deadline time.Time) error {
+	CountTimerDeadline(TimerCensusSitePgDeadline, deadline)
+	return self.Conn.SetDeadline(deadline)
+}
+
+func (self *pgWriteTrackedConn) SetReadDeadline(deadline time.Time) error {
+	CountTimerDeadline(TimerCensusSitePgDeadline, deadline)
+	return self.Conn.SetReadDeadline(deadline)
+}
+
+func (self *pgWriteTrackedConn) SetWriteDeadline(deadline time.Time) error {
+	CountTimerDeadline(TimerCensusSitePgDeadline, deadline)
+	return self.Conn.SetWriteDeadline(deadline)
 }
 
 // Wraps beneath TLS so pgx still sees *tls.Conn for SCRAM channel binding.

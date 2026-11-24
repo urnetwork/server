@@ -31,8 +31,8 @@ func TestFrontQuicCountsConnectionsByAddressFamily(t *testing.T) {
 		if family == frontFamilyIpv6 {
 			otherFamily = frontFamilyIpv4
 		}
-		counter := frontQuicConnectionsByFamilyCounter.WithLabelValues(frontPortQuic, family, frontQuicResultConnect)
-		otherCounter := frontQuicConnectionsByFamilyCounter.WithLabelValues(frontPortQuic, otherFamily, frontQuicResultConnect)
+		counter := frontQuicConnectionsByFamilyCounter.WithLabelValues(testFrontInterfaceA, frontPortQuic, family, frontQuicResultConnect)
+		otherCounter := frontQuicConnectionsByFamilyCounter.WithLabelValues(testFrontInterfaceA, frontPortQuic, otherFamily, frontQuicResultConnect)
 		before := testutil.ToFloat64(counter)
 		otherBefore := testutil.ToFloat64(otherCounter)
 

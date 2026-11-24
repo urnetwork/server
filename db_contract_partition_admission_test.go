@@ -33,9 +33,11 @@ func testContractLockTimeoutOf(t testing.TB, statement string) time.Duration {
 
 // Every main-pool statement waits at most PgLockTimeout for a lock and then
 // fails (55P03), not rerun. Statements queued behind the swap's or rollback's
-// ACCESS EXCLUSIVE request wait out that request's lock wait and then its
-// work, so each of those lock waits must stay well below PgLockTimeout. The
-// build of 2026-10-23 waited up to 3 s.
+// ACCESS EXCLUSIVE requests wait out the LOCK TABLE statement and then the
+// step's work, so the LOCK TABLE statement as a whole (statement_timeout, and
+// lock_timeout for each lock) stays at least 400 ms under PgLockTimeout. The
+// build of 2026-10-23 waited up to 3 s, and bounded each lock, not the
+// statement.
 func TestContractCutoverLockTimeoutsStayBelowTheApplicationLockBound(t *testing.T) {
 	shapes := map[string]*contractTableShape{}
 	staged := map[string]*contractTableShape{}
@@ -43,13 +45,27 @@ func TestContractCutoverLockTimeoutsStayBelowTheApplicationLockBound(t *testing.
 		shapes[table] = &contractTableShape{table: table, relkind: "r"}
 		staged[table] = &contractTableShape{table: contractStagedParentName(table), relkind: "p"}
 	}
-	statements := contractSwapSql(shapes, staged, ContractIdFloor(time.Date(2026, 11, 23, 0, 0, 0, 0, time.UTC)))
-	if swap := testContractLockTimeoutOf(t, statements[0]); PgLockTimeout/2 < swap {
-		t.Errorf("the swap waits up to %s for each lock; application statements queued behind it give up after %s", swap, PgLockTimeout)
+	limit := PgLockTimeout - 400*time.Millisecond
+	check := func(name string, statements []string) {
+		if len(statements) < 4 {
+			t.Fatalf("%s: %d statements", name, len(statements))
+		}
+		lock := testContractLockTimeoutOf(t, statements[0])
+		if limit < lock {
+			t.Errorf("%s waits up to %s for each lock; at most %s, as application statements queued behind it give up after %s", name, lock, limit, PgLockTimeout)
+		}
+		if statements[1] != contractStatementTimeoutSql(lock) {
+			t.Errorf("%s does not bound its LOCK TABLE statement as a whole by %s: %s", name, lock, statements[1])
+		}
+		if !strings.HasPrefix(statements[2], "LOCK TABLE ") {
+			t.Errorf("%s's third statement is not its LOCK TABLE: %s", name, statements[2])
+		}
+		if !strings.HasPrefix(statements[3], "SET LOCAL statement_timeout = ") || statements[3] == statements[1] {
+			t.Errorf("%s keeps the LOCK TABLE statement's timeout for its work: %s", name, statements[3])
+		}
 	}
-	if rollback := DefaultContractPartitionRollbackSettings().LockTimeout; PgLockTimeout/2 < rollback {
-		t.Errorf("rollback waits up to %s for each lock; application statements queued behind it give up after %s", rollback, PgLockTimeout)
-	}
+	check("the swap", contractSwapSql(shapes, staged, ContractIdFloor(time.Date(2026, 11, 23, 0, 0, 0, 0, time.UTC))))
+	check("rollback", contractRollbackLockSql([]string{"public.transfer_contract"}, DefaultContractPartitionRollbackSettings()))
 }
 
 // Once the tables are partitioned, their vacuums run on the leaves, and the
@@ -199,7 +215,8 @@ func TestContractPartitionPrepareDefersABusyTable(t *testing.T) {
 			}
 		}
 		defer releaseHolder()
-		age := DefaultContractPartitionLockSettings().MaxTransactionAge + time.Second
+		settings := DefaultContractPartitionCutoverSettings()
+		age := settings.LockSettings.MaxTransactionAge + time.Second
 		MaintenanceDb(ctx, func(conn PgConn) {
 			for {
 				var old bool
@@ -211,11 +228,14 @@ func TestContractPartitionPrepareDefersABusyTable(t *testing.T) {
 			}
 		})
 
+		// a few quick attempts: the default tries for minutes to meet a quiet moment
+		settings.StepAttempts = 3
+		settings.StepRetryInterval = 100 * time.Millisecond
 		prepareCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 		defer cancel()
 		var err error
 		if failure := testContractPartitionRecover(func() {
-			err = MigrateContractsToPartitions(prepareCtx, ContractPartitionMigrateOptions{CutoverDay: cutoverDay, Logf: logf})
+			err = MigrateContractsToPartitions(prepareCtx, ContractPartitionMigrateOptions{CutoverDay: cutoverDay, Logf: logf, CutoverSettings: settings})
 		}); failure != nil {
 			err = fmt.Errorf("%v", failure)
 		}
@@ -247,6 +267,114 @@ func TestContractPartitionPrepareDefersABusyTable(t *testing.T) {
 				t.Fatalf("%s is not prepared after the second run: %+v", table, bound)
 			}
 		}
+		if err := MigrateContractsToPartitions(ctx, ContractPartitionMigrateOptions{Abort: true, Logf: logf}); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+// A reader of transfer_contract older than the admission age (the provider
+// list's fill and the payout sweeps read for 26 to 45 s on Main): prepare must
+// defer the legacy bound without a lock request, never queue every new
+// statement on the table behind the reader.
+func TestContractPartitionPrepareDoesNotQueueBehindALongReader(t *testing.T) {
+	DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		if IsContractPartitioned(ctx) {
+			t.Skip("prepare starts from plain contract tables")
+		}
+		logf := testContractPartitionLogf(t)
+		cutoverDay := ContractPartitionDayStart(NowUtc()).AddDate(0, 0, 2)
+		busy := "transfer_contract"
+
+		holderPid := make(chan uint32, 1)
+		release := make(chan struct{})
+		holderDone := make(chan error, 1)
+		go func() {
+			holderDone <- contractPartitionTx(ctx, func(tx PgTx) {
+				RaisePgResult(tx.Exec(ctx, fmt.Sprintf(`LOCK TABLE public.%s IN ACCESS SHARE MODE`, quoteIdentifier(busy))))
+				holderPid <- tx.Conn().PgConn().PID()
+				select {
+				case <-release:
+				case <-ctx.Done():
+				}
+			})
+		}()
+		var pid uint32
+		select {
+		case pid = <-holderPid:
+		case err := <-holderDone:
+			t.Fatalf("the reader failed: %v", err)
+		}
+		released := false
+		releaseHolder := func() {
+			if !released {
+				released = true
+				close(release)
+				if err := <-holderDone; err != nil {
+					t.Fatalf("the reader failed: %v", err)
+				}
+			}
+		}
+		defer releaseHolder()
+		// older than the admission age by the database clock
+		settings := DefaultContractPartitionCutoverSettings()
+		age := settings.LockSettings.MaxTransactionAge + 500*time.Millisecond
+		MaintenanceDb(ctx, func(conn PgConn) {
+			for {
+				var old bool
+				Raise(conn.QueryRow(ctx, `SELECT clock_timestamp() - xact_start > make_interval(secs => $2) FROM pg_stat_activity WHERE pid = $1`, pid, age.Seconds()).Scan(&old))
+				if old {
+					return
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
+		})
+
+		// the default lock wait and admission age; a few quick attempts
+		settings.StepAttempts = 3
+		settings.StepRetryInterval = 100 * time.Millisecond
+		prepareDone := make(chan error, 1)
+		go func() {
+			var err error
+			if failure := testContractPartitionRecover(func() {
+				err = MigrateContractsToPartitions(ctx, ContractPartitionMigrateOptions{CutoverDay: cutoverDay, Logf: logf, CutoverSettings: settings})
+			}); failure != nil {
+				err = fmt.Errorf("%v", failure)
+			}
+			prepareDone <- err
+		}()
+
+		// Until prepare returns, no exclusive request on the table may wait.
+		queued := false
+		var prepareErr error
+		MaintenanceDb(ctx, func(conn PgConn) {
+			for {
+				select {
+				case prepareErr = <-prepareDone:
+					return
+				default:
+				}
+				var waiting bool
+				Raise(conn.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'relation' AND relation = to_regclass($1) AND mode = 'AccessExclusiveLock' AND NOT granted)`, "public."+busy).Scan(&waiting))
+				if waiting {
+					queued = true
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+		})
+		if queued {
+			t.Fatalf("prepare queued an exclusive request on %s behind a long reader (it then returned %v)", busy, prepareErr)
+		}
+		if prepareErr == nil || !strings.Contains(prepareErr.Error(), busy) {
+			t.Fatalf("prepare with %s held by a long reader must report it deferred, got %v", busy, prepareErr)
+		}
+		if bound := readContractShapes(ctx, contractTableName)[busy].legacyBound; bound != nil {
+			t.Fatalf("%s is read, yet prepare added its legacy bound", busy)
+		}
+
+		releaseHolder()
 		if err := MigrateContractsToPartitions(ctx, ContractPartitionMigrateOptions{Abort: true, Logf: logf}); err != nil {
 			t.Fatal(err)
 		}

@@ -67,6 +67,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/urnetwork/server"
 )
 
 // The response head outgrew ForwardSettings.MaxUpstreamResponseHeaderBytes.
@@ -387,6 +389,7 @@ func (self *upstreamConnection) Read(p []byte) (int, error) {
 		}
 	}
 	if 0 < self.readTimeout && self.readArmed.Load() {
+		server.CountTimerDeadlineAfter(server.TimerCensusSiteFrontUpstreamDeadline, self.readTimeout)
 		self.conn.SetReadDeadline(time.Now().Add(self.readTimeout))
 	}
 	n, err := self.conn.Read(p)
@@ -407,6 +410,7 @@ func (self *upstreamConnection) armRead() {
 		return
 	}
 	if 0 < self.readTimeout {
+		server.CountTimerDeadlineAfter(server.TimerCensusSiteFrontUpstreamDeadline, self.readTimeout)
 		self.conn.SetReadDeadline(time.Now().Add(self.readTimeout))
 	}
 }
@@ -415,6 +419,7 @@ func (self *upstreamConnection) armRead() {
 // socket accepted.
 func (self *upstreamConnection) Write(p []byte) (int, error) {
 	if 0 < self.writeTimeout {
+		server.CountTimerDeadlineAfter(server.TimerCensusSiteFrontUpstreamDeadline, self.writeTimeout)
 		self.conn.SetWriteDeadline(time.Now().Add(self.writeTimeout))
 	}
 	n, err := self.conn.Write(p)

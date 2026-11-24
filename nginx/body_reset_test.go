@@ -10,7 +10,7 @@ package nginx
 // connection before it canceled the stream's context.
 //
 // The errors here are the ones real servers return: Go's own TCP, h1 and h2
-// stacks and the vendored http3 (third_party/quic-go), each read through a
+// stacks and URnetwork's http3 (../quic-go), each read through a
 // handler while a raw client resets at a barrier, the handler's first read
 // of the body. Each is then classified with a context that never ends, so
 // the test shows what the error alone says.
@@ -29,8 +29,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/http3"
+	"github.com/urnetwork/quic-go"
+	"github.com/urnetwork/quic-go/http3"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
 )
@@ -141,10 +141,10 @@ func testHttp2BodyErrors(t *testing.T, ends map[string]func(conn *tls.Conn, fram
 	return errs
 }
 
-// The body read errors of real h3 request streams on the vendored http3,
-// each ended by its client once the handler has read its first bytes: by
-// end, after a POST declaring declaredLength bytes and sending body. The
-// certificate is any the server may present.
+// The body read errors of real h3 request streams on the quic-go fork's
+// http3, each ended by its client once the handler has read its first
+// bytes: by end, after a POST declaring declaredLength bytes and sending
+// body. The certificate is any the server may present.
 func testHttp3BodyErrors(t *testing.T, certificates []tls.Certificate, declaredLength int64, body []byte, ends map[string]func(quicConn *quic.Conn, str *http3.RequestStream)) map[string]error {
 	t.Helper()
 	// quic-go warns once per process when it can't raise the socket buffers
@@ -276,7 +276,7 @@ func TestBodyReadClientGoneOfRealClientResets(t *testing.T) {
 			quicConn.CloseWithError(quic.ApplicationErrorCode(http3.ErrCodeNoError), "")
 		},
 	})
-	// more DATA than the declared length, which the vendored http3 refuses
+	// more DATA than the declared length, refused by the quic-go fork's http3
 	for name, err := range testHttp3BodyErrors(t, certificates, 5, []byte("0123456789"), map[string]func(quicConn *quic.Conn, str *http3.RequestStream){
 		"h3: the body runs past its declared length": func(quicConn *quic.Conn, str *http3.RequestStream) {},
 	}) {
@@ -304,8 +304,8 @@ func TestBodyReadClientGoneOfRealClientResets(t *testing.T) {
 	}
 }
 
-// The QUIC failures no test client can make at will, as quic-go and the
-// vendored http3 report them: a stateless reset, and a remote transport,
+// The QUIC failures no test client can make at will, as URnetwork's quic-go
+// and its http3 report them: a stateless reset, and a remote transport,
 // application or stream error, each the client's QUIC gone, wrapped or not;
 // the same errors from the front's own side are not.
 func TestBodyReadClientGoneOfQuicErrors(t *testing.T) {

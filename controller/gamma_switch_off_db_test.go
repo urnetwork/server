@@ -145,9 +145,10 @@ func TestGammaRenewalOffVoidsThePendingRenewal(t *testing.T) {
 	})
 }
 
-// The renewal's charge was recorded but no batch carried it (the spend's fee
-// was over the limit), and the customer turns renewal off. The charge never
-// goes into a batch, and it no longer holds the deposit: a data pack the same
+// The renewal's charge was recorded but no spend carried it (the deposit
+// hotkey's pool held a transaction ahead of its finalized nonce, so the
+// biller waited), and the customer turns renewal off. The charge never goes
+// into a spend, and it no longer holds the deposit: a data pack the same
 // deposit pays is charged.
 func TestGammaRenewalOffVoidsARenewalChargeNotYetInABatch(t *testing.T) {
 	skipWithoutProYml(t)
@@ -162,10 +163,9 @@ func TestGammaRenewalOffVoidsARenewalChargeNotYetInABatch(t *testing.T) {
 		termEnd := cryptoDbRenewals(t, ctx, networkId, model.SubscriptionMarketGamma).endTime.Add(-manualPaymentGracePeriod)
 		f.now = termEnd.Add(-30 * time.Minute)
 		f.autoNow()
-		fee := f.sim.fee
-		f.sim.fee = 2 * f.settings.MaxFeeRao
+		f.sim.poolAhead[hotkey] = true
 		f.run()
-		f.sim.fee = fee
+		f.sim.poolAhead[hotkey] = false
 		connect.AssertEqual(t, len(f.sim.submitted), 0)
 		renewal := model.GetLatestGammaPaymentIntent(ctx, networkId, model.GammaPurposeRenew)
 		if renewal == nil {

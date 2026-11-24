@@ -162,9 +162,11 @@ type Front struct {
 	// the request metrics' series, by service and block (observe)
 	requestMetrics *frontRequestMetricsTable
 	limits         *frontLimits
-	interfaces     map[string]*frontInterface
-	lbStatusBody   []byte
-	gzipWriters    sync.Pool
+	// the connect connections by source address (LBALTOPT2 R16)
+	concentration *frontConcentration
+	interfaces    map[string]*frontInterface
+	lbStatusBody  []byte
+	gzipWriters   sync.Pool
 	// requests the access log has considered, for its sampling
 	accessLogCount atomic.Uint64
 
@@ -200,8 +202,12 @@ func NewFront(ctx context.Context, routeTable *RouteTable, revision string, cert
 		return nil, err
 	}
 
+	if err := checkTlsTicketSecrets(settings.Tls.SessionTicketSecrets); err != nil {
+		return nil, err
+	}
+
 	matcher := newNameMatcher(routeTable)
-	tlsConfig, quicTlsConfig := newTlsConfigs(certificateStore, matcher, routeTable.Lb.Names[0], routeTable.Listen, settings.Tls, defaultFrontMetrics)
+	tlsConfig, quicTlsConfig := newTlsConfigs(certificateStore, matcher, routeTable.Lb.Names[0], routeTable.Listen, routeTable.Interfaces, settings.Tls, defaultFrontMetrics, time.Now)
 	bodyStore := newBodyStore(settings.Body)
 	serviceForwarders := map[string]serviceForwarder{}
 	for _, service := range routeTable.Services {
@@ -277,6 +283,7 @@ func newFront(ctx context.Context, routeTable *RouteTable, revision string, depe
 		routes:            routes,
 		requestMetrics:    newFrontRequestMetricsTable(dependencies.metrics, routes),
 		limits:            newFrontLimits(frontCtx, settings.Limit, dependencies.now),
+		concentration:     newFrontConcentration(dependencies.metrics),
 		interfaces:        map[string]*frontInterface{},
 		lbStatusBody:      append(lbStatusBody, '\n'),
 		hijackedConns:     map[*responseHijackedConn]bool{},
@@ -332,7 +339,9 @@ func (self *Front) ClassifyName(name string) NameClass {
 }
 
 // The base TLS config for every TCP 443 socket: one long-lived config, so
-// session tickets resume across the block's sockets (D6c).
+// session tickets resume across the block's sockets (D6c), and with
+// TlsSettings.SessionTicketSecrets across every front holding the same
+// secrets (tls_ticket.go).
 // GetConfigForClient picks the certificate by SNI, the default server's for
 // a missing or unknown one, and ALPN by class: http/1.1 only for connect
 // names, h2 and http/1.1 for the rest. NewTlsListener and http.Server.Serve
@@ -345,7 +354,7 @@ func (self *Front) TlsConfig() *tls.Config {
 // connect and api names, with alt's ALPN rule (the client's offer intersected
 // with [h3], so raw-QUIC connect without ALPN still passes). The public QUIC
 // config that uses it sets Allow0RTT false. It counts each ClientHello by
-// port kind, the class of its name and whether it offered h3, in
+// interface, port kind, the class of its name and whether it offered h3, in
 // urnetwork_front_quic_client_hellos_total (newTlsConfigs).
 func (self *Front) QuicTlsConfig() *tls.Config {
 	return self.quicTlsConfig
@@ -424,7 +433,8 @@ func (self *Front) unknownInterfaceHandler(interfaceName string) http.Handler {
 // interface the route table doesn't list admits nothing, counted under the
 // limit "interface" and no zone, and so does a class the front doesn't serve
 // on QUIC, under the limit "class", rather than logged, since connections set
-// their pace.
+// their pace. An admitted connect connection counts against its address in
+// the concentration gauges until its release (LBALTOPT2 R16).
 func (self *Front) AcquireQuicConnection(interfaceName string, addr netip.Addr, nameClass NameClass) (release func(), ok bool) {
 	frontInterface, ok := self.lookupInterface(interfaceName)
 	if !ok {
@@ -440,6 +450,15 @@ func (self *Front) AcquireQuicConnection(interfaceName string, addr netip.Addr, 
 	if outcome != limitOutcomeAdmitted {
 		self.metrics.limitRefusals.WithLabelValues(outcome.String(), limitDefaultZone, nameClass.String()).Inc()
 		return nil, false
+	}
+	if quicClass == limitQuicClassConnect {
+		// each release is safe to call more than once, so the pair is too
+		limitRelease := release
+		concentrationRelease := self.concentration.acquire(addr)
+		release = func() {
+			limitRelease()
+			concentrationRelease()
+		}
 	}
 	return release, true
 }

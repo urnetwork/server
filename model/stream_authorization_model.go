@@ -4,14 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
 	"time"
 )
 
+// The text is built without fmt: every stream authorization builds it, and
+// fmt boxed the id and ran its printer for it (CPUOPT7.md §12).
 func streamAuthorityKey(streamId server.Id, suffix string) string {
-	return fmt.Sprintf("{sa_%s}%s", streamId, suffix)
+	return "{sa_" + streamId.String() + "}" + suffix
 }
 
 type streamEndpointAuthorization struct {
@@ -29,6 +30,7 @@ type StreamAuthorization struct {
 	DeadlineUnixMillis int64
 	Allowed            bool
 	Legacy             bool
+	HasIntermediaries  bool
 }
 
 // The stream's stable participant set is published before any StreamOpen. All
@@ -173,6 +175,7 @@ func AuthorizeStream(ctx context.Context, streamId server.Id, now time.Time) (re
 		}
 	}
 	result.Allowed = true
+	result.HasIntermediaries = len(binding.Endpoints) > 2
 	if !binding.Legacy {
 		result.LeaseMillis = uint32(session.AuthorizationLeaseDuration / time.Millisecond)
 		result.DeadlineUnixMillis = now.Add(session.AuthorizationLeaseDuration).UnixMilli()

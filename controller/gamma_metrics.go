@@ -13,9 +13,6 @@ var gammaReadinessReasons = []string{
 	gammaChainUnreachable,
 	gammaRuntimeUnsupported,
 	gammaServiceNotPublished,
-	gammaServiceSpenderMismatch,
-	gammaBillingProxyMissing,
-	gammaFeeFloatLow,
 	gammaWatcherBehind,
 	gammaBatchInReview,
 }
@@ -29,14 +26,6 @@ var (
 			Help:      "1 for the biller's current readiness (ready, or why it pauses), 0 for every other",
 		},
 		[]string{"reason"},
-	)
-	gammaFloatGauge = prometheus.NewGauge(
-		prometheus.GaugeOpts{
-			Namespace: "urnetwork",
-			Subsystem: "gamma_pay",
-			Name:      "billing_float_rao",
-			Help:      "What the billing key can pay fees from, in rao",
-		},
 	)
 	gammaPriceAgeGauge = prometheus.NewGauge(
 		prometheus.GaugeOpts{
@@ -68,7 +57,7 @@ var (
 			Namespace: "urnetwork",
 			Subsystem: "gamma_pay",
 			Name:      "charges_resolved_total",
-			Help:      "Gamma charges resolved by a finalized event, by state and skip reason",
+			Help:      "Gamma charges resolved, by state (spent at a finalized GammaSpent; skipped before anything was sent) and skip reason; state foreign counts spends at our service from hotkeys we never assigned",
 		},
 		[]string{"state", "reason"},
 	)
@@ -86,7 +75,7 @@ var (
 			Namespace: "urnetwork",
 			Subsystem: "gamma_pay",
 			Name:      "batches_submitted_total",
-			Help:      "Gamma spend batches signed and submitted",
+			Help:      "Gamma spends signed (each as its deposit's hotkey) and submitted",
 		},
 	)
 	gammaBatchFees = prometheus.NewHistogram(
@@ -94,7 +83,7 @@ var (
 			Namespace: "urnetwork",
 			Subsystem: "gamma_pay",
 			Name:      "batch_fee_rao",
-			Help:      "The fee each landed spend batch paid, in rao",
+			Help:      "The fee each landed spend paid, in rao (none since runtime 493: a spend pays no fee)",
 			Buckets:   []float64{50_000, 100_000, 200_000, 500_000, 1_000_000, 5_000_000},
 		},
 	)
@@ -112,7 +101,6 @@ var (
 func init() {
 	prometheus.MustRegister(
 		gammaReadiness,
-		gammaFloatGauge,
 		gammaPriceAgeGauge,
 		gammaScanLagGauge,
 		gammaIntentsCreated,

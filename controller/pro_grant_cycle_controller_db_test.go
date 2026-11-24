@@ -309,7 +309,7 @@ func TestGammaRenewalGetsTheFullGrantAtTheRenewalsOwnStart(t *testing.T) {
 			t.Fatalf("no intent: %+v", intent.Error)
 		}
 		hotkey := gammaTestAccount(t, intent.DepositHotkey)
-		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: coldkey, spender: f.settings.Spender, balance: 100_000_000_000})
+		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: coldkey, balance: 100_000_000_000})
 		f.run()
 		f.sim.mine()
 		f.run()

@@ -7,36 +7,39 @@ package controller
 //
 //	vault/<env>/gamma.yml
 //	  gamma:
-//	    billing_key_seed: 0x...       # SECRET: the GammaSpend proxy key, an sr25519 mini-secret
-//	    billing_address: 5...         # its SS58, checked against the seed
-//	    deposit_hotkey_master: 5...   # the public key every deposit hotkey derives from
-//	    spender: 5...                 # the stable spender every SN25 deposit names (seed offline)
+//	    deposit_hotkey_seed: 0x...    # SECRET: the deposit master's sr25519 seed; billing hosts only
+//	    deposit_hotkey_master: 5...   # its public key, every deposit hotkey derives from
 //	    netuid: 25
 //	    service_hotkey: 5CyQ...     # the SN25 owner hotkey the service is published under
 //	    services_url: https://api.bringyour.com/pay/gamma/services.json
 //	    rpc_urls: []                # Finney JSON-RPC; empty = st.yml's subtensor gateway
-//	    max_fee_rao: 5000000        # the most one spend batch may pay in fees
-//	    min_float_rao: 1000000      # the least the billing key must hold to bill
 //
 // A missing or incomplete file is Gamma off ("not_configured"), never a boot
-// failure. Errors name the resource and the key, never a value.
+// failure. Errors name the resource and the key, never a value. The keys of
+// runtime 492's spender model (billing_key_seed, billing_address, spender,
+// max_fee_rao, min_float_rao) are no longer read: runtime 493 retired the
+// spender and its GammaSpend proxy, and a spend pays no fee.
 //
 // Deposit hotkeys: the n-th hotkey we assign (n counted over every account,
 // from 0) is the deposit master key soft-derived with the junction /n: the
-// public key of <seed>/n, which any Substrate tool (subkey, btcli
-// regen-hotkey --uri, the Python SDK's Keypair.create_from_uri) reproduces
-// from the seed. A soft junction derives from the public key alone, so no
-// host holds the seed: it stays in vault/<env>/gamma_keys.yml, which no
-// service reads, and only recovers TAO sent to a deposit hotkey by mistake.
-// The keys have no power over gamma: a deposit belongs to the coldkey that
-// mints into it, and only the spender spends. An account gets a second
-// hotkey when a payer's coldkey cannot open a deposit at its first (another
-// coldkey owns that deposit or the hotkey).
+// key of <seed>/n, which any Substrate tool (subkey, btcli regen-hotkey
+// --uri, the Python SDK's Keypair.create_from_uri) reproduces from the seed.
+// A soft junction derives the public key from the master public key alone, so
+// the api and alt assign hotkeys without the seed. Since runtime 493 a deposit
+// is spent only by its own hotkey, so the biller signs each charge with the
+// key of <seed>/n: the seed is on the billing hosts (the taskworker), and a
+// copy of gamma.yml without it serves and never bills. A deposit still
+// belongs to the coldkey that mints into it: that coldkey sets its daily cap,
+// moves its gamma to another hotkey at any time (which ends our access to it)
+// and closes it. An account gets a second hotkey when a payer's coldkey
+// cannot open a deposit at its first (another coldkey owns that deposit or
+// the hotkey).
 
 import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -54,12 +57,10 @@ const gammaVaultResource = "gamma.yml"
 
 // The defaults for the policy keys gamma.yml may leave out.
 const (
-	gammaDefaultNetuid      = 25
-	gammaDefaultMaxFeeRao   = 5_000_000
-	gammaDefaultMinFloatRao = 1_000_000
+	gammaDefaultNetuid = 25
 	// an intent nothing was charged for ends after this
 	gammaDefaultIntentTtl = 24 * time.Hour
-	// a spend batch's era: 64 blocks, about 13 minutes
+	// a spend's era: 64 blocks, about 13 minutes
 	gammaDefaultEraPeriod = 64
 	// the most finalized blocks one biller run reads
 	gammaDefaultMaxBlocksPerRun = 200
@@ -73,16 +74,12 @@ const (
 
 type gammaYaml struct {
 	Gamma struct {
-		BillingKeySeed      string   `yaml:"billing_key_seed"`
-		BillingAddress      string   `yaml:"billing_address"`
+		DepositHotkeySeed   string   `yaml:"deposit_hotkey_seed"`
 		DepositHotkeyMaster string   `yaml:"deposit_hotkey_master"`
-		Spender             string   `yaml:"spender"`
 		Netuid              int      `yaml:"netuid"`
 		ServiceHotkey       string   `yaml:"service_hotkey"`
 		ServicesUrl         string   `yaml:"services_url"`
 		RpcUrls             []string `yaml:"rpc_urls"`
-		MaxFeeRao           uint64   `yaml:"max_fee_rao"`
-		MinFloatRao         uint64   `yaml:"min_float_rao"`
 		IntentTtl           string   `yaml:"intent_ttl"`
 		EraPeriod           uint64   `yaml:"era_period"`
 		MaxBlocksPerRun     uint64   `yaml:"max_blocks_per_run"`
@@ -92,22 +89,18 @@ type gammaYaml struct {
 
 // gammaSettings is gamma.yml, checked.
 type gammaSettings struct {
-	billingKey signature.KeyringPair
-	// the billing key's seed is present: this process can bill
-	canSign          bool
-	BillingPublicKey [32]byte
-	BillingAddress   string
+	// SECRET: the deposit master's seed, as gamma.yml has it; "" in a serving
+	// copy. Only gammaDepositSigner reads it, and nothing prints it.
+	depositSeed string
+	// the deposit seed is present: this process can bill
+	canSign bool
 	// the public key every deposit hotkey derives from
 	DepositHotkeyMaster [32]byte
-	Spender             [32]byte
-	SpenderAddress      string
 	Netuid              uint16
 	ServiceHotkey       [32]byte
 	ServiceAddress      string
 	ServicesUrl         string
 	RpcUrls             []string
-	MaxFeeRao           uint64
-	MinFloatRao         uint64
 	IntentTtl           time.Duration
 	EraPeriod           uint64
 	MaxBlocksPerRun     uint64
@@ -140,34 +133,7 @@ func parseGammaSettings(y *gammaYaml) (*gammaSettings, error) {
 	}
 	settings := &gammaSettings{}
 
-	// The seed is needed only where the biller runs (the taskworker). The api
-	// and alt serve from the public fields, so their copy may leave it out
-	// and name billing_address instead.
 	var err error
-	seed := strings.TrimSpace(g.BillingKeySeed)
-	if seed != "" {
-		billingKey, err := signature.KeyringPairFromSecret(seed, model.BittensorSS58Prefix)
-		if err != nil || len(billingKey.PublicKey) != 32 {
-			return nil, invalid("billing_key_seed")
-		}
-		settings.billingKey = billingKey
-		settings.canSign = true
-		copy(settings.BillingPublicKey[:], billingKey.PublicKey)
-		settings.BillingAddress = billingKey.Address
-		if address := strings.TrimSpace(g.BillingAddress); address != "" && address != settings.BillingAddress {
-			return nil, fmt.Errorf("%w: %s: gamma.billing_address is not the address of gamma.billing_key_seed", errGammaNotConfigured, gammaVaultResource)
-		}
-	} else {
-		address := strings.TrimSpace(g.BillingAddress)
-		if address == "" {
-			return nil, missing("billing_key_seed")
-		}
-		if settings.BillingPublicKey, err = model.DecodeBittensorAddress(address); err != nil {
-			return nil, invalid("billing_address")
-		}
-		settings.BillingAddress = address
-	}
-
 	if strings.TrimSpace(g.DepositHotkeyMaster) == "" {
 		return nil, missing("deposit_hotkey_master")
 	}
@@ -178,16 +144,22 @@ func parseGammaSettings(y *gammaYaml) (*gammaSettings, error) {
 		return nil, invalid("deposit_hotkey_master")
 	}
 
-	if strings.TrimSpace(g.Spender) == "" {
-		return nil, missing("spender")
-	}
-	if settings.Spender, err = model.DecodeBittensorAddress(strings.TrimSpace(g.Spender)); err != nil {
-		return nil, invalid("spender")
-	}
-	settings.SpenderAddress = strings.TrimSpace(g.Spender)
-	if settings.Spender == settings.BillingPublicKey {
-		// the spender's seed stays offline; the hot key may only be its proxy
-		return nil, fmt.Errorf("%w: %s: gamma.spender must not be the billing key", errGammaNotConfigured, gammaVaultResource)
+	// The seed is needed only where the biller runs (the taskworker). The api
+	// and alt serve from the public fields, so their copy leaves it out.
+	if seed := strings.TrimSpace(g.DepositHotkeySeed); seed != "" {
+		// a password (///) would end every derivation path appended to it
+		if strings.Contains(seed, "///") {
+			return nil, invalid("deposit_hotkey_seed")
+		}
+		master, err := signature.KeyringPairFromSecret(seed, model.BittensorSS58Prefix)
+		if err != nil || len(master.PublicKey) != 32 {
+			return nil, invalid("deposit_hotkey_seed")
+		}
+		if [32]byte(master.PublicKey) != settings.DepositHotkeyMaster {
+			return nil, fmt.Errorf("%w: %s: gamma.deposit_hotkey_master is not the public key of gamma.deposit_hotkey_seed", errGammaNotConfigured, gammaVaultResource)
+		}
+		settings.depositSeed = seed
+		settings.canSign = true
 	}
 
 	netuid := g.Netuid
@@ -206,7 +178,7 @@ func parseGammaSettings(y *gammaYaml) (*gammaSettings, error) {
 		return nil, invalid("service_hotkey")
 	}
 	settings.ServiceAddress = strings.TrimSpace(g.ServiceHotkey)
-	if settings.ServiceHotkey == settings.Spender || settings.ServiceHotkey == settings.BillingPublicKey {
+	if settings.ServiceHotkey == settings.DepositHotkeyMaster {
 		return nil, invalid("service_hotkey")
 	}
 
@@ -225,14 +197,6 @@ func parseGammaSettings(y *gammaYaml) (*gammaSettings, error) {
 		}
 	}
 
-	settings.MaxFeeRao = g.MaxFeeRao
-	if settings.MaxFeeRao == 0 {
-		settings.MaxFeeRao = gammaDefaultMaxFeeRao
-	}
-	settings.MinFloatRao = g.MinFloatRao
-	if settings.MinFloatRao == 0 {
-		settings.MinFloatRao = gammaDefaultMinFloatRao
-	}
 	settings.IntentTtl = gammaDefaultIntentTtl
 	if g.IntentTtl != "" {
 		ttl, err := time.ParseDuration(g.IntentTtl)
@@ -261,6 +225,36 @@ func parseGammaSettings(y *gammaYaml) (*gammaSettings, error) {
 		settings.RunInterval = interval
 	}
 	return settings, nil
+}
+
+// errGammaNotSignable: this process holds no deposit seed, or the hotkey is
+// not the one the seed derives at its index (a hotkey of another master).
+var errGammaNotSignable = errors.New("the deposit hotkey's key is not derivable here")
+
+// gammaDepositSigner is the key of the deposit hotkey at a derivation index:
+// <seed>/index, checked to be the hotkey the master public key derives there
+// and the hotkey the caller names. Its errors never quote the seed.
+func gammaDepositSigner(settings *gammaSettings, index int64, hotkey [32]byte) (signature.KeyringPair, error) {
+	if !settings.canSign || settings.depositSeed == "" {
+		return signature.KeyringPair{}, errGammaNotSignable
+	}
+	want, _, err := gammaDepositHotkeyAt(settings.DepositHotkeyMaster, index)
+	if err != nil || want != hotkey {
+		return signature.KeyringPair{}, errGammaNotSignable
+	}
+	signer, err := signature.KeyringPairFromSecret(settings.depositSeed+"/"+strconv.FormatInt(index, 10), model.BittensorSS58Prefix)
+	if err != nil || len(signer.PublicKey) != 32 || [32]byte(signer.PublicKey) != hotkey {
+		return signature.KeyringPair{}, errGammaNotSignable
+	}
+	return signer, nil
+}
+
+// gammaDepositHotkeyCurrent reports whether a hotkey we assigned is the one
+// the configured master derives at its index: hotkeys of an earlier master
+// are never handed out again, and nothing is charged from them.
+func gammaDepositHotkeyCurrent(settings *gammaSettings, hotkey *model.GammaDepositHotkey) bool {
+	_, address, err := gammaDepositHotkeyAt(settings.DepositHotkeyMaster, hotkey.DerivationIndex)
+	return err == nil && address == hotkey.Hotkey
 }
 
 // Endpoints are the JSON-RPC endpoints to read and submit through: gamma.yml's

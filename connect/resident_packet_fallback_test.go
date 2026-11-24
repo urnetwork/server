@@ -129,7 +129,7 @@ func testResidentPacketSourceFallback(t testing.TB, caseName string, active bool
 	if active {
 		wantAccepted = packets
 	}
-	if got := len(forward.send); got != wantAccepted || sourceReads.Load() != 1 {
+	if got := forward.send.len(); got != wantAccepted || sourceReads.Load() != 1 {
 		t.Fatalf("%s: cohort accepted=%d source_reads=%d, want accepted=%d source_reads=1", caseName, got, sourceReads.Load(), wantAccepted)
 	}
 	if got := server.PacketPostgresAttempts(resident.residentContractManager.ctx); got != 0 {

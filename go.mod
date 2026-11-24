@@ -19,7 +19,7 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/jsonschema-go v0.4.3
 	github.com/google/uuid v1.6.0
-	github.com/gorilla/websocket v1.5.3
+	github.com/gorilla/websocket v1.5.4-0.20240701034025-d67f41855da4
 	github.com/holiman/uint256 v1.3.2
 	github.com/jackc/pgerrcode v0.0.0-20250907135507-afb5586c32a6
 	github.com/jackc/pgx/v5 v5.10.0
@@ -40,7 +40,6 @@ require (
 	github.com/pquerna/cachecontrol v0.2.0
 	github.com/prometheus/client_golang v1.24.1
 	github.com/prometheus/client_model v0.6.2
-	github.com/quic-go/quic-go v0.61.0
 	github.com/redis/go-redis/v9 v9.23.0
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	github.com/stripe/stripe-go/v82 v82.5.1
@@ -50,15 +49,16 @@ require (
 	github.com/urnetwork/connect v0.0.0
 	github.com/urnetwork/glog v0.0.0
 	github.com/urnetwork/proxy v0.0.0
+	github.com/urnetwork/quic-go v0.0.0
 	github.com/urnetwork/sdk v0.0.0
 	github.com/urnetwork/userwireguard v0.0.0
 	github.com/vedhavyas/go-subkey/v2 v2.0.0
-	golang.org/x/crypto v0.58.0
-	golang.org/x/mod v0.41.0
+	golang.org/x/crypto v0.59.0
+	golang.org/x/mod v0.42.0
 	golang.org/x/net v0.62.0
 	golang.org/x/oauth2 v0.36.0
-	golang.org/x/sys v0.49.0
-	golang.org/x/text v0.43.0
+	golang.org/x/sys v0.50.0
+	golang.org/x/text v0.44.0
 	golang.zx2c4.com/wireguard/wgctrl v0.0.0-20241231184526-a9ab2273dd10
 	google.golang.org/protobuf v1.36.11
 	gopkg.in/yaml.v3 v3.0.1
@@ -199,9 +199,9 @@ require (
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba // indirect
 	golang.org/x/exp v0.0.0-20260727155853-b88d891fe743 // indirect
-	golang.org/x/image v0.44.0 // indirect
-	golang.org/x/sync v0.24.0 // indirect
-	golang.org/x/term v0.47.0 // indirect
+	golang.org/x/image v0.45.0 // indirect
+	golang.org/x/sync v0.25.0 // indirect
+	golang.org/x/term v0.48.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	gopkg.in/ini.v1 v1.67.3 // indirect
 	gopkg.in/natefinch/npipe.v2 v2.0.0-20160621034901-c1b8fa8bdcce // indirect
@@ -222,6 +222,11 @@ replace github.com/urnetwork/sdk => ../sdk
 
 replace github.com/urnetwork/glog => ../glog
 
+// URnetwork's quic-go, its own module (../quic-go/URNETWORK.md).
+// Go ignores a dependency's replacements, so each main module that builds
+// connect selects the sibling checkout, as it does glog.
+replace github.com/urnetwork/quic-go => ../quic-go
+
 replace github.com/urnetwork/goidenticons => ../goidenticons
 
 replace github.com/urnetwork/userwireguard => ../userwireguard
@@ -241,7 +246,12 @@ replace gvisor.dev/gvisor => ../gvisor
 // one while it is still in the runtime's timer heap (third_party/pgx/URNETWORK.md).
 replace github.com/jackc/pgx/v5 => ./third_party/pgx
 
-// The connection's run loop timer keeps a pending unchanged deadline and arms a
-// new timer for another, instead of resetting one still in the runtime's timer
-// heap (third_party/quic-go/URNETWORK.md).
-replace github.com/quic-go/quic-go => ./third_party/quic-go
+// The pool can skip its per-checkout socket check for a connection put back
+// within a window, SkipConnCheckWithin, which the pools with command retries
+// set (third_party/go-redis/URNETWORK.md; LBALTOPT2 R19).
+replace github.com/redis/go-redis/v9 => ./third_party/go-redis
+
+// UConn.Write releases its interlock with Close after its compare-and-swap
+// loop, so a write allocates no defer record (third_party/utls/URNETWORK.md;
+// CPUOPT7 P3).
+replace github.com/refraction-networking/utls => ./third_party/utls

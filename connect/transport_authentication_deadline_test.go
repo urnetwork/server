@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/quic-go/quic-go"
 	clientconnect "github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
+	"github.com/urnetwork/quic-go"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 )

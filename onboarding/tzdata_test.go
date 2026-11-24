@@ -20,7 +20,6 @@ import (
 func TestServiceBinariesEmbedTimeZoneDatabase(t *testing.T) {
 	mains := []string{
 		"github.com/urnetwork/server/cli/all",
-		"github.com/urnetwork/server/cli/alt",
 		"github.com/urnetwork/server/cli/api",
 		"github.com/urnetwork/server/cli/competitionworker",
 		"github.com/urnetwork/server/cli/connect",

@@ -85,6 +85,14 @@ var contractCloseEvidenceHorizonGuardMigrationVersion = server.ContractCloseEvid
 // of the move guard in either layout.
 var contractCloseEvidenceHorizonArtifactQuery = contractCloseEvidencePartitionedCustodyArtifact(server.ContractCloseEvidenceHorizonGuardBodySql())
 
+// The version of the migration whose guard keeps retention deletes to the
+// evidence's own window, 7 days (owner, 2026-11-23), found by its SQL.
+var contractCloseEvidenceWindowGuardMigrationVersion = server.ContractCloseEvidenceWindowGuardMigrationVersion()
+
+// The window guard replaces only the guard body and republishes the custody
+// of the horizon guard in either layout.
+var contractCloseEvidenceWindowArtifactQuery = contractCloseEvidencePartitionedCustodyArtifact(server.ContractCloseEvidenceWindowGuardBodySql())
+
 // The evidence custody in either layout with guardBody as both guards' body.
 func contractCloseEvidencePartitionedCustodyArtifact(guardBody string) string {
 	return `(` +

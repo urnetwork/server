@@ -2,8 +2,9 @@ package api
 
 // The api router reports a provider that keeps retrying a terminal refusal
 // (controller/connect_control_stuck_provider.go) through the real route,
-// credentials and Redis flag. A provider whose packs carry a sender role is
-// never reported, and the router alt mounts reports nothing.
+// credentials and Redis flag, with the api service's settings and no control.
+// A provider whose packs carry a sender role is never reported, and the router
+// alt mounts reports nothing.
 
 import (
 	"context"
@@ -38,13 +39,10 @@ func (self *stuckProviderTestClock) Set(now time.Time) {
 	self.now = now
 }
 
-// Reports with the default thresholds on clock, with the switch on for every
-// block while the control sets none.
+// The api service's router as newApiRouter builds it, reporting on clock.
 func newStuckProviderTestRouter(clock *stuckProviderTestClock) func(ctx context.Context, uploadCtx context.Context) (*router.Router, func(), error) {
 	return func(ctx context.Context, uploadCtx context.Context) (*router.Router, func(), error) {
-		settings := controller.DefaultStuckProviderSignalSettings()
-		settings.EnableStuckProviderSignal = true
-		settings.StuckProviderSignalDefault = model.ConnectLocalTransportAll
+		settings := apiStuckProviderSignalSettings()
 		settings.Now = clock.Now
 		return newRouterWithStuckProviderSignals(ctx, uploadCtx, settings)
 	}
@@ -88,12 +86,24 @@ func waitForStuckProviderTestFlag(ctx context.Context, clientId server.Id, timeo
 	return true
 }
 
-// With the default thresholds: a provider retrying a terminal refusal every
-// 2 minutes is reported once its run has lasted 20 minutes, and not before.
+// The code defaults, with no control: a provider retrying a terminal refusal
+// every 2 minutes is reported once its run has lasted 20 minutes, and not
+// before.
 func TestConnectControlRouteReportsAStuckProvider(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
+		func() {
+			controlCtx, controlCancel := context.WithTimeout(ctx, 10*time.Second)
+			defer controlCancel()
+			control, err := model.GetConnectMoveControl(controlCtx, model.ConnectMoveControlCeiling{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if control.Present {
+				t.Fatal("the move control is set")
+			}
+		}()
 		start := time.Now()
 		clock := &stuckProviderTestClock{now: start}
 		fixture, closeFixture := newControlReplayFixtureWithRouter(t, ctx, newStuckProviderTestRouter(clock))
