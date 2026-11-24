@@ -17,7 +17,8 @@ import (
 func TestCompetitionAutomationReadinessBindsReservedRound(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: true, RerunCount: 0}).Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		fixture := newCompetitionAutomationFixture(t)
+		// Round reservation is independent of the production instrument transition.
+		fixture := newCompetitionAutomationFixtureWithMode(t, true)
 		fixture.now = fixture.round.RevealAt
 		seal, err := fixture.store.SealAndElect(ctx, fixture.settings, fixture.round.RoundId)
 		if err != nil {
@@ -37,7 +38,7 @@ func TestCompetitionAutomationReadinessBindsReservedRound(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		wrong := model.CompetitionSourceReadiness{Environment: intent.Environment, CompetitionId: intent.CompetitionId, SeasonId: intent.SeasonId, Generation: 2,
+		wrong := model.CompetitionSourceReadiness{Staging: intent.Staging, Environment: intent.Environment, CompetitionId: intent.CompetitionId, SeasonId: intent.SeasonId, Generation: 2,
 			TargetRoundId: server.NewId(), Role: "api", ActorId: "synthetic-api", ManifestCommit: intent.ManifestCommit, ManifestSha256: intent.ManifestSha256,
 			SourceLockSha256: intent.SourceLockSha256, RuntimeImageDigest: testApiImageDigest(), QualificationSha256: intent.HostQualificationSha256, Ready: true, RecordedAt: fixture.now}
 		if err = fixture.store.RecordSourceReadiness(ctx, fixture.settings, wrong); !errors.Is(err, ErrConflict) {
@@ -63,20 +64,22 @@ func TestCompetitionAutomationReadinessBindsReservedRound(t *testing.T) {
 		if err = fixture.store.SourcePreparationReady(ctx, fixture.settings, 2); err != nil {
 			t.Fatal(err)
 		}
-		if _, err = fixture.store.ActivateSource(ctx, fixture.settings, *lease, 2, 1); err != nil {
+		active, err := fixture.store.ActivateSource(ctx, fixture.settings, *lease, 2, 1)
+		if err != nil {
 			t.Fatal(err)
 		}
-		fixture.now = stored.PreparedAt.Add(16 * time.Hour)
+		fixture.now = stored.PreparedAt.Add(sourcePreparationInterval(stored))
 		lease, err = fixture.store.AcquireAutomationLease(ctx, fixture.settings, lease.OwnerId, 5*time.Minute)
 		if err != nil {
 			t.Fatal(err)
 		}
-		qualified, err := sourceSettingsFromIntent(fixture.settings, stored)
+		qualified, err := sourceSettingsFromIntent(fixture.settings, active)
 		if err != nil {
 			t.Fatal(err)
 		}
 		qualified.automationTargetRoundId = server.NewId()
-		wrongRound, err := fixture.store.prepareRound(ctx, qualified, GenerateRoundArgs{OpensAt: fixture.now, ClosesAt: fixture.now.Add(7 * 24 * time.Hour), RevealAt: fixture.now.Add(7 * 24 * time.Hour)}, false)
+		closesAt := fixture.now.Add(time.Duration(fixture.settings.SeasonPolicy.SubmissionWindowSeconds) * time.Second)
+		wrongRound, err := fixture.store.prepareRound(ctx, qualified, GenerateRoundArgs{OpensAt: fixture.now, ClosesAt: closesAt, RevealAt: closesAt}, true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -84,7 +87,7 @@ func TestCompetitionAutomationReadinessBindsReservedRound(t *testing.T) {
 			server.Tx(ctx, func(tx server.PgTx) {
 				server.Raise(fixture.store.requireAutomationLeaseInTx(ctx, tx, fixture.settings, *lease))
 				server.RaisePgResult(tx.Exec(ctx, `INSERT INTO competition_round(round_id,competition_id,epoch_number,staging,workload_commitment,seed_nonce,seed_ciphertext,providers_sha256,providers_path,policy_json,opens_at,closes_at,reveal_at,created_at,canceled)
-			 VALUES($1,$2,2,false,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,false)`, wrongRound.RoundId, wrongRound.CompetitionId, wrongRound.WorkloadCommitment, wrongRound.SeedNonce, wrongRound.SeedCiphertext,
+			 VALUES($1,$2,2,true,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,false)`, wrongRound.RoundId, wrongRound.CompetitionId, wrongRound.WorkloadCommitment, wrongRound.SeedNonce, wrongRound.SeedCiphertext,
 					wrongRound.ProvidersSha256, wrongRound.ProvidersPath, string(wrongRound.PolicyJson), wrongRound.OpensAt, wrongRound.ClosesAt, wrongRound.RevealAt, wrongRound.CreatedAt))
 			})
 		})

@@ -180,10 +180,13 @@ func (self *automationReadinessStore) Readiness(_ context.Context, settings *Set
 // Season-static settings do not require a per-epoch manual config rollout to become ready.
 func TestCompetitionV2ReadinessBindsActivatedReservedRoundSource(t *testing.T) {
 	settings := automationApiSettings()
+	settings.FutureEpochPolicy = g2FuturePolicyForTest(t)
 	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
 	intent := &model.CompetitionSourceActivation{Environment: settings.AutomationPolicy.Environment, CompetitionId: settings.CompetitionId, SeasonId: settings.AutomationPolicy.SeasonId,
 		Generation: 2, SourceGeneration: 1, TargetEpoch: 2, TargetRoundId: server.RequireParseId("00000000-0000-0000-0000-000000000503"),
-		EvaluatorImageDigest: settings.EvaluatorImageDigest, HostQualificationSha256: strings.Repeat("9", 64), Threshold: .2, ActivatedAt: &now, State: "activated", Commits: map[string]string{}}
+		EvaluatorImageDigest: settings.EvaluatorImageDigest, HostQualificationSha256: strings.Repeat("9", 64), Threshold: .2, ActivatedAt: &now, State: "active", Commits: map[string]string{},
+		G2VolumePolicy: settings.FutureEpochPolicy.G2VolumePolicy, WorkCoveragePolicy: settings.FutureEpochPolicy.WorkCoveragePolicy.Clone(),
+		SimulatorSha256: settings.FutureEpochPolicy.SimulatorSha256, ScorerSha256: settings.FutureEpochPolicy.ScorerSha256}
 	for _, name := range []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "warp", "gvisor"} {
 		intent.Commits[name] = strings.Repeat("c", 40)
 	}
@@ -212,6 +215,7 @@ func TestCompetitionV2ReadinessBindsActivatedReservedRoundSource(t *testing.T) {
 		func(intent *model.CompetitionSourceActivation) { intent.TargetRoundId = server.Id{} },
 		func(intent *model.CompetitionSourceActivation) { intent.ActivatedAt = nil },
 		func(intent *model.CompetitionSourceActivation) { intent.TargetEpoch++ },
+		func(intent *model.CompetitionSourceActivation) { intent.WorkCoveragePolicy = nil },
 	} {
 		copy := *intent
 		mutate(&copy)

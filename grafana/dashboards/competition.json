@@ -57,7 +57,7 @@
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
       "fieldConfig": {"defaults": {"unit": "none", "min": 0, "max": 1, "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]}}, "overrides": []},
       "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}},
-      "targets": [{"refId": "A", "expr": "min(urnetwork_competition_artifact_archive_ready{env=\"$env\",host=~\"$host\"})", "instant": true}]
+      "targets": [{"refId": "A", "expr": "min(urnetwork_competition_artifact_archive_ready{env=\"$env\",host=~\"$host\",job=~\"api|competitionworker\"})", "instant": true}]
     },
     {
       "id": 3, "type": "stat", "title": "durable worker lease heartbeat age",
