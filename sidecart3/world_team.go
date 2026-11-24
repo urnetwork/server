@@ -204,7 +204,7 @@ func (self *T3World) startApi() (*t3WorldApiRun, error) {
 	model.SetConfigLogSequencer(controller.NewHostedConfigLogSequencer(self.apiHost, self.apiFirst, configLogSettings))
 	pops := []func(){func() { model.SetConfigLogSequencer(nil) }}
 	pops = append(pops, oauth.SetExchangeScopeSource(oauth.NewProjectionExchangeScopeSource(gate.cache, &oauth.ExchangeScopeSettings{Clock: self.host.Clock})))
-	pops = append(pops, installT3WorldApi(self.ctx, self.apiHost, self.apiFirst, gate.cache))
+	pops = append(pops, installT3WorldApi(self.ctx, self.apiHost, self.apiFirst, gate.cache, self.api))
 	return &t3WorldApiRun{
 		gate: gate,
 		pop: func() {

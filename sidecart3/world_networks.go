@@ -86,6 +86,7 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"github.com/urnetwork/connect"
+	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/evsservice"
@@ -465,6 +466,9 @@ func NewT3World(t testing.TB, settings *T3WorldSettings) (world *T3World, return
 	}
 	self.apiHost = &apiHost
 	self.apiFirst = first
+	// api's routes before its installs, which reach gkm's origin through them as api's process reaches $UR_GKM_URL;
+	// every route reads what the installs set at each request, as RestartApi relies on
+	self.api = NewT3Api(ctx, self.net, sidecarSettings)
 	// api's log and exchange, as its process installs them over its first cluster
 	apiRun, err := self.startApi()
 	if err != nil {
@@ -473,7 +477,6 @@ func NewT3World(t testing.TB, settings *T3WorldSettings) (world *T3World, return
 	self.apiRun = apiRun
 	self.closes = append(self.closes, self.stopApi)
 
-	self.api = NewT3Api(ctx, self.net, sidecarSettings)
 	exchange, err := NewT3SidecarExchange(ctx, t, settings.Exchange)
 	if err != nil {
 		return nil, err
@@ -486,15 +489,16 @@ func NewT3World(t testing.TB, settings *T3WorldSettings) (world *T3World, return
 
 // What api's process installs over its gate cache beside the sequencer and the exchange's scopes
 // (controller.installApiAuthorization, installApiProjection), on the world's host and its first cluster, until the
-// returned pop: the approval gate's states, the dns scopes' labels, the smtp routes' §8 checks, the edge logins' source,
-// rev/'s store signing under the world's svc- key, the issuer's worker that claims its tasks (revocations, due ticks and
-// their hooks), and the contract gate when sidecar.yml's acl_contract_gate is on now, as the install reads the switch
-// at api's start.
-func installT3WorldApi(ctx context.Context, host *sidecar.ServiceHost, first sidecar.BlobCluster, cache *sidecar.AclGateCache) func() {
+// returned pop: the approval gate's states, the dns scopes' labels, the smtp routes' §8 checks, §14.8's report seal key
+// source with gkm at the world's gkm origin (newT3WorldReportKeySource), the edge logins' source, rev/'s store signing
+// under the world's svc- key, the issuer's worker that claims its tasks (revocations, due ticks and their hooks), and
+// the contract gate when sidecar.yml's acl_contract_gate is on now, as the install reads the switch at api's start.
+func installT3WorldApi(ctx context.Context, host *sidecar.ServiceHost, first sidecar.BlobCluster, cache *sidecar.AclGateCache, api *T3Api) func() {
 	pops := []func(){}
 	pops = append(pops, model.SetApprovalGateStates(model.ApprovalGateStatesOf(cache)))
 	pops = append(pops, model.SetDnsScopeLabelSource(model.DnsScopeLabelSourceOf(cache)))
 	pops = append(pops, model.SetSmtpApiGate(model.SmtpApiGateOf(cache)))
+	pops = append(pops, controller.SetSmtpReportKeySource(newT3WorldReportKeySource(cache, api, host.Clock)))
 	oauth.SetEdgeLoginSource(oauth.NewProjectionEdgeLoginSource(cache))
 	pops = append(pops, func() { oauth.SetEdgeLoginSource(nil) })
 	revSettings := model.DefaultSidecarRevSettings()
@@ -547,6 +551,19 @@ func installT3WorldApi(ctx context.Context, host *sidecar.ServiceHost, first sid
 			pops[index]()
 		}
 	}
+}
+
+// §14.8's report seal key source over cache, as api's projection installs it (controller's newApiSmtpReportKeySource):
+// gkm's drop-key route at the world's gkm origin, reached through api's transport as the world's lb, under the tokens
+// api mints with the world's svc- key, so a report the platform listener's intake asks for is sealed to the network's
+// mail key wherever gkm answers at that origin. An origin that is no gkm url answers none for every network and says
+// so, as api's process does without $UR_GKM_URL.
+func newT3WorldReportKeySource(cache *sidecar.AclGateCache, api *T3Api, clock sidecar.Clock) *controller.SmtpReportKeySource {
+	gkm, err := controller.NewSmtpReportGkmReader(api.ServiceOrigin("gkm"), api.Transport(), clock)
+	if err != nil {
+		glog.Errorf("[t3]gkm's origin %s cannot be used, so every network's reports are sealed to none: %v\n", api.ServiceOrigin("gkm"), err)
+	}
+	return controller.NewSmtpReportKeySource(controller.SmtpReportKeyStatesOf(cache), gkm, clock, nil)
 }
 
 // The world's issuer at origin and its two signer keys, throwaways made here, until the returned pop: the svc- key,

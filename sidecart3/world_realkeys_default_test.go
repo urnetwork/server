@@ -2,9 +2,11 @@
 
 // A T3 world on its defaults runs real keys (world_networks.go's keys and config rows): each device's own key client at
 // the gkm ServeGkm serves, the config repo's heads on evs, and each network bootstrapped by its first owner's follower,
-// FakeGkm and the in-memory heads left untouched; and a bootstrap on real keys is refused at once while gkm or evs
-// does not answer at its origin. Run them with the private stores through the build's wrapper, -tags 'sidecar_e2e
-// sidecar_pending sidecar_localstack', as world_evs_e2e_test.go's cases run.
+// FakeGkm and the in-memory heads left untouched; a bootstrap on real keys is refused at once while gkm or evs does
+// not answer at its origin; and api's installs give the world §14.8's report seal key source, which reaches gkm at the
+// world's origin and answers a personal network's mail key, its owner's mailbox's drop key. Run them with the private
+// stores through the build's wrapper, -tags 'sidecar_e2e sidecar_pending sidecar_localstack', as
+// world_evs_e2e_test.go's cases run.
 
 package sidecart3
 
@@ -21,6 +23,7 @@ import (
 	"github.com/urnetwork/sidecar/protocol"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/controller"
 )
 
 // What the real-keys cases run with (QD-702).
@@ -210,5 +213,67 @@ func TestT3WorldRealKeysBootstrapRefusesWithoutGkmOrEvs(t *testing.T) {
 			tb.Fatal(err)
 		}
 		refused("evs")
+	})
+}
+
+// api's installs in a world give the process §14.8's report seal key source, as api's projection installs it: it
+// reads the world's api gate cache and gkm at the world's gkm origin under the token api mints with the world's svc-
+// key, so a personal network's mail key is its owner's mailbox's drop key, the one the mailbox's creator holds. A
+// restarted api installs a source of its own, and the world's Close puts back the one before it.
+func TestT3WorldInstallsTheReportKeySource(t *testing.T) {
+	settings := defaultT3RealKeysSettings()
+	(&server.TestEnv{ApplyDbMigrations: true}).Run(t, func(tb testing.TB) {
+		ctx, cancel := context.WithTimeout(context.Background(), settings.CaseTimeout)
+		defer cancel()
+		before := controller.CurrentSmtpReportKeySource()
+		world, network, devices := newT3RealKeysWorld(ctx, tb, 2)
+		defer world.Close()
+		installed := controller.CurrentSmtpReportKeySource()
+		if installed == nil || installed == before {
+			tb.Fatal("the world's api installed no report key source")
+		}
+		networkId := sidecar.Id(network.NetworkId)
+		key, err := installed.ReportSealKey(ctx, networkId)
+		if err != nil || key != nil {
+			tb.Fatalf("the source answered %v, %v for a network with no mailbox, not none", key, err)
+		}
+
+		// the owner member's mailbox, created by its device that writes no config heads (QD-1093)
+		creator := devices[1]
+		client, err := creator.EvsClient()
+		if err != nil {
+			tb.Fatal(err)
+		}
+		memberId := network.MemberId()
+		mailbox, err := client.CreateRepo(ctx, &sidecar.EvsCreateRepoArgs{Kind: protocol.RepoKind_REPO_KIND_MAILBOX, OwnerMemberId: &memberId, Confirmed: true})
+		if err != nil {
+			tb.Fatalf("%s's mailbox: %v", creator.Name, err)
+		}
+		if err := network.Sync(ctx, creator.Follower().Client().Pin().GetVersion()); err != nil {
+			tb.Fatal(err)
+		}
+		dropKey, err := creator.Gkm.DropKey(ctx, mailbox.RepoId())
+		if err != nil {
+			tb.Fatalf("%s holds no drop key of its mailbox: %v", creator.Name, err)
+		}
+		key, err = installed.ReportSealKey(ctx, networkId)
+		if err != nil || key == nil {
+			tb.Fatalf("the source answered %v, %v for a network whose owner's mailbox stands, not its drop key", key, err)
+		}
+		if key.RepoId != mailbox.RepoId() || key.Generation != dropKey.Generation || !bytes.Equal(key.PublicKey, dropKey.PublicKey) {
+			tb.Errorf("the source sealed to repo %s at generation %d, not the mailbox %s's drop key at %d", key.RepoId, key.Generation, mailbox.RepoId(), dropKey.Generation)
+		}
+
+		if err := world.RestartApi(); err != nil {
+			tb.Fatal(err)
+		}
+		restarted := controller.CurrentSmtpReportKeySource()
+		if restarted == nil || restarted == installed {
+			tb.Errorf("the restarted api installed no report key source of its own")
+		}
+		world.Close()
+		if controller.CurrentSmtpReportKeySource() != before {
+			tb.Errorf("the world's Close left its report key source installed")
+		}
 	})
 }
