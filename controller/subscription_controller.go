@@ -709,10 +709,11 @@ func createBalanceCodeForSale(
 
 	awsMessageSender := GetAWSMessageSender()
 
+	var sendErr error
 	if applied && appliedNetworkName != "" {
 		// bought FOR this network from the buy-data page, and the data is there:
 		// say so rather than offer a code that is already spent
-		return awsMessageSender.SendAccountMessageTemplate(
+		sendErr = awsMessageSender.SendAccountMessageTemplate(
 			balanceCode.PurchaseEmail,
 			&SubscriptionDataAppliedTemplate{
 				Secret:           balanceCode.Secret,
@@ -720,15 +721,22 @@ func createBalanceCodeForSale(
 				NetworkName:      appliedNetworkName,
 			},
 		)
+	} else {
+		sendErr = awsMessageSender.SendAccountMessageTemplate(
+			balanceCode.PurchaseEmail,
+			&SubscriptionTransferBalanceCodeTemplate{
+				Secret:           balanceCode.Secret,
+				BalanceByteCount: balanceCode.BalanceByteCount,
+			},
+		)
 	}
-
-	return awsMessageSender.SendAccountMessageTemplate(
-		balanceCode.PurchaseEmail,
-		&SubscriptionTransferBalanceCodeTemplate{
-			Secret:           balanceCode.Secret,
-			BalanceByteCount: balanceCode.BalanceByteCount,
-		},
-	)
+	if sendErr != nil {
+		// the webhook answers with this error, which the router logs, and the
+		// send's error can carry the purchase email: it names the code and the
+		// failure's kind alone (I-13). The provider's retry sends the same code.
+		return fmt.Errorf("balance code %s email send %s", balanceCode.BalanceCodeId, accountMessageSendFailureKind(sendErr))
+	}
+	return nil
 }
 
 type RedeemBalanceCodeArgs struct {

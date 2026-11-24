@@ -5,8 +5,10 @@ package controller
 // messages do, so each line about one names the failure's kind and the
 // network, code or channel it already has, as the account message outbox's
 // lines do: the AWS sender's own lines, the epoch earnings run's warning, the
-// verification and password reset code sends. Before, each of those lines
-// printed the send's error.
+// verification and password reset code sends, and a data purchase's balance
+// code email, whose error the webhook answers with and the router logs.
+// Before, each of those lines printed the send's error, and the Stripe
+// checkout's line printed the purchase email itself.
 //
 // Each test reads what its sends log from a subprocess of this test binary
 // (TestEmailSendLogChild), with glog writing every line to stderr at
@@ -38,6 +40,8 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/router"
+	"github.com/urnetwork/server/session"
 )
 
 // The environment variable that names the scenario TestEmailSendLogChild runs.
@@ -207,6 +211,33 @@ func (self *emailSendLogAwsEndpoint) sender() *AWSMessageSender {
 	}
 }
 
+// Serves one request through the wrapper the payment webhooks are served by,
+// its implementation running fulfill as the Stripe webhook runs a completed
+// checkout's, so the router answers and logs fulfill's error as it does the
+// webhook's. Returns the answer's status.
+func emailSendLogServeWebhook(ctx context.Context, fulfill func() error) int {
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"https://api.example/pay/stripe",
+		strings.NewReader(`{"id":"evt_synthetic_email_send_log","type":"checkout.session.completed"}`),
+	).WithContext(ctx)
+	response := httptest.NewRecorder()
+	router.WrapWithInputBodyFormatterNoAuth(
+		func(clientSession *session.ClientSession, req *http.Request) (io.Reader, error) {
+			return req.Body, nil
+		},
+		func(stripeWebhook *StripeWebhookArgs, clientSession *session.ClientSession) (*StripeWebhookResult, error) {
+			if err := fulfill(); err != nil {
+				return nil, err
+			}
+			return &StripeWebhookResult{}, nil
+		},
+		response,
+		req,
+	)
+	return response.Code
+}
+
 // The AWS sender's lines about an SES rejection naming the recipient name the
 // channel, the kind and the SDK's code: the bounded report and, at verbosity
 // 1, the line for every failure, which printed the error.
@@ -249,6 +280,20 @@ func TestAuthVerifySendFailureLogsNoAddress(t *testing.T) {
 func TestAuthPasswordResetSendFailureLogsNoAddress(t *testing.T) {
 	capture, _ := emailSendLogOutput(t, "auth-reset")
 	requireEmailSendLogLine(t, capture, "[auth]password reset code send timeout")
+	requireEmailSendLogOmits(t, capture, "@"+emailSendLogDomain)
+}
+
+// A data purchase's balance code email that fails answers the webhook with an
+// error naming the code and the kind, which the router logs, and the Stripe
+// checkout's line names the purchase event where it named the purchase email.
+func TestBalanceCodeSendFailureLogsNoAddress(t *testing.T) {
+	capture, facts := emailSendLogOutput(t, "balance-code")
+	if facts["balance_code_id"] == "" {
+		t.Fatalf("the subprocess reported no balance code: %v", facts)
+	}
+	requireEmailSendLogText(t, capture, "[sub]create balance code: cs_test_synthetic_email_send_log {")
+	requireEmailSendLogText(t, capture, "[h]request impl error (*controller.StripeWebhookArgs)")
+	requireEmailSendLogText(t, capture, fmt.Sprintf("balance code %s email send failed", facts["balance_code_id"]))
 	requireEmailSendLogOmits(t, capture, "@"+emailSendLogDomain)
 }
 
@@ -357,6 +402,61 @@ func TestEmailSendLogChild(t *testing.T) {
 			sender.requireErrorsNameTheirAddresses(t, failedAddress, timeoutAddress)
 			fact("failed", failedNetworkId.String())
 			fact("timeout", timeoutNetworkId.String())
+		})
+
+	case "balance-code":
+		(&server.TestEnv{ApplyDbMigrations: true, RerunCount: 0}).Run(t, func(t testing.TB) {
+			ctx := context.Background()
+			address := "buyer@" + emailSendLogDomain
+			sender := &emailSendLogTestSender{}
+			previousSender := GetAWSMessageSender()
+			SetMessageSender(sender)
+			defer SetMessageSender(previousSender)
+			previousSkus := stripeSkusFunc
+			stripeSkusFunc = func() map[string]*Sku {
+				return map[string]*Sku{
+					"prod_synthetic_email_send_log": {
+						FeeFraction:                   0.3,
+						BalanceByteCountHumanReadable: "1tib",
+					},
+				}
+			}
+			defer func() { stripeSkusFunc = previousSkus }()
+			lineItems := []*StripeLineItem{{
+				Id:          "li_synthetic_email_send_log",
+				AmountTotal: 1000,
+				Quantity:    1,
+				Price:       &StripeLineItemProduct{Product: "prod_synthetic_email_send_log"},
+			}}
+
+			captureStart()
+			// the checkout's fulfillment, whose line named the purchase email:
+			// with pro.yml its send fails, and without one the code's zero
+			// duration refuses it first
+			checkoutStatus := emailSendLogServeWebhook(ctx, func() error {
+				return stripeFulfillCheckoutLineItems(ctx, "cs_test_synthetic_email_send_log", lineItems, address, nil, "")
+			})
+			// a sale's code with its duration given, so its send fails with
+			// pro.yml or without
+			saleStatus := emailSendLogServeWebhook(ctx, func() error {
+				return createBalanceCodeForSale(ctx, 1*model.Tib, 24*time.Hour, model.UsdToNanoCents(7), "synthetic-email-send-log-sale", "{}", address, nil, "", nil)
+			})
+			captureEnd()
+
+			// an undeclared error: the router answers 500, so the provider retries
+			if checkoutStatus != http.StatusInternalServerError || saleStatus != http.StatusInternalServerError {
+				t.Fatalf("the webhook answered %d and %d, want 500 for each", checkoutStatus, saleStatus)
+			}
+			if model.Pro().DataCodeDuration <= 0 {
+				sender.requireErrorsNameTheirAddresses(t, address)
+			} else {
+				sender.requireErrorsNameTheirAddresses(t, address, address)
+			}
+			balanceCodeId, err := model.GetBalanceCodeIdForPurchaseEventId(ctx, "synthetic-email-send-log-sale")
+			if err != nil {
+				t.Fatalf("the sale made no balance code: %v", err)
+			}
+			fact("balance_code_id", balanceCodeId.String())
 		})
 
 	default:

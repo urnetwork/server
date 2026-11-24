@@ -692,9 +692,11 @@ func stripeFulfillCheckoutLineItemsForSale(
 					quantity = 1
 				}
 
-				glog.Infof("[sub]create balance code: %s %s\n", purchaseEmail, string(stripeItemJsonBytes))
-
 				purchaseEventId := stripeCheckoutPurchaseEventId(stripeSessionId, lineIndex)
+				// the line names the purchase event, never the purchase email the
+				// code is sent to (I-13)
+				glog.Infof("[sub]create balance code: %s %s\n", purchaseEventId, string(stripeItemJsonBytes))
+
 				balanceByteCount := quantity * sku.BalanceByteCount()
 				err = createBalanceCodeForSale(
 					ctx,
