@@ -98,11 +98,13 @@ func newWinnerClosingFixture() *winnerClosingFixture {
 	}}
 }
 
-func (self *winnerClosingFixture) Acquire(context.Context, string, time.Duration) (*model.CompetitionSupervisorLease, error) {
-	return &model.CompetitionSupervisorLease{}, nil
+// A lease runs its full duration from the fixture's clock: the supervisor's
+// confirmed authority refuses one with no expiry as already lost.
+func (self *winnerClosingFixture) Acquire(_ context.Context, _ string, duration time.Duration) (*model.CompetitionSupervisorLease, error) {
+	return &model.CompetitionSupervisorLease{LeaseExpiresAt: self.now.Add(duration)}, nil
 }
-func (self *winnerClosingFixture) Renew(context.Context, model.CompetitionSupervisorLease, time.Duration) (*model.CompetitionSupervisorLease, error) {
-	return &model.CompetitionSupervisorLease{}, nil
+func (self *winnerClosingFixture) Renew(_ context.Context, _ model.CompetitionSupervisorLease, duration time.Duration) (*model.CompetitionSupervisorLease, error) {
+	return &model.CompetitionSupervisorLease{LeaseExpiresAt: self.now.Add(duration)}, nil
 }
 func (self *winnerClosingFixture) Snapshot(context.Context, model.CompetitionSupervisorLease) (*CompetitionSupervisorSnapshot, error) {
 	snapshot := self.snapshot
