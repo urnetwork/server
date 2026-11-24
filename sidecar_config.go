@@ -9,6 +9,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/urnetwork/glog"
+	"github.com/urnetwork/sidecar"
 )
 
 // The sidecar gates, config/<env>/sidecar.yml (§19.11, D-OPS-10). The file is
@@ -33,6 +34,7 @@ import (
 //	  sockets_control_qps: {rate: 50, burst: 500}
 //	  urnetwork_edge: <network_id>
 //	  file_clusters: {<cluster id>: {settle_passed_build: <commit>, hdd_capacity_ops: <n>}}
+//	  auth_features: {api: [], evs: [], gkm: [], mxedge: [], compute: []}  # DESIGN-COMPUTE §16.6; sidecar_gates.go
 //
 // No key enforces §7.4's stage 1 or D-TEAM-14: since M1 (TEAM-M1-01) they refuse
 // in code, in api's route gates, session's strict_exp expiry and the transport
@@ -157,6 +159,7 @@ type sidecarConfigYaml struct {
 			SettlePassedBuild string `yaml:"settle_passed_build"`
 			HddCapacityOps    int64  `yaml:"hdd_capacity_ops"`
 		} `yaml:"file_clusters"`
+		AuthFeatures map[string][]string `yaml:"auth_features"`
 	} `yaml:"sidecar"`
 }
 
@@ -193,6 +196,9 @@ type SidecarConfig struct {
 
 	// the evs gate's blocks, 0 when the file sets none that is at least 1
 	evsBlocks int
+
+	// the authorization features each log-reading service implements, by name (sidecar_gates.go)
+	authFeatures map[string]sidecar.AuthFeature
 }
 
 // Whether the network is listed in preview_networks.
@@ -256,6 +262,7 @@ func newSidecarConfig(y *sidecarConfigYaml) *SidecarConfig {
 		restoreHold:       y.Sidecar.RestoreHold,
 		placeNew:          y.Sidecar.PlaceNew,
 		fileClusters:      map[string]SidecarFileCluster{},
+		authFeatures:      parseSidecarAuthFeatures(y.Sidecar.AuthFeatures),
 	}
 	for _, networkId := range parseSidecarConfigIds("preview_networks", y.Sidecar.PreviewNetworks) {
 		config.previewNetworkIds[networkId] = true

@@ -89,8 +89,10 @@ func GetSidecarSyncVersions(w http.ResponseWriter, r *http.Request) {
 func GetSidecarSyncTopic(w http.ResponseWriter, r *http.Request) {
 	topic := router.GetPathValues(r)[0]
 	since := r.URL.Query().Get("since")
+	// the features the sidecar's release implements (DESIGN-COMPUTE §16.6), empty from an older one
+	authFeatures := r.URL.Query().Get("auth_features")
 	impl := func(clientSession *session.ClientSession) (*controller.SidecarSyncCoreResult, error) {
-		return controller.SidecarSyncTopic(topic, since, clientSession)
+		return controller.SidecarSyncTopicWithFeatures(topic, since, authFeatures, clientSession)
 	}
 	router.WrapRequireClient(impl, w, r)
 }

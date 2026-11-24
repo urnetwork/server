@@ -28,9 +28,19 @@ package controller
 // owner decision 335), best effort, so the answer never fails with the zone's
 // write.
 //
+// A base that turns on an authorization feature some service serving the
+// network does not implement is refused before anything is appended, 403
+// feature_unsupported with the tip (DESIGN-COMPUTE §16.6's point row;
+// CACL-M11-03): api reads only the base's rows' ProjectionSettings.auth_features,
+// which carry its head's ServiceSettings, the newest base's, and the services'
+// bits (server.SidecarConfig.AuthFeaturesFor), and judges no content. A bit the
+// newest base already set turns nothing on, so only the bits a base adds are
+// held to the services. api's verifier judges the base again at the tip as every
+// reader does, a bit its own release lacks or rows clearing one included.
+//
 // Refusals answer {"error", "code", "tip"}: 403 config_refused, 409
-// config_tip_moved and config_unadmitted's 403; an unavailable store or a
-// process with no first metadata cluster answers 503.
+// config_tip_moved, config_unadmitted's 403 and feature_unsupported's 403; an
+// unavailable store or a process with no first metadata cluster answers 503.
 
 import (
 	"bytes"
@@ -103,6 +113,38 @@ func configPinResult(pin *bridge.AuthPin) *NetworkConfigPinResult {
 // An unadmitted client's refusal.
 func configUnadmitted(text string) error {
 	return &model.ConfigLogError{Status: http.StatusForbidden, Code: "config_unadmitted", Err: errors.New(text)}
+}
+
+// The code of a base turning on a feature a service serving the network lacks.
+const configFeatureUnsupported = "feature_unsupported"
+
+// Nil where the base's rows turn on no feature beyond those every service
+// serving the network implements; else feature_unsupported, 403 with the tip.
+// Rows that do not parse are the verifier's to refuse, as config_refused.
+func configBaseFeatureCheck(clientSession *session.ClientSession, sequencer *model.ConfigLogSequencer, rows []byte) error {
+	features, err := sidecar.ConfigRowsAuthFeatures(rows)
+	if err != nil || features == 0 {
+		return nil
+	}
+	networkId := clientSession.ByJwt.NetworkId
+	state, err := sequencer.CaughtUpState(clientSession.Ctx, networkId)
+	if err != nil {
+		return &model.ConfigLogError{Status: http.StatusServiceUnavailable, Code: "unavailable", Err: err}
+	}
+	var on sidecar.AuthFeature
+	var tip *bridge.AuthPin
+	if state != nil {
+		on, tip = state.AuthFeatures(), state.Pin()
+	}
+	if lacking := (features &^ on) &^ server.CurrentSidecarConfig().AuthFeaturesFor(networkId); lacking != 0 {
+		return &model.ConfigLogError{
+			Status: http.StatusForbidden,
+			Code:   configFeatureUnsupported,
+			Tip:    tip,
+			Err:    fmt.Errorf("a service serving the network does not implement %s", lacking),
+		}
+	}
+	return nil
 }
 
 // The sidecar the bearer's client binds, zero for none.
@@ -237,6 +279,10 @@ func NetworkConfigProjectionPublish(args *NetworkConfigProjectionPublishArgs, cl
 		if !admitted {
 			return nil, configUnadmitted("an unadmitted client publishes no base")
 		}
+	}
+	// DESIGN-COMPUTE §16.6's point row: a feature some service serving the network lacks
+	if err := configBaseFeatureCheck(clientSession, sequencer, args.Rows); err != nil {
+		return nil, err
 	}
 	pin, err := sequencer.AppendBase(clientSession.Ctx, clientSession.ByJwt.NetworkId, &model.ConfigLogBase{
 		SignedHeader: args.SignedHeader,
