@@ -16,9 +16,55 @@ func TestMinimumRuntimeMigrationVersionExactPayerTail(t *testing.T) {
 		want = 791
 	case 926:
 		want = 925
+	case 1009:
+		want = 1008
 	}
 	if got := MinimumRuntimeMigrationVersion(); got != want {
 		t.Fatalf("current runtime requires %d, want %d", got, want)
+	}
+}
+
+// The real list: its last migration, 1009, is the close evidence window guard,
+// so its binaries run against head 1008. Pinned to this list: whoever appends
+// migration 1010 updates this test, and decides there whether binaries with it
+// run against a head without it.
+func TestMinimumRuntimeMigrationVersionCurrentList(t *testing.T) {
+	if count, required := MigrationCount(), MinimumRuntimeMigrationVersion(); count != 1009 || required != 1008 {
+		t.Fatalf("%d migrations require head %d, want 1009 requiring 1008", count, required)
+	}
+}
+
+// Migration 1009 only replaces the close evidence guard's function body: a
+// binary that carries it runs against head 1008, only for that exact published
+// migration, and only while it is the last.
+func TestMinimumRuntimeMigrationVersionEvidenceWindowGuardTail(t *testing.T) {
+	if got := minimumRuntimeMigrationVersion(1009, MigrationIdentity); got != 1008 {
+		t.Fatalf("the published evidence window guard migration requires %d, want 1008", got)
+	}
+	for _, fail := range []bool{false, true} {
+		got := minimumRuntimeMigrationVersion(1009, func(index int) (string, error) {
+			if index == 1008 {
+				if fail {
+					return "", errors.New("identity unavailable")
+				}
+				return "different published migration", nil
+			}
+			return MigrationIdentity(index)
+		})
+		if got != 1009 {
+			t.Fatalf("changed migration 1009/error=%v lowered head to %d", fail, got)
+		}
+	}
+	// A migration appended after the guard is required in full, though the
+	// guard (identity(1008)) is unchanged.
+	got := minimumRuntimeMigrationVersion(1010, func(index int) (string, error) {
+		if index == 1009 {
+			return "appended migration", nil
+		}
+		return MigrationIdentity(index)
+	})
+	if got != 1010 {
+		t.Fatalf("a migration appended after the guard lowered head 1010 to %d", got)
 	}
 }
 
@@ -45,7 +91,7 @@ func TestMinimumRuntimeMigrationVersionStatisticsTail(t *testing.T) {
 }
 
 func TestMinimumRuntimeMigrationVersionRetainsUnknownHead(t *testing.T) {
-	for _, count := range []int{0, 790, 791, 792, 794, 795, 796, 924, 925, 927, 928} {
+	for _, count := range []int{0, 790, 791, 792, 794, 795, 796, 924, 925, 927, 928, 1007, 1008, 1010, 1011} {
 		t.Run(strconv.Itoa(count), func(t *testing.T) {
 			calls := 0
 			got := minimumRuntimeMigrationVersion(count, func(int) (string, error) {
