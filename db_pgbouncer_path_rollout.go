@@ -28,7 +28,8 @@ import (
 const pgBouncerEveryBlock = "*"
 
 // The services whose mains choose their path with `SetServicePgBouncerPath`.
-var pgBouncerPathServices = []string{"api", "connect", "proxy", "taskworker", "alt", "gossip", "mcp"}
+// alt was retired on 2026-11-20 and its main removed on 2026-11-23 (290ebc028).
+var pgBouncerPathServices = []string{"api", "connect", "proxy", "taskworker", "gossip", "mcp"}
 
 // The blocks whose main pools dial the PgBouncer instances directly, by
 // service. Every block not listed is on the single port.
@@ -54,7 +55,6 @@ var pgBouncerDirectBlocks = map[string][]string{
 	"connect":    {pgBouncerEveryBlock},
 	"proxy":      {pgBouncerEveryBlock},
 	"taskworker": {pgBouncerEveryBlock},
-	"alt":        {pgBouncerEveryBlock},
 	"gossip":     {pgBouncerEveryBlock},
 	"mcp":        {pgBouncerEveryBlock},
 }
