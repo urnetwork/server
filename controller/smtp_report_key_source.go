@@ -21,10 +21,12 @@ package controller
 //	         now (the network's state not loaded, gkm not answering, a state behind the generation), which the route
 //	         answers 503 and the listener 451
 //
-// gkm honors a deposit scope only for a sidecar that may deposit (D-ACL-21), and its guard refuses a token naming no
-// sidecar (gkmservice's admitToken), so until gkm admits this token at the drop-key route alone, as §7.8 and §10.14
-// have it, gkm answers 403 and every network reads as having none: each report's raw bytes are dropped unread and its
-// fields kept, as before (question smtp-report-seal-key-gkm-api-token).
+// gkm admits this token at the drop-key route alone, as §7.8 and §10.14 have it (QD-1229, question
+// smtp-report-seal-key-gkm-api-token): its guard passes a token naming no sidecar or member and holding deposit scopes
+// alone there and on no other route, asks it no standing, and honors its deposit while the network's newest verified
+// state at gkm holds the repo, with no RepoDelete standing on it, and the repo takes deposits (D-KEYS-17). gkm answers
+// 503 while that state is not loaded, which reads here as gkm not telling now, and 403 for a repo that state does not
+// hold, holds deleted or holds as taking no deposits, which reads as none until the answer is read again.
 //
 // Safe for concurrent use. No lock is held across I/O.
 
