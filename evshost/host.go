@@ -106,6 +106,8 @@ type HostSettings struct {
 	UsageDrainTimeout time.Duration
 	// The segment cluster's HDD share. nil: evsservice.DefaultHddAdmissionSettings.
 	Hdd *evsservice.HddAdmissionSettings
+	// The usage producer's. nil: sidecar.DefaultQuotaUsageBatcherSettings.
+	Usage *sidecar.QuotaUsageBatcherSettings
 	// The storage gate and a spent network's reads. nil: evsservice.DefaultQuotaGateSettings. Its Read.Blocks is
 	// not the host's to set: NewHost takes the count from sidecar.yml's evs gate (QD-639), and keeps this one only
 	// for a block that starts under a disabled gate with no count, which serves nothing.
@@ -307,7 +309,7 @@ func NewHost(ctx context.Context, host *sidecar.ServiceHost, settings *HostSetti
 		}
 		self.quotaGate = quotaGate
 		uploads.Quota = quotaGate
-		usage, err := evsservice.NewUsageBatcher(ctx, host, nil)
+		usage, err := evsservice.NewUsageBatcher(ctx, host, settings.Usage)
 		if err != nil {
 			return fail(err)
 		}
