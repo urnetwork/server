@@ -64,6 +64,8 @@ func Testing_CreateDeletedNetworkFixture(ctx context.Context, networkName string
 		exec(`INSERT INTO account_feedback (feedback_id, network_id, user_id, feedback_time) VALUES ($1, $2, $3, $4)`, server.NewId(), fixture.NetworkId, fixture.UserId, now)
 		exec(`INSERT INTO network_referral_code (network_id, referral_code) VALUES ($1, $2)`, fixture.NetworkId, "SYN"+server.NewId().String()[24:])
 		exec(`INSERT INTO network_referral (network_id, referral_network_id, create_time) VALUES ($1, $2, $3)`, fixture.NetworkId, server.NewId(), now)
+		exec(`INSERT INTO network_referral_referee (network_id, first_link_time) VALUES ($1, $2)`, fixture.NetworkId, now)
+		exec(`INSERT INTO network_referral_app_day (network_id, day, app_byte_count, update_time) VALUES ($1, $2::date, 1, $2)`, fixture.NetworkId, now)
 		exec(`INSERT INTO exclude_network_client_location (network_id, client_location_id) VALUES ($1, $2)`, fixture.NetworkId, server.NewId())
 		authCodeId := server.NewId()
 		fixture.AuthCodeIds = []server.Id{authCodeId}

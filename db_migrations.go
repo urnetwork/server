@@ -11946,6 +11946,13 @@ var migrations = []any{
 	// before it reads the new body as 91 days and deletes less, so it applies
 	// before or after the deploy.
 	newSqlMigration(contractCloseReportEvidenceWindowGuardSql),
+
+	// The referral terms (network_referral_terms_schema.go): which links
+	// existed when a referral began to need app use and a limited period, the
+	// referred networks' first link and qualification, and their app use per
+	// day. A column with a constant default and two new tables; the running
+	// release writes network_referral without naming the column.
+	newSqlMigration(networkReferralTermsSchemaSql),
 }
 
 // The deleted_network backfill (the migration above): every network an App

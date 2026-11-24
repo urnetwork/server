@@ -36,7 +36,8 @@ func TestLagGuestsGetNoAutomaticGrant(t *testing.T) {
 		connect.AssertEqual(t, granted, false)
 
 		// referrals: the guest referred by a referrer that has one ordinary
-		// referral besides
+		// referral besides, both links from before the referral terms, which
+		// pay without app use
 		referrerId := server.NewId()
 		Testing_CreateNetwork(ctx, referrerId, "lag-referrer-"+referrerId.String()[:8], server.NewId())
 		refereeId := server.NewId()
@@ -45,7 +46,7 @@ func TestLagGuestsGetNoAutomaticGrant(t *testing.T) {
 			for _, networkId := range []server.Id{guest.NetworkId, refereeId} {
 				server.RaisePgResult(tx.Exec(
 					ctx,
-					`INSERT INTO network_referral (network_id, referral_network_id) VALUES ($1, $2)`,
+					`INSERT INTO network_referral (network_id, referral_network_id, existing_link) VALUES ($1, $2, true)`,
 					networkId,
 					referrerId,
 				))
