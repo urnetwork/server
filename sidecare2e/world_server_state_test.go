@@ -5,8 +5,9 @@
 // over api's internal quota surface, the quota ledgers a scenario reconciles, read after the debit journal is flushed
 // as taskworker's flush would, the service debits by meter in service_debit_journal and network_service_usage, a
 // network's verification by a paid balance, a device's issued certificate row standing in for the certs worker, the
-// contract gate's install, api's dns.yml root, and a network's age and its mail enable's, which no route moves; and
-// tlsedge's connection records, which the blogger case's privacy capture reads.
+// contract gate's install, api's dns.yml root, and a network's age and its mail enable's, which no route moves;
+// tlsedge's connection records, which the blogger case's privacy capture reads; and a network's report token, which no
+// zone of the world names in a rua (the World's header).
 
 package sidecare2e
 
@@ -222,6 +223,31 @@ func worldAgeMailEnable(ctx context.Context, networkId server.Id, age time.Durat
 		})
 	}, func(err error) {
 		returnErr = fmt.Errorf("the mail enable's age: %w", err)
+	})
+	return
+}
+
+// networkId's report token in root's zone (network_dns_zone.report_token, MG6's; plan-SMTP-net-token), drawn with the
+// zone's system set and kept for the network's life: the local part of the address its _dmarc and _smtp._tls rua name
+// where dns.yml gives the root a report host, which the world's does not (the World's header).
+func worldNetworkReportToken(ctx context.Context, networkId server.Id, root string) (token string, returnErr error) {
+	server.HandleError(func() {
+		var held *string
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(ctx, `SELECT report_token FROM network_dns_zone WHERE root = $1 AND network_id = $2`, root, networkId)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(&held))
+				}
+			})
+		})
+		if held == nil {
+			returnErr = fmt.Errorf("network %s's zone in %s holds no report token", networkId, root)
+			return
+		}
+		token = *held
+	}, func(err error) {
+		returnErr = fmt.Errorf("the report token: %w", err)
 	})
 	return
 }

@@ -13,7 +13,10 @@
 //	          issuer's worker, and §8.10's contract gate when WorldSettings.AclContractGate turns sidecar.yml's switch
 //	          on), the sequencer and rev/'s store spending on api's own write budget over the world's Redis, which
 //	          reports beside each block's (T3WorldSettings.ApiWriteBudget), and api's internal gate surface on the
-//	          world's throwaway bearers (ServeInternalGate), as a block reaches api
+//	          world's throwaway bearers (ServeInternalGate), as a block reaches api, its routes api's main serves there:
+//	          the quota surface, the projection, the edge clients, abuse notices, identity clients and the report key,
+//	          which answers from the report seal key source the T3World's api installs over its gate cache, gkm at the
+//	          world's gkm block
 //	exchange  server's exchange and its connect handler on loopback, which every sidecar's and edge client's connect
 //	          client dials, with sidecar.yml's push switch on, so each sidecar's client hears its hints from the
 //	          exchange's resident publisher as in production (WorldSettings.Push)
@@ -21,6 +24,10 @@
 //	          its origin through T3Api.ServeService by the world's lb (worldLb: http over loopback to the block, with
 //	          X-UR-Forwarded-For set as warp's nginx sets it), and its direct ports on listeners of their own:
 //	          tlsedge's TLS behind its PROXY listener, smtpedge's and mxedge's SMTP, dnsedge's DNS on TCP and UDP
+//	reports   mxedge's platform listener with its report intake as mxedge's main composes it
+//	          (world_report_intake_test.go), TCP 25 at an lb interface of its own (W4): a report at a network's token
+//	          is tied to the network by its zone's row, counted, and its raw bytes sealed to the network mail key, which
+//	          the intake reads from api's report-key route on the platform listener's own bearer
 //	quota     every block's Quota reads and writes server's ledgers through api's internal quota surface on its own
 //	          bearer (quotahost's api-backed HostQuota), each network funded by a transfer balance of server's
 //	edges     tlsedge, smtpedge and mxedge's router hold their K platform clients in urnetwork-edge, a network the world
@@ -88,6 +95,13 @@
 //     part, as its prover does;
 //   - mxedge's router's PTR and host lookups: they answer nothing, since the test stack serves no in-addr.arpa zone and
 //     resolves no public name;
+//   - the platform report intake's lookups of a reporter's DKIM key (world_report_intake_test.go): they ask the world's
+//     DNS above as a receiver's checks do, where production's intake asks the process's resolver, which a test may not
+//     send to the public resolvers, so the internet sender's reports verify under its zone's key;
+//   - a reporter's address: api reads dns.yml once a process, and the test stack's config holds none, so api's zones
+//     take dns.yml's defaults, whose root_records give no root a report host (report_mx); no zone of the world names a
+//     rua, and a report goes to its network's report token as its zone's row holds it (worldNetworkReportToken), the
+//     address a rua would name;
 //   - §13.8's certs worker and its ACME CA: a device's issued certificate row is written as the worker writes it
 //     (World.IssueTlsCertificateRow), on the device's own key, and no chain is issued, so a visitor to a published name
 //     is shown the device's self-signed leaf on that key.
@@ -239,6 +253,10 @@ type WorldSettings struct {
 	LbIpv6Name        string
 	LbIpv6Address     netip.Addr
 	LbIpv6ProbeSource netip.AddrPort
+	// mxedge-platform's own lb interface, the report host's (W4: an lb stream port maps to one service), whose TCP 25 the
+	// lb hands the platform listener behind its PROXY header: a documentation address, none of the others, and off the
+	// dns API's inventory, as the report host's address is dns.yml's and no edge row's. A zero address leaves it out.
+	PlatformLbAddress netip.Addr
 	// Who reaches mxedge's LAN listener (mxedge.yml's lan_sources), smtpedge's splice to an MX on the router's own lb
 	// interface (D-SMTP-13): the loopback smtpedge's block dials it from.
 	MxLanSources []netip.Prefix
@@ -328,6 +346,7 @@ func DefaultWorldSettings() *WorldSettings {
 		LbIpv6Name:                  "e2e-lb-2",
 		LbIpv6Address:               netip.MustParseAddr("2001:db8::80"),
 		LbIpv6ProbeSource:           netip.MustParseAddrPort("[2001:db8:53::53]:40053"),
+		PlatformLbAddress:           netip.MustParseAddr("192.0.2.81"),
 		MxLanSources:                []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")},
 		SmtpGateRetryTimeout:        2 * time.Second,
 		SmtpMxRetryTimeout:          2 * time.Second,
@@ -390,6 +409,8 @@ type World struct {
 	// (router_lan), and the DNSSEC path above the world's root (world_mail_dns_test.go)
 	mxLanAddress netip.AddrPort
 	dnssec       *worldDnssec
+	// what the platform listener's intakes answered across its runs (world_report_intake_test.go)
+	reportOutcomes *worldReportOutcomes
 
 	blocks []*worldBlock
 
@@ -421,12 +442,13 @@ func NewWorld(t testing.TB, settings *WorldSettings) *World {
 		hostsSettings = defaultE2eHostsSettings()
 	}
 	self := &World{
-		t:             t,
-		settings:      settings,
-		urnetworkEdge: server.NewId(),
-		caseDeadline:  time.Now().Add(hostsSettings.CaseTimeout),
-		statusClient:  &http.Client{Transport: &http.Transport{DisableKeepAlives: true}},
-		lbTransport:   &http.Transport{DisableCompression: true},
+		t:              t,
+		settings:       settings,
+		urnetworkEdge:  server.NewId(),
+		caseDeadline:   time.Now().Add(hostsSettings.CaseTimeout),
+		statusClient:   &http.Client{Transport: &http.Transport{DisableKeepAlives: true}},
+		lbTransport:    &http.Transport{DisableCompression: true},
+		reportOutcomes: newWorldReportOutcomes(),
 	}
 	t.Cleanup(self.Close)
 
@@ -569,7 +591,11 @@ func (self *World) StepContext(parent context.Context, timeout time.Duration) (c
 }
 
 // Each internal gate caller's bearer, 256 random bits, and api's digests of them: the verify file api's internal gate
-// surface checks callers against, served in place of api's own (T3Api.ServeInternalGate) until Close.
+// surface checks callers against, served in place of api's own (T3Api.ServeInternalGate) until Close. Its routes are
+// those api's main serves there (api.Routes), each on that verifier: the quota surface, the projection, the edge
+// clients on the world's edge.yml and urnetwork-edge, abuse notices, identity clients, and the report key, which
+// answers from controller.CurrentSmtpReportKeySource as api's does, the source the T3World's api installs over its
+// gate cache and each restarted api installs again.
 func (self *World) installInternalGate() error {
 	self.bearers = map[server.InternalGateCaller]string{}
 	verifyLines := []string{}
@@ -604,6 +630,7 @@ func (self *World) installInternalGate() error {
 		}).Routes(),
 		handlers.NewInternalGateAbuseNoticeHandlers(&handlers.InternalGateAbuseNoticeDeps{Verifier: verifier}).Routes(),
 		handlers.NewInternalGateIdentityClientsHandlers(&handlers.InternalGateIdentityClientsDeps{Verifier: verifier}).Routes(),
+		handlers.NewInternalGateReportKeyHandlers(&handlers.InternalGateReportKeyDeps{Verifier: verifier}).Routes(),
 	)
 	self.t3.Api().ServeInternalGate(router.NewRouter(self.t3.Context(), routes))
 	self.closes = append(self.closes, func() { self.t3.Api().ServeInternalGate(nil) })
