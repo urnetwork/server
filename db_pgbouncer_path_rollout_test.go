@@ -140,7 +140,6 @@ func TestPgBouncerDirectRolloutStage(t *testing.T) {
 		"connect":    {pgBouncerEveryBlock},
 		"proxy":      {pgBouncerEveryBlock},
 		"taskworker": {pgBouncerEveryBlock},
-		"alt":        {pgBouncerEveryBlock},
 		"gossip":     {pgBouncerEveryBlock},
 		"mcp":        {pgBouncerEveryBlock},
 	}
@@ -154,7 +153,6 @@ func TestPgBouncerDirectRolloutStage(t *testing.T) {
 		"connect":    {"beta", "g1", "g2", "g3", "g4"},
 		"proxy":      {"g1", "g2", "g3", "g4", "g5", "g6", "g7", "g8", "g9", "g10"},
 		"taskworker": {"g1", "g2"},
-		"alt":        {"g1"},
 		"gossip":     {"g1"},
 		"mcp":        {"beta", "g1", "g2", "g3", "g4"},
 	}
