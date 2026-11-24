@@ -97,7 +97,10 @@ type e2eHostsSettings struct {
 	ServiceTokenIssuer string
 	// The root names the blocks serve under, each a documentation name. The networks' root is one, as production's
 	// is: the dns API's zones, tlsedge's names, mxedge's routes and smtpedge's envelopes all sit under DnsRoot's
-	// <label>.<root>, so a name the API gives a network is the one tlsedge and mxedge route by.
+	// <label>.<root>, so a name the API gives a network is the one tlsedge and mxedge route by. mxedge's platform root
+	// is that root too, as config/main's platform_root is its route_root, and smtpedge.yml's root and report host are
+	// the platform's, which mxedge's main holds its report intake to, since the listener takes recipients by the one
+	// and the intake routes them by the other.
 	TlsEdgeRoot    string
 	DnsRoot        string
 	MxRouteRoot    string
@@ -148,7 +151,7 @@ func defaultE2eHostsSettings() *e2eHostsSettings {
 		DnsRoot:                    "zone.e2e.example.",
 		MxRouteRoot:                "zone.e2e.example",
 		MxReportHost:               "rpt.report.e2e.example",
-		MxPlatformRoot:             "platform.e2e.example",
+		MxPlatformRoot:             "zone.e2e.example",
 		MxBannerHost:               "mx.report.e2e.example",
 		SmtpRoot:                   "zone.e2e.example",
 		SmtpReportHost:             "rpt.report.e2e.example",

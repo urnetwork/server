@@ -515,11 +515,19 @@ func (self *World) runMxedgeRouter(ctx context.Context, listeners *worldBlockLis
 	return mxedgehost.RunHost(ctx, mxedgehost.HostRoleRouter, settings, nil, deps, &mxedgehost.HostPorts{Smtp: worldSmtpPort, Lan: worldMxLanPort})
 }
 
-// mxedge's platform listener on the world's Postgres and Redis with its certificate and no report intake, TCP 25 on a
-// listener of its own.
+// mxedge's platform listener on the world's Postgres and Redis with its certificate and its report intake as mxedge's
+// main composes it, each run its own (world_report_intake_test.go), ready once the groups the intake reads are linked,
+// TCP 25 on a listener of its own, which the world's lb hands the platform's interface (world_lb_test.go).
 func (self *World) runMxedgePlatform(ctx context.Context, listeners *worldBlockListeners) error {
 	settings := e2eMxEdgeSettings(self.HostsSettings())
+	intake, intakeGroups, err := self.platformReportIntake(settings.MxEdge)
+	if err != nil {
+		listeners.close()
+		return err
+	}
 	deps := &mxedgehost.HostDeps{
+		Intake:         intake,
+		IntakeGroups:   intakeGroups,
 		Certificate:    self.credentials.platformCertificate,
 		StatusListener: listeners.status,
 		SmtpListener:   listeners.direct[worldSmtpPort],

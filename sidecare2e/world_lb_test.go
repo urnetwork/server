@@ -7,7 +7,9 @@
 // The dns API lists both as its lb inventory, so the dns edge's probes (§12.6, §13.4) reach the world's own tlsedge
 // through each family and mxedge through the router, the edge answers a published name's A and AAAA (§12.7's * edge
 // records) from the interfaces whose probes pass, and a visitor to a published name reaches tlsedge the same way
-// (world_sockets_test.go).
+// (world_sockets_test.go). mxedge-platform's own interface, WorldSettings.PlatformLbAddress, carries its TCP 25 alone
+// (W4), which reaches the platform listener's direct listener, and is in no inventory, as the report host's address is
+// dns.yml's.
 
 package sidecare2e
 
@@ -24,15 +26,21 @@ import (
 )
 
 // The block and port destination's connection reaches behind the lb: tlsedge's direct listener for one of its service
-// ports at either interface, or mxedge's router's for 25 at the router interface alone.
+// ports at either interface, mxedge's router's for 25 at the router interface alone, or the platform listener's for 25
+// at the platform's interface, which forwards nothing else.
 func (self *World) lbTarget(destination netip.AddrPort) (string, error) {
 	router := destination.Addr() == self.settings.LbAddress
 	ipv6 := self.settings.LbIpv6Address.IsValid() && destination.Addr() == self.settings.LbIpv6Address
-	if !router && !ipv6 {
+	platform := self.settings.PlatformLbAddress.IsValid() && destination.Addr() == self.settings.PlatformLbAddress
+	if !router && !ipv6 && !platform {
 		return "", fmt.Errorf("no lb interface answers at %s", destination.Addr())
 	}
 	block, port := "", int(destination.Port())
 	switch {
+	case platform && port == worldSmtpPort:
+		block = WorldBlockMxedgePlatform
+	case platform:
+		return "", fmt.Errorf("the lb forwards no port %d at %s", port, destination.Addr())
 	case port == worldSmtpPort && router:
 		block = WorldBlockMxedge
 	case slices.Contains(tlsedgehost.HostServicePorts, port):
