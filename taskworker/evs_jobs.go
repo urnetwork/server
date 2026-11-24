@@ -146,34 +146,48 @@ func startEvsJobsFromVault(ctx context.Context, lifetime *sync.WaitGroup) {
 		return
 	}
 	host.Budget = budget
-	// §21.9's hold/ writer for the abuse hold pass, on the same first metadata cluster (ABUSE-M5-14)
-	var holdStore *model.AbuseHoldStore
+	closeWriters := func() {}
 	if firstCluster, err := clusters.FirstCluster(); err == nil {
-		holdStore = model.NewAbuseHoldStore(firstCluster)
-		model.SetAbuseHoldStore(holdStore)
-		model.SetAbuseHoldSoftStateSource(model.NewAbuseHoldSoftStateSource(host, evsSettings))
-		// The worker's scoped credentials sweep expired revocations. Signing
-		// and all revocation writes belong to the issuer.
-		model.SetSidecarRevStore(model.NewSidecarRevStore(firstCluster, nil, nil))
-		if server.SidecarMg2Linked() {
-			settings := model.DefaultConfigLogSettings()
-			settings.QueueTicksAtIssuer = true
-			model.SetConfigLogSequencer(controller.NewHostedConfigLogSequencer(host, firstCluster, settings))
-		}
+		closeWriters = installEvsJobWriters(host, firstCluster, evsSettings)
 	}
 	startEvsJobsOnHost(ctx, lifetime, host, evsSettings, evsJobs, func() {
-		if holdStore != nil {
-			model.SetAbuseHoldSoftStateSource(nil)
-			model.SetAbuseHoldStore(nil)
-			model.SetSidecarRevStore(nil)
-			if server.SidecarMg2Linked() {
-				model.SetConfigLogSequencer(nil)
-			}
-		}
+		closeWriters()
 		budget.Close()
 		quota.Drain(context.Background())
 		clusters.Close()
 	})
+}
+
+// Installs the first metadata cluster's writers this process runs beside evs's jobs, on firstCluster with host's
+// budget: §21.9's hold/ writer for the abuse hold pass (ABUSE-M5-14) and its soft-state source, rev/'s expiry sweep,
+// and, while the binary links MG2, the authorization log's sequencer for retention and effects. Every write each
+// makes, the hold writer's creates, rewrites and DELETEs and the sweep's and retention's DELETEs among them, is P0
+// (QD-084), spent from the budget at its own one of §11.13's cost rows once the store shows it took effect, by the
+// table the budget, built with evsservice's default settings, prices with (SetWriteBudget's nil prices). Answers what
+// removes them.
+func installEvsJobWriters(host *sidecar.ServiceHost, firstCluster sidecar.BlobCluster, evsSettings *evsservice.EvsSettings) func() {
+	holdStore := model.NewAbuseHoldStore(firstCluster)
+	holdStore.SetWriteBudget(host.Budget, nil)
+	model.SetAbuseHoldStore(holdStore)
+	model.SetAbuseHoldSoftStateSource(model.NewAbuseHoldSoftStateSource(host, evsSettings))
+	// The worker's scoped credentials sweep expired revocations. Signing
+	// and all revocation writes belong to the issuer.
+	revStore := model.NewSidecarRevStore(firstCluster, nil, nil)
+	revStore.SetWriteBudget(host.Budget, nil)
+	model.SetSidecarRevStore(revStore)
+	if server.SidecarMg2Linked() {
+		settings := model.DefaultConfigLogSettings()
+		settings.QueueTicksAtIssuer = true
+		model.SetConfigLogSequencer(controller.NewHostedConfigLogSequencer(host, firstCluster, settings))
+	}
+	return func() {
+		model.SetAbuseHoldSoftStateSource(nil)
+		model.SetAbuseHoldStore(nil)
+		model.SetSidecarRevStore(nil)
+		if server.SidecarMg2Linked() {
+			model.SetConfigLogSequencer(nil)
+		}
+	}
 }
 
 // Installs host for evs's jobs until ctx ends, with evsSettings the engine settings its runs take, this code's
