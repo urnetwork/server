@@ -413,6 +413,26 @@ func (self *snReservedAttemptAuthority) result(method string, args []json.RawMes
 			return "0x" + hex.EncodeToString(binary.LittleEndian.AppendUint64(nil, uint64(self.chainNow().UnixMilli()))), nil
 		}
 		return value, nil
+	case "state_queryStorageAt":
+		// As a node answers at one block: every key, valued as a single
+		// state_getStorage read of it answers.
+		var keys []string
+		if len(args) != 2 || json.Unmarshal(args[0], &keys) != nil || !knownNative(argument(1)) {
+			break
+		}
+		changes := make([][]any, 0, len(keys))
+		for _, key := range keys {
+			encoded, err := json.Marshal(key)
+			if err != nil {
+				return nil, err
+			}
+			value, err := self.result("state_getStorage", []json.RawMessage{encoded, args[1]})
+			if err != nil {
+				return nil, err
+			}
+			changes = append(changes, []any{key, value})
+		}
+		return []map[string]any{{"block": argument(1), "changes": changes}}, nil
 	case "state_call":
 		if len(args) == 3 && argument(0) == "SubnetInfoRuntimeApi_get_selective_metagraph" && argument(1) == "0x09021400001e00340039004500" && knownNative(argument(2)) {
 			return self.metagraph, nil
