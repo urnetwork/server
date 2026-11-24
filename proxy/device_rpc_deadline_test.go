@@ -155,8 +155,11 @@ func TestProxyRpcDeadlineHijackFailurePreservesOwner(t *testing.T) {
 	if ws != nil {
 		defer ws.Close()
 	}
+	// Gorilla reports a failed hijack as its own handshake error and keeps
+	// only the cause's text ("websocket: hijack: <cause>", since the
+	// GO-2026-6278 fix version).
 	var handshakeErr websocket.HandshakeError
-	if !errors.As(err, &handshakeErr) || err.Error() != want.Error() || response.Code != http.StatusInternalServerError || raw.closes != 0 || raw.writes != 0 {
+	if !errors.As(err, &handshakeErr) || err.Error() != "websocket: hijack: "+want.Error() || response.Code != http.StatusInternalServerError || raw.closes != 0 || raw.writes != 0 {
 		t.Fatalf("hijack=%v closes=%d writes=%d", err, raw.closes, raw.writes)
 	}
 }
