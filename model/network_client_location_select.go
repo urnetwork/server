@@ -546,11 +546,116 @@ func readFindProviders2PostQuantumEncryption(session *session.ClientSession, pos
 // the marker is set, members of {provider_modern} (§12.4); before it, those
 // modern by their evidence of the last seven days
 // (readProviderModernClientIds), network-only ones by the same evidence.
+//
+// Either way a named provider in the caller's own network is answered too,
+// modern or not (owner, 2026-11-24). The probe cannot reach a device that
+// provides only to its network, so the caller's own devices would never
+// count, and a client in post-quantum mode could not connect to them. The
+// caller's window client still requires a sealed end-to-end session with
+// the device (connect EncryptionModeRequired), so a device that cannot seal
+// costs a failed dial, never plaintext. Only the providers the modern check
+// refused read their network, and a request without a jwt has no network.
 func readFindProviders2NamedModern(session *session.ClientSession, postQuantumReady bool, clientIds []server.Id, now time.Time) (map[server.Id]bool, error) {
+	var modernClientIds map[server.Id]bool
+	var err error
 	if !postQuantumReady {
-		return readProviderModernClientIds(session.Ctx, clientIds, now)
+		modernClientIds, err = readProviderModernClientIds(session.Ctx, clientIds, now)
+	} else {
+		modernClientIds, err = readProviderPostQuantumSet(session.Ctx, providerPostQuantumModernKey, clientIds, now)
 	}
-	return readProviderPostQuantumSet(session.Ctx, providerPostQuantumModernKey, clientIds, now)
+	if err != nil {
+		return nil, err
+	}
+	if session.ByJwt == nil {
+		return modernClientIds, nil
+	}
+	refusedClientIds := []server.Id{}
+	for _, clientId := range clientIds {
+		if !modernClientIds[clientId] {
+			refusedClientIds = append(refusedClientIds, clientId)
+		}
+	}
+	ownClientIds, err := readNetworkOwnClientIds(session.Ctx, session.ByJwt.NetworkId, refusedClientIds)
+	if err != nil {
+		return nil, err
+	}
+	answerClientIds := maps.Clone(modernClientIds)
+	if answerClientIds == nil {
+		answerClientIds = map[server.Id]bool{}
+	}
+	maps.Copy(answerClientIds, ownClientIds)
+	return answerClientIds, nil
+}
+
+// The ids among clientIds that are active clients of networkId. One
+// read-only statement per chunk of 256 ids, each observing the caller's
+// context; every error is returned, never raised.
+func readNetworkOwnClientIds(ctx context.Context, networkId server.Id, clientIds []server.Id) (map[server.Id]bool, error) {
+	const chunkSize = 256
+	uniqueClientIds := make([]server.Id, 0, len(clientIds))
+	seenClientIds := make(map[server.Id]bool, len(clientIds))
+	for _, clientId := range clientIds {
+		if !seenClientIds[clientId] {
+			seenClientIds[clientId] = true
+			uniqueClientIds = append(uniqueClientIds, clientId)
+		}
+	}
+	ownClientIds := map[server.Id]bool{}
+	if len(uniqueClientIds) == 0 {
+		return ownClientIds, nil
+	}
+	var returnErr error
+	// a connection that cannot be acquired raises; it is the caller's error
+	// all the same
+	server.HandleError(func() {
+		server.Db(ctx, func(conn server.PgConn) {
+			for start := 0; start < len(uniqueClientIds); start += chunkSize {
+				chunkClientIds := uniqueClientIds[start:min(start+chunkSize, len(uniqueClientIds))]
+				if err := ctx.Err(); err != nil {
+					returnErr = err
+					return
+				}
+				rows, err := conn.Query(
+					ctx,
+					`
+					SELECT network_client.client_id
+					FROM network_client
+					WHERE
+						network_client.client_id = ANY($1::uuid[]) AND
+						network_client.network_id = $2 AND
+						network_client.active
+					`,
+					chunkClientIds,
+					networkId,
+				)
+				if err != nil {
+					returnErr = err
+					return
+				}
+				func() {
+					defer rows.Close()
+					for rows.Next() {
+						var clientId server.Id
+						if err := rows.Scan(&clientId); err != nil {
+							returnErr = err
+							return
+						}
+						ownClientIds[clientId] = true
+					}
+					returnErr = rows.Err()
+				}()
+				if returnErr != nil {
+					return
+				}
+			}
+		}, server.OptReadOnly(), server.OptNoRetry())
+	}, func(err error) {
+		returnErr = err
+	})
+	if returnErr != nil {
+		return nil, returnErr
+	}
+	return ownClientIds, nil
 }
 
 // The answer's band of a discovered provider, for the answered-modern counts.
