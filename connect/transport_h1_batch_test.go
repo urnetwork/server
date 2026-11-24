@@ -107,9 +107,12 @@ func TestConnectH1ReadyDrainBalancesAcksAndPayloadBytes(t *testing.T) {
 	if count, bytes := readyCount(128); count != 32 || bytes != 4*1024 {
 		t.Fatalf("ACK-sized ready drain=(%d, %dB), want (32, 4096B)", count, bytes)
 	}
-	if count, bytes := readyCount(clientconnect.DefaultMtu); count != 12 ||
+	// Ordinary data stops at the first message that reaches the 12 KiB drain
+	// bound, which stays below 16 KiB: ten at the product's 1280-byte MTU.
+	mtuCount := (connectH1WriteBatchDrainByteCount + clientconnect.DefaultMtu - 1) / clientconnect.DefaultMtu
+	if count, bytes := readyCount(clientconnect.DefaultMtu); count != mtuCount ||
 		bytes >= 16*1024 {
-		t.Fatalf("tunnel-MTU ready drain=(%d, %dB), want 12 below 16KiB", count, bytes)
+		t.Fatalf("tunnel-MTU ready drain=(%d, %dB), want %d below 16KiB", count, bytes, mtuCount)
 	}
 	if count, bytes := readyCount(4 * 1024); count != 3 ||
 		bytes != connectH1WriteBatchDrainByteCount {
