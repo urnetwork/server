@@ -22,11 +22,13 @@
 // mounts. Without the url or the file it files none, says so at start, and answers role mail as before; it stays
 // ready either way, since the intake's reports need neither. On the same bearer its intake reads each network's mail
 // key from api's report-key route and seals each report to it (plan-SMTP-report-seal-key); without the url or the
-// file it seals none, says so at start, and keeps every report's fields. Its intake attributes ARF reports and role
-// mail by
-// SMTP-M9-15's join and halts by SMTP-M9-16's ladder (report_join.go), over the send log, the X-UR-Ref keys its block
-// mounts from M9 (smtpedge-x-ur-ref.yml, warp's mxedge-platform-x-ur-ref.yml) and a Quota over its own Postgres, where
-// its binary links MG9; without them it attributes nothing, says so at start, and serves the rest as before.
+// file it seals none, says so at start, and keeps every report's fields. Its intake ties a report at a network's token
+// to that network by network_dns_zone's index over its own Postgres (report_token_source.go), where its binary links
+// MG6; without it every such report is dropped unread, and it says so at start. Its intake attributes ARF reports and
+// role mail by SMTP-M9-15's join and halts by SMTP-M9-16's ladder (report_join.go), over the send log, the X-UR-Ref
+// keys its block mounts from M9 (smtpedge-x-ur-ref.yml, warp's mxedge-platform-x-ur-ref.yml) and a Quota over its own
+// Postgres, where its binary links MG9; without them it attributes nothing, says so at start, and serves the rest as
+// before.
 //
 // Each URL flag's default is the variable the role's fragment, mxedge.yml or mxedge-platform.yml, gives a deployed
 // block in its env_vars, $UR_API_URL and for the router $UR_SOCKETS_URL (sidecarhost.ServiceUrlFlag).
@@ -125,6 +127,13 @@ func main() {
 				glog.Errorf("[mxedge]no report is sealed, so each one's raw bytes are dropped unread and its fields kept: %v\n", err)
 			}
 			deps.IntakeGroups = reportIntakeGroups()
+			// each report at a network's token tied to that network by network_dns_zone's index over the block's own
+			// Postgres (report_token_source.go), where the binary links MG6, the column's group
+			if err := resolveBlockReportTokens(intake); err != nil {
+				glog.Errorf("[mxedge]no report at a network's token is tied to its network, so each is dropped unread: %v\n", err)
+			} else {
+				deps.IntakeGroups = append(deps.IntakeGroups, reportTokenGroups()...)
+			}
 			// SMTP-M9-15's join and SMTP-M9-16's ladder (report_join.go), their Quota on a context of its own,
 			// drained after the block
 			joinCtx, joinCancel := context.WithCancel(context.WithoutCancel(ctx))
