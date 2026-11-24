@@ -20,7 +20,7 @@ func windowStrictHandoverTestDeviceLocalDisables(t *testing.T) bool {
 	defer manager.CloseAndWait(context.Background())
 	settings := manager.proxyDeviceSettings()
 	settings.DisableWindowIdentityPersistence = true
-	deviceLocalSettings := newProxyDeviceLocalSettings(ctx, &model.ProxyDeviceConfig{}, settings)
+	deviceLocalSettings := newProxyDeviceLocalSettings(ctx, &model.ProxyDeviceConfig{}, settings, false)
 	if settings.DisableStrictWindowHandover == deviceLocalSettings.StrictWindowHandover {
 		t.Fatal("the hosted DeviceLocal does not follow the device's handover switch")
 	}
@@ -116,7 +116,7 @@ func TestHostedDevicesHoldTheirRefillWhileOutOfBalance(t *testing.T) {
 	defer manager.CloseAndWait(context.Background())
 	settings := manager.proxyDeviceSettings()
 	settings.DisableWindowIdentityPersistence = true
-	deviceLocalSettings := newProxyDeviceLocalSettings(ctx, &model.ProxyDeviceConfig{}, settings)
+	deviceLocalSettings := newProxyDeviceLocalSettings(ctx, &model.ProxyDeviceConfig{}, settings, false)
 	if !deviceLocalSettings.OutOfBalanceRefillProbe {
 		t.Fatal("a hosted device builds window clients its payer's balance refuses")
 	}

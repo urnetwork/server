@@ -27,10 +27,13 @@ import (
 // only for a scalar copy; database/controller calls run outside that lock.
 // Close follows the hosted device's completed join.
 type Authority struct {
-	networkId     server.Id
-	userId        server.Id
-	clientId      server.Id
-	deviceId      server.Id
+	networkId server.Id
+	userId    server.Id
+	clientId  server.Id
+	deviceId  server.Id
+	// the parent credential's pro claim: whether its network had Pro when the
+	// credential was minted
+	pro           bool
 	apiUrl        string
 	stateLock     sync.Mutex
 	parentJwt     string
@@ -123,6 +126,7 @@ func newAuthority(ctx context.Context, claims *session.ByJwt, token string, apiU
 		userId:            claims.UserId,
 		clientId:          *claims.ClientId,
 		deviceId:          *claims.DeviceId,
+		pro:               claims.Pro,
 		apiUrl:            strings.TrimRight(apiUrl, "/"),
 		parentJwt:         token,
 		notifications:     notifications,
@@ -132,8 +136,17 @@ func newAuthority(ctx context.Context, claims *session.ByJwt, token string, apiU
 		mintAdmission:     settings.MintAdmission,
 		contractAdmission: settings.ContractAdmission,
 	}
-	authority.reservedMints.Store(settings.MintAdmission.reservedCountPerDevice())
+	authority.reservedMints.Store(settings.MintAdmission.reservedCountPerDevice(claims.Pro))
 	return authority
+}
+
+// Whether the parent credential's network had Pro when the credential was
+// minted: its pro claim. A hosted device reads its plan from it once, at
+// construction. A hosted session is reused for up to two hours
+// (proxy hosted_session_reuse.go), so a plan change reaches the next device
+// built on a newly minted session.
+func (self *Authority) Pro() bool {
+	return self.pro
 }
 
 // Sets how the authority learns whether its device can route a new flow. While

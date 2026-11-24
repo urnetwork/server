@@ -119,6 +119,7 @@ func newProxyDeviceTransportTestDevice(t testing.TB) (*sdk.DeviceLocal, func()) 
 		ctx,
 		&model.ProxyDeviceConfig{},
 		proxyDeviceSettings,
+		false,
 	)
 	if !deviceLocalSettings.HostedIncompatible {
 		cancel()

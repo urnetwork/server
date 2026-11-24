@@ -56,7 +56,7 @@ func TestHostedDevicesAskEveryProviderWithoutALimitedWindow(t *testing.T) {
 	defer cancel()
 	proxyDeviceSettings := DefaultProxyDeviceSettings()
 	proxyDeviceSettings.DisableWindowIdentityPersistence = true
-	deviceLocalSettings := newProxyDeviceLocalSettings(ctx, &model.ProxyDeviceConfig{}, proxyDeviceSettings)
+	deviceLocalSettings := newProxyDeviceLocalSettings(ctx, &model.ProxyDeviceConfig{}, proxyDeviceSettings, false)
 	if deviceLocalSettings.NormalWindowSelectors == nil || *deviceLocalSettings.NormalWindowSelectors != (connect.ProviderSelectors{
 		Ip:       connect.ProviderIpCapabilityIpv4,
 		Protocol: connect.ProviderProtocolCapabilityAny,
@@ -86,7 +86,7 @@ func TestHostedDeviceWindowsAskWithIpv4AndAny(t *testing.T) {
 	discovery := &hostedWindowSelectorsTestDiscovery{asked: connect.NewMonitor()}
 	proxyDeviceSettings := DefaultProxyDeviceSettings()
 	proxyDeviceSettings.DisableWindowIdentityPersistence = true
-	deviceLocalSettings := newProxyDeviceLocalSettings(ctx, &model.ProxyDeviceConfig{}, proxyDeviceSettings)
+	deviceLocalSettings := newProxyDeviceLocalSettings(ctx, &model.ProxyDeviceConfig{}, proxyDeviceSettings, false)
 	deviceLocalSettings.ProviderDiscovery = discovery
 	networkSpace := sdk.NewNetworkSpaceWithUrls(
 		ctx,
@@ -114,7 +114,7 @@ func TestHostedDeviceWindowsAskWithIpv4AndAny(t *testing.T) {
 
 	// the same device without the hosted policy: its 32-MiB tier's own
 	// fraction (or connect's) gives it a limited window
-	control := newProxyDeviceLocalSettings(ctx, &model.ProxyDeviceConfig{}, proxyDeviceSettings)
+	control := newProxyDeviceLocalSettings(ctx, &model.ProxyDeviceConfig{}, proxyDeviceSettings, false)
 	control.NormalWindowSelectors = nil
 	control.DisableLimitedWindow = false
 	controlDevice := newDevice(control)

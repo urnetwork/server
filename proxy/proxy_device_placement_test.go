@@ -35,14 +35,14 @@ func TestProxyDevicesCarryTheManagerPlacement(t *testing.T) {
 		t.Fatalf("device placement = %v, want the manager's", deviceSettings.PlatformPlacement)
 	}
 	deviceSettings.DisableWindowIdentityPersistence = true
-	local := newProxyDeviceLocalSettings(context.Background(), &model.ProxyDeviceConfig{}, deviceSettings)
+	local := newProxyDeviceLocalSettings(context.Background(), &model.ProxyDeviceConfig{}, deviceSettings, false)
 	if local.PlatformPlacement != connect.PlatformPlacement(placement) {
 		t.Fatalf("DeviceLocal placement = %v, want the manager's", local.PlatformPlacement)
 	}
 
 	unplaced := DefaultProxyDeviceSettings()
 	unplaced.DisableWindowIdentityPersistence = true
-	if local := newProxyDeviceLocalSettings(context.Background(), &model.ProxyDeviceConfig{}, unplaced); local.PlatformPlacement != nil {
+	if local := newProxyDeviceLocalSettings(context.Background(), &model.ProxyDeviceConfig{}, unplaced, false); local.PlatformPlacement != nil {
 		t.Fatalf("a device without a placement places its windows with %v", local.PlatformPlacement)
 	}
 }

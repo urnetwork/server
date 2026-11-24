@@ -21,7 +21,7 @@ func TestProxyDeviceIdleRefillHoldDefaults(t *testing.T) {
 		if settings.ProxyDeviceIdleTimeout != 45*time.Minute {
 			t.Fatalf("idle hold = %s, want 45m", settings.ProxyDeviceIdleTimeout)
 		}
-		local := newProxyDeviceLocalSettings(context.Background(), &model.ProxyDeviceConfig{}, settings)
+		local := newProxyDeviceLocalSettings(context.Background(), &model.ProxyDeviceConfig{}, settings, false)
 		if local.IdleRefillHold != settings.IdleRefillHold {
 			t.Fatalf("the device's windows hold their refill after %s, want %s", local.IdleRefillHold, settings.IdleRefillHold)
 		}

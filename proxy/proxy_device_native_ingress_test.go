@@ -124,7 +124,7 @@ func TestPrivateProxyNativeRunNextReadPrecedesRemoteReadiness(t *testing.T) {
 	})
 	proxySettings := DefaultProxyDeviceSettings()
 	proxySettings.DisableWindowIdentityPersistence = true
-	settings := newProxyDeviceLocalSettings(ctx, &model.ProxyDeviceConfig{}, proxySettings)
+	settings := newProxyDeviceLocalSettings(ctx, &model.ProxyDeviceConfig{}, proxySettings, false)
 	if !settings.HostedIncompatible || settings.SendTimeout != 5*time.Second {
 		t.Fatal("actual hosted constructor lost its hosted or generic five-second contract")
 	}
