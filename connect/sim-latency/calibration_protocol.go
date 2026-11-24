@@ -62,13 +62,13 @@ func readCalibrationProtocolPin(path, digest string) ([]byte, error) {
 	file := os.NewFile(uintptr(fd), path)
 	defer file.Close()
 	opened, err := file.Stat()
-	if err != nil || !os.SameFile(info, opened) || opened.Size() < 0 || opened.Size() > int64(maximumSourceConfigBytes) {
+	if err != nil || !os.SameFile(info, opened) || opened.Size() < 0 || opened.Size() > int64(defaultSourceEpochSettings().MaximumSourceConfigBytes) {
 		return nil, errors.New("calibration protocol publication changed or oversized")
 	}
-	content, err := io.ReadAll(io.LimitReader(file, int64(maximumSourceConfigBytes)+1))
+	content, err := io.ReadAll(io.LimitReader(file, int64(defaultSourceEpochSettings().MaximumSourceConfigBytes)+1))
 	after, statErr := file.Stat()
 	hash := sha256.Sum256(content)
-	if err != nil || statErr != nil || len(content) > maximumSourceConfigBytes || int64(len(content)) != opened.Size() || after.Size() != opened.Size() || after.ModTime() != opened.ModTime() || hex.EncodeToString(hash[:]) != digest {
+	if err != nil || statErr != nil || len(content) > defaultSourceEpochSettings().MaximumSourceConfigBytes || int64(len(content)) != opened.Size() || after.Size() != opened.Size() || after.ModTime() != opened.ModTime() || hex.EncodeToString(hash[:]) != digest {
 		return nil, errors.New("calibration protocol publication bytes changed")
 	}
 	return content, nil

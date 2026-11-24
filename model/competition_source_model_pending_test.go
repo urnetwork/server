@@ -13,9 +13,10 @@ import (
 )
 
 // On a database with MG0's permissive step, the lock digest and the database's
-// graph guard admit the same graphs, the ten and the ten with sidecar, and for
-// each the digest is the one the guards compute. So a source the control plane
-// accepts with either graph passes the guards (QD-128, QD-752).
+// graph guard admit the same graphs, the ten and the ten with sidecar and
+// operator-core, and for each the digest is the one the guards compute. So a
+// source the control plane accepts with either graph passes the guards (QD-128,
+// QD-752, QD-1393), and the eleven of either of the two alone passes neither.
 func TestCompetitionSourceLockDigestAgreesWithTheWidenedGuards(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -26,9 +27,9 @@ func TestCompetitionSourceLockDigestAgreesWithTheWidenedGuards(t *testing.T) {
 		for _, name := range CompetitionSourceRepositoryNamesBeforeSidecar() {
 			ten[name] = strings.Repeat("a", 40)
 		}
-		eleven := map[string]string{}
+		twelve := map[string]string{}
 		for _, name := range CompetitionSourceRepositoryNames() {
-			eleven[name] = strings.Repeat("a", 40)
+			twelve[name] = strings.Repeat("a", 40)
 		}
 		with := func(base map[string]string, name string, commit string) map[string]string {
 			commits := maps.Clone(base)
@@ -42,14 +43,19 @@ func TestCompetitionSourceLockDigestAgreesWithTheWidenedGuards(t *testing.T) {
 		}
 		graphs := []map[string]string{
 			ten,
-			eleven,
+			twelve,
 			with(ten, "synthetic-unknown", strings.Repeat("a", 40)),
 			with(ten, "operator-proxy", strings.Repeat("a", 40)),
-			with(eleven, "synthetic-unknown", strings.Repeat("a", 40)),
+			with(ten, "sidecar", strings.Repeat("a", 40)),
+			with(ten, "operator-core", strings.Repeat("a", 40)),
+			with(with(ten, "sidecar", strings.Repeat("a", 40)), "synthetic-unknown", strings.Repeat("a", 40)),
+			with(with(ten, "operator-core", strings.Repeat("a", 40)), "synthetic-unknown", strings.Repeat("a", 40)),
+			with(twelve, "synthetic-unknown", strings.Repeat("a", 40)),
 			with(ten, "sidecar", "invalid-commit"),
+			with(twelve, "operator-core", "invalid-commit"),
 			without(ten, "gvisor"),
-			without(eleven, "gvisor"),
-			with(without(eleven, "gvisor"), "synthetic-unknown", strings.Repeat("a", 40)),
+			without(twelve, "gvisor"),
+			with(without(twelve, "gvisor"), "synthetic-unknown", strings.Repeat("a", 40)),
 			{},
 		}
 		admitted := 0
@@ -79,7 +85,7 @@ func TestCompetitionSourceLockDigestAgreesWithTheWidenedGuards(t *testing.T) {
 			}
 		})
 		if admitted != 2 {
-			t.Fatalf("%d graphs are admitted, not the ten and the ten with sidecar", admitted)
+			t.Fatalf("%d graphs are admitted, not the ten and the ten with sidecar and operator-core", admitted)
 		}
 	})
 }

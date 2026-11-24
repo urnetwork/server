@@ -267,7 +267,7 @@ func TestEvaluatorBaseGoPinSupportsFrozenServerModule(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lockedModule, err := sourceGitBlobAtCommit(context.Background(), repositoryRoot, head, "go.mod", maximumSourceConfigBytes)
+	lockedModule, err := sourceGitBlobAtCommit(context.Background(), repositoryRoot, head, "go.mod", defaultSourceEpochSettings().MaximumSourceConfigBytes)
 	if err != nil {
 		t.Fatal(err)
 	}

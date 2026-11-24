@@ -44,8 +44,9 @@ type competitionDistributedSourceEvidence struct {
 }
 
 // Exactly the frozen graph is permitted, the ten measured repositories or those
-// with sidecar (model.CompetitionSourceLockDigest); operator control code is
-// never copied into an evaluation checkout or accepted as a candidate product.
+// with sidecar and operator-core (model.CompetitionSourceLockDigest); operator
+// control code is never copied into an evaluation checkout or accepted as a
+// candidate product.
 func validateDistributedMeasuredCommits(commits map[string]string) error {
 	if _, err := model.CompetitionSourceLockDigest(commits); err != nil {
 		return errors.New("measured source must contain the exact canonical repository graph")

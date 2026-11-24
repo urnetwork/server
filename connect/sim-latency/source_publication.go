@@ -338,7 +338,7 @@ func (self *gitSourcePublicationBackend) Verify(ctx context.Context, ref sourceP
 		if err != nil || (changed != manifestPath && !(intent.Bootstrap && changed == "" && ref.Commit == ref.ExpectedCommit)) {
 			return errors.New("source config publication must change only the source manifest")
 		}
-		manifestBytes, err := sourceGitBytes(ctx, ref.StagedRoot, maximumSourceConfigBytes, "show", ref.Commit+":"+manifestPath)
+		manifestBytes, err := sourceGitBytes(ctx, ref.StagedRoot, defaultSourceEpochSettings().MaximumSourceConfigBytes, "show", ref.Commit+":"+manifestPath)
 		if err != nil {
 			return err
 		}
@@ -387,14 +387,14 @@ func sourceGitNetworkBytes(ctx context.Context, repositoryRoot string, limit int
 
 // The explicit transport counterpart of credentialless local sourceGitText.
 func sourceGitNetworkText(ctx context.Context, repositoryRoot string, args ...string) (string, error) {
-	content, err := sourceGitNetworkBytes(ctx, repositoryRoot, maximumSourceConfigBytes, args...)
+	content, err := sourceGitNetworkBytes(ctx, repositoryRoot, defaultSourceEpochSettings().MaximumSourceConfigBytes, args...)
 	return strings.TrimSpace(string(content)), err
 }
 
 // Reads bounded textual Git output only where whitespace is not authenticated
 // content. Process cancellation covers network stalls and lease loss.
 func sourceGitText(ctx context.Context, repositoryRoot string, args ...string) (string, error) {
-	content, err := sourceGitBytes(ctx, repositoryRoot, maximumSourceConfigBytes, args...)
+	content, err := sourceGitBytes(ctx, repositoryRoot, defaultSourceEpochSettings().MaximumSourceConfigBytes, args...)
 	return strings.TrimSpace(string(content)), err
 }
 

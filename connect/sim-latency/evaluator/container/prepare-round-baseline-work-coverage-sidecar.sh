@@ -2,8 +2,8 @@
 # A separately pinned scorer-three producer has no candidate or submission
 # completion authority. New qualification must precede any public freeze.
 # This release prepares the control of a round whose source graph is the ten
-# repositories with sidecar. It accepts only a request naming sidecar/1 and
-# runs only the producer of that graph, pinned below.
+# repositories with sidecar and operator-core. It accepts only a request
+# naming sidecar/1 and runs only the producer of that graph, pinned below.
 set -Eeuo pipefail
 umask 077
 baseline_arguments=("$@")
@@ -44,7 +44,7 @@ baseline_actual_management_affinity="$(awk -F: '$1 == "Cpus_allowed_list" {gsub(
 round_baseline_control_prefix() {
     local source="$1" program prefix count
     [ -f "$source" ] && [ ! -L "$source" ] || return 1
-    [ "$(sha256sum -- "$source" | awk '{print $1}')" = 7a98e73540e236c364d59e421d090c23b16e28da04977fc81d44ebe549c3f8d0 ] || return 1
+    [ "$(sha256sum -- "$source" | awk '{print $1}')" = ab3f591422d6fe93ae44f7859706c9599da8e0afe2b0f3058f491594b5d2f0d2 ] || return 1
     program="$(<"$source")"
     count="$(printf '%s\n' "$program" | awk '$0 == "build_candidate" {n++} END {print n+0}')"
     [ "$count" = 1 ] || return 1

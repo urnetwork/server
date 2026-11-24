@@ -63,8 +63,9 @@ func sourceSettingsFromIntent(settings *Settings, intent *model.CompetitionSourc
 	copy.EvaluationPolicy = copy.EvaluationPolicy.Clone()
 	// The source graph comes from the approved configuration for the target
 	// epoch, never from the intent, and the intent's lock must hold exactly that
-	// graph: a server commit that needs sidecar cannot be prepared for a round
-	// whose evaluator release copies the ten, nor a lock of the ten for the eleven.
+	// graph: a server commit that needs sidecar and operator-core cannot be
+	// prepared for a round whose evaluator release copies the ten, nor a lock of
+	// the ten for the twelve.
 	if !model.CompetitionSourceLockMatchesGraphPolicy(intent.Commits, copy.EvaluationPolicy.SourceGraphPolicy) {
 		return nil, errors.New("source lock does not hold the source graph of its target epoch's evaluator release")
 	}

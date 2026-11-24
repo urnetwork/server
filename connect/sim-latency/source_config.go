@@ -18,14 +18,14 @@ import (
 // the active manifest's ancestry and exact bytes. No source pins or remote refs
 // are changed, and an existing staging path is never reused or rebased.
 func stageFreshSourceConfig(ctx context.Context, origin, stagedRoot string, current *model.CompetitionSourceActivation, manifestBytes []byte, message string) (string, string, error) {
-	if current == nil || !sourceGitShaPattern.MatchString(current.ManifestCommit) || !validSha256(current.ManifestSha256) || len(current.Manifest) == 0 || len(current.Manifest) > maximumSourceConfigBytes {
+	if current == nil || !sourceGitShaPattern.MatchString(current.ManifestCommit) || !validSha256(current.ManifestSha256) || len(current.Manifest) == 0 || len(current.Manifest) > defaultSourceEpochSettings().MaximumSourceConfigBytes {
 		return "", "", errors.New("active source lacks its authenticated config predecessor")
 	}
 	currentDigest := sha256.Sum256(current.Manifest)
 	if hex.EncodeToString(currentDigest[:]) != current.ManifestSha256 {
 		return "", "", errors.New("active source manifest bytes do not match its immutable digest")
 	}
-	if len(manifestBytes) == 0 || len(manifestBytes) > maximumSourceConfigBytes {
+	if len(manifestBytes) == 0 || len(manifestBytes) > defaultSourceEpochSettings().MaximumSourceConfigBytes {
 		return "", "", errors.New("source successor manifest is empty or oversized")
 	}
 	for _, content := range [][]byte{current.Manifest, manifestBytes} {
@@ -57,7 +57,7 @@ func stageFreshSourceConfig(ctx context.Context, origin, stagedRoot string, curr
 		return "", "", errors.New("config main no longer descends from the active manifest commit")
 	}
 	for _, commit := range []string{current.ManifestCommit, parent} {
-		content, err := sourceGitBytes(ctx, stagedRoot, maximumSourceConfigBytes, "show", commit+":"+manifestRepositoryPath)
+		content, err := sourceGitBytes(ctx, stagedRoot, defaultSourceEpochSettings().MaximumSourceConfigBytes, "show", commit+":"+manifestRepositoryPath)
 		if err != nil {
 			return "", "", err
 		}

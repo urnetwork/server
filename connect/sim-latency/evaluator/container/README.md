@@ -3,8 +3,10 @@
 The evaluator uses one immutable image per canonical submission patch. It does
 not accept a miner Dockerfile, build command, repository URL, tool artifact,
 or runtime command. Prospective `mono_root_v1` rounds accept screened source
-changes across all ten locked repositories; an omitted `path_base` retains the
-historical server-relative policy.
+changes across the ten repositories their allowed paths name; `sidecar` and
+`operator-core`, which the `sidecar/1` graph also locks, are outside every
+allowed path of the production template, so no submission changes them. An
+omitted `path_base` retains the historical server-relative policy.
 
 The trusted release builds a base image containing clean pinned source clones,
 the Go toolchain, a warmed module cache, the simulator/scorer, the structural
@@ -31,11 +33,11 @@ trusted baseline and scorer continue to execute from the pristine base image.
 
 For every production evaluation attempt, `prepare-evaluation-source.sh` copies fresh
 `server`, `connect`, `sdk`, `proxy`, `glog`, `goidenticons`, `userwireguard`,
-`sn`, `warp`, `gvisor`, and `sidecar` repositories out of that authenticated base
-image into a bounded temporary directory. It checks out a local
+`sn`, `warp`, `gvisor`, `sidecar`, and `operator-core` repositories out of that
+authenticated base image into a bounded temporary directory. It checks out a local
 `sim-latency` branch at each epoch source-lock commit without reading or
 changing any host repository checkout. Explicit v2 staging instead copies exactly
-the same eleven repositories above, using only
+the same twelve repositories above, using only
 `sim-latency-staging` branches and a staging-authenticated image and source lock.
 The staging builder neither discovers nor contacts the retired remote. Existing
 production images and eleven-pin locks retain their original identity as
@@ -131,13 +133,15 @@ image ids, exit/OOM state, and accounting after every stage.
 The evaluator measures one of two source graphs, and a round's frozen
 `evaluation_policy.source_graph_policy` says which. Omitted, it is the ten
 repositories every earlier round measured. `sidecar/1` is those ten with
-`sidecar` as the eleventh, which every server commit that requires the sidecar
-module needs beside it to build.
+`sidecar` and `operator-core` as the eleventh and twelfth, which every server
+commit that requires the sidecar module and operator-core needs beside it to
+build (QD-769, QD-1393). The release was re-cut for operator-core before it was
+ever qualified; no release takes sidecar alone.
 
 Each graph has its own immutable producer release for each scoring policy, and
 its own preparation program that pins that producer by SHA-256:
 
-| scoring policy | ten repositories (omitted) | eleven repositories (`sidecar/1`) |
+| scoring policy | ten repositories (omitted) | twelve repositories (`sidecar/1`) |
 | --- | --- | --- |
 | legacy | `evaluator.sh`, `prepare-round-baseline.sh` | `evaluator-sidecar.sh`, `prepare-round-baseline-sidecar.sh` |
 | `minimum-work/1` | `evaluator-minimum-work.sh`, `prepare-round-baseline-minimum-work.sh` | `evaluator-minimum-work-sidecar.sh`, `prepare-round-baseline-minimum-work-sidecar.sh` |
@@ -145,26 +149,35 @@ its own preparation program that pins that producer by SHA-256:
 
 The six programs of the ten repositories are sealed: version-one controls are
 authenticated against their bytes, so they never change. A producer of the
-eleven is its sibling with the longer repository list and the selector in its
+twelve is its sibling with the longer repository list and the selector in its
 request schema, and nothing else. It refuses a request that does not name
 `sidecar/1`, and a producer of the ten refuses one that does, because each
 checks the exact key set of `evaluation_policy`. A preparation program of the
-eleven writes `source_graph_policy` into its completion receipt, which the
+twelve writes `source_graph_policy` into its completion receipt, which the
 worker compares with the frozen round.
 
 `build-base.sh`, `prepare-evaluation-source.sh`, `build-submission.sh`,
 `evaluator-subevaluation.sh` and `Dockerfile.base` in this directory hold the
-eleven repositories, so this tree builds and runs only the `sidecar/1` graph.
+twelve repositories, so this tree builds and runs only the `sidecar/1` graph.
 A round of the ten runs from its own installed release, whose helpers are the
 bytes that release pinned.
 
-The controller's dependency map for the eleven
+The controller's dependency map for the twelve
 (`roundBaselineSidecarDependencyDigests` in
 `controller/competition_round_baseline_preparation.go`) pins each script at
 this tree's bytes. It records no digest for the compiled patch validator
 (`competitionpatch` and `competitionpatch.sha256`), which is built when the
 release is qualified on the evaluator hosts, and the worker refuses the release
 until both are recorded. Nothing here builds an image or qualifies a host.
+
+`Dockerfile.base` builds with Go 1.27.4, the line server's module requires
+(QD-674, QD-1393). The index digest of its `golang:1.27.4-bookworm` image is
+recorded when the owner re-qualifies the evaluator on go1.27.4 (owner decision
+272); until then it is the all-zero digest and `build-base.sh` refuses to
+build. The guards that judge what the image compiles, such as
+`tracked-submission-build.sh`'s binary check, the reviewed-source sandbox and
+the host entrypoints, still require go1.27.3 and move with that
+re-qualification, so no evaluation runs on this tree's base before it.
 
 ## Trust and data flow
 

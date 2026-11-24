@@ -33,7 +33,7 @@ func reviewedGenerationForProposal(current *model.CompetitionSourceActivation, p
 // can subsequently choose a round and append its authoritative mapping.
 func reviewedSourceImageManifest(current *model.CompetitionSourceActivation, proposal *reviewedSourceProposal) ([]byte, error) {
 	if current == nil || proposal == nil || proposal.Significance == nil || current.Staging != proposal.Staging ||
-		current.SourceGeneration < 0 || maximumCompetitionEpoch <= current.SourceGeneration || proposal.BaseSourceLockSha256 != current.SourceLockSha256 {
+		current.SourceGeneration < 0 || defaultSourceEpochSettings().MaximumCompetitionEpoch <= current.SourceGeneration || proposal.BaseSourceLockSha256 != current.SourceLockSha256 {
 		return nil, errors.New("reviewed image requires approval against the exact active source")
 	}
 	manifest, err := decodeSourceManifest(current.Manifest)

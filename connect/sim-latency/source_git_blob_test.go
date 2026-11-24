@@ -117,7 +117,7 @@ func TestPinnedSourceBlobReadsRemoteManifestExactly(t *testing.T) {
 	t.Setenv("TMPDIR", scratch)
 	sourceTestForeignGit(t, fixture.controlRoot)
 	sourceTestUnscopedGitRefusal(t, fixture.controlRoot)
-	content, err := sourceGitBlobAtCommit(context.Background(), fixture.controlRoot, pin, "main/sim-latency.yml", maximumSourceConfigBytes)
+	content, err := sourceGitBlobAtCommit(context.Background(), fixture.controlRoot, pin, "main/sim-latency.yml", defaultSourceEpochSettings().MaximumSourceConfigBytes)
 	if err != nil || !bytes.Equal(content, manifest) {
 		t.Fatalf("approved remote manifest changed: %q %v", content, err)
 	}
@@ -137,7 +137,7 @@ func TestPinnedSourceBlobReadsRemoteManifestExactly(t *testing.T) {
 func TestPinnedSourceBlobRejectsUnavailableCommit(t *testing.T) {
 	fixture := newPinnedSourceBlobFixture(t, "server")
 	refsBefore := sourceTestGit(t, fixture.controlRoot, "for-each-ref", "--format=%(refname) %(objectname)")
-	if _, err := sourceGitBlobAtCommit(context.Background(), fixture.controlRoot, strings.Repeat("f", 40), "go.mod", maximumSourceConfigBytes); err == nil {
+	if _, err := sourceGitBlobAtCommit(context.Background(), fixture.controlRoot, strings.Repeat("f", 40), "go.mod", defaultSourceEpochSettings().MaximumSourceConfigBytes); err == nil {
 		t.Fatal("missing pinned commit was replaced by an origin head")
 	}
 	if refs := sourceTestGit(t, fixture.controlRoot, "for-each-ref", "--format=%(refname) %(objectname)"); refs != refsBefore {
@@ -149,7 +149,7 @@ func TestPinnedSourceBlobRejectsUnavailableCommit(t *testing.T) {
 func TestPinnedSourceBlobPreservesContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := sourceGitBlobAtCommit(ctx, t.TempDir(), strings.Repeat("f", 40), "go.mod", maximumSourceConfigBytes)
+	_, err := sourceGitBlobAtCommit(ctx, t.TempDir(), strings.Repeat("f", 40), "go.mod", defaultSourceEpochSettings().MaximumSourceConfigBytes)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("pinned Git read lost cancellation identity: %v", err)
 	}

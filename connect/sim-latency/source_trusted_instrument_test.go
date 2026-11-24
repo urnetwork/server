@@ -34,7 +34,7 @@ func sourceTrustedInstrumentFixture(t *testing.T) (string, string, *model.Compet
 	if err := os.WriteFile(mainPath, []byte("package main\n// synthetic minimum-work instrument\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	patch, err := sourceGitBytes(context.Background(), repository, maximumSourceConfigBytes, "diff", "--binary", "--full-index", "--no-ext-diff", "--no-renames", base, "--")
+	patch, err := sourceGitBytes(context.Background(), repository, defaultSourceEpochSettings().MaximumSourceConfigBytes, "diff", "--binary", "--full-index", "--no-ext-diff", "--no-renames", base, "--")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestTrustedInstrumentOverlayPreservesUnknownWinnerGraph(t *testing.T) {
 	if err := verifyTrustedInstrumentChild(context.Background(), repository, proof); err != nil {
 		t.Fatal(err)
 	}
-	actual, err := sourceGitBlobAtCommit(context.Background(), repository, child, "connect/synthetic_product.go", maximumSourceConfigBytes)
+	actual, err := sourceGitBlobAtCommit(context.Background(), repository, child, "connect/synthetic_product.go", defaultSourceEpochSettings().MaximumSourceConfigBytes)
 	if err != nil || string(actual) != "package connect\nvar syntheticProduct = 2\n" {
 		t.Fatal("instrumentation replaced selected winner product bytes", err)
 	}

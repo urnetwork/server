@@ -35,7 +35,7 @@ func sourceInTreeGraphFixture(t *testing.T, content string) (string, string) {
 	return repository, sourceTestGit(t, repository, "rev-parse", "HEAD")
 }
 
-// The repository owner does not become an eleventh separately pinned checkout.
+// The repository owner does not become another separately pinned checkout.
 func TestSourceGraphInTreeModuleUsesEnclosingFrozenRepository(t *testing.T) {
 	repository, commit := sourceInTreeGraphFixture(t, "module module.example/dependency\n\ngo 1.23.0\n")
 	for _, staging := range []bool{false, true} {

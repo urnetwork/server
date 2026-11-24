@@ -218,8 +218,8 @@ var (
 // TestCompetitionSidecarSourceGraphOnlyWidens and
 // TestCompetitionSidecarSourceAuthorizationOnlyWidens, under the pending tag.
 var sidecarGroupRefusedConditions = map[string][]string{
-	"competition_v2_source_graph_valid": {"commits ? 'sidecar'"},
-	"competition_v2_source_authorized":  {"intent->'commits' ? 'sidecar'"},
+	"competition_v2_source_graph_valid": {"commits ?& ARRAY['sidecar','operator-core']"},
+	"competition_v2_source_authorized":  {"intent->'commits' ?& ARRAY['sidecar','operator-core']"},
 }
 
 // The migrations below every pending group: main's and each registered
@@ -483,24 +483,24 @@ func sidecarGroupSourceGraphTwin(t *testing.T, count string) any {
 }
 
 // A group may replace a registered function only to widen it. The cleanup step
-// that requires sidecar narrows what the running release writes, so no group
-// holds it.
+// that requires sidecar and operator-core narrows what the running release
+// writes, so no group holds it.
 func TestSidecarGroupCheckRefusesANarrowedFunction(t *testing.T) {
 	permissive := []any{newSqlMigration(competitionSidecarSourceMigration())}
 	outside := "replaces the function competition_v2_source_graph_valid the running release calls outside a conditional arm"
 
-	// eleven required: the ten the running release sends stop passing
-	requireSidecarGroupFindings(t, []any{sidecarGroupSourceGraphTwin(t, "11")}, permissive, outside)
-	narrowed := strings.Replace(competitionSourceRetirementGraph, "'warp','gvisor']", "'warp','gvisor','sidecar']", 1)
+	// twelve required: the ten the running release sends stop passing
+	requireSidecarGroupFindings(t, []any{sidecarGroupSourceGraphTwin(t, "12")}, permissive, outside)
+	narrowed := strings.Replace(competitionSourceRetirementGraph, "'warp','gvisor']", "'warp','gvisor','sidecar','operator-core']", 1)
 	if narrowed == competitionSourceRetirementGraph {
 		t.Fatal("the registered source graph guard lost its names")
 	}
 	requireSidecarGroupFindings(t, []any{newSqlMigration(narrowed)}, permissive, outside)
 
-	// the arms the other way round: ten is required of a graph with sidecar and
-	// eleven of one without
+	// the arms the other way round: ten is required of a graph with the two and
+	// twelve of one without
 	requireSidecarGroupFindings(t,
-		[]any{sidecarGroupSourceGraphTwin(t, "(CASE WHEN commits ? 'sidecar' THEN 10 ELSE 11 END)")},
+		[]any{sidecarGroupSourceGraphTwin(t, "(CASE WHEN commits ?& ARRAY['sidecar','operator-core'] THEN 10 ELSE 12 END)")},
 		[]any{sidecarGroupSourceGraphTwin(t, competitionSidecarSourceGraphCount)},
 		outside,
 	)
@@ -508,9 +508,18 @@ func TestSidecarGroupCheckRefusesANarrowedFunction(t *testing.T) {
 	// a conditional arm under a condition nothing shows the registered guard to
 	// refuse, here one that always holds
 	requireSidecarGroupFindings(t,
-		[]any{sidecarGroupSourceGraphTwin(t, "(CASE WHEN commits ? 'server' THEN 11 ELSE 10 END)")},
+		[]any{sidecarGroupSourceGraphTwin(t, "(CASE WHEN commits ? 'server' THEN 12 ELSE 10 END)")},
 		[]any{sidecarGroupSourceGraphTwin(t, competitionSidecarSourceGraphCount)},
 		`under the condition "commits ? 'server'", which the registered function is not shown to refuse`,
+	)
+
+	// the condition the eleven's step used, sidecar alone: at the twelve's count
+	// it would admit sidecar beside an unknown twelfth name, so the check now
+	// holds a group to the condition of the two
+	requireSidecarGroupFindings(t,
+		[]any{sidecarGroupSourceGraphTwin(t, "(CASE WHEN commits ? 'sidecar' THEN 12 ELSE 10 END)")},
+		[]any{sidecarGroupSourceGraphTwin(t, competitionSidecarSourceGraphCount)},
+		`under the condition "commits ? 'sidecar'", which the registered function is not shown to refuse`,
 	)
 
 	// the permissive counts with one more change beside them
