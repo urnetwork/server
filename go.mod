@@ -12,7 +12,7 @@ require (
 	github.com/coinbase/cdp-sdk/go v0.0.0-20261110213716-4515c7fc74fb
 	github.com/coreos/go-semver v0.3.1
 	github.com/docopt/docopt-go v0.0.0-20180111231733-ee0de3bc6815
-	github.com/ethereum/go-ethereum v1.17.1
+	github.com/ethereum/go-ethereum v1.17.0
 	github.com/gagliardetto/solana-go v1.26.0
 	github.com/go-jose/go-jose/v4 v4.1.9
 	github.com/go-playground/assert/v2 v2.2.0
