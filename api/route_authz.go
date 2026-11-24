@@ -459,6 +459,9 @@ var routeAccessByRoute = map[string]routeAccess{
 	// bearer, verified by hash, is its credential, never a client's or staff member's token, and the body is header
 	// facts alone
 	"POST /internal/gate/abuse-notice": routeAccessPublic,
+	// the network mail key the platform listener's intake seals reports to (plan-SMTP-report-seal-key, QD-075): the
+	// platform listener's internal bearer, verified by hash, is its credential, and the answer is a public key alone
+	"GET /internal/gate/report-key/([^/]+)": routeAccessPublic,
 	// §5.15's sidecar_id to client lookup for §6.8's hints (plan-KEYS-hint-addressing, QD-146): gkm's or mxedge's
 	// internal bearer, verified by hash, is its credential, never a client's token, and it logs no per-target record
 	"POST /internal/gate/sidecar-identity-clients": routeAccessPublic,
