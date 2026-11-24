@@ -3909,6 +3909,14 @@ type FindLocationsArgs struct {
 	MaxDistanceFraction       float32 `json:"max_distance_fraction,omitempty"`
 	EnableMaxDistanceFraction bool    `json:"enable_max_distance_fraction,omitempty"`
 	RankMode                  string  `json:"rank_mode"`
+	// Lists only modern supply, the providers a find-providers2 request with
+	// RequireModernProvider draws from (locationSupply.listed): a location
+	// whose export counted no modern provider is left out, and a listed
+	// location's provider count and stability are its modern providers'. A
+	// client whose connections require end-to-end encryption sends it, so it
+	// is never offered a location it cannot connect to. Unset keeps the
+	// capability-blind list.
+	RequireModernProvider bool `json:"require_modern_provider"`
 }
 
 type FindLocationsResult struct {
@@ -4737,8 +4745,58 @@ func loadInitialClientLocations(ctx context.Context) (initialClientLocations *In
 	return
 }
 
+// One location's public supply, as its latest export's filter
+// (ClientFilter) counted it.
+type locationSupply struct {
+	stable bool
+	// whether the export counted the modern supply; false from an export
+	// before the count
+	modernCounted bool
+	modernCount   int
+	modernStable  bool
+}
+
+// How a list publishes the location: whether at all, with which provider
+// count, and whether stable. A list that requires modern providers
+// (FindLocationsArgs.RequireModernProvider) publishes only modern supply,
+// so a client that connects only to modern providers is never offered a
+// location it cannot connect to. A filter written before the modern count
+// leaves that supply unknown, and the location is published as before: an
+// api that reads the filters ahead of the first export that counts lists
+// what it listed before, not nothing.
+func (self locationSupply) listed(requireModern bool, providerCount int) (listed bool, listedProviderCount int, stable bool) {
+	if requireModern && self.modernCounted {
+		return 0 < self.modernCount, self.modernCount, self.modernStable
+	}
+	return true, providerCount, self.stable
+}
+
 // a missing entry means the location has no providers
 func loadLocationStables(
+	ctx context.Context,
+	locationIds []server.Id,
+	forceMinimum bool,
+	rankMode RankMode,
+	clientLocationId server.Id,
+) (
+	locationStables map[server.Id]bool,
+	returnErr error,
+) {
+	locationSupplies, err := loadLocationSupplies(ctx, locationIds, forceMinimum, rankMode, clientLocationId)
+	if err != nil {
+		return nil, err
+	}
+	locationStables = map[server.Id]bool{}
+	for locationId, supply := range locationSupplies {
+		locationStables[locationId] = supply.stable
+	}
+	return locationStables, nil
+}
+
+// The public supply of each location with providers, from the filters the
+// score export wrote for the caller's location. A missing entry means the
+// location has no providers.
+func loadLocationSupplies(
 	ctx context.Context,
 	locationIds []server.Id,
 	// forceMinimum selects which pre-computed key family to read. The writer
@@ -4751,10 +4809,10 @@ func loadLocationStables(
 	rankMode RankMode,
 	clientLocationId server.Id,
 ) (
-	locationStables map[server.Id]bool,
+	locationSupplies map[server.Id]locationSupply,
 	returnErr error,
 ) {
-	locationStables = map[server.Id]bool{}
+	locationSupplies = map[server.Id]locationSupply{}
 
 	server.Redis(ctx, func(r server.RedisClient) {
 		type filterRead struct {
@@ -4780,7 +4838,7 @@ func loadLocationStables(
 		// Exec can report redis.Nil while a later command has a real error.
 		if returnErr = execClientScoreReadPipeline(ctx, pipe); returnErr != nil {
 			providerPickerMetrics.readFilters.Inc()
-			locationStables = nil
+			locationSupplies = nil
 			return
 		}
 
@@ -4801,12 +4859,16 @@ func loadLocationStables(
 			returnErr = e.Decode(&filter)
 			if returnErr != nil {
 				providerPickerMetrics.readFilters.Inc()
-				locationStables = nil
+				locationSupplies = nil
 				return
 			}
 			if 0 < filter.Count {
-				stable := MinStableNetReliabilityWeight <= filter.NetReliabilityWeight
-				locationStables[locationId] = stable
+				locationSupplies[locationId] = locationSupply{
+					stable:        MinStableNetReliabilityWeight <= filter.NetReliabilityWeight,
+					modernCounted: filter.ModernCounted,
+					modernCount:   filter.ModernCount,
+					modernStable:  MinStableNetReliabilityWeight <= filter.ModernNetReliabilityWeight,
+				}
 			}
 			// else there are no providers
 		}
@@ -4915,7 +4977,7 @@ func FindProviderLocations(
 
 		// An absent entry excludes the location, so read errors must propagate.
 		observation.enter("filters")
-		locationStables, err := loadLocationStables(
+		locationSupplies, err := loadLocationSupplies(
 			session.Ctx,
 			slices.Collect(maps.Keys(clientLocations)),
 			// user-facing search: only surface locations that meet the bar
@@ -4926,31 +4988,36 @@ func FindProviderLocations(
 		if err != nil {
 			return nil, err
 		}
-		if locationStables == nil {
-			locationStables = map[server.Id]bool{}
+		if locationSupplies == nil {
+			locationSupplies = map[server.Id]locationSupply{}
 		}
 		observation.enter("format_result")
 
 		locationResults := []*LocationResult{}
 
 		for locationId, clientLocation := range clientLocations {
-			stable, ok := locationStables[locationId]
-			if ok {
-				locationResult := &LocationResult{
-					LocationId:        clientLocation.LocationId,
-					LocationType:      clientLocation.LocationType,
-					Name:              clientLocation.Name,
-					CityLocationId:    clientLocation.CityLocationId,
-					RegionLocationId:  clientLocation.RegionLocationId,
-					CountryLocationId: clientLocation.CountryLocationId,
-					CountryCode:       clientLocation.CountryCode,
-					ProviderCount:     clientLocation.ClientCount,
-					StrongPrivacy:     clientLocation.StrongPrivacy,
-					Stable:            stable,
-					MatchDistance:     matchDistances[locationId],
-				}
-				locationResults = append(locationResults, locationResult)
+			supply, ok := locationSupplies[locationId]
+			if !ok {
+				continue
 			}
+			listed, providerCount, stable := supply.listed(findLocations.RequireModernProvider, clientLocation.ClientCount)
+			if !listed {
+				continue
+			}
+			locationResult := &LocationResult{
+				LocationId:        clientLocation.LocationId,
+				LocationType:      clientLocation.LocationType,
+				Name:              clientLocation.Name,
+				CityLocationId:    clientLocation.CityLocationId,
+				RegionLocationId:  clientLocation.RegionLocationId,
+				CountryLocationId: clientLocation.CountryLocationId,
+				CountryCode:       clientLocation.CountryCode,
+				ProviderCount:     providerCount,
+				StrongPrivacy:     clientLocation.StrongPrivacy,
+				Stable:            stable,
+				MatchDistance:     matchDistances[locationId],
+			}
+			locationResults = append(locationResults, locationResult)
 		}
 
 		for _, locationResult := range locationResults {
@@ -4969,7 +5036,10 @@ func FindProviderLocations(
 			blankQuery:       query == "",
 			indexMatches:     indexMatches,
 			locationMetadata: len(clientLocations) > 0,
-			positiveFilter:   len(locationStables) > 0, // A false value is a positive count below the stability threshold.
+			// A false value is a positive count below the stability threshold.
+			// A list that requires modern providers and publishes none of the
+			// positive locations reads positive_filter_no_rendered_rows.
+			positiveFilter: len(locationSupplies) > 0,
 		}
 
 		return result, nil
@@ -5391,10 +5461,22 @@ type ClientScore struct {
 	countryFloor bool
 }
 
+// A target's public supply, as the score export counted it for the location
+// list (loadLocationSupplies). Gob: a field an older export did not write
+// decodes zero.
 type ClientFilter struct {
 	Count                int
 	NetReliabilityWeight float64
 	Index                int
+	// Of Count, the providers modern at the export's instant
+	// (ClientScore.Modern): the supply a require_modern_provider request draws
+	// from (FP2-MODERN.md).
+	ModernCount                int
+	ModernNetReliabilityWeight float64
+	// Whether the export counted the modern supply. False from an export
+	// before the count: the location's modern supply is unknown, and a list
+	// that requires modern providers lists it as before.
+	ModernCounted bool
 }
 
 // scores are [0, max], where 0 is best
