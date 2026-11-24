@@ -1383,6 +1383,88 @@
           "legendFormat": "{{host}} {{interface}} {{port}}"
         }
       ]
+    },
+    {
+      "id": 32,
+      "type": "timeseries",
+      "title": "SN25 validator rate class requests / s by outcome",
+      "description": "Requests the front charged to the SN25 validator rate class (3000 / min, burst 1500, 100 in flight per validator identity), by outcome. A request is charged to the class only when its validator class token verifies and names the client of the request's own verified bearer; any other request keeps the identity and per-address limits. Refusals also count in limit refusals with rate_class=validator.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 128
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (outcome) (rate(urnetwork_front_validator_class_requests_total{env=\"$env\",block=~\"$block\",host=~\"$host\"}[$__rate_interval]))",
+          "legendFormat": "{{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 33,
+      "type": "timeseries",
+      "title": "SN25 validator class tokens checked / s by result",
+      "description": "Validator class tokens the front checked beside a verified client bearer, by result: refused, failed the cheap checks (shape, audience, expiry, client) with no HMAC; cached, answered from the verified or refused cache; verified and unverified, an HMAC verification that passed or failed. Junk costs no HMAC, and a repeated forgery costs one per minute.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 128
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (result) (rate(urnetwork_front_validator_class_tokens_total{env=\"$env\",block=~\"$block\",host=~\"$host\"}[$__rate_interval]))",
+          "legendFormat": "{{result}}"
+        }
+      ]
     }
   ]
 }
