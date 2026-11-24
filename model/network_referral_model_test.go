@@ -96,7 +96,8 @@ func TestNetworkReferral(t *testing.T) {
 // TestAddReferralBonusesGrantsBothSides pins the payout policy: a single grant window
 // credits BOTH the referrer (bonus_per_referral × its referral count) AND each referred
 // network (a flat referred_bonus). Deltas are used so any balance a network already has
-// does not skew the assertion.
+// does not skew the assertion. The referred networks have qualified by their app use
+// (network_referral_terms.go), which a link made under the referral terms needs.
 func TestAddReferralBonusesGrantsBothSides(t *testing.T) {
 	skipWithoutProYml(t)
 
@@ -113,6 +114,8 @@ func TestAddReferralBonusesGrantsBothSides(t *testing.T) {
 		code := CreateNetworkReferralCode(ctx, referrerId)
 		CreateNetworkReferral(ctx, refereeAId, code.ReferralCode)
 		CreateNetworkReferral(ctx, refereeBId, code.ReferralCode)
+		Testing_QualifyReferralReferee(ctx, refereeAId, server.NowUtc())
+		Testing_QualifyReferralReferee(ctx, refereeBId, server.NowUtc())
 
 		bonusPerReferral := Pro().ReferralBonus
 		referredBonus := Pro().ReferredBonus

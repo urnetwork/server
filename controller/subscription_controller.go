@@ -2707,10 +2707,12 @@ func ScheduleRefreshReferralTransferBalances(clientSession *session.ClientSessio
 }
 
 // RefreshReferralTransferBalances grants the referral bonus to both sides for one
-// period, all from pro.yml: the referrer earns bonus_per_referral x min(referrals,
-// max_referrals), and each referred network earns referred_bonus. Referrals pay out
-// every period for life. The balances are unpaid and pro = false, so referral data
-// never confers Pro.
+// period, all from pro.yml: the referrer earns bonus_per_referral x min(paying referrals,
+// max_referrals), and each referred network on a paying link earns referred_bonus. A
+// link pays under the referral terms (model/network_referral_terms.go): once its
+// referred network has used the app, unless the link existed when the terms began, and
+// for link_duration from its creation. The balances are unpaid and pro = false, so
+// referral data never confers Pro.
 func RefreshReferralTransferBalances(
 	refreshReferralTransferBalances *RefreshReferralTransferBalancesArgs,
 	clientSession *session.ClientSession,

@@ -158,6 +158,8 @@ func TestRecurringGrantTasksDoNotDuplicateCommittedBodyOnReplay(t *testing.T) {
 		if model.CreateNetworkReferral(ctx, refereeId, code.ReferralCode) == nil {
 			t.Fatal("synthetic referral was rejected")
 		}
+		// a link made under the referral terms pays once its referee uses the app
+		model.Testing_QualifyReferralReferee(ctx, refereeId, server.NowUtc())
 		owner := session.NewLocalClientSession(ctx, "", nil)
 		defer owner.Cancel()
 		assertTransferGrantTaskReplay(t, owner, RefreshFreeTransferBalances, RefreshFreeTransferBalancesPost,
@@ -186,6 +188,8 @@ func TestReferralGrantTaskRejectsDiscoveryFailureAndRecovers(t *testing.T) {
 		if model.CreateNetworkReferral(ctx, refereeId, code.ReferralCode) == nil {
 			t.Fatal("synthetic referral was rejected")
 		}
+		// a link made under the referral terms pays once its referee uses the app
+		model.Testing_QualifyReferralReferee(ctx, refereeId, server.NowUtc())
 		owner := session.NewLocalClientSession(ctx, "", nil)
 		defer owner.Cancel()
 		target := task.NewTaskTargetWithPost(RefreshReferralTransferBalances, RefreshReferralTransferBalancesPost)

@@ -997,7 +997,11 @@ func drainClientDataUsageShard(ctx context.Context, blockNumber int64, shard int
 	}
 
 	if usage := parseClientDataUsageFields(fields); 0 < len(usage) {
-		applyClientDataUsageShard(ctx, blockNumber, shard, usage)
+		if applyClientDataUsageShard(ctx, blockNumber, shard, usage) {
+			// the referred networks' app use, after the usage committed
+			// (network_referral_terms.go)
+			recordReferralAppUse(ctx, clientDataUsageBlockStart(blockNumber), usage)
+		}
 	}
 
 	server.Redis(ctx, func(r server.RedisClient) {
@@ -1005,7 +1009,9 @@ func drainClientDataUsageShard(ctx context.Context, blockNumber int64, shard int
 	})
 }
 
-func applyClientDataUsageShard(ctx context.Context, blockNumber int64, shard int, usage map[server.Id]ByteCount) {
+// Applies one drained (block, shard) once. applied is false for a replay, or
+// when no payer has a client row any more.
+func applyClientDataUsageShard(ctx context.Context, blockNumber int64, shard int, usage map[server.Id]ByteCount) (applied bool) {
 	payerClientIds := make([]server.Id, 0, len(usage))
 	for payerClientId := range usage {
 		payerClientIds = append(payerClientIds, payerClientId)
@@ -1014,6 +1020,8 @@ func applyClientDataUsageShard(ctx context.Context, blockNumber int64, shard int
 	monthStart := clientDataCapMonthStart(blockStart)
 
 	server.Tx(ctx, func(tx server.PgTx) {
+		// a retried attempt starts over
+		applied = false
 		now := server.NowUtc()
 		tag := server.RaisePgResult(tx.Exec(
 			ctx,
@@ -1140,7 +1148,9 @@ func applyClientDataUsageShard(ctx context.Context, blockNumber int64, shard int
 			byteCounts,
 		))
 		clientDataUsageDrainResults.WithLabelValues("ok").Inc()
+		applied = true
 	})
+	return
 }
 
 // reapClientDataUsage bounds the drain bookkeeping and the monthly usage

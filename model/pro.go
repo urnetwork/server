@@ -52,6 +52,12 @@ type proReferralYaml struct {
 	ReferredBonus    string `yaml:"referred_bonus"`
 	Period           string `yaml:"period"`
 	MaxReferrals     int    `yaml:"max_referrals"`
+	// the referral terms (ReferralTermsSettings); an absent key keeps its
+	// default
+	LinkDuration          string `yaml:"link_duration"`
+	ExistingLinkLimitFrom string `yaml:"existing_link_limit_from"`
+	AppUseDailyBytes      string `yaml:"app_use_daily_bytes"`
+	AppUseDays            *int   `yaml:"app_use_days"`
 }
 
 type proSeekerYaml struct {
@@ -315,6 +321,9 @@ type ProConfig struct {
 	ReferredBonus  ByteCount
 	ReferralPeriod time.Duration
 	MaxReferrals   int
+	// when a referral pays: once its referred network uses the app, and for
+	// how long (network_referral_terms.go)
+	ReferralTerms ReferralTermsSettings
 
 	// seekerDataMultiplier scales a Seeker/Saga holder's free + referral data grants;
 	// read it via SeekerDataMultiplier(), which defaults a missing/zero value to 1.
@@ -467,6 +476,7 @@ var proConfig = sync.OnceValue(func() *ProConfig {
 		ReferredBonus:            parseByteCountOrZero(y.Referral.ReferredBonus),
 		ReferralPeriod:           mustParseDuration(y.Referral.Period),
 		MaxReferrals:             y.Referral.MaxReferrals,
+		ReferralTerms:            parseReferralTerms(y.Referral),
 		seekerDataMultiplier:     y.Seeker.DataMultiplier,
 		DataCodeDuration:         mustParseDuration(y.DataCode.Duration),
 		DataCodeSkus:             skus,

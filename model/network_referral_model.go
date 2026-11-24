@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/urnetwork/glog"
+
 	"github.com/urnetwork/server"
 )
 
@@ -22,6 +24,12 @@ func isSelfReferral(networkId server.Id, referralNetworkId *server.Id) bool {
 	return referralNetworkId != nil && *referralNetworkId == networkId
 }
 
+// Links the network to the referrer whose code this is, or re-points its link
+// to that referrer. A link's period runs from the network's first link
+// (network_referral_terms.go): a re-point keeps the link's create_time, and a
+// link made again after an unlink takes the first link's time. A link to
+// another referrer than the network's existing link is a new referral under
+// the terms, so it pays only once the network qualifies by its app use.
 func CreateNetworkReferral(
 	ctx context.Context,
 	networkId server.Id,
@@ -46,6 +54,8 @@ func CreateNetworkReferral(
 	createTime := server.NowUtc()
 
 	server.Tx(ctx, func(tx server.PgTx) {
+		// a retried attempt starts over
+		networkReferral = nil
 
 		// count referral_network records for this network
 		var count int
@@ -72,8 +82,10 @@ func CreateNetworkReferral(
 			return
 		}
 
-		// a failed upsert raises: going on would commit a rollback
-		server.RaisePgResult(tx.Exec(
+		// a failed upsert raises: going on would commit a rollback. The
+		// update's right-hand sides read the link as it was.
+		var linkCreateTime time.Time
+		server.Raise(tx.QueryRow(
 			ctx,
 			`
 				INSERT INTO network_referral (
@@ -81,20 +93,46 @@ func CreateNetworkReferral(
 					referral_network_id,
 					create_time
 				)
-				VALUES ($1, $2, $3)
+				VALUES (
+					$1,
+					$2,
+					LEAST($3, COALESCE(
+						(SELECT first_link_time FROM network_referral_referee WHERE network_id = $1),
+						$3
+					))
+				)
 				ON CONFLICT (network_id)
 				DO UPDATE SET
-				    referral_network_id = EXCLUDED.referral_network_id,
-				    create_time = EXCLUDED.create_time;
+					referral_network_id = EXCLUDED.referral_network_id,
+					create_time = LEAST(network_referral.create_time, EXCLUDED.create_time),
+					existing_link = network_referral.existing_link AND
+						network_referral.referral_network_id = EXCLUDED.referral_network_id
+				RETURNING create_time
 			`,
 			networkId,
 			referralNetworkId,
 			createTime,
+		).Scan(&linkCreateTime))
+
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				INSERT INTO network_referral_referee (
+					network_id,
+					first_link_time
+				)
+				VALUES ($1, $2)
+				ON CONFLICT (network_id) DO UPDATE
+				SET first_link_time = LEAST(network_referral_referee.first_link_time, EXCLUDED.first_link_time)
+			`,
+			networkId,
+			linkCreateTime,
 		))
 
 		networkReferral = &NetworkReferral{
 			NetworkId:         &networkId,
 			ReferralNetworkId: referralNetworkId,
+			CreateTime:        linkCreateTime,
 		}
 	})
 	return networkReferral
@@ -149,15 +187,32 @@ func GetReferralNetworkByChildNetworkId(
 
 }
 
-/**
- * Removes parent network referral
- */
+// Removes the network's link to its referrer. The network keeps its first
+// link's time (network_referral_referee), so a link it makes again pays only
+// for what is left of its period.
 func UnlinkReferralNetwork(
 	ctx context.Context,
 	networkId server.Id,
 ) {
 
 	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				INSERT INTO network_referral_referee (
+					network_id,
+					first_link_time
+				)
+				SELECT
+					network_id,
+					create_time
+				FROM network_referral
+				WHERE network_id = $1
+				ON CONFLICT (network_id) DO UPDATE
+				SET first_link_time = LEAST(network_referral_referee.first_link_time, EXCLUDED.first_link_time)
+			`,
+			networkId,
+		))
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -229,9 +284,15 @@ func ReferralBonusCount(referralCount int) int {
 }
 
 // AddReferralBonusesToAllNetworks grants the referral bonus to BOTH sides for a single
-// grant window, re-granted every period for life:
-//   - the REFERRER earns bonusPerReferral × min(referrals, pro.yml max_referrals);
-//   - each REFERRED (referee) network earns a flat referredBonus.
+// grant window, re-granted every period while the link pays under the referral terms
+// (network_referral_terms.go, pro.yml referral): a link made under the terms pays once
+// its referred network has qualified by its app use, and every link pays for
+// link_duration from its creation, an existing link from existing_link_limit_from on:
+//   - the REFERRER earns bonusPerReferral × min(paying referrals, pro.yml max_referrals);
+//   - each REFERRED (referee) network on a paying link earns a flat referredBonus.
+//
+// The run first marks the referred networks whose app use qualified them since the last
+// run, so they and their referrers earn from this one.
 //
 // Called on the recurring refresh cadence alongside the tier data grant. Both sides are
 // granted in ONE transaction so a run is atomic.
@@ -258,8 +319,23 @@ func AddReferralBonusesToAllNetworks(
 		return
 	}
 
-	// referralNetworkId -> the networks it referred
-	referrals := GetNetworkReferralsMap(ctx)
+	terms := Pro().ReferralTerms
+	qualifiedCount, droppedCount := qualifyReferralReferees(ctx, startTime, &terms)
+
+	// referralNetworkId -> the networks it referred, by the links that pay
+	links := getReferralLinks(ctx)
+	referrals := payingReferrals(links, startTime, &terms)
+	payingCount := 0
+	for _, referredNetworkIds := range referrals {
+		payingCount += len(referredNetworkIds)
+	}
+	glog.Infof(
+		"[referral]%d links, %d paying; %d referred networks newly qualified by app use, %d app use days dropped\n",
+		len(links),
+		payingCount,
+		qualifiedCount,
+		droppedCount,
+	)
 
 	// Seeker/Saga holders get their referral data scaled (pro.yml seeker.data_multiplier).
 	seekers := GetAllSeekerHolders(ctx)
@@ -317,8 +393,12 @@ func AddReferralBonusesToAllNetworks(
 	return
 }
 
+// referralNetworkId -> every network it referred, whatever the referral terms
+// say about paying the link: the referral tree the operator block points read.
+// The referral grant reads its links with getReferralLinks.
+//
 // A source query failure is not an empty referral set; propagate it so the
-// grant task retries without committing a receipt for missing work.
+// caller retries without committing a receipt for missing work.
 func GetNetworkReferralsMap(
 	ctx context.Context,
 ) map[server.Id][]server.Id {
