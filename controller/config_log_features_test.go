@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"slices"
 	"testing"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -266,6 +267,14 @@ func TestSidecarSyncCoreAuthFeatures(t *testing.T) {
 		}
 		if len(stated) != 2 || stated[ownerSidecarId] != sidecar.AuthFeatureAgentRepos || stated[memberSidecarId] != 0 {
 			t.Fatalf("api keeps %v", stated)
+		}
+		// and the hash goes HashTtl after its last write, a network no sidecar syncs keeping none
+		var ttl time.Duration
+		server.Redis(ctx, func(r server.RedisClient) {
+			ttl = r.TTL(ctx, "{scf_"+networkId.String()+"}").Val()
+		})
+		if ttl <= 0 || settings.HashTtl < ttl {
+			t.Fatalf("the hash's expiry: %s", ttl)
 		}
 		// a later statement replaces the earlier one, and a sidecar stating both features is no longer listed
 		if _, err := SidecarSyncTopicWithFeatures(sidecar.PushTopicCore, "", "agent_repos,listeners", memberSession); err != nil {

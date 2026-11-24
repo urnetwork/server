@@ -7,9 +7,10 @@ package model
 //
 // An entry lives until the sidecar's next core sync replaces it or its removal drops it: each read for an Owner's or
 // Admin's device drops the entries of sidecars the network's caught-up state holds revoked or does not hold at all.
-// Soft state: a lost entry is stated again at the sidecar's next core sync, hourly at the latest while it is online,
-// and meanwhile reads as stating none, the cautious direction for the prompt, which then lists it as one that would
-// pause.
+// The hash also expires HashTtl past its last write, so a network no sidecar syncs for that long, a deleted one among
+// them, keeps none. Soft state: a lost entry is stated again at the sidecar's next core sync, hourly at the latest
+// while it is online, and meanwhile reads as stating none, the cautious direction for the prompt, which then lists it
+// as one that would pause.
 //
 // What an Owner's or Admin's device is told (SidecarFeaturesLacking) comes from the network's standing sidecars in the
 // caught-up verified state, the authority on who is admitted, each with what it last stated: those that lack one of
@@ -21,6 +22,8 @@ import (
 	"context"
 	"strconv"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/sidecar"
@@ -35,6 +38,11 @@ type SidecarFeaturesSettings struct {
 	// The most sidecars one core answer lists as lacking a feature: 1,000, past which it says more were left out, so
 	// an answer to a large network stays bounded. Non-positive lists none, saying more wherever one lacks a feature.
 	ListedSidecarCount int
+	// How long a network's hash lives past its last write: 30 days. Every online sidecar states its features at least
+	// hourly, so only a network none of whose sidecars synced for that long loses it, a deleted one among them, and a
+	// lost entry reads as stating none, the cautious direction. Non-positive keeps the hash until its entries are
+	// dropped.
+	HashTtl time.Duration
 }
 
 // The defaults, a fresh value each call.
@@ -42,6 +50,7 @@ func DefaultSidecarFeaturesSettings() *SidecarFeaturesSettings {
 	return &SidecarFeaturesSettings{
 		RedisTimeout:       5 * time.Second,
 		ListedSidecarCount: 1000,
+		HashTtl:            30 * 24 * time.Hour,
 	}
 }
 
@@ -50,12 +59,21 @@ func sidecarFeaturesKey(networkId server.Id) string {
 	return "{scf_" + networkId.String() + "}"
 }
 
-// Keeps features as the sidecar's stated set, replacing what its last core sync stated.
+// Keeps features as the sidecar's stated set, replacing what its last core sync stated, and moves the hash's expiry
+// to HashTtl from now.
 func SetSidecarStatedAuthFeatures(ctx context.Context, settings *SidecarFeaturesSettings, networkId server.Id, sidecarId server.Id, features sidecar.AuthFeature) error {
 	boundedCtx, cancel := context.WithTimeout(ctx, settings.RedisTimeout)
 	defer cancel()
+	key := sidecarFeaturesKey(networkId)
 	return server.RedisWithDeadline(boundedCtx, func(r server.RedisClient) error {
-		return r.HSet(boundedCtx, sidecarFeaturesKey(networkId), sidecarId.String(), strconv.FormatUint(uint64(features), 10)).Err()
+		_, err := r.TxPipelined(boundedCtx, func(pipe redis.Pipeliner) error {
+			pipe.HSet(boundedCtx, key, sidecarId.String(), strconv.FormatUint(uint64(features), 10))
+			if 0 < settings.HashTtl {
+				pipe.Expire(boundedCtx, key, settings.HashTtl)
+			}
+			return nil
+		})
+		return err
 	})
 }
 
