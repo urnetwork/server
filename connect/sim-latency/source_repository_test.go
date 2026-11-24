@@ -197,6 +197,34 @@ func TestSourceLedgerRequiresOperatorCorePin(t *testing.T) {
 	}
 }
 
+// The evaluator locks sidecar and operator-core but no submission may change
+// either (QD-1393): every path the production template's mono-root policy
+// allows lies in one of the ten product repositories.
+func TestProductionTemplateAllowsNoPathInSidecarOrOperatorCore(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join("launch", "competition-production.yml.template"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var template struct {
+		PatchPolicy struct {
+			PathBase     string   `yaml:"path_base"`
+			AllowedPaths []string `yaml:"allowed_paths"`
+		} `yaml:"patch_policy"`
+	}
+	if err := yaml.Unmarshal(content, &template); err != nil {
+		t.Fatal(err)
+	}
+	if template.PatchPolicy.PathBase != "mono_root_v1" || len(template.PatchPolicy.AllowedPaths) == 0 {
+		t.Fatalf("the production template's patch policy is not the mono-root one: %+v", template.PatchPolicy)
+	}
+	for _, path := range template.PatchPolicy.AllowedPaths {
+		repository, _, _ := strings.Cut(path, "/")
+		if !slices.Contains(model.CompetitionSourceRepositoryNamesBeforeSidecar(), repository) {
+			t.Errorf("the production template allows %s outside the ten product repositories", path)
+		}
+	}
+}
+
 // Synthetic module inputs contain no checkout paths, remote Git, or network
 // resolution; they exercise required/local/versioned replacement semantics.
 type sourceModuleVersionFixture = sourceModuleVersion
