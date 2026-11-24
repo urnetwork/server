@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -56,11 +55,13 @@ func executeHostMemoryPredicate(t *testing.T, fixture hostMemoryPredicateFixture
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Fatal("actual jq is required; skipping is not permitted")
 	}
-	_, source, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("test source path unavailable")
+	// go test runs in the package directory; the caller's path is the module
+	// path under -trimpath, which names no directory.
+	directory, err := os.Getwd()
+	if err != nil {
+		t.Fatal("test source path unavailable: ", err)
 	}
-	content, err := os.ReadFile(filepath.Join(filepath.Dir(source), "evaluator", "host-self-check.sh"))
+	content, err := os.ReadFile(filepath.Join(directory, "evaluator", "host-self-check.sh"))
 	if err != nil {
 		t.Fatal(err)
 	}
