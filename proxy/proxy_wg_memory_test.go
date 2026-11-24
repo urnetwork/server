@@ -12,7 +12,7 @@ type recordingWgProxyDeviceOpener struct {
 	err     error
 }
 
-func (o *recordingWgProxyDeviceOpener) OpenProxyDevice(proxyID server.Id) (*ProxyDevice, error) {
+func (o *recordingWgProxyDeviceOpener) openProxyDeviceFor(_ proxyDeviceCaller, proxyID server.Id) (*ProxyDevice, error) {
 	o.proxyID = proxyID
 	return nil, o.err
 }

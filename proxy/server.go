@@ -535,7 +535,10 @@ func (self *socks5Server) newSocksProxy() *proxy.SocksProxy {
 			// the sign-in is the session's first use: start the device now, so
 			// its construction and its window's first exit overlap the client's
 			// request round trip, and the request's dial joins it
-			self.proxyDeviceManager.startOpenProxyDevice(proxyId)
+			self.proxyDeviceManager.startOpenProxyDevice(
+				proxyDeviceCaller{path: proxyDevicePathSocksSignIn, addr: addrPort.Addr()},
+				proxyId,
+			)
 		}
 		return valid
 	}
@@ -559,7 +562,15 @@ func (self *socks5Server) newSocksProxy() *proxy.SocksProxy {
 			}
 		}
 
-		pd, err := self.proxyDeviceManager.OpenProxyDeviceWithContext(ctx, proxyId)
+		// the client's own connection, which the credential store admitted
+		var callerAddr netip.Addr
+		if r.RemoteAddr != nil {
+			callerAddr = proxyCallerAddr(r.RemoteAddr.String())
+		}
+		pd, err := self.proxyDeviceManager.OpenProxyDeviceWithContext(
+			withProxyDeviceCaller(ctx, proxyDeviceCaller{path: proxyDevicePathSocks, addr: callerAddr}),
+			proxyId,
+		)
 		if err != nil {
 			recordProxyAdmissionFailure("socks", false)
 			return nil, err
@@ -764,7 +775,10 @@ func (self *httpServer) newHttpProxy() *proxy.HttpProxy {
 			return nil, err
 		}
 
-		pd, err := self.proxyDeviceManager.OpenProxyDeviceWithContext(ctx, proxyId)
+		pd, err := self.proxyDeviceManager.OpenProxyDeviceWithContext(
+			withProxyDeviceCaller(ctx, proxyDeviceCaller{path: proxyDevicePathHttp, addr: addrPort.Addr()}),
+			proxyId,
+		)
 		if err != nil {
 			recordProxyAdmissionFailure("http", false)
 			if errors.Is(err, errProxyDeviceNotFound) {
@@ -1015,8 +1029,10 @@ type wgClientCounts struct {
 	notEntitled int
 }
 
+// The manager's open as the WireGuard tun factory makes it, naming its path for
+// the build line.
 type wgProxyDeviceOpener interface {
-	OpenProxyDevice(server.Id) (*ProxyDevice, error)
+	openProxyDeviceFor(proxyDeviceCaller, server.Id) (*ProxyDevice, error)
 }
 
 // A signed peer owns one cold-open attempt at a time and a bounded failure
@@ -1061,7 +1077,11 @@ func wgTunFactory(opener wgProxyDeviceOpener, proxyId server.Id) func() (tun pro
 			}
 		}()
 		if r := server.HandleError(func() {
-			tun, err = opener.OpenProxyDevice(proxyId)
+			// the device learned the peer's endpoint, and the factory is not
+			// told it: reading it from the device here would wait on the peer
+			// map, which a removal of this peer holds while it joins the
+			// receive routine this runs on
+			tun, err = opener.openProxyDeviceFor(proxyDeviceCaller{path: proxyDevicePathWg}, proxyId)
 		}); r != nil {
 			if rErr, ok := r.(error); ok {
 				err = rErr
