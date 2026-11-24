@@ -29,7 +29,10 @@
 //     order, with no gap
 //   - the first write after a shrink: one subscriber's read is revoked, and at once another is granted writer and
 //     writes, api's gate Lag behind both, so its write must rotate the generation before it seals (§10.5). It is held
-//     to landing as the first phase's writes are
+//     to landing as the first phase's writes are, and its key client to riding the lag out at gkm (QD-1230): the
+//     rotation's claim asks for the repo's rw scope alone, each such exchange refused invalid_scope only while api's
+//     gate lacked the grant and granted only once it held it, at least one refused, and the write done within the
+//     key client's window of the first refusal
 //   - a grant that never reaches api's gate: one subscriber's read is revoked again, its read token dropped, and the
 //     writer commits, rotating past the shrink. Then api's gate is held while another subscriber is granted writer
 //     and writes, and the first is granted reader and subscribes. Each must end with the exchange's invalid_scope
@@ -48,12 +51,12 @@
 //
 // What it found, in its runs of 2026-11-23 on sidecar 2a4e4b33 (runs 3 and 4 alike):
 //
-//   - the rotation phase fails, the product's (question e2e-grant-lag-case-gkm-rotation-grant-lag). The new writer's
+//   - the rotation phase failed, the product's (question e2e-grant-lag-case-gkm-rotation-grant-lag). The new writer's
 //     key client rotates inside EnsureWritable, and asks the exchange one token for its state's batch of repo scopes.
-//     The exchange, behind the grant, leaves the writer's rw out of that token, and gkm refuses the rotation's claim.
-//     QD-1179's single-scope retry does not apply, since the batch already carried the role, so the write ends within
+//     The exchange, behind the grant, left the writer's rw out of that token, and gkm refused the rotation's claim.
+//     QD-1179's single-scope retry did not apply, since the batch already carried the role, so the write ended within
 //     half a second of its grant (0.1 s and 0.47 s) with ErrGkmWait ("gkm write gate closed: the generation's pin 23
-//     is below holders_shrunk_at 31"), while api's gate applied the grant 2.5 s after it landed. gkm's client rides
+//     is below holders_shrunk_at 31"), while api's gate applied the grant 2.5 s after it landed. gkm's client rode
 //     out no exchange refusal, as QD-1226's question noted
 //   - every other check held. The fresh grants' writes and leases were refused at 0, 1 and 2 s and granted near 3 s,
 //     api's gate applying each 2.4 s to 2.5 s after it landed, and every subscriber heard every commit. In the never
@@ -61,6 +64,14 @@
 //     after it began, and the lease at 0, 1, 3 and 5 s, each ending with invalid_scope. The revoked devices' writes
 //     were refused within 150 ms by their own key clients or gkm's gate, and their reads by evs's gate, 403 SCOPE, on
 //     tokens the lagging exchange had still issued
+//
+// QD-1230 (gkm-grant-lag-ride-out) has gkm's key client ride the lag out as evs's client does: a call gkm refuses
+// under a batch whose token the exchange granted without the call's repo scope goes again under that scope alone,
+// whose invalid_scope it asks again a second apart for GkmSettings.ExchangeScopeWaitTimeout. In two runs of
+// 2026-11-23 after it every check holds: the rotation's claim, refused 403 under the batch, asked for rw alone at
+// +0.06 to +0.1 s, +1.1 and +2.1 s, each refused invalid_scope, and was granted at +3.1 s, api's gate having applied
+// the grant at +2.5 s; gkm took the claim, and the write landed at +3.1 s and +4.9 s, the second waiting 1.7 s on
+// gkm's answer to the claim
 //
 // Not here, each for the reason given:
 //
@@ -122,6 +133,8 @@ type grantLagSettings struct {
 	GateTarget time.Duration
 	// How long a device rides the exchange's invalid_scope out: its own EvsSettings.ExchangeScopeWaitTimeout.
 	Window time.Duration
+	// How long a device's key client rides it out at gkm: its own GkmSettings.ExchangeScopeWaitTimeout (QD-1230).
+	GkmWindow time.Duration
 	// How far past its window an act refused to the end may end: its last exchange and the work around it.
 	WindowSlack time.Duration
 	// The writer's commits while the subscribers are revoked, and while the first phase's devices act.
@@ -163,6 +176,7 @@ func defaultGrantLagSettings() *grantLagSettings {
 		Lag:                2500 * time.Millisecond,
 		GateTarget:         5 * time.Second,
 		Window:             sidecar.DefaultEvsSettings().ExchangeScopeWaitTimeout,
+		GkmWindow:          sidecar.DefaultGkmSettings().ExchangeScopeWaitTimeout,
 		WindowSlack:        2 * time.Second,
 		InterimCommitCount: 2,
 		PhaseCommitCount:   3,
@@ -329,12 +343,13 @@ type grantLagCase struct {
 	network  *WorldNetwork
 	gate     *grantLagGate
 	recorder *grantLagRecorder
-	// the network's id as the gate keys it, the repo, its main ref and evs's origin, which every exchange of an evs
-	// scope names
+	// the network's id as the gate keys it, the repo, its main ref and evs's and gkm's origins, which every exchange of
+	// a scope of theirs names
 	networkId sidecar.Id
 	repoId    sidecar.Id
 	mainRefId sidecar.Id
 	evsOrigin string
+	gkmOrigin string
 	// the roles
 	owner       *grantLagDevice
 	writer      *grantLagDevice
@@ -361,8 +376,8 @@ func runGrantLag(t testing.TB, settings *grantLagSettings) {
 	switch {
 	case settings.UpgradeCount < 2 || settings.SubscribeCount < 4:
 		t.Fatalf("%d upgraders and %d subscribers have no room for the later phases' roles", settings.UpgradeCount, settings.SubscribeCount)
-	case settings.Window <= settings.Lag || settings.GateTarget <= settings.Lag:
-		t.Fatalf("a lag of %s does not reach the gate within the window %s and §8.9's %s", settings.Lag, settings.Window, settings.GateTarget)
+	case settings.Window <= settings.Lag || settings.GkmWindow <= settings.Lag || settings.GateTarget <= settings.Lag:
+		t.Fatalf("a lag of %s does not reach the gate within the windows %s and %s and §8.9's %s", settings.Lag, settings.Window, settings.GkmWindow, settings.GateTarget)
 	}
 	worldSettings := DefaultWorldSettings()
 	worldSettings.NetworkCount = 1
@@ -377,7 +392,13 @@ func runGrantLag(t testing.TB, settings *grantLagSettings) {
 	world := NewWorld(t, worldSettings)
 	defer world.Close()
 
-	self := &grantLagCase{t: t, settings: settings, world: world, evsOrigin: world.T3().Api().ServiceOrigin(WorldBlockEvs)}
+	self := &grantLagCase{
+		t:         t,
+		settings:  settings,
+		world:     world,
+		evsOrigin: world.T3().Api().ServiceOrigin(WorldBlockEvs),
+		gkmOrigin: world.T3().Api().ServiceOrigin(WorldBlockGkm),
+	}
 	defer func() {
 		for _, device := range self.devices {
 			device.closeSubscriptions()
@@ -851,6 +872,56 @@ func (self *grantLagCase) rotateFirstPhase() {
 	FailBurstErrors(t, bursts)
 	if act.pin != nil {
 		self.checkLanded(ctx, act)
+		self.checkKeyClientRodeOut(ctx, act)
+	}
+}
+
+// Holds the rotation phase's write to its key client riding out api's gate lag at gkm (QD-1230): the rotation's claim
+// asks the exchange for the repo's rw scope alone at gkm, once the batch's token left it out, and each such exchange
+// was refused invalid_scope only while api's gate lacked the grant and granted only once it held it; at least one was
+// refused, so the write met the lag; and a write that landed was done within the window of the first refusal.
+func (self *grantLagCase) checkKeyClientRodeOut(ctx context.Context, act *grantLagAct) {
+	t := self.t
+	settings := self.settings
+	appliedAt, err := self.gate.awaitApplied(ctx, self.networkId, act.pin.GetVersion(), settings.ApplyTimeout)
+	if err != nil {
+		t.Errorf("%s at gkm: %v", act.name(), err)
+		return
+	}
+	exchanges := self.recorder.exchangesOf(act.device.clientId(), self.gkmOrigin, act.scope, act.startedAt, act.endedAt)
+	lines := []string{}
+	refused := []*grantLagExchange{}
+	granted := false
+	for _, exchange := range exchanges {
+		lines = append(lines, exchange.describe(act.landedAt))
+		switch {
+		case exchange.scopeRefused():
+			refused = append(refused, exchange)
+			if exchange.at.After(appliedAt) {
+				t.Errorf("%s: api refused %s at gkm invalid_scope at +%s though its gate held the grant from +%s", act.name(), act.scope, exchange.at.Sub(act.landedAt).Round(time.Millisecond), appliedAt.Sub(act.landedAt).Round(time.Millisecond))
+			}
+		case exchange.grants(act.scope):
+			granted = true
+			if exchange.answered.Before(appliedAt) {
+				t.Errorf("%s: api granted %s at gkm at +%s, before its gate held the grant at +%s", act.name(), act.scope, exchange.answered.Sub(act.landedAt).Round(time.Millisecond), appliedAt.Sub(act.landedAt).Round(time.Millisecond))
+			}
+		default:
+			t.Errorf("%s: api answered an exchange of %s at gkm %d %s", act.name(), act.scope, exchange.status, exchange.code)
+		}
+	}
+	t.Logf("%s's key client at gkm, api's gate +%s: %s", act.name(), appliedAt.Sub(act.landedAt).Round(time.Millisecond), strings.Join(lines, "; "))
+	if len(refused) == 0 {
+		t.Errorf("%s: its key client met no lag at gkm, api's gate holding the grant before the rotation's claim asked for it, so the phase tested no ride-out", act.name())
+		return
+	}
+	if act.err != nil {
+		return
+	}
+	if !granted {
+		t.Errorf("%s: no exchange granted %s at gkm while it ran", act.name(), act.scope)
+	}
+	if took := act.endedAt.Sub(refused[0].answered); settings.GkmWindow+settings.WindowSlack < took {
+		t.Errorf("%s was done %s after its key client's first refusal, past the window %s", act.name(), took.Round(time.Millisecond), settings.GkmWindow)
 	}
 }
 
