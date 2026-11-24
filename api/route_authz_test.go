@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
 	"github.com/urnetwork/server/session"
 )
@@ -483,4 +484,59 @@ func TestSpecDocumentsTheClientTokenRefusal(t *testing.T) {
 	if documentedCount == 0 {
 		t.Fatal("no gated route documents the refusal")
 	}
+}
+
+// POST /sn/validator-class serves the validator's client token: through the
+// route the API serves, gates applied, the token reaches the mint. Before,
+// the route was unclassified, so the router refused every client token with
+// 403 before the mint, and no validator could ever get its class.
+func TestValidatorClassRouteServesTheValidatorsClientToken(t *testing.T) {
+	tokens := newRouteAccessTokens()
+	var route *router.Route
+	for _, candidate := range Routes() {
+		if routeAccessKey(candidate) == "POST /sn/validator-class" {
+			route = candidate
+		}
+	}
+	if route == nil {
+		t.Fatal("the API serves no POST /sn/validator-class")
+	}
+	reached := false
+	stubbed := router.Testing_WithHandler(route, func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusOK)
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w := serveRouteAccess(router.NewRouter(ctx, []*router.Route{stubbed}), http.MethodPost, "/sn/validator-class", "Bearer "+tokens.clientToken)
+	if !reached || w.Code != http.StatusOK {
+		t.Fatalf("the validator's client token = %d %q, mint ran = %t; want the mint", w.Code, w.Body.String(), reached)
+	}
+}
+
+// The same through the real mint: a client token reaches it and is answered
+// by it (here: no class consent, 400), and a network token, which names no
+// client, is refused by it (401).
+func TestValidatorClassMintAnswersThroughTheRouter(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		networkId, userId, deviceId, clientId := server.NewId(), server.NewId(), server.NewId(), server.NewId()
+		model.Testing_CreateNetwork(t.Context(), networkId, "validator-class-"+networkId.String(), userId)
+		model.Testing_CreateDevice(t.Context(), networkId, deviceId, clientId, "validator-class", "test")
+		network := session.NewByJwt(networkId, userId, "validator-class", false, false)
+		tokens := &routeAccessTokens{networkId: networkId, networkToken: network.Testing_Sign(), clientToken: network.Client(deviceId, clientId).Testing_Sign()}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		apiRouter := router.NewRouter(ctx, Routes())
+		w := serveRouteAccess(apiRouter, http.MethodPost, "/sn/validator-class", "Bearer "+tokens.clientToken)
+		if w.Code == http.StatusForbidden && strings.TrimSpace(w.Body.String()) == router.ClientCredentialRefusedMessage {
+			t.Fatal("the router refused the validator's client token before the mint")
+		}
+		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "validator class consent") {
+			t.Fatalf("a client token without a class consent = %d %q, want the mint's 400", w.Code, w.Body.String())
+		}
+		w = serveRouteAccess(apiRouter, http.MethodPost, "/sn/validator-class", "Bearer "+tokens.networkToken)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("a network token = %d %q, want the mint's 401: the class names a client", w.Code, w.Body.String())
+		}
+	})
 }
