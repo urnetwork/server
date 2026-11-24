@@ -127,7 +127,12 @@ func TestContractLifecycleWritesUsePrimaryDatabaseClockAfterLocks(t *testing.T) 
 		// 969bba39's zero escrow contract, the contract degradation valve's
 		// free fallback, is the fourth reviewed transfer_contract writer.
 		{filename: "subscription_zero_escrow.go", functionName: "createZeroEscrowContractInTx", lockMarker: "if err := lockActiveContractClientsInTx(", writeMarker: "zeroEscrowContractInsertSql", statementConstant: "zeroEscrowContractInsertSql"},
-		{filename: "network_client_model.go", functionName: "RemoveDisconnectedNetworkClients", lockMarker: "FOR UPDATE OF network_client", writeMarker: "WITH lifecycle_clock AS MATERIALIZED"},
+		// 7c0e415fd's relayed contract between two marked clients of one
+		// network (QUOTA-M2-08) is the fifth.
+		{filename: "relayed_contract_model.go", functionName: "createRelayedContractInTx", lockMarker: "if err := lockActiveContractClientsInTx(", writeMarker: creationClockMarker},
+		// RemoveDisconnectedNetworkClients runs this on its default batch
+		// bounds since they moved into settings (QD-702, 1d689d6ea).
+		{filename: "network_client_model.go", functionName: "RemoveDisconnectedNetworkClientsWithSettings", lockMarker: "FOR UPDATE OF network_client", writeMarker: "WITH lifecycle_clock AS MATERIALIZED"},
 	}
 
 	for _, boundary := range boundaries {
@@ -283,8 +288,8 @@ func TestContractLifecycleWritesUsePrimaryDatabaseClockAfterLocks(t *testing.T) 
 			return true
 		})
 	}
-	if len(contractWriters) != 4 {
-		t.Fatalf("production transfer_contract INSERT writers = %d, want exactly 4 reviewed writers", len(contractWriters))
+	if len(contractWriters) != 5 {
+		t.Fatalf("production transfer_contract INSERT writers = %d, want exactly 5 reviewed writers", len(contractWriters))
 	}
 	for writerIndex, writer := range contractWriters {
 		for _, want := range []string{

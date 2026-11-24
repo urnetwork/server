@@ -1887,6 +1887,15 @@ func TestPerfvarCellEdgeScenarioDefaults(t *testing.T) {
 		cellEdge1mDown250kUpName:  256 * 1024,
 		cellEdge256kDown64kUpName: 64 * 1024,
 	}
+	// The product MTU bounded by the device link's inner MTU, as for every path
+	// (TestFullTunProductMtu1280Defaults): the 5 Mbit/s link's 1400-byte outer
+	// MTU leaves 1320 bytes inside, room for the product's 1280, while the two
+	// slower links' 1280-byte outer MTU leaves 1200.
+	wantApplicationMtus := map[string]int{
+		cellEdge5mDown1mUpName:    clientconnect.DefaultMtu,
+		cellEdge1mDown250kUpName:  1200,
+		cellEdge256kDown64kUpName: 1200,
+	}
 	if len(scenarios) != 2*len(wantPayloadByteCounts) {
 		t.Fatalf("cell-edge scenario count=%d want=%d", len(scenarios), 2*len(wantPayloadByteCounts))
 	}
@@ -1907,12 +1916,12 @@ func TestPerfvarCellEdgeScenarioDefaults(t *testing.T) {
 				wantPayloadByteCount,
 			)
 		}
-		if scenario.ApplicationMtu != clientconnect.DefaultMtu {
+		if wantApplicationMtu := wantApplicationMtus[scenario.Profile.Name]; scenario.ApplicationMtu != wantApplicationMtu {
 			t.Errorf(
-				"profile %q application MTU=%d want product default=%d",
+				"profile %q application MTU=%d want=%d",
 				scenario.Profile.Name,
 				scenario.ApplicationMtu,
-				clientconnect.DefaultMtu,
+				wantApplicationMtu,
 			)
 		}
 		directionalRateBitsPerSecond := scenario.Profile.Forward.RateBitsPerSecond
