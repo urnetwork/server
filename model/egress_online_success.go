@@ -818,3 +818,29 @@ func GetProviderOnlineSuccessExemptCountries(ctx context.Context) ([]*ProviderOn
 	}
 	return baseline.exemptCountries(), true
 }
+
+// Whether the country is one GetProviderOnlineSuccessExemptCountries lists:
+// the export applied the rule, measured the country, and exempted it. False
+// for a nil guard, unlike exempt, by which the rule keeps every provider
+// while no guard shows the probe works anywhere.
+func (self *providerOnlineSuccessBaseline) listsExempt(countryCode string) bool {
+	if self == nil || !self.enabled || countryCode == "" {
+		return false
+	}
+	count, ok := self.countryCodeCounts[countryCode]
+	return ok && 0 < count.Measured && count.Exempt
+}
+
+// Whether the guard the score export last published lists the provider's
+// published country as exempt now (listsExempt), the country the score
+// export reads from the provider's location rollup. The guard is read before
+// the database, as the other scoped readers read it, and without a trusted
+// guard the country is not read at all.
+func providerOnlineSuccessCountryExempt(ctx context.Context, clientId server.Id) bool {
+	baseline := getProviderOnlineSuccessBaseline(ctx)
+	if baseline == nil || !baseline.enabled {
+		return false
+	}
+	countryCodes := getProviderCapabilityProbePublishedCountryCodes(ctx, []server.Id{clientId})
+	return baseline.listsExempt(normalizeCountryCode(countryCodes[clientId]))
+}

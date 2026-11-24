@@ -120,11 +120,13 @@ func (self *urlProbeE2eObservation) Evidence(httpsPassed bool) *egresshealth.Url
 	observation, found := self.read()
 	var requestSession connect.PeerCapabilitySession
 	sealedAtRequest := false
+	requestWritten := false
 	func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
 		requestSession = self.requestSession
 		sealedAtRequest = self.sealedAtRequest
+		requestWritten = self.requestWritten
 	}()
 	sameSession := sealedAtRequest && requestSession == observation.Session
 	// The request's group remains its own evidence even if a later epoch
@@ -137,7 +139,7 @@ func (self *urlProbeE2eObservation) Evidence(httpsPassed bool) *egresshealth.Url
 		observation.E2eNegotiated = true
 		observation.E2eSealed = true
 	}
-	return readUrlProbeE2e(observation, found, self.now(), sameSession, httpsPassed, self.unmeasurable(), self.settings)
+	return readUrlProbeE2e(observation, found, self.now(), sameSession, requestWritten, httpsPassed, self.unmeasurable(), self.settings)
 }
 
 // The e2e evidence of one turn's recorder at now, nil when it recorded
@@ -153,9 +155,15 @@ func (self *urlProbeE2eObservation) Evidence(httpsPassed bool) *egresshealth.Url
 //     client saw it;
 //   - unmeasured: anything else.
 //
+// An unmeasured post-quantum session that sealed on the turn's one tunnel and
+// client while the IPv4 HTTPS leg wrote no request (requestWritten false: the
+// leg failed before its first request, at its DNS lookup or dial) reads
+// sealed (owner, 2026-11-24). Its outcome stays unmeasured: no request rode
+// the seal, so strict post-quantum selection's window does not count it.
+//
 // The window reads resizable when an acknowledgement advertised one, fixed
 // when acknowledgements came without, and not_tested otherwise.
-func readUrlProbeE2e(observation connect.PeerCapabilityObservation, found bool, now time.Time, sealedAtRequest bool, httpsPassed bool, unmeasurable bool, settings *UrlProbePostQuantumSettings) *egresshealth.UrlProbeE2eEvidence {
+func readUrlProbeE2e(observation connect.PeerCapabilityObservation, found bool, now time.Time, sealedAtRequest bool, requestWritten bool, httpsPassed bool, unmeasurable bool, settings *UrlProbePostQuantumSettings) *egresshealth.UrlProbeE2eEvidence {
 	if !found {
 		return nil
 	}
@@ -188,5 +196,8 @@ func readUrlProbeE2e(observation connect.PeerCapabilityObservation, found bool, 
 			e2e.Pq = egresshealth.UrlProbePqNegative
 		}
 	}
+	e2e.Sealed = e2e.Pq == egresshealth.UrlProbePqUnmeasured && !unmeasurable && !requestWritten &&
+		negotiated && observation.E2eSealed && observation.PostQuantum &&
+		egresshealth.UrlProbeKeyExchangePostQuantum(e2e.KeyExchange) && !e2e.SealedBeforeRequest
 	return e2e
 }
