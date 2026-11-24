@@ -33,6 +33,11 @@ reach. It keeps everything in memory and forgets it when it stops, and a test th
 Pebble checks no CAA and no customer `accounturi`, does not reuse orders and has no rate limits, so those rows stay
 LE staging's and the scripted ACME client's (DESIGN-DETAILS 17.6). `pebble/main_test.go` runs it in process on loopback.
 
+Pebble v2.10.3 wedges until restart when an authorization is deactivated while its challenge is under validation, as
+acmez's cleanup does when an order fails part way. So `pebble/pebble_hold.go` holds each request on an authorization
+until the validation authority has finished the challenges of it under way, as `sidecartest.StartPebble` does in a
+test's own process, and answers it 503 past `-validation-wait` (30 s). `pebble/pebble_hold_test.go` holds that.
+
 ## The sink
 
 `smtpsink` speaks enough SMTP for a sending MTA: EHLO and HELO, STARTTLS, MAIL, RCPT, DATA, RSET, NOOP and QUIT.
