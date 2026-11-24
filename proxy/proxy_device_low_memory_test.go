@@ -34,7 +34,7 @@ func TestProxyDeviceLowMemoryExplicitProfileOnHostedConstructor(t *testing.T) {
 	settings := DefaultProxyDeviceSettings()
 	settings.MemoryTargetByteCount = 32 * model.Mib
 	settings.DisableWindowIdentityPersistence = true
-	local := newProxyDeviceLocalSettings(context.Background(), &model.ProxyDeviceConfig{}, settings)
+	local := newProxyDeviceLocalSettings(context.Background(), &model.ProxyDeviceConfig{}, settings, false)
 	if !local.LowMemoryProfile || local.MemoryTargetByteCount != 32*model.Mib {
 		t.Fatalf("hosted policy: low=%t target=%d; want explicit low profile and 32 MiB",
 			local.LowMemoryProfile, local.MemoryTargetByteCount)
@@ -60,7 +60,7 @@ func TestProxyDeviceLowMemoryConfiguredTargetPreservesProfile(t *testing.T) {
 			settings := DefaultProxyDeviceSettingsWithBufferSize(manager.SequenceBufferSize)
 			settings.MemoryTargetByteCount = manager.DeviceMemoryTargetByteCount
 			settings.DisableWindowIdentityPersistence = true
-			local := newProxyDeviceLocalSettings(context.Background(), &model.ProxyDeviceConfig{}, settings)
+			local := newProxyDeviceLocalSettings(context.Background(), &model.ProxyDeviceConfig{}, settings, false)
 			if manager.DeviceMemoryTargetByteCount != shape.target ||
 				local.MemoryTargetByteCount != shape.target || !local.LowMemoryProfile {
 				t.Fatalf("override %s: manager=%d local=%d low=%t",
@@ -82,7 +82,7 @@ func TestProxyDeviceLowMemoryRefusesNonpositiveTargets(t *testing.T) {
 			settings := DefaultProxyDeviceSettings()
 			settings.MemoryTargetByteCount = target
 			settings.DisableWindowIdentityPersistence = true
-			_ = newProxyDeviceLocalSettings(context.Background(), &model.ProxyDeviceConfig{}, settings)
+			_ = newProxyDeviceLocalSettings(context.Background(), &model.ProxyDeviceConfig{}, settings, false)
 		}()
 	}
 }

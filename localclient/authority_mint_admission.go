@@ -105,6 +105,11 @@ type MintAdmissionSettings struct {
 	ReservedConcurrentCount int
 	// The reserved registrations one device takes in its life.
 	ReservedCountPerDevice int
+	// The reserved registrations one device of a network on the free plan
+	// takes in its life, in place of ReservedCountPerDevice: a device whose
+	// parent credential carries no pro claim. Nonpositive reserves none for
+	// such a device.
+	FreeReservedCountPerDevice int
 	// Registrations waiting for a slot at once. Past it a registration that
 	// finds the bound full is refused at once. Nonpositive waits none.
 	MaxWaiterCount int
@@ -129,16 +134,24 @@ type MintAdmissionSettings struct {
 //     those at once 93-99% of the time (Erlang B); they come after the shared
 //     slots and before the wait.
 //   - Six is a hosted device's whole first window: five quality exits and one
-//     speed exit.
+//     speed exit. A free device's window is smaller (see
+//     defaultFreeReservedCountPerDevice).
 func DefaultMintAdmissionSettings(maxConcurrentCount int) MintAdmissionSettings {
 	return MintAdmissionSettings{
-		MaxConcurrentCount:      maxConcurrentCount,
-		ReservedConcurrentCount: 2,
-		ReservedCountPerDevice:  6,
-		MaxWaiterCount:          32,
-		MaxWait:                 1 * time.Second,
+		MaxConcurrentCount:         maxConcurrentCount,
+		ReservedConcurrentCount:    2,
+		ReservedCountPerDevice:     6,
+		FreeReservedCountPerDevice: defaultFreeReservedCountPerDevice,
+		MaxWaiterCount:             32,
+		MaxWait:                    1 * time.Second,
 	}
 }
+
+// The whole first window of a free device: two quality exits and one speed
+// exit (proxy ProxyDeviceSettings.FreeQualityWindowSize and
+// FreeSpeedWindowSize; owner, 2026-11-24). It halves the reserved lane's
+// registrations per free build.
+const defaultFreeReservedCountPerDevice = 3
 
 // The slot a registration holds.
 type mintLane int
@@ -190,10 +203,14 @@ func NewMintAdmissionWithSettings(settings MintAdmissionSettings) *MintAdmission
 	}
 }
 
-// The reserved registrations a new authority's device takes in its life.
-func (self *MintAdmission) reservedCountPerDevice() int64 {
+// The reserved registrations a new authority's device takes in its life, by
+// its parent credential's pro claim.
+func (self *MintAdmission) reservedCountPerDevice(pro bool) int64 {
 	if self == nil || self.settings.ReservedConcurrentCount <= 0 {
 		return 0
+	}
+	if !pro {
+		return int64(max(0, self.settings.FreeReservedCountPerDevice))
 	}
 	return int64(max(0, self.settings.ReservedCountPerDevice))
 }

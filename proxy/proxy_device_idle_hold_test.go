@@ -266,7 +266,7 @@ func TestProxyDeviceManagerSharesOnePauseDetector(t *testing.T) {
 		t.Fatal("the manager's devices do not share one pause detector")
 	}
 	first.DisableWindowIdentityPersistence = true
-	deviceLocalSettings := newProxyDeviceLocalSettings(ctx, &model.ProxyDeviceConfig{}, first)
+	deviceLocalSettings := newProxyDeviceLocalSettings(ctx, &model.ProxyDeviceConfig{}, first, false)
 	if deviceLocalSettings.SchedulerPauseDetector != manager.schedulerPauseDetector {
 		t.Fatal("a hosted device's settings do not carry the manager's pause detector")
 	}

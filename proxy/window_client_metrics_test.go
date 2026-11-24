@@ -202,7 +202,7 @@ func TestProxyDevicesCountIntoTheProcessWindowClientStats(t *testing.T) {
 		t.Fatal("the manager does not open its devices with the process's window client counters")
 	}
 	settings.DisableWindowIdentityPersistence = true
-	deviceLocalSettings := newProxyDeviceLocalSettings(ctx, &model.ProxyDeviceConfig{}, settings)
+	deviceLocalSettings := newProxyDeviceLocalSettings(ctx, &model.ProxyDeviceConfig{}, settings, false)
 	if deviceLocalSettings.WindowClientStats != defaultWindowClientStats {
 		t.Fatal("a hosted device's settings do not carry the process's window client counters")
 	}
