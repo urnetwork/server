@@ -35,8 +35,10 @@ var revokingStatementOwners = map[string]struct {
 }{
 	"model/network_client_model.go:deactivateLockedNetworkClientsInTx": {hooks: []string{"RevokeClientRecordsInTx"}},
 	// the abandoned top-level mark and the stale child reap end active
-	// clients; its inactive reap deletes only rows already ended
-	"model/network_client_model.go:RemoveDisconnectedNetworkClients":              {hooks: []string{"RevokeNetworkClientRecordsInTx", "RevokeRetiredClientRecordsInTx"}},
+	// clients; its inactive reap deletes only rows already ended. It is
+	// RemoveDisconnectedNetworkClients's body since the batch bounds moved
+	// into settings (QD-702, 1d689d6ea).
+	"model/network_client_model.go:RemoveDisconnectedNetworkClientsWithSettings":  {hooks: []string{"RevokeNetworkClientRecordsInTx", "RevokeRetiredClientRecordsInTx"}},
 	"model/network_client_retired_hosted.go:removeRetiredHostedNetworkClientsSql": {reason: "deletes only rows already inactive (NOT locked.active)"},
 	// the 2-day hosted proxy reap (91f14f258): its delete re-checks, under the
 	// row lock, that the client is inactive and was deactivated before the

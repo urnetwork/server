@@ -113,8 +113,10 @@ func TestNetworkClientLifecycleWritesFollowExplicitRowLocks(t *testing.T) {
 		t.Fatal(err)
 	}
 	slices.Sort(writers)
+	// RemoveDisconnectedNetworkClients runs its settings function on the
+	// default batch bounds since they moved into settings (QD-702, 1d689d6ea).
 	reviewed := []string{
-		"model/network_client_model.go: RemoveDisconnectedNetworkClients",
+		"model/network_client_model.go: RemoveDisconnectedNetworkClientsWithSettings",
 		"model/network_client_model.go: deactivateLockedNetworkClientsInTx",
 	}
 	if !slices.Equal(writers, reviewed) {
