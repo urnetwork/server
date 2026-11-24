@@ -88,6 +88,20 @@ git -C "$config_root" diff --quiet HEAD -- "$source_config_relative" &&
 for command in git go jq sha256sum mktemp realpath stat sudo; do
     command -v "$command" >/dev/null 2>&1 || { printf 'missing command: %s\n' "$command" >&2; exit 1; }
 done
+
+# The Go image's index digest is recorded when the owner re-qualifies the
+# evaluator on go1.27.4 (owner decision 272, QD-1393). Until then
+# Dockerfile.base holds the all-zero digest, and no base is built from it.
+require_recorded_go_image() {
+    local dockerfile="$1" go_image
+    go_image="$(sed -n 's/^ARG GO_IMAGE=//p' "$dockerfile")" || return 1
+    [[ "$go_image" =~ ^golang:[0-9]+\.[0-9]+\.[0-9]+-[a-z0-9]+@sha256:[0-9a-f]{64}$ ]] &&
+        [[ "${go_image##*@sha256:}" != 0000000000000000000000000000000000000000000000000000000000000000 ]] || {
+        printf 'the evaluator Go image digest is not recorded: %s\n' "$go_image" >&2
+        return 1
+    }
+}
+require_recorded_go_image "$SCRIPT_DIR/Dockerfile.base" || exit 1
 sudo -n docker info >/dev/null
 
 build_context="$(mktemp -d "${TMPDIR:-/tmp}/urnetwork-evaluator-base.XXXXXXXX")"

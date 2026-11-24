@@ -170,6 +170,15 @@ this tree's bytes. It records no digest for the compiled patch validator
 release is qualified on the evaluator hosts, and the worker refuses the release
 until both are recorded. Nothing here builds an image or qualifies a host.
 
+`Dockerfile.base` builds with Go 1.27.4, the line server's module requires
+(QD-674, QD-1393). The index digest of its `golang:1.27.4-bookworm` image is
+recorded when the owner re-qualifies the evaluator on go1.27.4 (owner decision
+272); until then it is the all-zero digest and `build-base.sh` refuses to
+build. The guards that judge what the image compiles, such as
+`tracked-submission-build.sh`'s binary check, the reviewed-source sandbox and
+the host entrypoints, still require go1.27.3 and move with that
+re-qualification, so no evaluation runs on this tree's base before it.
+
 ## Trust and data flow
 
 1. The API authenticates a text patch, canonicalizes it, stores its SHA-256,
