@@ -17,7 +17,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -959,9 +958,14 @@ func TestCryptoPayConfigAbsentOrMalformedIsOff(t *testing.T) {
 // since the owner's launch go of 2026-10-21 (mmm/ZCASH.md §0.7); local keeps
 // them off, since a developer machine has no wallet daemons.
 func TestCryptoPayConfigFiles(t *testing.T) {
-	_, thisFile, _, _ := runtime.Caller(0)
+	// go test runs in the package directory; the caller's path is the module
+	// path under -trimpath, which names no directory.
+	directory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, env := range []string{"local", "main"} {
-		path := filepath.Join(filepath.Dir(thisFile), "..", "..", "config", env, "crypto_pay.yml")
+		path := filepath.Join(directory, "..", "..", "config", env, "crypto_pay.yml")
 		data, err := os.ReadFile(path)
 		if err != nil {
 			t.Skipf("no config checkout beside the server: %s", err)
