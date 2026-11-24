@@ -23,7 +23,17 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const maximumPromotionPatchBytes = 64 * 1024 * 1024
+// Bounds the winning patch a promotion reads (QD-702).
+type sourcePromotionSettings struct {
+	// The largest winner patch a promotion accepts, in bytes; an empty or larger
+	// file is refused. 64 MiB is far above any patch policy's own bound.
+	MaximumPatchBytes int64
+}
+
+// 64 MiB.
+func defaultSourcePromotionSettings() sourcePromotionSettings {
+	return sourcePromotionSettings{MaximumPatchBytes: 64 * 1024 * 1024}
+}
 
 var promotionJobIdPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 
@@ -204,7 +214,7 @@ func promotionPatchPath(winnerRoot string, repository string) (string, bool, err
 		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 			return "", false, fmt.Errorf("winner patch must be a regular file: %s", candidate)
 		}
-		if info.Size() <= 0 || maximumPromotionPatchBytes < info.Size() {
+		if info.Size() <= 0 || defaultSourcePromotionSettings().MaximumPatchBytes < info.Size() {
 			return "", false, fmt.Errorf("winner patch size is invalid: %s", candidate)
 		}
 		foundPaths = append(foundPaths, candidate)
@@ -461,7 +471,7 @@ func fastForwardLocalBranch(repositoryRoot string, branch string, commit string)
 func runPromote(opts docopt.Opts) {
 	epochNumber, err := configuredEpoch(opts)
 	if err != nil || epochNumber == 0 {
-		fatalf("promotion epoch must be an integer in 1..%d", maximumCompetitionEpoch)
+		fatalf("promotion epoch must be an integer in 1..%d", defaultSourceEpochSettings().MaximumCompetitionEpoch)
 	}
 	noWinner := optBool(opts, "--no-winner")
 	winnerJobId := optString(opts, "--winner-job-id", "")

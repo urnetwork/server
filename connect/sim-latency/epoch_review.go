@@ -131,8 +131,8 @@ func reviewActionMaterializesCandidate(action string, state *controller.Candidat
 
 func runEpochReview(opts docopt.Opts) {
 	epoch, err := configuredEpoch(opts)
-	if err != nil || epoch < 1 || maximumCompetitionEpoch < epoch {
-		fatalf("honesty-review epoch must be an integer in 1..%d", maximumCompetitionEpoch)
+	if err != nil || epoch < 1 || defaultSourceEpochSettings().MaximumCompetitionEpoch < epoch {
+		fatalf("honesty-review epoch must be an integer in 1..%d", defaultSourceEpochSettings().MaximumCompetitionEpoch)
 	}
 	settings, store, err := loadCompetitionControl()
 	if err != nil {

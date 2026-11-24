@@ -106,7 +106,7 @@ func sourceModuleGraphAtCommit(ctx context.Context, repositoryRoot, commit strin
 	if !sourceGitShaPattern.MatchString(commit) {
 		return nil, fmt.Errorf("module audit requires an exact source commit")
 	}
-	content, err := sourceGitBlobAtCommit(ctx, repositoryRoot, commit, "go.mod", maximumSourceConfigBytes)
+	content, err := sourceGitBlobAtCommit(ctx, repositoryRoot, commit, "go.mod", defaultSourceEpochSettings().MaximumSourceConfigBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -128,7 +128,7 @@ func parseSourceModuleGraph(ctx context.Context, content []byte) ([]byte, error)
 	command := exec.CommandContext(ctx, "go", "mod", "edit", "-json", path)
 	command.Dir = root
 	command.Env = []string{"PATH=" + os.Getenv("PATH"), "GOTOOLCHAIN=local", "GOPROXY=off", "GOWORK=off", "GOENV=off"}
-	output, stderr := &sourceBoundedWriter{limit: maximumSourceConfigBytes}, &sourceBoundedWriter{limit: 64 * 1024}
+	output, stderr := &sourceBoundedWriter{limit: defaultSourceEpochSettings().MaximumSourceConfigBytes}, &sourceBoundedWriter{limit: 64 * 1024}
 	command.Stdout, command.Stderr = output, stderr
 	if err := command.Run(); err != nil {
 		return nil, fmt.Errorf("parse frozen module graph: %w: %s", err, strings.TrimSpace(string(stderr.content)))
@@ -160,7 +160,7 @@ func verifyFrozenSourceGraphForMode(ctx context.Context, repositoryRoot, commit 
 	_, err = sourceGitReadAtCommit(ctx, repositoryRoot, commit, defaultSourceGitReadSettings(), func(readCtx context.Context, root string) ([]byte, error) {
 		for _, relative := range layout.inTreePaths {
 			modulePath := relative + "/go.mod"
-			entry, err := sourceGitBytes(readCtx, root, maximumSourceConfigBytes, "--literal-pathspecs", "ls-tree", "-z", "--full-tree", commit, "--", modulePath)
+			entry, err := sourceGitBytes(readCtx, root, defaultSourceEpochSettings().MaximumSourceConfigBytes, "--literal-pathspecs", "ls-tree", "-z", "--full-tree", commit, "--", modulePath)
 			if err != nil {
 				return nil, err
 			}
@@ -169,7 +169,7 @@ func verifyFrozenSourceGraphForMode(ctx context.Context, repositoryRoot, commit 
 			if !found || name != modulePath || len(fields) != 3 || (fields[0] != "100644" && fields[0] != "100755") || fields[1] != "blob" || !sourceGitShaPattern.MatchString(fields[2]) {
 				return nil, fmt.Errorf("in-tree local module %s has no regular go.mod in frozen source", relative)
 			}
-			content, err := sourceGitBytes(readCtx, root, maximumSourceConfigBytes, "cat-file", "blob", fields[2])
+			content, err := sourceGitBytes(readCtx, root, defaultSourceEpochSettings().MaximumSourceConfigBytes, "cat-file", "blob", fields[2])
 			if err != nil {
 				return nil, err
 			}

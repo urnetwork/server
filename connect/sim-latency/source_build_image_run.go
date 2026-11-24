@@ -85,7 +85,7 @@ func bindSourceBuildImageScriptLabels(root *sourceBuildContext, request reviewed
 		canonical, pathErr := filepath.EvalSymlinks(path)
 		info, statErr := os.Lstat(path)
 		if pathErr != nil || statErr != nil || canonical != path || !info.Mode().IsRegular() || info.Mode().Perm()&0o222 != 0 ||
-			info.Size() <= 0 || info.Size() > maximumSourceConfigBytes {
+			info.Size() <= 0 || info.Size() > int64(defaultSourceEpochSettings().MaximumSourceConfigBytes) {
 			return errors.New("source script labels require exact regular read-only protected programs")
 		}
 		file, err := os.Open(path)
@@ -98,9 +98,9 @@ func bindSourceBuildImageScriptLabels(root *sourceBuildContext, request reviewed
 			return errors.New("source script changed while opening")
 		}
 		// The existing protected-source document bound also limits these exact-byte labels.
-		content, readErr := io.ReadAll(io.LimitReader(file, maximumSourceConfigBytes+1))
+		content, readErr := io.ReadAll(io.LimitReader(file, int64(defaultSourceEpochSettings().MaximumSourceConfigBytes)+1))
 		closeErr := file.Close()
-		if readErr != nil || closeErr != nil || len(content) > maximumSourceConfigBytes || int64(len(content)) != info.Size() {
+		if readErr != nil || closeErr != nil || len(content) > defaultSourceEpochSettings().MaximumSourceConfigBytes || int64(len(content)) != info.Size() {
 			return errors.New("source script changed or exceeded its protected-source budget")
 		}
 		digest := sha256.Sum256(content)

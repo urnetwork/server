@@ -136,7 +136,7 @@ func runBootstrapSource(opts docopt.Opts) {
 		if err != nil {
 			fatalf("baseline config: %s", err)
 		}
-		manifestBytes, err := sourceGitBlobAtCommit(ctx, configRoot, manifestCommit, sourceManifestRepositoryPath(settings.AutomationPolicy.Staging), maximumSourceConfigBytes)
+		manifestBytes, err := sourceGitBlobAtCommit(ctx, configRoot, manifestCommit, sourceManifestRepositoryPath(settings.AutomationPolicy.Staging), defaultSourceEpochSettings().MaximumSourceConfigBytes)
 		if err != nil {
 			fatalf("baseline exact config: %s", err)
 		}

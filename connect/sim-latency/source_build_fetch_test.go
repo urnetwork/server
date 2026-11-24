@@ -63,7 +63,7 @@ func TestSourceBuildFetchRejectsSuccessfulTransportOutputOverflow(t *testing.T) 
 		source := filepath.Join(root, "server")
 		tools := t.TempDir()
 		payload := filepath.Join(root, "transport-output")
-		size := maximumSourceConfigBytes + 1
+		size := defaultSourceEpochSettings().MaximumSourceConfigBytes + 1
 		if channel == "stderr" {
 			size = settings.MaximumDiagnosticBytes + 1
 		}

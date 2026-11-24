@@ -198,7 +198,7 @@ func TestSourceBuildImageScriptLabelsRejectUnsealedMissingOrRedirectedInputs(t *
 			if err = os.Chmod(path, 0o644); err == nil {
 				content := []byte{}
 				if mutation == "oversized" {
-					content = bytes.Repeat([]byte("x"), maximumSourceConfigBytes+1)
+					content = bytes.Repeat([]byte("x"), defaultSourceEpochSettings().MaximumSourceConfigBytes+1)
 				}
 				if err = os.WriteFile(path, content, 0o444); err == nil {
 					err = os.Chmod(path, 0o444)

@@ -108,7 +108,7 @@ func newSourceIndexCheckpoint(status *controller.CompetitionSourceLifecycleStatu
 	}
 	intent := status.Intent
 	if intent.AbandonedAt != nil || intent.State == "abandoned" || !credentialNamePattern.MatchString(intent.CompetitionId) || !credentialNamePattern.MatchString(intent.SeasonId) ||
-		intent.TargetRoundId == (server.Id{}) || intent.Generation < 1 || intent.SourceGeneration < 0 || intent.TargetEpoch < 1 || intent.TargetEpoch > maximumCompetitionEpoch ||
+		intent.TargetRoundId == (server.Id{}) || intent.Generation < 1 || intent.SourceGeneration < 0 || intent.TargetEpoch < 1 || intent.TargetEpoch > defaultSourceEpochSettings().MaximumCompetitionEpoch ||
 		!validSha256(intent.IntentSha256) || !validSha256(intent.SourceDecisionDigest) || !validSha256(intent.SourceLockSha256) ||
 		!strings.HasPrefix(intent.EvaluatorImageDigest, "sha256:") || !validSha256(strings.TrimPrefix(intent.EvaluatorImageDigest, "sha256:")) || !validSourceMargin(intent.Threshold*100, intent.Staging) {
 		return nil, errors.New("source index activation identity is incomplete, abandoned or invalid")

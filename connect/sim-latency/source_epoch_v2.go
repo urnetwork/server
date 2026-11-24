@@ -76,7 +76,7 @@ func validateReviewedSourceManifest(manifest *sourceManifest) error {
 		}
 	}
 	generationRecords := manifest.EvaluationSource.Generations
-	if len(generationRecords) == 0 || maximumCompetitionEpoch+1 < len(generationRecords) {
+	if len(generationRecords) == 0 || defaultSourceEpochSettings().MaximumCompetitionEpoch+1 < len(generationRecords) {
 		return errors.New("reviewed source config requires baseline generation 0 and at most six promotions")
 	}
 	for index, generation := range generationRecords {
@@ -135,7 +135,7 @@ func validateReviewedSourceManifest(manifest *sourceManifest) error {
 		}
 	}
 	for index, round := range manifest.EvaluationSource.Rounds {
-		if round.Epoch < 1 || maximumCompetitionEpoch < round.Epoch ||
+		if round.Epoch < 1 || defaultSourceEpochSettings().MaximumCompetitionEpoch < round.Epoch ||
 			(index > 0 && round.Epoch != manifest.EvaluationSource.Rounds[index-1].Epoch+1) ||
 			round.ActivationGeneration < 1 || !validSha256(round.SourceDecisionDigest) ||
 			(round.RewardDecisionDigest != "" && !validSha256(round.RewardDecisionDigest)) || round.Reason == "" {

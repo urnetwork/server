@@ -122,7 +122,7 @@ func TestFreshSourceConfigPreservesUnrelatedMainAdvance(t *testing.T) {
 	if parents := sourceTestGit(t, stagedRoot, "rev-list", "--parents", "-n", "1", commit); parents != commit+" "+parent {
 		t.Fatalf("successor did not preserve the exact fetched parent: %s", parents)
 	}
-	content, err := sourceGitBytes(context.Background(), stagedRoot, maximumSourceConfigBytes, "show", commit+":main/unrelated.yml")
+	content, err := sourceGitBytes(context.Background(), stagedRoot, defaultSourceEpochSettings().MaximumSourceConfigBytes, "show", commit+":main/unrelated.yml")
 	if err != nil || !bytes.Equal(content, unrelated) {
 		t.Fatalf("unrelated config changed: %q, %v", content, err)
 	}
@@ -185,7 +185,7 @@ func TestFreshSourceConfigRejectsNonancestorMain(t *testing.T) {
 	sourceTestGit(t, fixture.repositoryRoot, "push", "--quiet", "origin", "synthetic-unrelated")
 	// This compare-and-swap changes only the fixture's local bare repository.
 	sourceTestGit(t, fixture.remoteRoot, "update-ref", "refs/heads/main", unrelated, fixture.current.ManifestCommit)
-	content, err := sourceGitBytes(context.Background(), fixture.remoteRoot, maximumSourceConfigBytes, "show", unrelated+":main/sim-latency.yml")
+	content, err := sourceGitBytes(context.Background(), fixture.remoteRoot, defaultSourceEpochSettings().MaximumSourceConfigBytes, "show", unrelated+":main/sim-latency.yml")
 	if err != nil || !bytes.Equal(content, fixture.current.Manifest) {
 		t.Fatalf("nonancestor fixture must retain exact manifest bytes: %q %v", content, err)
 	}

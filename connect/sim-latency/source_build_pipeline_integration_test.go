@@ -79,7 +79,7 @@ func TestSourceBuildRealOfflinePipeline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	patch, err := sourceGitBytes(ctx, stagedServer, maximumSourceConfigBytes, "diff", commits["server"], newCommit, "--", "connect/resident_contract_manager.go")
+	patch, err := sourceGitBytes(ctx, stagedServer, defaultSourceEpochSettings().MaximumSourceConfigBytes, "diff", commits["server"], newCommit, "--", "connect/resident_contract_manager.go")
 	if err != nil {
 		t.Fatal(err)
 	}
