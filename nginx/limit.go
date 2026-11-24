@@ -48,7 +48,10 @@ package nginx
 // one address was, and the address as a whole is still bounded. A request
 // without a credential, or with one that doesn't verify, is charged exactly
 // as without the identity limit, and a route zone's requests are never
-// charged to an identity.
+// charged to an identity. A request whose verified SN25 validator rate class
+// token names the same client (LimitIdentity.Validator) is charged at the
+// validator class's limits in place of the identity limit's, in state of its
+// own; its address ceiling is the same.
 //
 // State is bounded: idle state is swept once its buckets refill, and at
 // LimitSettings.MaxAddressStates the least recently used idle address state
