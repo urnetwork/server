@@ -24,7 +24,8 @@ import (
 
 // An authority with no credential: any call that gets past admission fails
 // its local preflight with a 401 and never reaches the database. Its device
-// can route unless mintAdmissionNoRoute says otherwise.
+// can route unless mintAdmissionNoRoute says otherwise, and takes a Pro
+// device's reserved registrations.
 func mintAdmissionTestAuthority(admission *MintAdmission) (*Authority, *connect.AuthNetworkClientArgs) {
 	clientId := server.NewId()
 	parent := connect.Id(clientId)
@@ -33,11 +34,12 @@ func mintAdmissionTestAuthority(admission *MintAdmission) (*Authority, *connect.
 		userId:        server.NewId(),
 		clientId:      clientId,
 		deviceId:      server.NewId(),
+		pro:           true,
 		apiUrl:        "https://control.example",
 		mintAdmission: admission,
 		cancel:        func() {},
 	}
-	authority.reservedMints.Store(admission.reservedCountPerDevice())
+	authority.reservedMints.Store(admission.reservedCountPerDevice(true))
 	return authority, &connect.AuthNetworkClientArgs{SourceClientId: &parent}
 }
 
@@ -629,7 +631,7 @@ func TestMintAdmissionHoldsChurningDevicesToTheSharedSlots(t *testing.T) {
 			var devices sync.WaitGroup
 			for range 10 {
 				reserved := &atomic.Int64{}
-				reserved.Store(admission.reservedCountPerDevice())
+				reserved.Store(admission.reservedCountPerDevice(true))
 				noRoute := func() bool { return true }
 				devices.Add(1)
 				go func() {

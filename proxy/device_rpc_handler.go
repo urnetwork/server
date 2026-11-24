@@ -310,7 +310,7 @@ func (self *deviceRpcHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	pd, err := self.proxyDeviceManager.OpenProxyDevice(proxyId)
+	pd, err := self.proxyDeviceManager.openProxyDeviceFor(proxyDeviceCaller{path: proxyDevicePathRpc}, proxyId)
 	if err != nil {
 		glog.Infof("[drpc][%s]open device err = %s\n", proxyId, err)
 		http.Error(w, "device unavailable", http.StatusServiceUnavailable)

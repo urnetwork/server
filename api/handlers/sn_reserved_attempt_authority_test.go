@@ -60,6 +60,11 @@ type snReservedAttemptAuthority struct {
 	heldEventScans      atomic.Int32
 	// When set, the chain's time for later refreshes; now is the first's.
 	chainClock atomic.Pointer[time.Time]
+	// The permit census batch fails, or the current eligibility read's
+	// metagraph call does; the second counts the calls it refused.
+	refuseCensus          atomic.Bool
+	refuseMetagraph       atomic.Bool
+	refusedMetagraphCalls atomic.Int32
 }
 
 // The finalized heads' time: now, until a test moves the chain on.
@@ -417,6 +422,9 @@ func (self *snReservedAttemptAuthority) result(method string, args []json.RawMes
 		}
 		return value, nil
 	case "state_queryStorageAt":
+		if self.refuseCensus.Load() {
+			return nil, errors.New("synthetic census outage")
+		}
 		// As a node answers at one block: every key, valued as a single
 		// state_getStorage read of it answers.
 		var keys []string
@@ -437,6 +445,10 @@ func (self *snReservedAttemptAuthority) result(method string, args []json.RawMes
 		}
 		return []map[string]any{{"block": argument(1), "changes": changes}}, nil
 	case "state_call":
+		if self.refuseMetagraph.Load() {
+			self.refusedMetagraphCalls.Add(1)
+			return nil, errors.New("synthetic metagraph outage")
+		}
 		if len(args) == 3 && argument(0) == "SubnetInfoRuntimeApi_get_selective_metagraph" && argument(1) == "0x09021400001e00340039004500" && knownNative(argument(2)) {
 			return self.metagraph, nil
 		}
