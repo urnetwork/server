@@ -3,7 +3,6 @@ package main
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -13,11 +12,12 @@ import (
 // empty or differently named container.
 func TestAltContainerBuildContract(t *testing.T) {
 	t.Helper()
-	_, filename, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("cannot locate alt container test")
+	// go test runs in the package directory; the caller's path is the module
+	// path under -trimpath, which names no directory.
+	directory, err := os.Getwd()
+	if err != nil {
+		t.Fatal("cannot locate alt container test: ", err)
 	}
-	directory := filepath.Dir(filename)
 
 	makefileBytes, err := os.ReadFile(filepath.Join(directory, "Makefile"))
 	if err != nil {
