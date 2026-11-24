@@ -147,6 +147,8 @@ func TestCountNetworkActiveTopLevelClientsCountsDevices(t *testing.T) {
 		defer cancel()
 		defer Testing_ClearNetworkClientLimitCache()
 		defer Testing_SetProxyClientCreatesPerMinute(0, 0)()
+		// two proxies in a free network, over the free hosted proxy cap (1)
+		defer Testing_SetProxyClientLimits(0, 0)()
 
 		network := newDataCapTestNetworkWithoutEmbed(ctx, "count-devices")
 		for range 2 {
