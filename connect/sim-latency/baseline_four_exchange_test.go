@@ -85,12 +85,16 @@ func TestFourExchangeCalibrationMatchesRawEvidenceAndControllerOutcomes(t *testi
 	if err != nil || fmt.Sprintf("%x", sha256.Sum256(manifestBytes)) != image.SourceConfigSha256 {
 		t.Fatal("retained source manifest differs from the image's embedded configuration", err)
 	}
-	// This calibration measured the ten repositories, before sidecar was the
-	// eleventh (QD-769). Its retained ledger is evidence, not a live ledger: the
-	// current decoder refuses it for exactly the pin it predates, and its own
-	// lock digest still binds exactly the ten commits it records.
-	if _, err := decodeSourceManifest(manifestBytes); err == nil || !strings.Contains(err.Error(), "source generation 0 repository sidecar has an invalid commit") {
-		t.Fatal("a retained ledger of the ten repositories is not refused only for its absent sidecar pin", err)
+	// This calibration measured the ten repositories, before sidecar and
+	// operator-core were the eleventh and twelfth (QD-769, QD-1393). Its retained
+	// ledger is evidence, not a live ledger: the current decoder refuses it for
+	// one of exactly the two pins it predates, whichever its map walk meets
+	// first, and its own lock digest still binds exactly the ten commits it
+	// records.
+	if _, err := decodeSourceManifest(manifestBytes); err == nil ||
+		!strings.Contains(err.Error(), "source generation 0 repository sidecar has an invalid commit") &&
+			!strings.Contains(err.Error(), "source generation 0 repository operator-core has an invalid commit") {
+		t.Fatal("a retained ledger of the ten repositories is not refused only for its absent sidecar and operator-core pins", err)
 	}
 	var retainedLedger struct {
 		Schema           int `yaml:"schema"`

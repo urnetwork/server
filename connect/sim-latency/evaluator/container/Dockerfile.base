@@ -47,7 +47,9 @@ ARG BASE_SHA
 ARG SOURCE_EPOCH
 ARG SOURCE_CONFIG_SHA256
 ARG SOURCE_LOCK_SHA256
-# The private builder copies exactly the ten locked live repositories.
+# The private builder copies exactly the locked live repositories of the
+# source graph: the twelve of sidecar/1, the ten with sidecar and
+# operator-core (QD-769, QD-1393).
 COPY source/ /workspace/
 COPY source-lock.json /opt/urnetwork/source-lock.json
 COPY sim-latency.yml /opt/urnetwork/sim-latency.yml
@@ -73,6 +75,7 @@ RUN test "$(git -C /workspace/server rev-parse HEAD)" = "${BASE_SHA}" \
     && git config --system --add safe.directory /workspace/warp \
     && git config --system --add safe.directory /workspace/gvisor \
     && git config --system --add safe.directory /workspace/sidecar \
+    && git config --system --add safe.directory /workspace/operator-core \
     && chmod 0555 /usr/local/libexec/competition-container /usr/local/libexec/competition-official-run \
     && install -d -m 0755 /opt/urnetwork/bin /opt/urnetwork/submission /opt/urnetwork/go
 

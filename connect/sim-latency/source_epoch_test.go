@@ -110,6 +110,7 @@ func sourceTestManifest(repositoryCommits map[string]string) *sourceManifest {
 					Warp:          sourceRepository{Commit: repositoryCommits["warp"]},
 					Gvisor:        sourceRepository{Commit: repositoryCommits["gvisor"]},
 					Sidecar:       sourceRepository{Commit: repositoryCommits["sidecar"]},
+					OperatorCore:  sourceRepository{Commit: repositoryCommits["operator-core"]},
 				},
 			}},
 		},

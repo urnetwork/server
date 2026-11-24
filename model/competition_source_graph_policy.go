@@ -10,8 +10,9 @@ import (
 
 // Omission is the immutable historical graph of ten repositories, which every
 // round frozen before the sidecar module measured. The explicit version adds
-// sidecar as the eleventh repository (QD-769); only the producer releases cut
-// for that graph accept a request that names it, and they accept no other.
+// sidecar and operator-core as the eleventh and twelfth repositories (QD-769,
+// QD-1393); only the producer releases cut for that graph accept a request that
+// names it, and they accept no other.
 type CompetitionSourceGraphPolicy string
 
 const (
@@ -54,8 +55,9 @@ func CompetitionSourceRepositoryNamesForGraphPolicy(policy CompetitionSourceGrap
 }
 
 // A source lock belongs to a round only when it holds exactly the graph the
-// round's policy names: a lock of the ten cannot stand under sidecar/1, and a
-// lock that names sidecar cannot stand under the legacy graph.
+// round's policy names: a lock of the ten cannot stand under sidecar/1, a lock
+// that names sidecar or operator-core cannot stand under the legacy graph, and
+// a lock of sidecar without operator-core stands under neither.
 func CompetitionSourceLockMatchesGraphPolicy(commits map[string]string, policy CompetitionSourceGraphPolicy) bool {
 	repositoryNames, err := CompetitionSourceRepositoryNamesForGraphPolicy(policy)
 	if err != nil || len(commits) != len(repositoryNames) {

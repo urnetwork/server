@@ -54,12 +54,17 @@ type sourceRepositories struct {
 	// sidecar module builds only beside this checkout, so a ledger without the
 	// pin is refused, as one that still names operator-proxy is.
 	Sidecar sourceRepository `yaml:"sidecar"`
+	// The twelfth repository (QD-1393). Every server commit since owner
+	// decision 251 requires operator-core and builds only beside this checkout,
+	// so a ledger without the pin is refused, as one without sidecar is.
+	OperatorCore sourceRepository `yaml:"operator-core"`
 }
 
 // sourceRepositoryNames returns every repository copied into and built by the
-// evaluator: the ten it has held and sidecar, in the order of the producers of
-// the sidecar/1 source graph (evaluator-sidecar.sh and its two policy
-// siblings). A fresh slice keeps callers from mutating the package policy.
+// evaluator: the ten it has held, sidecar and operator-core, in the order of
+// the producers of the sidecar/1 source graph (evaluator-sidecar.sh and its two
+// policy siblings). A fresh slice keeps callers from mutating the package
+// policy.
 func sourceRepositoryNames() []string {
 	return sourceRepositoryNamesForMode(false)
 }
@@ -77,7 +82,7 @@ func sourceRepositoryNamesForMode(_ bool) []string {
 		"userwireguard",
 		"sn",
 	}
-	return append(names, "warp", "gvisor", "sidecar")
+	return append(names, "warp", "gvisor", "sidecar", "operator-core")
 }
 
 // commits returns the complete evaluation-source identity for one epoch.
@@ -99,6 +104,7 @@ func (self sourceRepositories) commitsForMode(_ bool) map[string]string {
 		"warp":          self.Warp.Commit,
 		"gvisor":        self.Gvisor.Commit,
 		"sidecar":       self.Sidecar.Commit,
+		"operator-core": self.OperatorCore.Commit,
 	}
 	return commits
 }

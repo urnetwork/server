@@ -369,7 +369,7 @@ git() {
 sudo() { printf 'unexpected source seal\n'; exit 99; }
 `
 	for _, staging := range []bool{false, true} {
-		for _, failedRepository := range []string{"server", "sidecar"} {
+		for _, failedRepository := range []string{"server", "operator-core"} {
 			root := t.TempDir()
 			commits := map[string]string{}
 			repositories := sourceRepositoryNamesForMode(staging)

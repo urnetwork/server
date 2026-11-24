@@ -1,8 +1,9 @@
-// The evaluator takes sidecar as its eleventh repository through new producer
-// releases (QD-769). Each new producer is its historical sibling with the
-// longer repository list and the frozen selector that names it, and nothing
-// else; the three historical producers and their preparation programs stay at
-// the bytes version-one controls were made with.
+// The evaluator takes sidecar and operator-core as its eleventh and twelfth
+// repositories through new producer releases (QD-769, re-cut for operator-core
+// by QD-1393). Each new producer is its historical sibling with the longer
+// repository list and the frozen selector that names it, and nothing else; the
+// three historical producers and their preparation programs stay at the bytes
+// version-one controls were made with.
 package main
 
 import (
@@ -77,13 +78,14 @@ func sourceGraphSha256(content string) string {
 
 const (
 	sourceGraphTenList    = "REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor)\n"
-	sourceGraphElevenList = "REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor sidecar)\n"
-	sourceGraphNote       = "# This release measures the source graph of eleven repositories, the ten with\n" +
-		"# sidecar, and accepts only a request whose frozen policy names sidecar/1.\n"
+	sourceGraphTwelveList = "REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor sidecar operator-core)\n"
+	sourceGraphNote       = "# This release measures the source graph of twelve repositories, the ten with\n" +
+		"# sidecar and operator-core, and accepts only a request whose frozen policy\n" +
+		"# names sidecar/1.\n"
 	sourceGraphRequestCheck = "         (.evaluation_policy | type == \"object\" and .source_graph_policy == \"sidecar/1\") and\n"
 	sourceGraphPreparerNote = "# This release prepares the control of a round whose source graph is the ten\n" +
-		"# repositories with sidecar. It accepts only a request naming sidecar/1 and\n" +
-		"# runs only the producer of that graph, pinned below.\n"
+		"# repositories with sidecar and operator-core. It accepts only a request\n" +
+		"# naming sidecar/1 and runs only the producer of that graph, pinned below.\n"
 	sourceGraphPreparerCheck = ".evaluation_policy.source_graph_policy == \"sidecar/1\" and "
 )
 
@@ -118,7 +120,7 @@ func TestSourceGraphSidecarProducersDifferOnlyByTheGraph(t *testing.T) {
 			t.Fatalf("%s is not a release of its own", release.sidecarProducer)
 		}
 		seen[digest] = true
-		folded := sourceGraphReplaceOnce(t, release.sidecarProducer, content, sourceGraphElevenList, sourceGraphTenList)
+		folded := sourceGraphReplaceOnce(t, release.sidecarProducer, content, sourceGraphTwelveList, sourceGraphTenList)
 		folded = sourceGraphReplaceOnce(t, release.sidecarProducer, folded, sourceGraphNote, "")
 		folded = sourceGraphReplaceOnce(t, release.sidecarProducer, folded, sourceGraphRequestCheck, "")
 		folded = sourceGraphReplaceOnce(t, release.sidecarProducer, folded, `"site_listen","source_graph_policy","takeover_margin"`, `"site_listen","takeover_margin"`)
@@ -216,13 +218,13 @@ func TestSourceGraphWorkerSchemaBindsEachProducerToItsGraph(t *testing.T) {
 		if sourceGraphRequestAccepted(t, release.sidecarProducer, ten) {
 			t.Errorf("%s accepted a request of the ten repositories", release.sidecarProducer)
 		}
-		eleven := sourceGraphRequest(t, release)
-		eleven["evaluation_policy"].(map[string]any)["source_graph_policy"] = string(model.CompetitionSourceGraphPolicySidecar)
-		if !sourceGraphRequestAccepted(t, release.sidecarProducer, eleven) {
+		twelve := sourceGraphRequest(t, release)
+		twelve["evaluation_policy"].(map[string]any)["source_graph_policy"] = string(model.CompetitionSourceGraphPolicySidecar)
+		if !sourceGraphRequestAccepted(t, release.sidecarProducer, twelve) {
 			t.Fatalf("%s refused its own request", release.sidecarProducer)
 		}
-		if sourceGraphRequestAccepted(t, release.producer, eleven) {
-			t.Errorf("%s accepted a request of the eleven repositories", release.producer)
+		if sourceGraphRequestAccepted(t, release.producer, twelve) {
+			t.Errorf("%s accepted a request of the twelve repositories", release.producer)
 		}
 		for _, value := range []any{"", nil, 1, true, "sidecar", "sidecar/2", "legacy", []string{"sidecar/1"}} {
 			changed := sourceGraphRequest(t, release)
@@ -258,7 +260,7 @@ func TestSourceGraphWorkerSchemaBindsEachProducerToItsGraph(t *testing.T) {
 }
 
 // The private executor's helper moves with the graph: this tree's copy serves
-// only rounds of the eleven, as the helpers it builds and copies with do.
+// only rounds of the twelve, as the helpers it builds and copies with do.
 func TestSourceGraphPrivateHelperRequiresTheSelector(t *testing.T) {
 	release := sourceGraphReleases()[2]
 	request := sourceGraphRequest(t, release)
@@ -267,7 +269,7 @@ func TestSourceGraphPrivateHelperRequiresTheSelector(t *testing.T) {
 	}
 	request["evaluation_policy"].(map[string]any)["source_graph_policy"] = string(model.CompetitionSourceGraphPolicySidecar)
 	if !sourceGraphRequestAccepted(t, "evaluator-subevaluation.sh", request) {
-		t.Fatal("the private helper refused a request of the eleven repositories")
+		t.Fatal("the private helper refused a request of the twelve repositories")
 	}
 	request["evaluation_policy"].(map[string]any)["source_graph_policy"] = "sidecar/2"
 	if sourceGraphRequestAccepted(t, "evaluator-subevaluation.sh", request) {
@@ -275,11 +277,12 @@ func TestSourceGraphPrivateHelperRequiresTheSelector(t *testing.T) {
 	}
 }
 
-// One set at eleven: every program and list that names the evaluated
+// One set at twelve: every program and list that names the evaluated
 // repositories names the Go list, which is the control plane's graph.
-func TestSourceGraphEverySurfaceHoldsTheElevenRepositories(t *testing.T) {
+func TestSourceGraphEverySurfaceHoldsTheTwelveRepositories(t *testing.T) {
 	names := sourceRepositoryNames()
-	if !slices.Equal(names, model.CompetitionSourceRepositoryNames()) || !slices.Equal(names, sourceRepositoryNamesForMode(true)) || len(names) != 11 || names[10] != "sidecar" {
+	if !slices.Equal(names, model.CompetitionSourceRepositoryNames()) || !slices.Equal(names, sourceRepositoryNamesForMode(true)) || len(names) != 12 ||
+		names[10] != "sidecar" || names[11] != "operator-core" {
 		t.Fatalf("the evaluated repositories are %v", names)
 	}
 	graph, err := model.CompetitionSourceRepositoryNamesForGraphPolicy(model.CompetitionSourceGraphPolicySidecar)
@@ -291,7 +294,7 @@ func TestSourceGraphEverySurfaceHoldsTheElevenRepositories(t *testing.T) {
 		"evaluator-sidecar.sh", "evaluator-minimum-work-sidecar.sh", "evaluator-work-coverage-sidecar.sh"} {
 		content, _ := sourceGraphContainerFile(t, name)
 		if strings.Count(content, list) != 1 || strings.Count(content, "REPOSITORIES=(") != 1 {
-			t.Errorf("%s does not hold exactly the eleven repositories", name)
+			t.Errorf("%s does not hold exactly the twelve repositories", name)
 		}
 	}
 	dockerfile, _ := sourceGraphContainerFile(t, "Dockerfile.base")
@@ -312,11 +315,11 @@ func TestSourceGraphEverySurfaceHoldsTheElevenRepositories(t *testing.T) {
 		t.Fatal(err)
 	}
 	if bytes.Count(runMain, []byte("--argjson repositories '"+string(encoded)+"' '")) != 1 {
-		t.Error("run-main.sh does not verify a staging source of exactly the eleven repositories")
+		t.Error("run-main.sh does not verify a staging source of exactly the twelve repositories")
 	}
-	commits := sourceRepositoriesFromCommits(map[string]string{"sidecar": strings.Repeat("b", 40)}).commits()
-	if len(commits) != len(names) || commits["sidecar"] != strings.Repeat("b", 40) {
-		t.Errorf("the ledger shape does not carry sidecar: %v", commits)
+	commits := sourceRepositoriesFromCommits(map[string]string{"sidecar": strings.Repeat("b", 40), "operator-core": strings.Repeat("c", 40)}).commits()
+	if len(commits) != len(names) || commits["sidecar"] != strings.Repeat("b", 40) || commits["operator-core"] != strings.Repeat("c", 40) {
+		t.Errorf("the ledger shape does not carry sidecar and operator-core: %v", commits)
 	}
 	for _, repository := range names {
 		if _, present := commits[repository]; !present {

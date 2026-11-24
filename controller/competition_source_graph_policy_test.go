@@ -130,7 +130,7 @@ func TestSourceGraphHistoricalProducersAndPinsAreUnchanged(t *testing.T) {
 	}
 }
 
-// Each policy has its own producer of the eleven repositories, and the
+// Each policy has its own producer of the twelve repositories, and the
 // preparation program in this tree pins exactly that producer's bytes.
 func TestSourceGraphSidecarReleasePinsItsOwnProducers(t *testing.T) {
 	seenProducers, seenPrograms := map[string]bool{}, map[string]bool{}
@@ -179,7 +179,7 @@ func TestSourceGraphSidecarReleasePinsItsOwnProducers(t *testing.T) {
 		if strings.Count(producerSource, "\nREPOSITORIES=("+strings.Join(model.CompetitionSourceRepositoryNames(), " ")+")\nreadonly REPOSITORIES\n") != 1 ||
 			strings.Count(producerSource, `(.evaluation_policy | type == "object" and .source_graph_policy == "sidecar/1") and`) != 1 ||
 			strings.Count(producerSource, `"site_listen","source_graph_policy","takeover_margin"`) != 1 {
-			t.Errorf("%s: %s does not hold the eleven repositories under sidecar/1", c.name, producer)
+			t.Errorf("%s: %s does not hold the twelve repositories under sidecar/1", c.name, producer)
 		}
 	}
 	if _, _, _, err := roundBaselineSidecarProducer("unknown/1", nil); err == nil {
@@ -219,7 +219,7 @@ func TestSourceGraphSidecarReleaseIsCutFromThisTreeAndUnqualified(t *testing.T) 
 			t.Fatal(err)
 		}
 		if !bytes.Contains(content, []byte("\nREPOSITORIES=("+strings.Join(model.CompetitionSourceRepositoryNames(), " ")+")\n")) {
-			t.Errorf("%s does not hold the eleven repositories", name)
+			t.Errorf("%s does not hold the twelve repositories", name)
 		}
 	}
 	for _, c := range sourceGraphPolicyCases() {
@@ -245,13 +245,13 @@ func TestSourceGraphPolicyIsFrozenWithTheRound(t *testing.T) {
 	if err := settings.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	eleven := *settings
-	eleven.EvaluationPolicy.SourceGraphPolicy = model.CompetitionSourceGraphPolicySidecar
-	if err := eleven.Validate(); err != nil {
+	twelve := *settings
+	twelve.EvaluationPolicy.SourceGraphPolicy = model.CompetitionSourceGraphPolicySidecar
+	if err := twelve.Validate(); err != nil {
 		t.Fatal("sidecar/1 refused", err)
 	}
-	elevenPolicy, err := policySnapshot(&eleven)
-	if err != nil || !bytes.Contains(elevenPolicy, []byte(`"source_graph_policy":"sidecar/1"`)) {
+	twelvePolicy, err := policySnapshot(&twelve)
+	if err != nil || !bytes.Contains(twelvePolicy, []byte(`"source_graph_policy":"sidecar/1"`)) {
 		t.Fatal("the explicit source graph was not frozen", err)
 	}
 	unknown := *settings
@@ -259,22 +259,22 @@ func TestSourceGraphPolicyIsFrozenWithTheRound(t *testing.T) {
 	if unknown.Validate() == nil {
 		t.Fatal("an unknown source graph validated")
 	}
-	if _, err := decodeRoundPolicySnapshot(bytes.Replace(elevenPolicy, []byte(`"sidecar/1"`), []byte(`"sidecar/2"`), 1)); err == nil {
+	if _, err := decodeRoundPolicySnapshot(bytes.Replace(twelvePolicy, []byte(`"sidecar/1"`), []byte(`"sidecar/2"`), 1)); err == nil {
 		t.Fatal("a frozen round named an unknown source graph")
 	}
-	elevenRound := &roundRecord{RoundResult: RoundResult{RoundId: server.NewId(), Epoch: 1}, PolicyJson: elevenPolicy}
-	frozen, err := settingsForFrozenRound(settings, elevenRound)
+	twelveRound := &roundRecord{RoundResult: RoundResult{RoundId: server.NewId(), Epoch: 1}, PolicyJson: twelvePolicy}
+	frozen, err := settingsForFrozenRound(settings, twelveRound)
 	if err != nil || frozen.EvaluationPolicy.SourceGraphPolicy != model.CompetitionSourceGraphPolicySidecar || settings.EvaluationPolicy.SourceGraphPolicy != model.CompetitionSourceGraphPolicyLegacy {
 		t.Fatal("a round frozen under sidecar/1 took the process graph", err)
 	}
 	legacyRound := &roundRecord{RoundResult: RoundResult{RoundId: server.NewId(), Epoch: 1}, PolicyJson: legacyPolicy}
-	frozen, err = settingsForFrozenRound(&eleven, legacyRound)
+	frozen, err = settingsForFrozenRound(&twelve, legacyRound)
 	if err != nil || frozen.EvaluationPolicy.SourceGraphPolicy != model.CompetitionSourceGraphPolicyLegacy {
 		t.Fatal("a round frozen under the ten took the process graph", err)
 	}
 }
 
-// A staged future policy moves only its own epochs to the eleven, needs its own
+// A staged future policy moves only its own epochs to the twelve, needs its own
 // evaluator image for that, and never moves the current round.
 func TestSourceGraphFuturePolicySelectsItsOwnGraphAndImage(t *testing.T) {
 	settings := validSettings()
@@ -302,7 +302,7 @@ func TestSourceGraphFuturePolicySelectsItsOwnGraphAndImage(t *testing.T) {
 		staged.EvaluatorImageDigest = image
 		relabeled.FutureEpochPolicy = &staged
 		if _, err := relabeled.ForCompetitionEpoch(2); err == nil {
-			t.Fatalf("the image %q of the ten was relabeled as the eleven's", image)
+			t.Fatalf("the image %q of the ten was relabeled as the twelve's", image)
 		}
 	}
 	unknown := *settings
@@ -331,9 +331,16 @@ func TestSourceGraphSourceSettingsRefuseALockOfAnotherGraph(t *testing.T) {
 	for _, repository := range model.CompetitionSourceRepositoryNamesBeforeSidecar() {
 		ten[repository] = strings.Repeat("a", 40)
 	}
-	eleven := map[string]string{"sidecar": strings.Repeat("b", 40)}
+	twelve := map[string]string{"sidecar": strings.Repeat("b", 40), "operator-core": strings.Repeat("c", 40)}
 	for repository, commit := range ten {
-		eleven[repository] = commit
+		twelve[repository] = commit
+	}
+	// the eleven sidecar/1 named before operator-core
+	eleven := map[string]string{}
+	for repository, commit := range twelve {
+		if repository != "operator-core" {
+			eleven[repository] = commit
+		}
 	}
 	intentFor := func(commits map[string]string) *model.CompetitionSourceActivation {
 		lock, err := model.CompetitionSourceLockDigest(commits)
@@ -347,30 +354,39 @@ func TestSourceGraphSourceSettingsRefuseALockOfAnotherGraph(t *testing.T) {
 	if derived, err := sourceSettingsFromIntent(settings, intentFor(ten)); err != nil || derived.EvaluationPolicy.SourceGraphPolicy != model.CompetitionSourceGraphPolicyLegacy {
 		t.Fatal("the ten were refused under the graph of the ten", err)
 	}
-	if _, err := sourceSettingsFromIntent(settings, intentFor(eleven)); err == nil {
-		t.Fatal("a lock naming sidecar was prepared for an evaluator release of the ten")
+	if _, err := sourceSettingsFromIntent(settings, intentFor(twelve)); err == nil {
+		t.Fatal("a lock naming sidecar and operator-core was prepared for an evaluator release of the ten")
 	}
 	sidecar := *settings
 	sidecar.EvaluationPolicy.SourceGraphPolicy = model.CompetitionSourceGraphPolicySidecar
-	derived, err := sourceSettingsFromIntent(&sidecar, intentFor(eleven))
+	derived, err := sourceSettingsFromIntent(&sidecar, intentFor(twelve))
 	if err != nil || derived.EvaluationPolicy.SourceGraphPolicy != model.CompetitionSourceGraphPolicySidecar {
-		t.Fatal("the eleven were refused under sidecar/1", err)
+		t.Fatal("the twelve were refused under sidecar/1", err)
 	}
 	if _, err := sourceSettingsFromIntent(&sidecar, intentFor(ten)); err == nil {
-		t.Fatal("a lock of the ten was prepared for an evaluator release of the eleven")
+		t.Fatal("a lock of the ten was prepared for an evaluator release of the twelve")
+	}
+	// a lock of the eleven has no digest, so it is built by hand; it stands under
+	// neither graph
+	elevenIntent := intentFor(ten)
+	elevenIntent.Commits = eleven
+	for _, current := range []*Settings{settings, &sidecar} {
+		if _, err := sourceSettingsFromIntent(current, elevenIntent); err == nil {
+			t.Fatalf("a lock of sidecar without operator-core was prepared under %q", current.EvaluationPolicy.SourceGraphPolicy)
+		}
 	}
 	sidecar.roundBaselinePreparation = &roundBaselinePreparationProfile{Config: roundBaselinePreparationConfig{}}
-	if _, err := sourceSettingsFromIntent(&sidecar, intentFor(eleven)); err == nil {
-		t.Fatal("the eleven inherited the preparation role of the ten")
+	if _, err := sourceSettingsFromIntent(&sidecar, intentFor(twelve)); err == nil {
+		t.Fatal("the twelve inherited the preparation role of the ten")
 	}
 	sidecar.roundBaselinePreparation = &roundBaselinePreparationProfile{Config: roundBaselinePreparationConfig{SourceGraphPolicy: model.CompetitionSourceGraphPolicySidecar}}
-	if _, err := sourceSettingsFromIntent(&sidecar, intentFor(eleven)); err != nil {
-		t.Fatal("the eleven were refused their own preparation role", err)
+	if _, err := sourceSettingsFromIntent(&sidecar, intentFor(twelve)); err != nil {
+		t.Fatal("the twelve were refused their own preparation role", err)
 	}
 }
 
 // A receipt is accepted only from the release of the frozen round's graph: the
-// programs of the eleven write sidecar/1, those of the ten write nothing.
+// programs of the twelve write sidecar/1, those of the ten write nothing.
 func TestSourceGraphPreparationReceiptBindsTheFrozenGraph(t *testing.T) {
 	fixture := newRoundBaselinePreparationEvidenceFixture(t)
 	if _, _, err := authenticateRoundBaselinePreparation(fixture.directory, fixture.settings, fixture.preparation); err != nil {
@@ -379,7 +395,7 @@ func TestSourceGraphPreparationReceiptBindsTheFrozenGraph(t *testing.T) {
 	fixture.receipt.SourceGraphPolicy = model.CompetitionSourceGraphPolicySidecar
 	fixture.publish(t)
 	if _, _, err := authenticateRoundBaselinePreparation(fixture.directory, fixture.settings, fixture.preparation); err == nil {
-		t.Fatal("a receipt of the eleven authenticated a control of the ten")
+		t.Fatal("a receipt of the twelve authenticated a control of the ten")
 	}
 
 	fixture = newRoundBaselinePreparationEvidenceFixture(t)
@@ -397,12 +413,12 @@ func TestSourceGraphPreparationReceiptBindsTheFrozenGraph(t *testing.T) {
 	fixture.receipt.ContextSha256 = fixture.preparation.ContextSha256
 	fixture.publish(t)
 	if _, _, err := authenticateRoundBaselinePreparation(fixture.directory, fixture.settings, fixture.preparation); err == nil {
-		t.Fatal("a receipt of the ten authenticated a control of the eleven")
+		t.Fatal("a receipt of the ten authenticated a control of the twelve")
 	}
 	fixture.receipt.SourceGraphPolicy = model.CompetitionSourceGraphPolicySidecar
 	fixture.publish(t)
 	if _, _, err := authenticateRoundBaselinePreparation(fixture.directory, fixture.settings, fixture.preparation); err != nil {
-		t.Fatal("a receipt of the eleven did not authenticate its own control", err)
+		t.Fatal("a receipt of the twelve did not authenticate its own control", err)
 	}
 }
 
@@ -412,6 +428,6 @@ func TestSourceGraphPreparationRefusesAnotherGraphsRelease(t *testing.T) {
 	fixture := newRoundBaselinePreparationEvidenceFixture(t)
 	fixture.settings.roundBaselinePreparation.Config.SourceGraphPolicy = model.CompetitionSourceGraphPolicySidecar
 	if _, err := (CommandEvaluator{}).PrepareRoundBaseline(t.Context(), fixture.settings, fixture.preparation); err == nil || !strings.Contains(err.Error(), "another source graph") {
-		t.Fatal("a release of the eleven prepared a round of the ten", err)
+		t.Fatal("a release of the twelve prepared a round of the ten", err)
 	}
 }

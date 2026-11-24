@@ -16,19 +16,19 @@ import (
 )
 
 func TestCompetitionDistributedMeasuredGraphUsesCanonicalTenRepositoryContract(t *testing.T) {
-	// the ten with sidecar are measured as the ten alone are, and sidecar stands
-	// in for none of them
+	// the ten with sidecar and operator-core are measured as the ten alone are,
+	// the two stand in for none of them, and neither is measured without the other
 	withSidecar := map[string]string{}
 	for _, repository := range model.CompetitionSourceRepositoryNames() {
 		withSidecar[repository] = strings.Repeat("a", 40)
 	}
-	if len(withSidecar) != 11 || validateDistributedMeasuredCommits(withSidecar) != nil {
-		t.Fatal("the ten measured repositories with sidecar were refused")
+	if len(withSidecar) != 12 || validateDistributedMeasuredCommits(withSidecar) != nil {
+		t.Fatal("the ten measured repositories with sidecar and operator-core were refused")
 	}
-	for _, repository := range model.CompetitionSourceRepositoryNamesBeforeSidecar() {
+	for _, repository := range model.CompetitionSourceRepositoryNames() {
 		delete(withSidecar, repository)
 		if validateDistributedMeasuredCommits(withSidecar) == nil {
-			t.Fatal("sidecar replaced an absent measured product repository", repository)
+			t.Fatal("the graph was measured without", repository)
 		}
 		withSidecar[repository] = strings.Repeat("a", 40)
 	}

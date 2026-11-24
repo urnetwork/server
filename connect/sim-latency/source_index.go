@@ -73,7 +73,7 @@ func sourceIndexRepositoryUrl(repository string) (string, error) {
 	switch repository {
 	case "sn":
 		return "https://github.com/urfoundation/sn", nil
-	case "server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "warp", "gvisor", "sidecar":
+	case "server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "warp", "gvisor", "sidecar", "operator-core":
 		return "https://github.com/urnetwork/" + repository, nil
 	default:
 		return "", errors.New("source index repository is outside the complete frozen graph")
