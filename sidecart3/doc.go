@@ -77,8 +77,9 @@
 //     whose clients would run on T2's platform fakes, rather than passing it there; a T3 test enrolls
 //     T3Sidecars through server's api instead (scenario_sidecar.go), as many as it needs in each of a
 //     T3World's networks (world_networks.go), whose service requests reach the hosts it serves at their
-//     origins. evs is served so (world_evs.go); gkm's host and the MLS key client are not, so a world's
-//     keys come from sidecartest's FakeGkm on the real stores.
+//     origins. evs and gkm are served so (world_evs.go, world_gkm.go), and a world's devices run their
+//     real KeyDelivery key clients there as ur daemon composes them, or sidecartest's FakeGkm on the real
+//     stores where a case asks for it (T3WorldSettings.FakeGkm); the MLS key client is not here.
 //   - a link's conditions (SetLink) and a contract's class (SetContractClass) on server's exchange, which
 //     takes neither: a row that asks for one fails as unapplied (sidecartest.Net.Unapplied).
 //   - the capture of the exchange's frames (CC2).

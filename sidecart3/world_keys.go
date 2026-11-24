@@ -1,8 +1,8 @@
 package sidecart3
 
-// A T3 world device's real key and evs clients (T3WorldSettings.RealKeys; KEYS-M2-22, EVS1-M2-22, QD-804, QD-817): what
-// ur daemon builds for every network it hosts (sidecar/cli/daemon_clients.go), built here for one T3Device, since the
-// daemon's composition is package main:
+// A T3 world device's real key and evs clients (a world's default, T3WorldSettings.FakeGkm false; KEYS-M2-22,
+// EVS1-M2-22, QD-804, QD-817): what ur daemon builds for every network it hosts (sidecar/cli/daemon_clients.go), built
+// here for one T3Device, since the daemon's composition is package main:
 //
 //	key client   the network's KeyDelivery group client (sidecar.GkmGroupClient) over GkmApi at the world's gkm origin,
 //	             with the gkm hint intake and the ReaderKey upkeep, behind t3WorldKeysGkm, which keeps the newest state

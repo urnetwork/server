@@ -35,6 +35,13 @@ func TestT3NetworkSyncEndsItsWaitOnADeviceRetiredMeanwhile(t *testing.T) {
 			tb.Fatal(err)
 		}
 		defer world.Close()
+		// a world's real keys bootstrap and join through gkm and evs at their origins
+		if _, err := world.ServeEvs(ctx, nil); err != nil {
+			tb.Fatal(err)
+		}
+		if _, err := world.ServeGkm(ctx, nil); err != nil {
+			tb.Fatal(err)
+		}
 		network, err := world.AddNetwork(ctx, "a")
 		if err != nil {
 			tb.Fatal(err)

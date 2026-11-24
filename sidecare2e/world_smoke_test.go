@@ -323,7 +323,7 @@ func runWorldSmoke(t *testing.T, worldSettings *WorldSettings) {
 
 		// gkm: on real keys, each network's repo's group formed at gkm's block, generation 1 held by every sidecar, then
 		// rotated by its owner, generation 2 held by every sidecar, and written and read under
-		if world.T3().Settings().RealKeys {
+		if !world.T3().Settings().FakeGkm {
 			worldSmokeGkm(t, world, settings, networks, repoIds)
 		} else {
 			t.Logf("the gkm step runs on a world of real keys alone, and this world runs FakeGkm (WorldSettings.FakeGkm)")

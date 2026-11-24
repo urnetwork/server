@@ -1,14 +1,15 @@
 //go:build sidecar_e2e && sidecar_localstack && sidecar_pending
 
 // Full sidecars pushing to and reading from evs at once (the end-to-end tests' groundwork, e2e-client-origins): a T3
-// world (world_networks.go) with evs served at its origin (world_evs.go), and in it two networks, the first with
-// FirstSidecarCount sidecars and the second with SecondSidecarCount, every one a sidecar.Sidecar enrolled through
-// server's api from an auth key its owner made and Online on server's exchange. Each network's first sidecar bootstraps
-// it and admits the rest, creates a general repo through evs and grants its member, so all its sidecars, writer; then
-// every sidecar of both networks runs BurstCount bursts, one goroutine a burst, each writing its own path
-// BurstWriteCount times in order with random pauses and reading another burst's path between its writes. Every
-// sidecar runs at once; TestT3WorldEvsBursts runs each sidecar's bursts one after another on its evs client, and
-// TestT3WorldEvsBurstsShareEachClient runs them all at once on it, as an app's writes run beside its sync's reads.
+// world (world_networks.go) with evs and gkm served at their origins (world_evs.go, world_gkm.go), every device on its
+// real keys, and in it two networks, the first with FirstSidecarCount sidecars and the second with SecondSidecarCount,
+// every one a sidecar.Sidecar enrolled through server's api from an auth key its owner made and Online on server's
+// exchange. Each network's first sidecar bootstraps it and admits the rest, creates a general repo through evs, whose
+// group forms at gkm, and grants its member, so all its sidecars, writer; then every sidecar of both networks runs
+// BurstCount bursts, one goroutine a burst, each writing its own path BurstWriteCount times in order with random pauses
+// and reading another burst's path between its writes. Every sidecar runs at once; TestT3WorldEvsBursts runs each
+// sidecar's bursts one after another on its evs client, and TestT3WorldEvsBurstsShareEachClient runs them all at once
+// on it, as an app's writes run beside its sync's reads.
 //
 // What must hold, strictly:
 //
@@ -39,6 +40,7 @@ package sidecart3
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -418,6 +420,9 @@ func runT3EvsBursts(t *testing.T, settings *t3EvsBurstSettings) {
 		if _, err := world.ServeEvs(caseCtx, nil); err != nil {
 			tb.Fatal(err)
 		}
+		if _, err := world.ServeGkm(caseCtx, nil); err != nil {
+			tb.Fatal(err)
+		}
 
 		setUpCtx, cancelSetUp := context.WithTimeout(caseCtx, settings.PhaseTimeout)
 		first, err := setUpT3EvsBurstNetwork(setUpCtx, world, "a", settings.FirstSidecarCount, settings)
@@ -533,7 +538,8 @@ func TestT3WorldEvsBurstsShareEachClient(t *testing.T) {
 }
 
 // Holds evs's answer to the one read a test arms it for: the block answers that read in full, then its answer waits
-// until the test releases it, as a slow link holds a reply that has left evs. Every other request passes.
+// until the test releases it, as a slow link holds a reply that has left evs. Every other request passes, a read of
+// another repo among them, such as the config repo's heads a follower on real keys reads through evs.
 type t3EvsReadHold struct {
 	// closed once the armed read's answer waits
 	held chan struct{}
@@ -541,30 +547,33 @@ type t3EvsReadHold struct {
 	release chan struct{}
 
 	stateLock sync.Mutex
-	armed     bool
+	// the armed read's path, "" once taken or before the arm
+	armedPath string
 }
 
 func newT3EvsReadHold() *t3EvsReadHold {
 	return &t3EvsReadHold{held: make(chan struct{}), release: make(chan struct{})}
 }
 
-// Holds the next read's answer.
-func (self *t3EvsReadHold) arm() {
+// Holds the answer to the next read of repoId.
+func (self *t3EvsReadHold) arm(repoId sidecar.Id) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
-	self.armed = true
+	self.armedPath = "/evs/v1/repos/" + hex.EncodeToString(repoId[:]) + "/read"
 }
 
 // Whether request is the armed read, which this takes.
 func (self *t3EvsReadHold) take(request *http.Request) bool {
-	if request.Method != http.MethodPost || !strings.HasSuffix(request.URL.Path, "/read") {
+	if request.Method != http.MethodPost {
 		return false
 	}
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
-	taken := self.armed
-	self.armed = false
-	return taken
+	if self.armedPath == "" || request.URL.Path != self.armedPath {
+		return false
+	}
+	self.armedPath = ""
+	return true
 }
 
 // The block's handler with the hold in front of it (T3EvsSettings.Handler).
@@ -611,6 +620,9 @@ func TestT3WorldEvsReadAnsweredBeforeItsOwnWrite(t *testing.T) {
 		if _, err := world.ServeEvs(ctx, evsSettings); err != nil {
 			tb.Fatal(err)
 		}
+		if _, err := world.ServeGkm(ctx, nil); err != nil {
+			tb.Fatal(err)
+		}
 		network, err := world.AddNetwork(ctx, "a")
 		if err != nil {
 			tb.Fatal(err)
@@ -650,7 +662,7 @@ func TestT3WorldEvsReadAnsweredBeforeItsOwnWrite(t *testing.T) {
 			err     error
 		}
 		read := make(chan readResult, 1)
-		hold.arm()
+		hold.arm(repo.RepoId())
 		go func() {
 			var content bytes.Buffer
 			_, err := repo.ReadHead(ctx, &sidecar.EvsReadArgs{Path: "asked.txt"}, &content)

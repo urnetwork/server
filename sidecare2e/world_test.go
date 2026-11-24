@@ -32,7 +32,7 @@
 //	          T3Api from their owners' auth keys, Online on the exchange, their service origins at the blocks
 //	keys      each device's real key client at gkm's block, its network's KeyDelivery group client with no MLS, and its
 //	          EvsClient over it, the config repo's heads on evs and each network bootstrapped by its first owner's
-//	          follower, as ur daemon composes them (sidecart3's T3WorldSettings.RealKeys, world_keys.go): each repo's
+//	          follower, as ur daemon composes them (sidecart3's world_keys.go, T3WorldSettings.FakeGkm off): each repo's
 //	          group forms at gkm, and a joining device takes the config repo's key by the late delivery gkm's hint by
 //	          sidecar id asks for. WorldSettings.FakeGkm runs the T3World's FakeGkm instead, its deliveries reaching each
 //	          device and the config heads in memory, for a scenario built on it (the it bridge case forms its config
@@ -174,7 +174,7 @@ func WorldBlockNames() []string {
 // What a world runs with (QD-702): every count, bound and name it uses.
 type WorldSettings struct {
 	// The T3World the stores, api, oauth, exchange and clients are. nil: its defaults, with every service's gate
-	// opened on sidecar.yml (NewWorld sets SidecarYaml, RealKeys and KeyResyncInterval whatever this holds).
+	// opened on sidecar.yml (NewWorld sets SidecarYaml, FakeGkm and KeyResyncInterval whatever this holds).
 	T3 *sidecart3.T3WorldSettings
 	// The blocks' names, roots, credentials' windows and waits, as e2e-hosts-in-process's harness has them. nil:
 	// defaultE2eHostsSettings.
@@ -219,7 +219,7 @@ type WorldSettings struct {
 	// heads in memory, for a scenario built on it (the it bridge case forms its config group there): false, so each
 	// device's key client is its real KeyDelivery one at gkm's block, with no MLS, the config heads on evs and each
 	// network bootstrapped by its first owner's follower, as ur daemon composes them. NewWorld sets
-	// T3WorldSettings.RealKeys from this whatever T3 holds.
+	// T3WorldSettings.FakeGkm from this whatever T3 holds.
 	FakeGkm bool
 	// Each sidecar's gkm hint resync on real keys (T3WorldSettings.KeyResyncInterval): 0, the sidecar's own hourly one,
 	// since the hints reach every sidecar.
@@ -438,7 +438,7 @@ func NewWorld(t testing.TB, settings *WorldSettings) *World {
 		t3Settings = &copied
 	}
 	t3Settings.SidecarYaml = worldSidecarYaml(self.urnetworkEdge, settings.Push, settings.AclContractGate, settings.SidecarYamlLines)
-	t3Settings.RealKeys = !settings.FakeGkm
+	t3Settings.FakeGkm = settings.FakeGkm
 	t3Settings.KeyResyncInterval = settings.KeyResyncInterval
 	// api spends on a budget of its own over the world's Redis, as its process does, never the Net's fake
 	t3Settings.ApiWriteBudget = true

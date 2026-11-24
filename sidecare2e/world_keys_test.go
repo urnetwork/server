@@ -1,6 +1,6 @@
 //go:build sidecar_e2e && sidecar_pending && sidecar_localstack
 
-// The world on its real keys (the World's default, WorldSettings.FakeGkm false; sidecart3's T3WorldSettings.RealKeys,
+// The world on its real keys (the World's default, WorldSettings.FakeGkm false, and the T3World's; sidecart3's
 // world_keys.go): every device's key client is its own real one, ur daemon's composition, at the world's gkm block, the
 // config repo's heads live on evs, and each network is bootstrapped by its first owner's follower as ur daemon's is. A
 // network of KeysClientCount sidecars: the owner's follower bootstraps it (KF1's draft of the config group at gkm, the

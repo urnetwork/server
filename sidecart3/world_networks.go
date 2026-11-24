@@ -26,16 +26,27 @@ package sidecart3
 //	          under its own verifier of the svc- key, as a block given HostDeps.ServiceTokens does, never the process's
 //	networks  each a personal network in preview_networks, funded in the Net's quota and in a transfer balance of
 //	          server's, and in every gated service's gate
-//	          (AddNetwork): its first sidecar bootstraps it, signing the Genesis and base 1 through api (Bootstrap),
-//	          and admits the others (Admit), each then following the log through its own token with its own key
-//	          client; statements a device files go through POST /network/config/delta with its token (FileStatement)
+//	          (AddNetwork): its first sidecar bootstraps it (Bootstrap) and admits the others (Admit), each then
+//	          following the log through its own token with its own key client; statements a device files go through
+//	          POST /network/config/delta with its token (FileStatement)
+//	keys      each device's real key client at the world's gkm origin, its network's KeyDelivery group client with no
+//	          MLS, and its EvsClient over it at evs's origin, as ur daemon composes them (world_keys.go): each repo's
+//	          group forms at gkm, and a joining device takes the config repo's generation as the first wrap its
+//	          admission's signer delivers, or by a late delivery a holder's next sync makes. gkm and evs answer at their
+//	          origins: a test serves them (ServeGkm, ServeEvs), or a world of hosts its own blocks (sidecare2e's World)
+//	config    the config repo's heads on evs, read through each device's EvsClient, and each network bootstrapped by its
+//	          first owner's follower, as ur daemon's first owner bootstraps (§7.9, QD-824): its draft of the config
+//	          group at gkm, the first head's push on evs, base 1 through api and the config repo's activation
+//
+// With FakeGkm, the keys and the config are what the world ran before real keys were its default:
+//
 //	keys      sidecartest's FakeGkm on the Net's real stores, writing each generation's GenRotate where evs's gate reads
 //	          it, one client a device, handed each state its follower verifies; at KF1 the world's client also stores
 //	          the repo's GroupForm, signed by the device's identity key, where gkm stores it and evs's activate route
-//	          reads it (t3WorldGkmClient): gkm's own host and the MLS key client are not this world's (the file's gap
-//	          list)
+//	          reads it (t3WorldGkmClient)
 //	config    the config repo's heads are sidecartest's FakeConfigHeads in memory, one per network, as S1's genesis
-//	          clause keeps them: the config group's KF1 on gkm is not this world's either
+//	          clause keeps them, and the first sidecar signs the Genesis and base 1 through api itself, no config group
+//	          formed at gkm
 //
 // Every wait is on a monitor, a follow or a gate's load, bounded by SyncTimeout in real time only to fail a broken run.
 // What the world installs process-wide (the sequencer, the exchange's source and api's other installs, oauth's issuer
@@ -43,12 +54,13 @@ package sidecart3
 // every T3 test does. Its sidecars run until it closes, whatever context a call that added them carried. Safe for
 // concurrent use once made.
 //
-// keys with RealKeys: each device's real key client at the gkm origin and its EvsClient over it, the config repo's
-// heads on evs, and each network bootstrapped by its first owner's follower, as ur daemon runs them (world_keys.go).
-// A joining device takes the config repo's key only by a late delivery that gkm's hint by sidecar id asks for, which
-// gkm's own hint writer cannot address, and a repo's creation is refused by gkm's cached 404 of its placement
-// (sidecare2e's world_keys_test.go has the evidence), so RealKeys is off by default, and a key reaches a device through
-// FakeGkm's deliveries.
+// Real keys are the default, as they are sidecare2e's, since the fixes for what kept them off landed (sidecare2e's
+// world_keys_test.go names the findings): a joining device's ask is answered without a rotation, by the first wrap its
+// admission's signer delivers once its state shows the admission and by a late delivery at every holder's sync
+// (keys-late-delivery), and gkm and evs judge a keying repo/ and a repo's placement from a fresh read, so neither
+// refuses a delivery made right after the repo's activation or a creation its own readers race (gkm-repo-create-race).
+// A world on real keys bootstraps nothing until gkm and evs answer at their origins (Bootstrap refuses). FakeGkm stays
+// for a case built on it (sidecare2e's it bridge case forms its config group at FakeGkm).
 
 import (
 	"context"
@@ -134,22 +146,27 @@ type T3WorldSettings struct {
 	// How long, in real time, a wait for a gate's load, a follower's catch-up or a sidecar's standing may take: 60 s,
 	// only a broken run's bound.
 	SyncTimeout time.Duration
-	// Whether each device's keys go through gkm's host with its own real key client (world_keys.go, as ur daemon
-	// composes it), the config repo's heads live on evs, and the network's bootstrap is its first owner's follower's
-	// own (§7.9, QD-824): what a world that serves gkm and evs at their origins runs. false keeps FakeGkm's deliveries
-	// and the config heads in memory.
-	RealKeys bool
-	// With RealKeys, each device's gkm hint resync (SidecarSettings.Gkm.ResyncInterval), 0 keeping the sidecar's own
-	// hourly one: 1 s, since gkm's hint writer resolves no sidecar id yet (plan-KEYS-hint-addressing) and the world's
-	// exchange publishes no hint unless its settings turn sidecar push on, so a resync stands in for the hints. A world
-	// of hosts whose gkm block resolves sidecar ids and whose exchange publishes hints keeps the sidecar's own
-	// (sidecare2e's World).
+	// Whether the world's keys are sidecartest's FakeGkm, its deliveries reaching each device, with the config repo's
+	// heads in memory and each network's Genesis and base 1 signed by its first sidecar (the file's FakeGkm rows), for a
+	// case built on it: false, so each device's key client is its own real one at gkm's origin, as ur daemon composes it
+	// (world_keys.go), the config repo's heads live on evs, and each network's bootstrap is its first owner's follower's
+	// own (§7.9, QD-824), which needs gkm and evs served at their origins.
+	FakeGkm bool
+	// On real keys, each device's gkm hint resync (SidecarSettings.Gkm.ResyncInterval), 0 keeping the sidecar's own
+	// hourly one: 1 s, since no gkm hint reaches this world's devices: the exchange publishes none unless its settings
+	// turn sidecar push on, and ServeGkm's block writes its hints to the Net's fake Push. Every sync answers the late
+	// asks gkm holds and delivers to the holders a generation's state left out (keys-late-delivery), so a resync stands
+	// in for the hints. A world of hosts whose gkm block resolves sidecar ids through api's internal identity route and
+	// whose exchange publishes hints keeps the sidecar's own (sidecare2e's World).
 	KeyResyncInterval time.Duration
-	// With RealKeys, how long, in real time, a joining device's follower may take to stand, in place of SyncTimeout: its
-	// join waits on a late delivery of the config repo's generation (§10.6), which a holder makes up to
-	// LateDeliverJitter, 15 s, after gkm's hint, and which gkm refuses while its 5 s repo/ cache still holds the config
-	// repo as keying. The joiner then asks again at its follower's first retry past LateAskInterval, a minute, which
-	// the config client's backoff from 10 s puts 70 s or 150 s after its first follow (e2e-world saw 124 s). 5 min.
+	// On real keys, how long, in real time, a joining device's follower may take to stand, in place of SyncTimeout: its
+	// join waits on the config repo's generation, which the signer of its admission delivers as its first wrap once
+	// its state shows the admission, and which a holder otherwise delivers late at its next sync, each
+	// KeyResyncInterval here (§10.6's late wraps; keys-late-delivery). gkm takes the delivery even right after the
+	// config repo's activation, since it caches no keying repo/ (GkmServiceSettings.RepoKeyingCacheTtl, 0), so a join
+	// here takes about as long as a statement's sync. 5 min, only a broken run's bound, kept past SyncTimeout for a
+	// world of hosts whose holders resync hourly: there a joiner whose first wrap missed it waits on its late ask, asked
+	// again each LateAskInterval, a minute, and answered up to LateDeliverJitter, 15 s, after a holder hears it.
 	KeyJoinTimeout time.Duration
 	// Whether api's sequencer and rev/ store spend on a write budget of api's own over the world's Redis
 	// (evsservice.NewWriteBudget on the world's host, as controller.installApiAuthorization builds api's), reporting its
@@ -158,9 +175,9 @@ type T3WorldSettings struct {
 	ApiWriteBudget bool
 	// Whether each device's follower runs §16.6's spend check on the log's GrantActivates and bridge approvals
 	// (ConfigLogSettings.AclSpendCheck, sidecar.NewSpendCheck) under FakeGkm, as ur daemon's follower does (cli's
-	// daemon_config.go) and RealKeys' followers always do. false keeps FakeGkm's followers on the defaults, which
+	// daemon_config.go) and real keys' followers always do. false keeps FakeGkm's followers on the defaults, which
 	// install none, so each refuses every GrantActivate as unbuilt while api, whose sequencer installs the check,
-	// takes it.
+	// takes it. Unread on real keys.
 	FollowerSpendCheck bool
 }
 
@@ -1008,7 +1025,7 @@ func (self *T3Network) enroll(ctx context.Context, name string, root string, mem
 		return nil, err
 	}
 	sidecarSettings := sidecar.DefaultSidecarSettings()
-	if self.world.settings.RealKeys && 0 < self.world.settings.KeyResyncInterval {
+	if !self.world.settings.FakeGkm && 0 < self.world.settings.KeyResyncInterval {
 		sidecarSettings.Gkm.ResyncInterval = self.world.settings.KeyResyncInterval
 	}
 	if settings != nil {
@@ -1035,8 +1052,8 @@ func (self *T3Network) enroll(ctx context.Context, name string, root string, mem
 	return device, nil
 }
 
-// The device's key client on its current Sidecar (the file's keys row): its real one with RealKeys, else FakeGkm's
-// for its identity. At enrollment, and again at each Restart, whose new Sidecar the old clients no longer reach.
+// The device's key client on its current Sidecar (the file's keys row): its real one, or with FakeGkm FakeGkm's for
+// its identity. At enrollment, and again at each Restart, whose new Sidecar the old clients no longer reach.
 func (self *T3Device) buildKeys() error {
 	running := self.T3Sidecar
 	network := self.Network
@@ -1045,7 +1062,7 @@ func (self *T3Device) buildKeys() error {
 		return fmt.Errorf("%s holds no identity", self.Name)
 	}
 	device := self
-	if network.world.settings.RealKeys {
+	if !network.world.settings.FakeGkm {
 		keys, err := newT3WorldKeys(running.Sidecar(), running.Settings.Log, func(ctx context.Context, signedType bridge.SignedType, body proto.Message) error {
 			_, err := network.FileStatement(ctx, device, signedType, body)
 			return err
@@ -1130,14 +1147,21 @@ func (self *T3Network) genesisChain() (*[sha256.Size]byte, error) {
 	return self.genesis, nil
 }
 
-// owner, an enrolled sidecar of the network, signs the Genesis and base 1 through POST /network/config/projection
-// (§7.9's bootstrap), its first head on the network's config heads, then follows the log with its key client: base 1
-// held by the owner's follower and by every gate of the world.
+// owner, an enrolled sidecar of the network, bootstraps it (§7.9's bootstrap): on real keys its follower does, as ur
+// daemon's first owner does (bootstrapByFollower), refused at once unless gkm and evs answer at their origins, where
+// it forms the config group and pushes the first head; with FakeGkm it signs the Genesis and base 1 through POST
+// /network/config/projection itself, its first head on the network's config heads, then follows the log with its key
+// client. Either way base 1 is held by the owner's follower and by every gate of the world.
 func (self *T3Network) Bootstrap(ctx context.Context, owner *T3Device) error {
 	if owner.Network != self {
 		return fmt.Errorf("%s is no sidecar of %s", owner.Name, self.Name)
 	}
 	if owner.keys != nil {
+		for _, service := range []string{"gkm", "evs"} {
+			if !self.world.api.servesService(service) {
+				return fmt.Errorf("%s bootstraps on real keys only with %s answering at its origin (T3World.ServeGkm and ServeEvs, or a world of hosts' own blocks), or on FakeGkm (T3WorldSettings.FakeGkm)", self.Name, service)
+			}
+		}
 		return self.bootstrapByFollower(ctx, owner)
 	}
 	running := owner.Sidecar()
@@ -1177,7 +1201,7 @@ func (self *T3Network) Bootstrap(ctx context.Context, owner *T3Device) error {
 	return self.Sync(ctx, bootstrap.Pin.GetVersion())
 }
 
-// With RealKeys, owner's follower bootstraps the network itself, as ur daemon's first owner does (§7.9, QD-824): its
+// On real keys, owner's follower bootstraps the network itself, as ur daemon's first owner does (§7.9, QD-824): its
 // draft, KF1's draft of the config group at gkm, the first head's push sealed on evs, base 1 through api and the config
 // repo's activation, until it stands; the genesis A_0 it then anchors at is the network's.
 func (self *T3Network) bootstrapByFollower(ctx context.Context, owner *T3Device) error {
@@ -1437,10 +1461,10 @@ type T3Device struct {
 	MemberId sidecar.Id
 	// The tag ids its auth key carried, 32 lowercase hex each; none for a member's device.
 	TagIds []string
-	// Its key client: FakeGkm's client for its identity, signing by its identity key (the file's keys row), or with
-	// RealKeys its real one (keys).
+	// Its key client: its real one (keys), or with FakeGkm FakeGkm's client for its identity, signing by its identity
+	// key (the file's keys rows).
 	Gkm sidecar.GkmClient
-	// With RealKeys, its key and evs clients as ur daemon composes them (world_keys.go); nil otherwise.
+	// On real keys, its key and evs clients as ur daemon composes them (world_keys.go); nil with FakeGkm.
 	keys *t3WorldKeys
 
 	stateLock sync.Mutex
