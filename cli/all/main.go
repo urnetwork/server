@@ -1,6 +1,9 @@
 // Command all runs the operator's API, Connect exchange and complete task
 // worker in one process. Schema changes and initial task seeding are explicit
 // commands; serving never migrates a database. Extender gossip is opt-in.
+// Before any service starts, the process installs what each of the three runs
+// on, as api's, connect's and taskworker's own mains do, each part once
+// (operatorInstallParts).
 package main
 
 import (
@@ -12,10 +15,13 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
+
+	"github.com/urnetwork/sidecar"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/api"
@@ -26,6 +32,7 @@ import (
 	"github.com/urnetwork/server/router"
 	"github.com/urnetwork/server/sidecarhost"
 	"github.com/urnetwork/server/taskworker"
+	"github.com/urnetwork/server/taskworker/work"
 )
 
 const usage = `URnetwork operator in one process.
@@ -47,6 +54,8 @@ Run options:
   --require-subnet               Refuse missing, disabled or invalid st.yml.
   --memory-owner-ledger          Enable Connect transfer-owner accounting.
   --private-heap-profile-target=config  Config, disabled, or exact host/block.
+  --feed-dir=                    Listing feed mirror for the mail breakers; none
+                                 leaves the listing unknown.
 
 Set WARP_ENV, WARP_HOST, WARP_SERVICE, WARP_BLOCK, WARP_DOMAIN,
 WARP_VERSION, WARP_HOST_IPV4 and WARP_PORTS before starting. WARP_PORTS
@@ -68,6 +77,9 @@ type commandOptions struct {
 	requireSubnet     bool
 	memoryOwnerLedger bool
 	privateHeapTarget string
+	// taskworker's --feed_dir: this host's copy of the listing feed's mirror,
+	// which §21.5's mail breakers read; empty leaves the listing unknown
+	feedDirectory string
 }
 
 // The complete command line is validated before loading credentials.
@@ -109,6 +121,7 @@ func parseCommand(args []string) (commandOptions, error) {
 	flags.BoolVar(&options.requireSubnet, "require-subnet", false, "require enabled subnet settlement")
 	flags.BoolVar(&options.memoryOwnerLedger, "memory-owner-ledger", false, "Connect memory accounting")
 	flags.StringVar(&options.privateHeapTarget, "private-heap-profile-target", "config", "Connect private heap scope")
+	flags.StringVar(&options.feedDirectory, "feed-dir", "", "mail breakers' listing feed mirror")
 	if err := flags.Parse(args); err != nil {
 		return options, err
 	}
@@ -390,17 +403,40 @@ func validateGossip(port int, config *controller.ExtenderConfig, configErr error
 	return nil
 }
 
+// The ServiceHost the process sets its Env with and installs what its services
+// run on over. This process runs api, connect and taskworker, and gossip when
+// asked, so it is the smallest ServiceHost their own services fill, with the
+// widest of their grants, api's and taskworker's: the db, Redis, metrics, the
+// service token authenticator, sidecar.yml's gates and the worker's own
+// sidecar task registry answer, and every service none of them builds here
+// refuses.
+func newProcessHost(ctx context.Context) *sidecar.ServiceHost {
+	return sidecarhost.NewServiceHost(ctx, &sidecarhost.ServiceHostOptions{Postgres: true, Tasks: taskworker.SidecarTasks()})
+}
+
 // Sets the process's Env, operator's global one, which sidecar/handler and
-// sidecar/work read (QD-1027), before any service starts. This process runs
-// api, connect and taskworker, and gossip when asked, so it sets one Env with
-// the widest of their grants, api's and taskworker's: over the smallest
-// ServiceHost their own services fill, so the db, Redis, metrics, the service
-// token authenticator, sidecar.yml's gates and the worker's own sidecar task
-// registry answer, and every service none of them builds here refuses.
-func setProcessEnv(ctx context.Context) error {
-	host := sidecarhost.NewServiceHost(ctx, &sidecarhost.ServiceHostOptions{Postgres: true, Tasks: taskworker.SidecarTasks()})
+// sidecar/work read (QD-1027), over host, before any service starts.
+func setProcessEnv(host *sidecar.ServiceHost) error {
 	_, err := core.SetProcessEnv("all", host)
 	return err
+}
+
+// What the services this process runs run on, over host, as their own mains
+// install it: api's route set's parts, which api's main installs
+// (controller.InstallApiRoutes), connect's exchange's, which connect's does
+// (controller.InstallConnectExchange), and taskworker's tasks', which
+// taskworker's does (work.InstallTaskworkerTasks); gossip's installs nothing.
+// controller.InstallProcessParts installs each part once: §21's parts, which
+// api's and taskworker's lists both name, once, and connect's hard deny and
+// authorization not at all, since api's standing and authorization cover them
+// (controller/process_install_parts.go), so no worker of theirs runs twice.
+// apiDeps may be nil, as api's main passes.
+func operatorInstallParts(host *sidecar.ServiceHost, options commandOptions, apiDeps *controller.ApiRoutesInstallDeps) []controller.ProcessInstallPart {
+	return slices.Concat(
+		controller.ApiRoutesInstallParts(host, apiDeps),
+		controller.ConnectExchangeInstallParts(host),
+		work.TaskworkerTasksInstallParts(&work.TaskworkerTasksInstallArgs{FeedDirectory: options.feedDirectory}),
+	)
 }
 
 // Startup reads the same Warp resources as standalone services. Optional
@@ -435,9 +471,13 @@ func runCommand(ctx context.Context, options commandOptions, output io.Writer) e
 		if err := validateGossip(options.gossipPort, extenderConfig, extenderErr); err != nil {
 			return err
 		}
-		if err := setProcessEnv(ctx); err != nil {
+		host := newProcessHost(ctx)
+		if err := setProcessEnv(host); err != nil {
 			return err
 		}
+		// what the services run on, before any of them starts, and the one
+		// undo, once supervise has joined every service's drain
+		defer controller.InstallProcessParts(ctx, operatorInstallParts(host, options, nil))()
 		services := operatorServices(options, serviceRunners{api: api.Run, connect: connectserver.Run, taskworker: taskworker.Run, gossip: gossip.Run})
 		return supervise(ctx, services, server.StartStatsPusher)
 	default:

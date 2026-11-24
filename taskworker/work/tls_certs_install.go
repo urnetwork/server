@@ -38,6 +38,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"sync"
 
 	"github.com/urnetwork/glog"
 
@@ -125,14 +126,22 @@ func NewTlsCertChainsInstall(deps *TlsCertChainsInstallDeps, settings *TlsCertCh
 
 // Starts taskworker's certs install: the order, renewal and revocation chains
 // run on the engine while sidecar.yml's certs switch is on and its files are
-// there, and run empty passes otherwise. It follows the switch until ctx ends,
-// then removes what it installed.
-func InstallTlsCertChains(ctx context.Context) *server.SidecarSwitchInstall {
+// there, and run empty passes otherwise. It follows the switch until ctx ends
+// or the returned call, then removes what it installed; the call returns once
+// it has.
+func InstallTlsCertChains(ctx context.Context) (remove func()) {
 	install := NewTlsCertChainsInstall(nil, nil)
-	go server.HandleError(func() {
-		install.Run(ctx)
+	runCtx, cancel := context.WithCancel(ctx)
+	var lifetime sync.WaitGroup
+	lifetime.Go(func() {
+		server.HandleError(func() {
+			install.Run(runCtx)
+		})
 	})
-	return install
+	return func() {
+		cancel()
+		lifetime.Wait()
+	}
 }
 
 // Builds the engine and installs it as the chains'; the returned call removes

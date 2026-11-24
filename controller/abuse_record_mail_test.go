@@ -477,9 +477,11 @@ func TestAbuseMailboxMailEndsWithItsContext(t *testing.T) {
 }
 
 // A process mails records only once it installs the production mailer, which
-// taskworker's startup and the install of api's route set alone do, the latter
-// called by api's and alt's startup alone, the two processes that serve that
-// set: before, the process's mailer refuses each record as unavailable.
+// §21's install parts alone do, in the lists of api's route set and of
+// taskworker's tasks: so api's, alt's and taskworker's startup install it, and
+// all's, which runs api and taskworker in one process, the processes that
+// serve that set or run the worker. Before, the process's mailer refuses each
+// record as unavailable.
 func TestAbuseRecordMailerIsInstalledByTheApiRouteProcessesAndTaskworkerAlone(t *testing.T) {
 	_, mailer, _ := currentAbuseActionDeps()
 	if err := mailer.MailAbuseRecord(context.Background(), testAbuseRecord()); !errors.Is(err, ErrAbuseRecordMailerUnavailable) {
@@ -492,8 +494,10 @@ func TestAbuseRecordMailerIsInstalledByTheApiRouteProcessesAndTaskworkerAlone(t 
 		t.Fatalf("installed %T in a binary that links MG5: %t", installed, server.SidecarMg5Linked())
 	}
 
-	// the module's callers of the install: taskworker's main and the route set's install, whose own callers are
-	// api's and alt's mains
+	// the module's callers of the install, down to the mains: §21's parts, which the lists of api's route set and of
+	// taskworker's tasks hold; the route set's list, which its install and all's main install, its install called
+	// by api's and alt's mains; and taskworker's list, which its install and all's main install, its install called
+	// by taskworker's main
 	moduleRoot, err := filepath.Abs("..")
 	if err != nil {
 		t.Fatal(err)
@@ -536,11 +540,20 @@ func TestAbuseRecordMailerIsInstalledByTheApiRouteProcessesAndTaskworkerAlone(t 
 		slices.Sort(callers)
 		return callers
 	}
-	if callers, want := callersOf("InstallAbuseRecordMailer"), []string{"cli/taskworker/main.go", "controller/api_routes_install.go"}; !slices.Equal(callers, want) {
-		t.Fatalf("InstallAbuseRecordMailer is called from %v, want %v", callers, want)
-	}
-	if callers, want := callersOf("InstallApiRoutes"), []string{"cli/alt/main.go", "cli/api/main.go"}; !slices.Equal(callers, want) {
-		t.Fatalf("InstallApiRoutes is called from %v, want %v", callers, want)
+	for _, c := range []struct {
+		name string
+		want []string
+	}{
+		{name: "InstallAbuseRecordMailer", want: []string{"controller/process_install_parts.go"}},
+		{name: "AbuseInstallParts", want: []string{"controller/api_routes_install.go", "taskworker/work/taskworker_tasks_install.go"}},
+		{name: "ApiRoutesInstallParts", want: []string{"cli/all/main.go", "controller/api_routes_install.go"}},
+		{name: "TaskworkerTasksInstallParts", want: []string{"cli/all/main.go", "taskworker/work/taskworker_tasks_install.go"}},
+		{name: "InstallApiRoutes", want: []string{"cli/alt/main.go", "cli/api/main.go"}},
+		{name: "InstallTaskworkerTasks", want: []string{"cli/taskworker/main.go"}},
+	} {
+		if callers := callersOf(c.name); !slices.Equal(callers, c.want) {
+			t.Fatalf("%s is called from %v, want %v", c.name, callers, c.want)
+		}
 	}
 }
 
