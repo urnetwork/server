@@ -79,15 +79,18 @@ require (
 	github.com/ProjectZKM/Ziren/crates/go-runtime/zkvm_runtime v0.0.0-20251001021608-1fe7b43fc4d6 // indirect
 	github.com/StackExchange/wmi v1.2.1 // indirect
 	github.com/andybalholm/brotli v1.2.7 // indirect
+	github.com/beevik/etree v1.7.0 // indirect
 	github.com/benbjohnson/clock v1.3.5 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bits-and-blooms/bitset v1.24.4 // indirect
 	github.com/blang/semver/v4 v4.0.0 // indirect
 	github.com/blendle/zapdriver v1.3.1 // indirect
+	github.com/cloudflare/circl v1.6.5 // indirect
 	github.com/consensys/gnark v0.15.0 // indirect
 	github.com/consensys/gnark-crypto v0.20.1 // indirect
 	github.com/cosmos/go-bip39 v1.0.0 // indirect
 	github.com/crate-crypto/go-eth-kzg v1.4.0 // indirect
+	github.com/creack/pty v1.1.24 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/davidlazar/go-crypto v0.0.0-20200604182044-b73af7476f6c // indirect
 	github.com/deckarep/golang-set v1.8.0 // indirect
@@ -96,10 +99,13 @@ require (
 	github.com/decred/dcrd/crypto/blake256 v1.1.0 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/ebitengine/purego v0.11.2 // indirect
+	github.com/emersion/go-ical v0.0.0-20261112170022-46c5b53a1723 // indirect
 	github.com/emersion/go-imap/v2 v2.0.0-beta.9 // indirect
 	github.com/emersion/go-message v0.18.2 // indirect
 	github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6 // indirect
 	github.com/emersion/go-smtp v0.25.1 // indirect
+	github.com/emersion/go-webdav v0.8.0 // indirect
 	github.com/emicklei/dot v1.6.2 // indirect
 	github.com/ethereum/c-kzg-4844/v2 v2.1.5 // indirect
 	github.com/fatih/color v1.19.0 // indirect
@@ -107,7 +113,7 @@ require (
 	github.com/filecoin-project/go-clock v0.1.0 // indirect
 	github.com/flynn/noise v1.1.0 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
-	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
+	github.com/fxamacker/cbor/v2 v2.9.6 // indirect
 	github.com/gagliardetto/binary v0.8.0 // indirect
 	github.com/gagliardetto/treeout v0.1.4 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
@@ -117,6 +123,10 @@ require (
 	github.com/gofrs/flock v0.13.0 // indirect
 	github.com/golang/snappy v1.0.0 // indirect
 	github.com/google/btree v1.1.3 // indirect
+	github.com/google/go-sev-guest v0.15.1-0.20261120002523-d591100d9985 // indirect
+	github.com/google/go-tdx-guest v0.3.2-0.20261123220626-a4ee4f4ee52a // indirect
+	github.com/google/go-tpm v0.9.8 // indirect
+	github.com/google/logger v1.1.1 // indirect
 	github.com/google/pprof v0.0.0-20260202012954-cb029daf43ef // indirect
 	github.com/gtank/merlin v0.1.1 // indirect
 	github.com/gtank/ristretto255 v0.1.2 // indirect
@@ -129,9 +139,11 @@ require (
 	github.com/jackpal/go-nat-pmp v1.0.2 // indirect
 	github.com/jbenet/go-temp-err-catcher v0.1.0 // indirect
 	github.com/jmespath/go-jmespath v0.4.0 // indirect
+	github.com/jonboulle/clockwork v0.5.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.4.0 // indirect
 	github.com/klauspost/crc32 v1.3.0 // indirect
 	github.com/koron/go-ssdp v0.9.1 // indirect
+	github.com/kr/fs v0.1.0 // indirect
 	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/letsencrypt/challtestsrv v1.4.2 // indirect
 	github.com/libp2p/go-buffer-pool v0.1.0 // indirect
@@ -184,6 +196,7 @@ require (
 	github.com/pion/webrtc/v4 v4.2.18 // indirect
 	github.com/pires/go-proxyproto v0.16.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
+	github.com/pkg/sftp v1.13.12 // indirect
 	github.com/prometheus/procfs v0.21.1 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/quic-go/webtransport-go v0.12.0 // indirect
@@ -193,6 +206,7 @@ require (
 	github.com/rs/cors v1.8.2 // indirect
 	github.com/rs/xid v1.6.0 // indirect
 	github.com/rs/zerolog v1.34.0 // indirect
+	github.com/russellhaering/goxmldsig v1.6.1 // indirect
 	github.com/segmentio/asm v1.1.3 // indirect
 	github.com/segmentio/encoding v0.5.4 // indirect
 	github.com/shirou/gopsutil v3.21.4-0.20210419000835-c7a38de76ee5+incompatible // indirect
@@ -202,11 +216,13 @@ require (
 	github.com/stretchr/testify v1.12.1 // indirect
 	github.com/supranational/blst v0.3.16-0.20250831170142-f48500c1fdbe // indirect
 	github.com/syndtr/goleveldb v1.0.1-0.20210819022825-2ae1ddf74ef7 // indirect
+	github.com/teambition/rrule-go v1.8.2 // indirect
 	github.com/theodorsm/covert-dtls v1.5.1 // indirect
 	github.com/tinylib/msgp v1.6.4 // indirect
 	github.com/tklauser/go-sysconf v0.3.12 // indirect
 	github.com/tklauser/numcpus v0.6.1 // indirect
 	github.com/urnetwork/goidenticons v0.0.0 // indirect
+	github.com/veraison/go-cose v1.1.0 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
@@ -257,6 +273,12 @@ replace github.com/urnetwork/sidecar/smtpproof => ../sidecar/smtpproof
 replace github.com/emersion/go-smtp => ../sidecar/third_party/go-smtp
 
 replace github.com/mjl-/mox => ../sidecar/third_party/mox
+
+// The attestation verifiers' trimmed copies of Google's go-tdx-guest and go-sev-guest, which sidecar's root
+// requires, repeated as the two above are (sidecar/third_party/*/URNETWORK.md).
+replace github.com/google/go-tdx-guest => ../sidecar/third_party/go-tdx-guest
+
+replace github.com/google/go-sev-guest => ../sidecar/third_party/go-sev-guest
 
 replace github.com/urnetwork/glog => ../glog
 
