@@ -225,10 +225,12 @@ func sidecarSyncCoreFeatures(ctx context.Context, networkId server.Id, sidecarId
 		glog.Warningf("[sync]%s could not keep sidecar %s's stated features: %v\n", networkId, sidecarId, err)
 	}
 	sequencer, err := model.CurrentConfigLogSequencer()
-	if err != nil {
+	if err != nil || settings.ListTimeout <= 0 {
 		return nil
 	}
-	lacking, err := sequencer.SidecarFeaturesLacking(ctx, settings, networkId, sidecarId, features)
+	listCtx, cancel := context.WithTimeout(ctx, settings.ListTimeout)
+	defer cancel()
+	lacking, err := sequencer.SidecarFeaturesLacking(listCtx, settings, networkId, sidecarId, features)
 	if err != nil {
 		glog.Warningf("[sync]%s could not list the sidecars lacking a feature: %v\n", networkId, err)
 		return nil

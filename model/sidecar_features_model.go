@@ -38,6 +38,10 @@ type SidecarFeaturesSettings struct {
 	// The most sidecars one core answer lists as lacking a feature: 1,000, past which it says more were left out, so
 	// an answer to a large network stays bounded. Non-positive lists none, saying more wherever one lacks a feature.
 	ListedSidecarCount int
+	// The bound of the whole listing on one core answer, the caught-up state's store reads included: 2 s, so a slow
+	// store costs an Owner's or Admin's device the advisory list alone, never the core state it rides on. Non-positive
+	// lists nothing.
+	ListTimeout time.Duration
 	// How long a network's hash lives past its last write: 30 days. Every online sidecar states its features at least
 	// hourly, so only a network none of whose sidecars synced for that long loses it, a deleted one among them, and a
 	// lost entry reads as stating none, the cautious direction. Non-positive keeps the hash until its entries are
@@ -50,6 +54,7 @@ func DefaultSidecarFeaturesSettings() *SidecarFeaturesSettings {
 	return &SidecarFeaturesSettings{
 		RedisTimeout:       5 * time.Second,
 		ListedSidecarCount: 1000,
+		ListTimeout:        2 * time.Second,
 		HashTtl:            30 * 24 * time.Hour,
 	}
 }
