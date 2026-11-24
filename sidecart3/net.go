@@ -134,13 +134,17 @@ var netFaultRedis sync.Map
 // Engines hosting on server's stores, Platform running the clients on server's exchange, the platform
 // fakes refused, and a row's authorization log on server's sequencer. Each Net arms server.Tx's pg-commit hook on t while it is open, so Nets are built one at
 // a time, as sidecartest's hooks already require. A Net that opens a client needs server's schema, so a
-// row with clients runs in a TestEnv that applies the migrations. settings nil takes the defaults.
+// row with clients runs in a TestEnv that applies the migrations. What its Close leaves running fails t
+// (net_close_failed.go), unless settings.Net takes it itself. settings nil takes the defaults.
 func NetSettings(t testing.TB, settings *Settings) *sidecartest.NetSettings {
 	if settings == nil {
 		settings = DefaultSettings()
 	}
 	netSettings := *settings.Net
 	netSettings.RefusePlatformFakes = refusePlatformFakes
+	if netSettings.CloseFailed == nil {
+		netSettings.CloseFailed = t3NetCloseFailed(t, netSettings.CloseDumpByteCount)
+	}
 	// the oracle's read access to server's tables (store_view.go)
 	netSettings.Postgres = PostgresReader()
 	clockWitness := sync.OnceFunc(func() { t.Logf("%s %s", fault.GateStoreClockWitness, t.Name()) })
