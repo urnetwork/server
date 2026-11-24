@@ -313,18 +313,31 @@ func (self *snReservedAttemptAuthority) result(method string, args []json.RawMes
 		if self.refuseEventScan.Load() {
 			return nil, errors.New("synthetic chain endpoint outage")
 		}
+		// Discovery asks for the permitted hotkeys' activations only: the
+		// event topic, any digest, then an OR-list of hotkeys, as a node
+		// filters them.
 		var filter struct {
-			Address common.Address `json:"address"`
-			From    string         `json:"fromBlock"`
-			To      string         `json:"toBlock"`
-			Topics  []common.Hash  `json:"topics"`
+			Address common.Address    `json:"address"`
+			From    string            `json:"fromBlock"`
+			To      string            `json:"toBlock"`
+			Topics  []json.RawMessage `json:"topics"`
 		}
-		if len(args) != 1 || json.Unmarshal(args[0], &filter) != nil || filter.Address != common.Address(self.deployment.Journal) || filter.From != "0x3e9" || filter.To != "0x4b0" || len(filter.Topics) != 1 || filter.Topics[0] != crypto.Keccak256Hash([]byte("ActivationPublished(bytes32,bytes32,uint64,uint64)")) {
+		topic := crypto.Keccak256Hash([]byte("ActivationPublished(bytes32,bytes32,uint64,uint64)"))
+		var first common.Hash
+		var hotkeys []common.Hash
+		if len(args) != 1 || json.Unmarshal(args[0], &filter) != nil || filter.Address != common.Address(self.deployment.Journal) || filter.From != "0x3e9" || filter.To != "0x4b0" ||
+			len(filter.Topics) != 3 || json.Unmarshal(filter.Topics[0], &first) != nil || first != topic || string(filter.Topics[1]) != "null" || json.Unmarshal(filter.Topics[2], &hotkeys) != nil {
 			break
 		}
-		epoch := common.BigToHash(big.NewInt(7))
-		return []map[string]any{{"address": filter.Address, "topics": []common.Hash{filter.Topics[0], common.Hash(self.digest), common.Hash(self.record.Hotkey), common.BigToHash(big.NewInt(1))},
-			"data": hexutil.Bytes(epoch[:]), "blockNumber": "0x3e9", "blockHash": common.BigToHash(big.NewInt(1001)), "logIndex": "0x0", "removed": false}}, nil
+		rows := []map[string]any{}
+		for _, hotkey := range hotkeys {
+			if hotkey == common.Hash(self.record.Hotkey) {
+				epoch := common.BigToHash(big.NewInt(7))
+				rows = append(rows, map[string]any{"address": filter.Address, "topics": []common.Hash{topic, common.Hash(self.digest), common.Hash(self.record.Hotkey), common.BigToHash(big.NewInt(1))},
+					"data": hexutil.Bytes(epoch[:]), "blockNumber": "0x3e9", "blockHash": common.BigToHash(big.NewInt(1001)), "logIndex": "0x0", "removed": false})
+			}
+		}
+		return rows, nil
 	case "eth_call":
 		return self.evmCall(args)
 	case "chain_getFinalizedHead":
