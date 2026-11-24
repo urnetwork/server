@@ -43,10 +43,15 @@ a config release and a restart of every taskworker, api and alt block. See
    probe handshake to count"). A network-only provider is modern only with the
    same probe evidence as a Public one. No provider counts on its declaration
    (FP2-PROTOCOL.md D12.6, §12.8).
+   **Amended on 2026-11-24** (owner, before post-quantum turns on by default
+   in the apps): a named provider in the caller's own network is answered
+   without the requirement. See [Connect multi client](#connect-multi-client).
 8. **The response is unchanged.** `FindProvidersProvider` gets no `modern`
    field.
 9. **Location lists are out of scope.** Provider-locations stays
    capability-blind. Counting modern supply there is a follow-up.
+   **Done on 2026-11-24** (owner: "Fix first, then flip"): see
+   [The location list](#the-location-list).
 10. **The field is named `require_modern_provider`.**
 11. **`post_quantum_encryption` keeps its meaning on the server**, for any
     client that sends it.
@@ -551,6 +556,14 @@ of a second's churn per second, against 250–760 a second on 10-21.
   providers that have no evidence yet.
 - An older server ignores the field. Discovery is then capability-blind, and
   the client fails closed per provider.
+- **The caller's own devices (2026-11-24).** A provider named by `client_id`
+  in the caller's own network is answered without the requirement
+  (`readFindProviders2NamedModern`). The probe cannot reach a device that
+  provides only to its network, so a client in post-quantum mode could
+  otherwise never connect to its own devices. The window client still runs
+  `EncryptionModeRequired`, so a device that cannot seal the session costs a
+  failed dial, never plaintext. Only the named providers the modern check
+  refused read their network, one indexed statement per request.
 - **Hosted proxy devices can enable end-to-end encryption.**
   - The proxy applies each device's profile through the sdk
     (`toConnectPerformanceProfile` passes `PostQuantumEncryption` through), and
@@ -560,6 +573,32 @@ of a second's churn per second, against 250–760 a second on 10-21.
   - That is why readers deploy only after the index is rewritten
     ([Rollout](#rollout), step 2).
 - The sdk, the apps and the JS remote device need only the connect bump.
+
+### The location list
+
+Added on 2026-11-24, before post-quantum turns on by default in the apps, so
+a client in post-quantum mode is never offered a location it cannot connect
+to.
+
+- **The count.** The score export counts, in each target's `ClientFilter`,
+  the modern providers of the same public population as `Count`
+  (`ModernCount`, `ModernNetReliabilityWeight`), and marks the filter
+  `ModernCounted`. A filter from an export before the count decodes
+  `ModernCounted == false`.
+- **The list.** `find-provider-locations` with `require_modern_provider`
+  (`locationSupply.listed`) leaves out a location whose filter counted no
+  modern provider, and lists every other with its modern provider count and
+  a stability decided by its modern providers' weight. A filter that was not
+  counted is listed exactly as without the field, so an api that runs ahead
+  of the first counting export lists what it listed before, not nothing.
+  Without the field the list is unchanged.
+- **The client.** The sdk asks with the field, for the blank list and every
+  search, while its performance profile has post-quantum encryption on.
+  `GET /network/provider-locations` is unchanged.
+- **Deploy order.** Either order is safe: an older reader ignores the new
+  filter fields, and a new reader lists an uncounted filter as before. The
+  list narrows once both the taskworker (the export) and the api (the reader)
+  run the change.
 
 ### Observability
 

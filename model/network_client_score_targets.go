@@ -319,6 +319,8 @@ func exportClientScoresInFormat(forceMinimum bool, rankMode RankMode, s map[serv
 	nativeCapabilityFacetClientScores := map[ipFamilyFacet][]*ClientScore{}
 	publicCount := 0
 	publicNetReliabilityWeight := float64(0)
+	publicModernCount := 0
+	publicModernNetReliabilityWeight := float64(0)
 	for _, clientScore := range s {
 		if classified := clientScore.capabilityCopy; !forceMinimum && classified != nil {
 			if facet, ok := clientScoreCapabilityFacetOf(classified.capabilityClass()); ok {
@@ -343,21 +345,30 @@ func exportClientScoresInFormat(forceMinimum bool, rankMode RankMode, s map[serv
 			if !clientScore.NetworkOnly {
 				publicCount += 1
 				publicNetReliabilityWeight += clientScore.ReliabilityWeight
+				if clientScore.Modern {
+					publicModernCount += 1
+					publicModernNetReliabilityWeight += clientScore.ReliabilityWeight
+				}
 			}
 		}
 	}
 
 	// the samples above carry Network-only providers too -- FindProviders2
 	// filters them per request against the caller's network -- but the
-	// ClientFilter does not. It is read only by loadLocationStables, which
-	// decides the `Stable` flag GetProviderLocations publishes to every
-	// user. That is a public surface, so like the provider count in
-	// UpdateClientLocations it counts only providers a stranger can reach:
-	// a location whose only supply is network-only is not stable, and with
-	// zero public providers it reports no providers at all.
+	// ClientFilter does not. It is read only by loadLocationSupplies, which
+	// decides whether the location lists publish a location to every user,
+	// and its `Stable` flag. That is a public surface, so like the provider
+	// count in UpdateClientLocations it counts only providers a stranger can
+	// reach: a location whose only supply is network-only is not stable, and
+	// with zero public providers it reports no providers at all. The modern
+	// count is the same population's modern providers, the supply a list that
+	// requires modern providers publishes.
 	filter := &ClientFilter{
-		Count:                publicCount,
-		NetReliabilityWeight: publicNetReliabilityWeight,
+		Count:                      publicCount,
+		NetReliabilityWeight:       publicNetReliabilityWeight,
+		ModernCount:                publicModernCount,
+		ModernNetReliabilityWeight: publicModernNetReliabilityWeight,
+		ModernCounted:              true,
 	}
 
 	payload := clientScoreExportPayload{

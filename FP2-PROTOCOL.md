@@ -2080,6 +2080,13 @@ marker.
     neither, it never counts.
 - **Network-only providers** need the same evidence. No probe can reach them,
   so they count only while evidence from a former Public provide is fresh.
+  - **The caller's own devices are the exception (owner, 2026-11-24).** A
+    `require_modern_provider` request answers a named provider in the
+    caller's own network without the requirement, so a client in
+    post-quantum mode can still connect to its own devices. Its window client
+    keeps `EncryptionModeRequired`: a device that cannot seal costs a failed
+    dial, never plaintext. `post_quantum_encryption` keeps its named check
+    (FP2-MODERN.md, "Connect multi client").
 - **The declaration** is still stored in `provide_capability`, as the
   provider's record of what it announced. No selection reads it.
   `readProvidePostQuantumEncryption` is deleted.
