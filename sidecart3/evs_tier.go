@@ -122,6 +122,8 @@ func newEvsTier(settings *EvsTierSettings) (*fault.EvsTier, func()) {
 			hostSettings := evshost.DefaultHostSettings()
 			hostSettings.Evs = &blockSettings
 			hostSettings.Hdd = deps.Hdd
+			// the usage producer as the world's settings name it, as T2's block takes it (EvsWorldSettings.UsageReportTimeout)
+			hostSettings.Usage = deps.Usage
 			var evsHost *evshost.Host
 			var err error
 			evshost.Testing_WithBlockConfig(evsTierBlockConfig(instanceFormat), func() {
