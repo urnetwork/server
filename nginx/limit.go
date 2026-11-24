@@ -409,6 +409,36 @@ type LimitIdentity struct {
 	Id server.Id
 	// whether Id is a network's
 	Network bool
+	// whether a verified validator rate class token beside the bearer names
+	// this client (session.ValidatorClassVerifier): its requests are charged
+	// at the validator class's limits in place of the identity limit's, to
+	// state of their own
+	Validator bool
+}
+
+// The rate_class label of the front's limit counters.
+const (
+	limitRateClassDefault   = "default"
+	limitRateClassValidator = "validator"
+)
+
+// The SN25 validator rate class: an admitted validator's requests, charged to
+// its identity at these limits in place of the identity limit's, and still to
+// its address's ceiling. On wherever the identity limit is on.
+const (
+	validatorClassRequestsPerMinute = 3000
+	validatorClassBurst             = 1500
+	validatorClassNetConnections    = 100
+)
+
+// The rate, burst and cap of requests in flight that an identity is charged
+// at: the validator class's for a validator, else the interface's identity
+// limit's.
+func (self *limitInterface) identityLimits(identity LimitIdentity) (milliRequestsPerSecond float64, burst int, netConnections int) {
+	if identity.Validator {
+		return limitMilliRequestsPerSecond(validatorClassRequestsPerMinute), validatorClassBurst, validatorClassNetConnections
+	}
+	return self.identityMilliRequestsPerSecond, self.identityBurst, self.netConnections
 }
 
 // Whether the identity is none.
@@ -657,7 +687,8 @@ func (self *limitIdentityState) idleWithLock() bool {
 
 // See limitState.
 func (self *limitIdentityState) fullWithLock(nowMs int64) bool {
-	return self.bucket.remainingWithLock(self.limitInterface.identityMilliRequestsPerSecond, nowMs) <= 0
+	milliRequestsPerSecond, _, _ := self.limitInterface.identityLimits(self.key.identity)
+	return self.bucket.remainingWithLock(milliRequestsPerSecond, nowMs) <= 0
 }
 
 // The front's limit state, for every interface. Safe for concurrent use.
@@ -852,11 +883,12 @@ func (self *frontLimits) acquireRequest(limitInterface *limitInterface, addr net
 // wait is the wait until both would admit.
 func (self *frontLimits) chargeIdentityWithLock(addrState *limitAddrState, identityState *limitIdentityState, nowMs int64) (limitOutcome, time.Duration) {
 	limitInterface := addrState.limitInterface
-	identityAdmits := identityState.bucket.admitsWithLock(limitInterface.identityMilliRequestsPerSecond, limitInterface.identityBurst, nowMs)
+	identityRate, identityBurst, identityNetConnections := limitInterface.identityLimits(identityState.key.identity)
+	identityAdmits := identityState.bucket.admitsWithLock(identityRate, identityBurst, nowMs)
 	ceilingAdmits := addrState.ceilingBucket.admitsWithLock(limitInterface.ceilingMilliRequestsPerSecond, limitInterface.ceilingBurst, nowMs)
 	if !identityAdmits || !ceilingAdmits {
 		wait := max(
-			identityState.bucket.waitWithLock(limitInterface.identityMilliRequestsPerSecond, limitInterface.identityBurst, nowMs),
+			identityState.bucket.waitWithLock(identityRate, identityBurst, nowMs),
 			addrState.ceilingBucket.waitWithLock(limitInterface.ceilingMilliRequestsPerSecond, limitInterface.ceilingBurst, nowMs),
 		)
 		if !identityAdmits {
@@ -864,10 +896,10 @@ func (self *frontLimits) chargeIdentityWithLock(addrState *limitAddrState, ident
 		}
 		return limitOutcomeCeilingRefused, wait
 	}
-	identityState.bucket.takeWithLock(limitInterface.identityMilliRequestsPerSecond, limitInterface.identityBurst, nowMs)
+	identityState.bucket.takeWithLock(identityRate, identityBurst, nowMs)
 	addrState.ceilingBucket.takeWithLock(limitInterface.ceilingMilliRequestsPerSecond, limitInterface.ceilingBurst, nowMs)
 
-	if 0 < limitInterface.netConnections && limitInterface.netConnections <= identityState.requestCount {
+	if 0 < identityNetConnections && identityNetConnections <= identityState.requestCount {
 		return limitOutcomeIdentityConcurrencyRefused, 0
 	}
 	if 0 < limitInterface.ceilingNetConnections && limitInterface.ceilingNetConnections <= addrState.identityRequestCount {
