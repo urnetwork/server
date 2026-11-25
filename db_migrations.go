@@ -11953,6 +11953,14 @@ var migrations = []any{
 	// day. A column with a constant default and two new tables; the running
 	// release writes network_referral without naming the column.
 	newSqlMigration(networkReferralTermsSchemaSql),
+
+	// The fleet's URL outcomes by bucket of measured time
+	// (db_provider_egress_url_fleet_bucket.go,
+	// model/provider_egress_url_overload.go): one new empty table, under a
+	// five-second lock bound, created only when absent. Nothing existing is
+	// locked or rewritten, and the running release never reads it. Apply
+	// before deploying: every URL window of a release with it reads it.
+	providerEgressUrlFleetBucketMigration,
 }
 
 // The deleted_network backfill (the migration above): every network an App
