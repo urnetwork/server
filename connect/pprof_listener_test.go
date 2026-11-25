@@ -106,6 +106,40 @@ func testPprofAccepts(network string, address string) bool {
 	return true
 }
 
+// Whether this process's CPU profiler is free. Under go test -cpuprofile, as
+// test.sh runs, the test binary holds it for the whole run, so every CPU
+// profile the listener starts answers 409 and its wait never begins.
+func testPprofCpuProfilerFree() bool {
+	if err := pprof.StartCPUProfile(io.Discard); err != nil {
+		return false
+	}
+	pprof.StopCPUProfile()
+	return true
+}
+
+// Skips a test about the listener's own CPU profiles while the process's
+// profiler is held elsewhere.
+func testPprofRequireCpuProfiler(t *testing.T) {
+	t.Helper()
+	if !testPprofCpuProfilerFree() {
+		t.Skip("this process's CPU profiler is held (go test -cpuprofile), so every CPU profile answers 409")
+	}
+}
+
+// The first value from a CPU profile's wait hook, or the test fails: a hang
+// guard, since a profile the listener refuses never begins its wait.
+func testPprofAwaitWait[T any](t *testing.T, started <-chan T) T {
+	t.Helper()
+	select {
+	case value := <-started:
+		return value
+	case <-time.After(30 * time.Second):
+		t.Fatal("the CPU profile's wait never began")
+	}
+	var zero T
+	return zero
+}
+
 // The listener binds 127.0.0.1 on a port the kernel picks, and the port
 // answers on no other address of the host.
 func TestPprofListenerBindsTheLoopbackOnly(t *testing.T) {
@@ -137,7 +171,8 @@ func TestPprofListenerBindsTheLoopbackOnly(t *testing.T) {
 }
 
 // The CPU profile and the four snapshots answer with their profiles, and a
-// snapshot with debug=1 answers in text.
+// snapshot with debug=1 answers in text. The CPU profile's cases need the
+// process's profiler, so they're left out while it's held elsewhere.
 func TestPprofListenerServesTheChosenProfiles(t *testing.T) {
 	settings := defaultPprofListenerSettings()
 	settings.cpuProfileWaitForTest = func(context.Context, time.Duration) time.Duration {
@@ -145,6 +180,10 @@ func TestPprofListenerServesTheChosenProfiles(t *testing.T) {
 		return 0
 	}
 	listener, _ := testPprofListener(t, settings)
+	cpuProfilerFree := testPprofCpuProfilerFree()
+	if !cpuProfilerFree {
+		t.Log("this process's CPU profiler is held (go test -cpuprofile): the CPU profile's cases are left out")
+	}
 	for _, c := range []struct {
 		path       string
 		sampleType string
@@ -157,6 +196,9 @@ func TestPprofListenerServesTheChosenProfiles(t *testing.T) {
 		{path: "/debug/pprof/mutex", sampleType: "contentions"},
 		{path: "/debug/pprof/block", sampleType: "contentions"},
 	} {
+		if c.sampleType == "cpu" && !cpuProfilerFree {
+			continue
+		}
 		status, header, body := testPprofRequest(http.MethodGet, listener.address.Port, c.path)
 		if status != http.StatusOK || header.Get("Content-Type") != "application/octet-stream" {
 			t.Errorf("GET %s answered %d %q, want 200 with a profile", c.path, status, header.Get("Content-Type"))
@@ -231,7 +273,9 @@ func TestPprofListenerRefusesUnservedSnapshotParameters(t *testing.T) {
 }
 
 // A CPU profile lasts its seconds, the default without them, and never more
-// than the cap; a malformed seconds is refused before any profile starts.
+// than the cap; a malformed seconds is refused before any profile starts. The
+// profiled cases need the process's profiler, so they're left out while it's
+// held elsewhere; the refusals and the cap's arithmetic don't.
 func TestPprofListenerCapsCpuProfileSeconds(t *testing.T) {
 	settings := defaultPprofListenerSettings()
 	waits := make(chan time.Duration, 1)
@@ -240,6 +284,10 @@ func TestPprofListenerCapsCpuProfileSeconds(t *testing.T) {
 		return 0
 	}
 	listener, _ := testPprofListener(t, settings)
+	cpuProfilerFree := testPprofCpuProfilerFree()
+	if !cpuProfilerFree {
+		t.Log("this process's CPU profiler is held (go test -cpuprofile): the profiled cases are left out")
+	}
 	for _, c := range []struct {
 		query    string
 		duration time.Duration
@@ -252,6 +300,9 @@ func TestPprofListenerCapsCpuProfileSeconds(t *testing.T) {
 		{query: "?seconds=3600", duration: 60 * time.Second},
 		{query: "?seconds=9223372036854775807", duration: 60 * time.Second},
 	} {
+		if !cpuProfilerFree {
+			break
+		}
 		if status, _ := testPprofGet(listener, "/debug/pprof/profile"+c.query); status != http.StatusOK {
 			t.Errorf("GET /debug/pprof/profile%s answered %d, want 200", c.query, status)
 			continue
@@ -394,6 +445,7 @@ func TestPprofListenerKillSwitch(t *testing.T) {
 // Past MaxConcurrentRequestCount a request is refused at once, and served
 // again once a place is free.
 func TestPprofListenerRefusesRequestsBeyondItsCapacity(t *testing.T) {
+	testPprofRequireCpuProfiler(t)
 	settings := defaultPprofListenerSettings()
 	settings.MaxConcurrentRequestCount = 1
 	started := make(chan struct{})
@@ -410,7 +462,7 @@ func TestPprofListenerRefusesRequestsBeyondItsCapacity(t *testing.T) {
 		status, _ := testPprofGet(listener, "/debug/pprof/profile")
 		cpuStatuses <- status
 	}()
-	<-started
+	testPprofAwaitWait(t, started)
 	if status, _ := testPprofGet(listener, "/debug/pprof/heap"); status != http.StatusServiceUnavailable {
 		t.Errorf("a snapshot during the one place's CPU profile answered %d, want 503", status)
 	}
@@ -426,6 +478,7 @@ func TestPprofListenerRefusesRequestsBeyondItsCapacity(t *testing.T) {
 // The process runs one CPU profile at a time: a second is refused with 409
 // while a snapshot is still served.
 func TestPprofListenerRefusesASecondCpuProfile(t *testing.T) {
+	testPprofRequireCpuProfiler(t)
 	settings := defaultPprofListenerSettings()
 	settings.MaxConcurrentRequestCount = 3
 	started := make(chan struct{})
@@ -442,7 +495,7 @@ func TestPprofListenerRefusesASecondCpuProfile(t *testing.T) {
 		status, _ := testPprofGet(listener, "/debug/pprof/profile")
 		cpuStatuses <- status
 	}()
-	<-started
+	testPprofAwaitWait(t, started)
 	if status, _ := testPprofGet(listener, "/debug/pprof/profile"); status != http.StatusConflict {
 		t.Errorf("a second CPU profile answered %d, want 409", status)
 	}
@@ -455,9 +508,43 @@ func TestPprofListenerRefusesASecondCpuProfile(t *testing.T) {
 	}
 }
 
+// While the process's profiler is held elsewhere, as go test -cpuprofile
+// holds it, a CPU profile is refused with 409 at once, never begun and never
+// stopping the other profile, and a snapshot is still served.
+func TestPprofListenerRefusesACpuProfileWhileTheProcessProfilerIsHeld(t *testing.T) {
+	if testPprofCpuProfilerFree() {
+		// hold it here, as another profiler in the process would
+		if err := pprof.StartCPUProfile(io.Discard); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(pprof.StopCPUProfile)
+	}
+	settings := defaultPprofListenerSettings()
+	var waitCount atomic.Int32
+	settings.cpuProfileWaitForTest = func(context.Context, time.Duration) time.Duration {
+		waitCount.Add(1)
+		return 0
+	}
+	listener, _ := testPprofListener(t, settings)
+
+	if status, _ := testPprofGet(listener, "/debug/pprof/profile?seconds=1"); status != http.StatusConflict {
+		t.Errorf("a CPU profile while the process's profiler is held answered %d, want 409", status)
+	}
+	if waitCount.Load() != 0 {
+		t.Errorf("%d refused CPU profiles began their wait", waitCount.Load())
+	}
+	if testPprofCpuProfilerFree() {
+		t.Error("the refused CPU profile stopped the profile that held the process's profiler")
+	}
+	if status, _ := testPprofGet(listener, "/debug/pprof/heap"); status != http.StatusOK {
+		t.Errorf("a snapshot while the process's profiler is held answered %d, want 200", status)
+	}
+}
+
 // Close ends a CPU profile in flight at once rather than waiting out its
 // seconds, waits for it, and leaves the process's profiler free.
 func TestPprofListenerCloseEndsACpuProfileInFlight(t *testing.T) {
+	testPprofRequireCpuProfiler(t)
 	settings := defaultPprofListenerSettings()
 	started := make(chan time.Duration, 1)
 	settings.cpuProfileWaitForTest = func(_ context.Context, duration time.Duration) time.Duration {
@@ -475,7 +562,7 @@ func TestPprofListenerCloseEndsACpuProfileInFlight(t *testing.T) {
 		defer close(cpuDone)
 		testPprofGet(listener, "/debug/pprof/profile?seconds=60")
 	}()
-	if duration := <-started; duration != 60*time.Second {
+	if duration := testPprofAwaitWait(t, started); duration != 60*time.Second {
 		t.Fatalf("the CPU profile waits %s, want 60s", duration)
 	}
 	closed := make(chan struct{})
@@ -499,6 +586,7 @@ func TestPprofListenerCloseEndsACpuProfileInFlight(t *testing.T) {
 // A CPU profile whose wait panics, which net/http recovers, still stops the
 // process's profiler and gives back its place, so the next one is served.
 func TestPprofListenerStopsTheProfilerWhenAProfilePanics(t *testing.T) {
+	testPprofRequireCpuProfiler(t)
 	settings := defaultPprofListenerSettings()
 	settings.MaxConcurrentRequestCount = 1
 	var waitCount atomic.Int32
