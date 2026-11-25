@@ -7,6 +7,7 @@ import (
 	"encoding/gob"
 	"encoding/hex"
 	"errors"
+	"io"
 	"math"
 	mathrand "math/rand/v2"
 	"net"
@@ -294,8 +295,17 @@ var exchangeHeaderCapturedGobHeaders = []struct {
 
 // A new reader reads an old writer's gob: the headers captured from the
 // encoder before the typed format, and seeded headers from the gob writer,
-// each as the old reader read it.
+// each as the old reader read it. The gob writer with the flag off writes
+// what the old writer writes, and the old reader reads it.
 func TestExchangeHeaderReaderReadsGobHeaders(t *testing.T) {
+	// gob numbers a process's types in the order they're first sent, so the
+	// captured bytes carry the type ids of the process that wrote them. Send
+	// another type first, as a full package run's earlier tests do, so that
+	// nothing below leans on the order.
+	type exchangeHeaderTestEarlierGobType struct{ Value int }
+	if err := gob.NewEncoder(io.Discard).Encode(exchangeHeaderTestEarlierGobType{Value: 1}); err != nil {
+		t.Fatal(err)
+	}
 	for _, captured := range exchangeHeaderCapturedGobHeaders {
 		data, err := hex.DecodeString(captured.gob)
 		if err != nil {
@@ -309,10 +319,17 @@ func TestExchangeHeaderReaderReadsGobHeaders(t *testing.T) {
 			t.Fatal(err)
 		}
 		assertExchangeHeaderFieldsEqual(t, &captured.want, header)
-		// the writer with the flag off still writes these exact bytes
-		if written := encodeExchangeHeader(false, &captured.want); !bytes.Equal(written, data) {
-			t.Fatalf("the gob writer's bytes changed:\n%x\n%x", data, written)
+		// the writer with the flag off writes the old writer's bytes, both in
+		// this process, and the old reader reads them
+		written := encodeExchangeHeader(false, &captured.want)
+		if old := exchangeHeaderOldWriterEncode(t, &captured.want); !bytes.Equal(written, old) {
+			t.Fatalf("the gob writer's bytes differ from the old writer's:\n%x\n%x", old, written)
 		}
+		oldRead, err := exchangeHeaderOldReaderDecode(written)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertExchangeHeaderFieldsEqual(t, &captured.want, oldRead)
 	}
 	// deterministic for reproducible failures; never shapes traffic
 	r := mathrand.New(mathrand.NewPCG(13, 3))
