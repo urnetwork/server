@@ -893,7 +893,9 @@ type ExtenderProbeStep struct {
 	// started. The optional carriers start together, so each has the same.
 	BudgetLeftMs int64 `json:"budget_left_ms"`
 	// ok; error, the step failed before its budget ran out; or timeout, its
-	// budget ran out before it answered
+	// budget ran out before it answered. A step cut off when the activation's
+	// caller left is canceled, which only the answer to a caller that has
+	// already gone carries
 	Outcome string `json:"outcome"`
 }
 
@@ -2028,6 +2030,12 @@ const (
 	extenderProbeStepOutcomeError = "error"
 	// its budget ran out before it answered
 	extenderProbeStepOutcomeTimeout = "timeout"
+	// the activation's caller left before it answered: the caller's context
+	// was canceled, as the api's request context is when the lb closes the
+	// upstream connection because its own client went away. It says nothing
+	// about the extender, and no answer reaches anyone. A deadline of the
+	// caller's own is a budget, which a step times out against
+	extenderProbeStepOutcomeCanceled = "canceled"
 )
 
 // How the required test of an activation refused it (C2a), for the outcome
@@ -2093,20 +2101,28 @@ func (self *extenderProbeStepRun) withinText() string {
 // The refusal of a step of the required test that did not pass (C2a). One
 // that timed out says how much time it had, so an extender that answers late
 // can tell that from one that does not answer at all (connect#230); one that
-// failed on its own says when, and makes no claim about the budget.
+// failed on its own says when, and makes no claim about the budget; one the
+// caller's departure cut off says that, and claims nothing about the extender.
 func (self *extenderProbeStepRun) refusal(subject string) string {
-	if self.step.Outcome == extenderProbeStepOutcomeTimeout {
+	switch self.step.Outcome {
+	case extenderProbeStepOutcomeTimeout:
 		return fmt.Sprintf("the %s did not answer %s: %s", subject, self.withinText(), self.err)
+	case extenderProbeStepOutcomeCanceled:
+		return fmt.Sprintf("the %s was cut off after %s, when the activation's caller left: %s", subject, extenderProbeSecondsText(self.elapsed), self.err)
 	}
 	return fmt.Sprintf("the %s failed after %s: %s", subject, extenderProbeSecondsText(self.elapsed), self.err)
 }
 
 // Why an optional carrier, or a dns port, was left out (C2a): the probe's own
-// error, and for a probe whose budget ran out first, how much time it had.
+// error, and for a probe whose budget ran out first, how much time it had, or
+// for one the caller's departure cut off, that.
 func (self *extenderProbeStepRun) carrierRefusal(carrier string, port int) *ExtenderCarrierRefusal {
 	errorText := self.err.Error()
-	if self.step.Outcome == extenderProbeStepOutcomeTimeout {
+	switch self.step.Outcome {
+	case extenderProbeStepOutcomeTimeout:
 		errorText = fmt.Sprintf("no answer %s: %s", self.withinText(), self.err)
+	case extenderProbeStepOutcomeCanceled:
+		errorText = fmt.Sprintf("cut off when the activation's caller left: %s", self.err)
 	}
 	return &ExtenderCarrierRefusal{
 		Carrier:      carrier,
@@ -2177,6 +2193,15 @@ func extenderProbeSecondsText(d time.Duration) string {
 // optional carriers'. A step whose budget ran out before it answered timed
 // out, and its refusal says how much time it had; a late answer and no answer
 // were the same "context deadline exceeded" before (connect#230).
+//
+// `ctx` is the caller's: a caller that leaves cancels it, and with it every
+// step's context. A step it cuts off is canceled, never an error of the
+// extender's, and the activation ends where the caller left it. The webrtc
+// path does not run in place of a tcp path the caller left: its cap was read
+// on the canceled context, which every database read refuses, and an
+// extender whose caller gave up on it as the tcp challenge ran was counted as
+// refused at the webrtc stage with an error, no webrtc test run, and the
+// read's failure logged with its stack, about 4,000 a day by 2026-11-25.
 func probeExtenderActivation(
 	ctx context.Context,
 	clock *extenderActivationClock,
@@ -2205,10 +2230,16 @@ func probeExtenderActivation(
 		deadline: probeDeadline,
 	}
 
+	// whether the activation's caller has left (extenderProbeStepOutcomeCanceled)
+	callerLeft := func() bool {
+		return errors.Is(ctx.Err(), context.Canceled)
+	}
+
 	// times one step under stepCtx, which ends at the budget's deadline or
 	// sooner. A step that failed once its context had reached its deadline
-	// timed out; any other failure is the step's own. It records nothing, so
-	// the optional carriers can be timed together and listed in a fixed order.
+	// timed out; one that failed once the caller had left was cut off; any
+	// other failure is the step's own. It records nothing, so the optional
+	// carriers can be timed together and listed in a fixed order.
 	timeStep := func(
 		budget *probeBudget,
 		stepCtx context.Context,
@@ -2238,6 +2269,8 @@ func probeExtenderActivation(
 			run.step.Outcome = extenderProbeStepOutcomeError
 			if errors.Is(stepCtx.Err(), context.DeadlineExceeded) {
 				run.step.Outcome = extenderProbeStepOutcomeTimeout
+			} else if callerLeft() {
+				run.step.Outcome = extenderProbeStepOutcomeCanceled
 			}
 		}
 		return run
@@ -2346,15 +2379,28 @@ func probeExtenderActivation(
 	// one dial over the carrier, which proves the key and then the forward
 	// through it, and the family the forward arrived on, under budget. The
 	// carrier dials no port, so the step names none. A cap that refuses it, or
-	// cannot be read, sends the extender nothing and lists no step.
+	// cannot be read, sends the extender nothing and lists no step, and so
+	// does a caller that has left, whose cap is not read at all.
 	probeWebRtcPath := func(path *requiredPathRun, budget *probeBudget) {
-		if err := askExtenderWebRtcOnlyRoom(budget.ctx, probes); err != nil {
-			path.refusal = fmt.Sprintf("the %s carrier was not tried: %s", connect.ExtenderCarrierWebRtc, err)
+		untried := func(reason string, refusalOutcome string) {
+			path.refusal = fmt.Sprintf("the %s carrier was not tried: %s", connect.ExtenderCarrierWebRtc, reason)
 			path.refusalStep = connect.ExtenderCarrierWebRtc
-			path.refusalOutcome = extenderActivationOutcomeError
+			path.refusalOutcome = refusalOutcome
+		}
+		if callerLeft() {
+			untried("the activation's caller left", extenderActivationOutcomeCanceled)
+			return
+		}
+		if err := askExtenderWebRtcOnlyRoom(budget.ctx, ctx, probes); err != nil {
+			refusalOutcome := extenderActivationOutcomeError
 			if errors.Is(err, ErrExtenderWebRtcOnlyCap) {
-				path.refusalOutcome = extenderActivationOutcomeCap
+				refusalOutcome = extenderActivationOutcomeCap
+			} else if callerLeft() {
+				// the count the caller's departure stopped, which is no
+				// failure of the count's
+				refusalOutcome = extenderActivationOutcomeCanceled
 			}
+			untried(err.Error(), refusalOutcome)
 			return
 		}
 		var forwardClientAddress string
@@ -2401,9 +2447,17 @@ func probeExtenderActivation(
 			passedBudget = sharedBudget
 		}
 	}
-	// webrtc only where the tcp path failed or was not offered
+	// webrtc only where the tcp path failed or was not offered, and while the
+	// caller is there
 	webRtcRan := false
-	if offersWebRtc && passedBudget == nil {
+	if offersWebRtc && passedBudget == nil && runsTcp && callerLeft() {
+		// the caller left as the tcp path ran, which may have failed only
+		// because the departure cut it off: nothing the webrtc path finds
+		// reaches anyone, so no cap is read and no offer is signaled, and the
+		// activation ends at the tcp path's step, canceled
+		tcpPath.refusal += fmt.Sprintf("; the %s carrier was not tried: the activation's caller left", connect.ExtenderCarrierWebRtc)
+		tcpPath.refusalOutcome = extenderActivationOutcomeCanceled
+	} else if offersWebRtc && passedBudget == nil {
 		webRtcRan = true
 		requiredPaths = append(requiredPaths, webRtcPath)
 		webRtcBudget := sharedBudget
@@ -2544,14 +2598,19 @@ func probeExtenderActivation(
 // (extenderActivationProbes.webRtcOnlyRoom) under the webrtc test's budget,
 // just before the test would run. A count that panics, a database read that
 // failed, is an error, which refuses the webrtc test untried rather than
-// probing past a cap it could not read. No question asks nothing.
-func askExtenderWebRtcOnlyRoom(ctx context.Context, probes *extenderActivationProbes) (err error) {
+// probing past a cap it could not read. No question asks nothing. A read the
+// departure of the activation's caller stopped (`callerCtx`) is refused the
+// same way, but it is no failure of the database's, so only a read that
+// failed while the caller was there is logged.
+func askExtenderWebRtcOnlyRoom(ctx context.Context, callerCtx context.Context, probes *extenderActivationProbes) (err error) {
 	if probes.webRtcOnlyRoom == nil {
 		return nil
 	}
 	defer func() {
 		if r := recover(); r != nil {
-			glog.Errorf("[extender]activation webrtc cap could not be read: %s\n", server.ErrorJson(r, debug.Stack()))
+			if !server.IsDoneError(r) || !errors.Is(callerCtx.Err(), context.Canceled) {
+				glog.Errorf("[extender]activation webrtc cap could not be read: %s\n", server.ErrorJson(r, debug.Stack()))
+			}
 			err = fmt.Errorf("the operator could not count its extenders on webrtc without tcp: %v", r)
 		}
 	}()
