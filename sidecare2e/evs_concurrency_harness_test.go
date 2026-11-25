@@ -18,8 +18,9 @@
 //     write budget, read back to price it as it stood, and released as AbuseHoldPass ends one, its object deleted
 //   - api's write budget against what api wrote, exactly: every P0 byte api's process reported against the first
 //     metadata cluster is an object it holds under §7.9's and §7.10's prefixes priced as created, a rev/ raise priced
-//     as its object, or the hold's object priced as it stood, as controlPlaneCheckApiBudget counts api's objects (its
-//     helpers, control_plane_concurrency_harness_test.go), read where the objects stand still across the report
+//     as its object overwritten, or the hold's object priced as it stood and its release's delete at the delete row,
+//     as controlPlaneCheckApiBudget counts api's objects (its helpers, control_plane_concurrency_harness_test.go), read
+//     where the objects stand still across the report
 //   - the write budget's reports: every process reports into {nvb_<set>} under a 15 s ttl, so a sampler reads every
 //     metadata cluster's reports for the case's life, keeping each process's newest, and a run chaos stopped stays in
 //     the ledger after its report lapses; the report a process writes as its budget closes is its newest
@@ -270,14 +271,17 @@ func (self *evsConcurrencyWorker) storedByteCounts(ctx context.Context) (map[sid
 type evsConcurrencyHold struct {
 	store  *model.AbuseHoldStore
 	record *sidecar.HoldRecord
-	// what its object, read back as it stood, prices at as created: the P0 of kind lifecycle api's budget spent on it,
-	// 0 where api runs no budget
+	// the cost rows api's budget prices the hold's writes at, nil where api runs no budget
+	prices *evsservice.PriceTable
+	// what the hold's writes price at, each at its own row: its object's create, read back as it stood, and once
+	// release deleted it, the delete; the P0 of kind lifecycle api's budget spent on it, 0 where api runs no budget
 	pricedByteCount int64
 }
 
 // A preserve_2703f hold on networkId's repoIds, placed at now as api writes hold/<network>/<case>/_ on the first
-// metadata cluster, its write P0 of kind lifecycle on api's own budget, priced as the evs block prices an object's
-// create. It binds evs's purge and drop job once their hold caches reread hold/, within 5 s (§21.9).
+// metadata cluster, its writes P0 of kind lifecycle on api's own budget, priced at their own rows of the evs block's
+// table, the create at its create row. It binds evs's purge and drop job once their hold caches reread hold/,
+// within 5 s (§21.9).
 func placeEvsConcurrencyHold(ctx context.Context, world *World, networkId server.Id, repoIds []sidecar.Id, life time.Duration) (*evsConcurrencyHold, error) {
 	first, err := world.T3().Host().Blobs.FirstCluster()
 	if err != nil {
@@ -288,18 +292,9 @@ func placeEvsConcurrencyHold(ctx context.Context, world *World, networkId server
 	if err != nil {
 		return nil, err
 	}
-	createPrice := func(objectByteCount int64) (int64, error) {
-		return priceTable.Price(evsservice.WriteOperation{Kind: evsservice.WriteOperationCreate, ObjectByteCount: objectByteCount, Count: 1})
-	}
 	budget := world.T3().ApiWriteBudget()
 	if budget != nil {
-		store.SetWriteBudget(budget, func(objectByteCount int64) int64 {
-			priced, err := createPrice(objectByteCount)
-			if err != nil {
-				return objectByteCount
-			}
-			return priced
-		})
+		store.SetWriteBudget(budget, priceTable)
 	}
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	record := &sidecar.HoldRecord{
@@ -319,20 +314,37 @@ func placeEvsConcurrencyHold(ctx context.Context, world *World, networkId server
 	}
 	hold := &evsConcurrencyHold{store: store, record: record}
 	if budget != nil {
+		hold.prices = priceTable
 		object, found, err := store.Read(ctx, networkId, server.Id(record.CaseId))
 		if err != nil || !found {
 			return nil, fmt.Errorf("the hold's object read back: found %t: %v", found, err)
 		}
-		if hold.pricedByteCount, err = createPrice(int64(len(object.Body))); err != nil {
+		hold.pricedByteCount, err = priceTable.Price(evsservice.WriteOperation{Kind: evsservice.WriteOperationCreate, ObjectByteCount: int64(len(object.Body)), Count: 1})
+		if err != nil {
 			return nil, err
 		}
 	}
 	return hold, nil
 }
 
-// Ends the hold as AbuseHoldPass ends one: its object deleted.
+// Ends the hold as AbuseHoldPass ends one: its object deleted, which api's budget spends at its delete row once the
+// store shows the DELETE took effect, and a hold whose object is gone already deletes nothing and spends nothing.
 func (self *evsConcurrencyHold) release(ctx context.Context) error {
-	return self.store.Delete(ctx, server.Id(self.record.NetworkId), server.Id(self.record.CaseId))
+	stood, err := self.stands(ctx)
+	if err != nil {
+		return err
+	}
+	if err := self.store.Delete(ctx, server.Id(self.record.NetworkId), server.Id(self.record.CaseId)); err != nil {
+		return err
+	}
+	if stood && self.prices != nil {
+		deletePrice, err := self.prices.Price(evsservice.WriteOperation{Kind: evsservice.WriteOperationDelete, Count: 1})
+		if err != nil {
+			return err
+		}
+		self.pricedByteCount += deletePrice
+	}
+	return nil
 }
 
 // Whether the hold's object stands on the first metadata cluster.
@@ -431,10 +443,11 @@ func (self *evsConcurrencyBudgetSampler) reports() (map[string]map[string]*evsse
 
 // api's write budget against what api wrote, exactly (the file's header): the P0 bytes api's process reported by kind
 // equal what the objects it holds under proj/, projrows/ and rev/ price at as created, each rev/ raise since
-// revWritesAtStart at its object's price, and the hold's object at its price as it stood (holdByteCount, P0 of kind
-// lifecycle; its release deleted it, which spends nothing); the rev/ writer created exactly the rev/ objects the store
-// holds; and api reported nothing else. Read where api's objects and the rev/ writer's count stand still across the
-// report, at most tryCount times, each LIST asking pageCount objects, as controlPlaneCheckApiBudget reads them.
+// revWritesAtStart at its object's price overwritten, and the hold's writes at their rows (holdByteCount, P0 of kind
+// lifecycle: its object's create as it stood and its release's delete); the rev/ writer created exactly the rev/
+// objects the store holds; and api reported nothing else. Read where api's objects and the rev/ writer's count stand
+// still across the report, at most tryCount times, each LIST asking pageCount objects, as controlPlaneCheckApiBudget
+// reads them.
 func evsConcurrencyCheckApiBudget(t testing.TB, ctx context.Context, world *World, tryCount int, pageCount int, revWritesAtStart *controlPlaneRevWrites, holdByteCount int64) {
 	t.Helper()
 	cluster, err := world.T3().Host().Blobs.FirstCluster()
@@ -477,7 +490,7 @@ func evsConcurrencyCheckApiBudget(t testing.TB, ctx context.Context, world *Worl
 		}
 		want := map[sidecar.WriteP0Kind]int64{}
 		objectCounts := map[sidecar.WriteP0Kind]int{}
-		revPrices := map[int64]bool{}
+		revRaisePrices := map[int64]bool{}
 		for key, byteCount := range after {
 			for prefix, kind := range kinds {
 				if !strings.HasPrefix(key, prefix) {
@@ -491,7 +504,13 @@ func evsConcurrencyCheckApiBudget(t testing.TB, ctx context.Context, world *Worl
 				want[kind] += price
 				objectCounts[kind] += 1
 				if kind == sidecar.WriteP0KindRevocation {
-					revPrices[price] = true
+					// a raise is an If-Match PUT over the object: §11.13's overwrite row
+					raisePrice, err := prices.Price(evsservice.WriteOperation{Kind: evsservice.WriteOperationOverwrite, ObjectByteCount: byteCount, Count: 1})
+					if err != nil {
+						t.Errorf("the raise price of %s's %d bytes: %v", key, byteCount, err)
+						return
+					}
+					revRaisePrices[raisePrice] = true
 				}
 			}
 		}
@@ -501,11 +520,11 @@ func evsConcurrencyCheckApiBudget(t testing.TB, ctx context.Context, world *Worl
 		}
 		raiseCount := int64(writesAfter.raisedCount - revWritesAtStart.raisedCount)
 		if 0 < raiseCount {
-			if len(revPrices) != 1 {
-				t.Errorf("api raised rev/ objects %d times, and its rev/ objects price at %v, not one price a raise takes", raiseCount, slices.Sorted(maps.Keys(revPrices)))
+			if len(revRaisePrices) != 1 {
+				t.Errorf("api raised rev/ objects %d times, and its rev/ objects price at %v overwritten, not one price a raise takes", raiseCount, slices.Sorted(maps.Keys(revRaisePrices)))
 				return
 			}
-			for price := range revPrices {
+			for price := range revRaisePrices {
 				want[sidecar.WriteP0KindRevocation] += raiseCount * price
 			}
 		}

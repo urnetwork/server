@@ -109,15 +109,19 @@ func (self *ConfigLogSequencer) RetainNetwork(ctx context.Context, networkId ser
 		return &ConfigLogRetentionNetworkResult{Point: 1}, nil
 	}
 	point := configLogRetentionPoint(bases, now.UnixMilli(), settings.KeepAfterNewerBase)
-	return retainConfigLogBelow(ctx, self.cluster, sidecar.Id(networkId), point, configLogRetainedRows(bases, point), now, settings)
+	return retainConfigLogBelow(ctx, self.spend, sidecar.Id(networkId), point, configLogRetainedRows(bases, point), now, settings)
 }
 
 // Deletes the network's entries below point, entry 0 never, and then its rows
 // that retained does not name and that are KeepAfterNewerBase old, at most
-// DeleteMaxCount objects. A point of 1 deletes nothing.
+// DeleteMaxCount objects, on spend's cluster. A point of 1 deletes nothing.
+// Each DELETE is P0 of kind log (QD-084), spent at §11.13's delete row once
+// the store shows it took effect (api_write_spend.go): the LIST that found the
+// object is the read before it, and one whose outcome was unknown HEADs the
+// key again, gone counting as deleted.
 func retainConfigLogBelow(
 	ctx context.Context,
-	cluster sidecar.BlobCluster,
+	spend *apiWriteSpend,
 	networkId sidecar.Id,
 	point uint64,
 	retained map[string]bool,
@@ -127,6 +131,19 @@ func retainConfigLogBelow(
 	result := &ConfigLogRetentionNetworkResult{Point: point}
 	if point <= 1 {
 		return result, nil
+	}
+	cluster := spend.cluster
+	deleteListed := func(info *sidecar.BlobInfo) error {
+		return spend.deleteObject(ctx, info.Key, info.Etag, func() (bool, []byte, string, error) {
+			held, err := cluster.Head(ctx, info.Key)
+			if errors.Is(err, sidecar.ErrBlobNotFound) {
+				return false, nil, "", nil
+			}
+			if err != nil {
+				return false, nil, "", err
+			}
+			return true, nil, held.Etag, nil
+		})
 	}
 	startAfter := sidecar.ConfigEntryKey(networkId, 0)
 	for {
@@ -149,7 +166,7 @@ func retainConfigLogBelow(
 				result.More = true
 				return result, nil
 			}
-			if err := cluster.Delete(ctx, info.Key); err != nil {
+			if err := deleteListed(info); err != nil {
 				return nil, err
 			}
 			result.DeletedCount += 1
@@ -177,7 +194,7 @@ func retainConfigLogBelow(
 				result.More = true
 				return result, nil
 			}
-			if err := cluster.Delete(ctx, info.Key); err != nil {
+			if err := deleteListed(info); err != nil {
 				return nil, err
 			}
 			result.DeletedCount += 1

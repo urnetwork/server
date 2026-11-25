@@ -20,15 +20,19 @@ package model
 //	        HEADing it again just before, so a raise that landed since the LIST
 //	        stays
 //
-// rev/ writes are P0, never queued or shed (§11.13): with a write budget
-// installed (SetWriteBudget) each PUT carries P0, and each create or raise is
-// spent once as P0 of kind revocation, which never waits or refuses, once the
-// store shows it took effect (api_write_spend.go): a 412 and a PUT a read shows
-// never landed spend nothing, and one whose outcome stays unknown is spent as
-// issued, once. An object this write made keeps a not_before at or past its own
-// until the sweep, since no writer lowers one, so after an unknown outcome a
-// read that finds no object, or another's at or below this not_before, shows
-// the PUT never landed. Either way the bytes sent are counted. Holds no
+// rev/ writes are P0, never queued or shed (§11.13; QD-084): with a write
+// budget installed (SetWriteBudget) each PUT and the sweep's each DELETE carry
+// P0, and each is spent once as P0 of kind revocation, which never waits or
+// refuses, once the store shows it took effect, at its own one of §11.13's
+// cost rows (api_write_spend.go): a create at the create row, a raise, an
+// If-Match PUT over the object, at the overwrite row, and the sweep's DELETE
+// at the delete row. A 412, and a PUT or DELETE a read shows never landed,
+// spend nothing, and one whose outcome stays unknown is spent as issued, once.
+// An object this write made keeps a not_before at or past its own until the
+// sweep, since no writer lowers one, so after an unknown outcome a read that
+// finds no object, or another's at or below this not_before, shows the PUT
+// never landed; after the sweep's, the object it meant standing shows its
+// DELETE never landed. Either way the bytes sent are counted. Holds no
 // Postgres connection across store I/O.
 //
 // What a removal owes is the rows that record it, network_client.deactivate_time
@@ -56,6 +60,7 @@ import (
 
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/sidecar"
+	"github.com/urnetwork/sidecar/evsservice"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
@@ -99,13 +104,13 @@ type SidecarRevSettings struct {
 	// object holds replaces it and could lower its not_before. Non-positive
 	// refuses every write.
 	ObjectMaxByteCount int
-	// How many writes whose PUT's outcome stayed unknown, the read after it
-	// failing too, the writer remembers by key: each is spent as issued, once,
-	// and the write of its key that settles it spends nothing more
-	// (api_write_spend.go). Past it such a PUT is spent and not remembered, so
-	// the write that settles it spends again, one object over. 1,024: each needs
-	// the store to fail both a PUT and the read after it. Non-positive
-	// remembers none.
+	// How many PUTs and sweep DELETEs whose outcome stayed unknown, the read
+	// after it failing too, the store remembers by key: each is spent as issued,
+	// once, and the write of its key that settles it spends only what its own
+	// cost row prices past that (api_write_spend.go). Past it such a write is
+	// spent and not remembered, so the write that settles it spends again, one
+	// write over. 1,024: each needs the store to fail both a write and the read
+	// after it. Non-positive remembers none.
 	UnsettledWriteCount int
 	// The clock writes and the sweep read. nil is real time.
 	Clock sidecar.Clock
@@ -204,12 +209,14 @@ func NewSidecarRevStore(cluster sidecar.BlobCluster, sign func(payload []byte) (
 	}
 }
 
-// Spends every rev/ create and raise that takes effect from budget, as P0 of
-// kind revocation, priced by price, and passes every PUT through it as P0 (see
-// the file header). OPS installs the process's budget with its first metadata
-// cluster. nil removes it.
-func (self *SidecarRevStore) SetWriteBudget(budget sidecar.WriteBudget, price func(objectByteCount int64) int64) {
-	self.spend.setBudget(budget, price)
+// Spends every rev/ create, raise and sweep DELETE that takes effect from
+// budget, as P0 of kind revocation at its row of prices, §11.13's cost rows,
+// and passes every PUT and DELETE through it as P0 (see the file header). api
+// and taskworker install the process's budget with their first metadata
+// cluster. nil prices is the table a budget built with evsservice's default
+// settings prices with; nil budget removes it.
+func (self *SidecarRevStore) SetWriteBudget(budget sidecar.WriteBudget, prices *evsservice.PriceTable) {
+	self.spend.setBudget(budget, prices)
 }
 
 // The API issuer's writer or taskworker's expiry sweep on the process's own
@@ -341,18 +348,20 @@ func (self *SidecarRevStore) Write(ctx context.Context, revocation *SidecarRevoc
 		}
 		sidecarRevP0ByteCounter.Add(float64(len(signed)))
 		putCtx := self.spend.p0Context(ctx)
-		outcome := "created"
+		var put *apiWrite
 		if !found {
 			_, err = self.cluster.PutIfNoneMatch(putCtx, key, signed, nil)
+			put = newApiWrite(evsservice.WriteOperationCreate, signed, "created", neverLanded)
 		} else {
-			outcome = "raised"
+			// a raise writes the object again: §11.13's overwrite row
 			_, err = self.cluster.PutIfMatch(putCtx, key, etag, signed, nil)
+			put = newApiWrite(evsservice.WriteOperationOverwrite, signed, "raised", neverLanded)
 		}
 		var unknown *sidecar.BlobUnknownError
 		switch {
 		case err == nil:
-			self.spend.spendWritten(ctx, key, len(signed))
-			sidecarRevWriteCounter.WithLabelValues(outcome).Inc()
+			self.spend.spendWritten(ctx, key, put)
+			sidecarRevWriteCounter.WithLabelValues(put.outcome).Inc()
 			return nil
 		case errors.Is(err, sidecar.ErrBlobPrecondition):
 			// another writer moved the key first: this PUT wrote nothing and
@@ -361,7 +370,7 @@ func (self *SidecarRevStore) Write(ctx context.Context, revocation *SidecarRevoc
 		case errors.As(err, &unknown):
 			// this PUT may have landed: the next read decides (§11.8's unknown
 			// row, D-OPS-20)
-			unknownPut = newApiWrite(signed, outcome, neverLanded)
+			unknownPut = put
 			continue
 		default:
 			return failed(err)
@@ -371,10 +380,25 @@ func (self *SidecarRevStore) Write(ctx context.Context, revocation *SidecarRevoc
 }
 
 // Deletes every object whose last write is DeleteAfter old, reading at most
-// SweepPageLimit pages. Reports how many it deleted.
+// SweepPageLimit pages. Reports how many it deleted. Each DELETE is spent at
+// §11.13's delete row once the store shows it took effect, and one whose
+// outcome was unknown HEADs the key again: gone, it landed, its answer lost,
+// and counts; the object it meant still standing, it never landed (see the file
+// header).
 func (self *SidecarRevStore) Sweep(ctx context.Context) (deletedCount int, returnErr error) {
 	expired := func(info *sidecar.BlobInfo) bool {
 		return self.settings.DeleteAfter <= self.clock.Now().Sub(info.LastModified)
+	}
+	// the key's object as a HEAD sees it, found false for none
+	head := func(key string) (info *sidecar.BlobInfo, found bool, err error) {
+		info, err = self.cluster.Head(ctx, key)
+		if errors.Is(err, sidecar.ErrBlobNotFound) {
+			return nil, false, nil
+		}
+		if err != nil {
+			return nil, false, err
+		}
+		return info, true, nil
 	}
 	startAfter := ""
 	for page := 0; page < self.settings.SweepPageLimit; page += 1 {
@@ -388,17 +412,28 @@ func (self *SidecarRevStore) Sweep(ctx context.Context) (deletedCount int, retur
 				continue
 			}
 			// read again just before the delete: a raise since the LIST stays
-			info, err := self.cluster.Head(ctx, listed.Key)
-			if errors.Is(err, sidecar.ErrBlobNotFound) {
-				continue
-			}
+			info, found, err := head(listed.Key)
 			if err != nil {
 				return deletedCount, err
 			}
-			if info.Etag != listed.Etag || !expired(info) {
+			heldEtag := ""
+			if found {
+				heldEtag = info.Etag
+			}
+			// an earlier sweep's DELETE of the key, spent with its outcome
+			// unknown, may settle here
+			self.spend.settleRead(ctx, listed.Key, nil, found, nil, heldEtag)
+			if !found || info.Etag != listed.Etag || !expired(info) {
 				continue
 			}
-			if err := self.cluster.Delete(ctx, listed.Key); err != nil {
+			err = self.spend.deleteObject(ctx, listed.Key, info.Etag, func() (bool, []byte, string, error) {
+				info, found, err := head(listed.Key)
+				if err != nil || !found {
+					return false, nil, "", err
+				}
+				return true, nil, info.Etag, nil
+			})
+			if err != nil {
 				return deletedCount, err
 			}
 			deletedCount += 1

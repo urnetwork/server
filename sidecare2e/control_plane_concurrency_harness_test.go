@@ -14,13 +14,14 @@
 //   - api's write budget (§11.13, evsservice's reports) against the objects api wrote: every P0 byte api's process
 //     reported against the first metadata cluster is an object it holds under §7.9's and §7.10's prefixes, priced as a
 //     create, by kind (log for proj/ and projrows/, revocation for rev/), or a raise of a rev/ object's not_before,
-//     priced as its object (§7.10's write row: If-None-Match to create, If-Match to raise), and it reported no P1, P2
-//     or credit; read where the objects listed before and after the report agree, since a report is a level at its
-//     time, as the dns and certificates case reads it (dns_certs_concurrency_ledgers_test.go). A raise writes an object
-//     the store lists once a second time, as a member's rev/ object is when api's denial and its MemberRevoke's effect
-//     round their not_befores to different seconds, so the raises come from the rev/ writer's own count of its writes
-//     that landed (model's urnetwork_sidecar_rev_writes_total, outcome raised) since the world began; a PUT spent and
-//     never landed, a lost race or a refused one, is counted by neither and still fails the check.
+//     priced as its object overwritten, §11.13's overwrite row (§7.10's write row: If-None-Match to create, If-Match
+//     to raise), and it reported no P1, P2 or credit; read where the objects listed before and after the report agree,
+//     since a report is a level at its time, as the dns and certificates case reads it
+//     (dns_certs_concurrency_ledgers_test.go). A raise writes an object the store lists once a second time, as a
+//     member's rev/ object is when api's denial and its MemberRevoke's effect round their not_befores to different
+//     seconds, so the raises come from the rev/ writer's own count of its writes that landed (model's
+//     urnetwork_sidecar_rev_writes_total, outcome raised) since the world began; a PUT spent and never landed, a lost
+//     race or a refused one, is counted by neither and still fails the check.
 //
 // Safe for concurrent use.
 
@@ -650,8 +651,9 @@ func controlPlaneRevWriteCounts() (*controlPlaneRevWrites, error) {
 
 // api's write budget against the objects it wrote, exactly (the file's header): the P0 bytes api's process reported by
 // kind equal what the objects it holds price at as created, and each raise of a rev/ object since revWritesAtStart,
-// the rev/ writer's writes as the world began (controlPlaneRevWriteCounts), at its object's price; the writer created
-// exactly the rev/ objects the store holds, which holds its count to the store; and it reported nothing else.
+// the rev/ writer's writes as the world began (controlPlaneRevWriteCounts), at its object's price overwritten; the
+// writer created exactly the rev/ objects the store holds, which holds its count to the store; and it reported nothing
+// else.
 func controlPlaneCheckApiBudget(t testing.TB, ctx context.Context, world *World, settings *controlPlaneLedgerSettings, revWritesAtStart *controlPlaneRevWrites) {
 	t.Helper()
 	cluster, err := world.T3().Host().Blobs.FirstCluster()
@@ -694,7 +696,7 @@ func controlPlaneCheckApiBudget(t testing.TB, ctx context.Context, world *World,
 		}
 		want := map[sidecar.WriteP0Kind]int64{}
 		objectCounts := map[sidecar.WriteP0Kind]int{}
-		revPrices := map[int64]bool{}
+		revRaisePrices := map[int64]bool{}
 		for key, byteCount := range after {
 			for prefix, kind := range kinds {
 				if !strings.HasPrefix(key, prefix) {
@@ -708,7 +710,13 @@ func controlPlaneCheckApiBudget(t testing.TB, ctx context.Context, world *World,
 				want[kind] += price
 				objectCounts[kind] += 1
 				if kind == sidecar.WriteP0KindRevocation {
-					revPrices[price] = true
+					// a raise is an If-Match PUT over the object: §11.13's overwrite row
+					raisePrice, err := prices.Price(evsservice.WriteOperation{Kind: evsservice.WriteOperationOverwrite, ObjectByteCount: byteCount, Count: 1})
+					if err != nil {
+						t.Errorf("the raise price of %s's %d bytes: %v", key, byteCount, err)
+						return
+					}
+					revRaisePrices[raisePrice] = true
 				}
 			}
 		}
@@ -717,15 +725,15 @@ func controlPlaneCheckApiBudget(t testing.TB, ctx context.Context, world *World,
 		if createCount != int64(objectCounts[sidecar.WriteP0KindRevocation]) {
 			t.Errorf("the rev/ writer created %d objects since the world began, and api holds %d under rev/", createCount, objectCounts[sidecar.WriteP0KindRevocation])
 		}
-		// each raise wrote an object again, the object as it stands; every rev/ object prices alike, its body a few
-		// hundred bytes, or a raise's price is not known
+		// each raise wrote an object again, the object as it stands, at §11.13's overwrite row; every rev/ object
+		// prices alike there, its body a few hundred bytes, or a raise's price is not known
 		raiseCount := int64(writesAfter.raisedCount - revWritesAtStart.raisedCount)
 		if 0 < raiseCount {
-			if len(revPrices) != 1 {
-				t.Errorf("api raised rev/ objects %d times, and its rev/ objects price at %v, not one price a raise takes", raiseCount, slices.Sorted(maps.Keys(revPrices)))
+			if len(revRaisePrices) != 1 {
+				t.Errorf("api raised rev/ objects %d times, and its rev/ objects price at %v overwritten, not one price a raise takes", raiseCount, slices.Sorted(maps.Keys(revRaisePrices)))
 				return
 			}
-			for price := range revPrices {
+			for price := range revRaisePrices {
 				want[sidecar.WriteP0KindRevocation] += raiseCount * price
 			}
 		}

@@ -170,7 +170,7 @@ func TestConfigLogWritesSpendTheBudgetAsP0(t *testing.T) {
 
 	budget := sidecartest.NewFakeWriteBudget(nil)
 	sequencer := NewConfigLogSequencer(cluster, settings, nil)
-	sequencer.SetWriteBudget(budget, func(objectByteCount int64) int64 { return 3 * objectByteCount })
+	sequencer.SetWriteBudget(budget, testApiBudgetPrices())
 	suite := testConfigLogSuiteSequencer{sequencer: sequencer}
 	if err := world.Start(suite); err != nil {
 		t.Fatal(err)
@@ -182,12 +182,13 @@ func TestConfigLogWritesSpendTheBudgetAsP0(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	written := len(read.SignedGenesis)
+	// each object at the create row
+	priced := testApiBudgetPrice(evsservice.WriteOperationCreate, int64(len(read.SignedGenesis)))
 	for _, object := range append(read.Entries, read.Rows...) {
-		written += len(object)
+		priced += testApiBudgetPrice(evsservice.WriteOperationCreate, int64(len(object)))
 	}
-	if got := budget.P0ByteCount(cluster.ClusterId(), sidecar.WriteP0KindLog); got != int64(3*written) {
-		t.Errorf("issued %d priced bytes for %d written", got, written)
+	if got := budget.P0ByteCount(cluster.ClusterId(), sidecar.WriteP0KindLog); got != priced {
+		t.Errorf("issued %d priced bytes for objects whose creates price at %d", got, priced)
 	}
 	if violations := budget.Violations(); len(violations) != 0 {
 		t.Errorf("the budget's violations: %v", violations)

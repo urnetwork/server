@@ -512,9 +512,9 @@ func CheckConfigReseedPushes(adoption *ConfigReseedAdoption, configPushes [][]by
 // at 0, every base's rows, then each entry, all If-None-Match. A position that
 // holds the same bytes is a retry; one that holds other bytes refuses the run,
 // writing nothing past it. Each object is spent as the sequencer's appends
-// spend theirs (config_log_model.go's file header): once the store shows its
-// create took effect, so a retry of the run spends nothing for what stands. The
-// network's verifier is then loaded again from the store.
+// spend theirs (config_log_model.go's file header, api_write_spend.go): once
+// the store shows its create took effect, so a retry of the run spends nothing
+// for what stands. The network's verifier is then loaded again from the store.
 func (self *ConfigLogSequencer) WriteAdoptedRun(ctx context.Context, networkId server.Id, adoption *ConfigReseedAdoption) error {
 	if !adoption.belongsTo(networkId) {
 		return fmt.Errorf("%w: no verified adoption for this network", ErrConfigReseedRunRefused)
@@ -523,7 +523,7 @@ func (self *ConfigLogSequencer) WriteAdoptedRun(ctx context.Context, networkId s
 		_, err := self.cluster.PutIfNoneMatch(self.p0Context(ctx, len(value)), key, value, nil)
 		var unknown *sidecar.BlobUnknownError
 		if err == nil {
-			self.spendWritten(ctx, key, len(value))
+			self.spend.spendWritten(ctx, key, configLogCreate(value))
 			return nil
 		}
 		if !errors.Is(err, sidecar.ErrBlobPrecondition) && !errors.As(err, &unknown) {
@@ -533,28 +533,28 @@ func (self *ConfigLogSequencer) WriteAdoptedRun(ctx context.Context, networkId s
 		switch {
 		case getErr != nil:
 			if unknown != nil {
-				self.spendUnsettled(ctx, key, len(value))
+				self.spend.spendUnsettled(ctx, key, configLogCreate(value))
 			}
 			return getErr
 		case found && bytes.Equal(held, value):
 			if unknown != nil {
 				// this PUT landed and its answer was lost
-				self.spendWritten(ctx, key, len(value))
+				self.spend.spendWritten(ctx, key, configLogCreate(value))
 			} else {
 				// a retry of the run: the earlier write's spend stands
-				self.settle(key)
+				self.spend.forget(key)
 			}
 			return nil
 		case found:
-			self.settle(key)
+			self.spend.forget(key)
 			return fmt.Errorf("%w: %s holds another entry", ErrConfigReseedDisagrees, key)
 		}
 		_, err = self.cluster.PutIfNoneMatch(self.p0Context(ctx, len(value)), key, value, nil)
 		switch {
 		case err == nil:
-			self.spendWritten(ctx, key, len(value))
+			self.spend.spendWritten(ctx, key, configLogCreate(value))
 		case errors.As(err, &unknown):
-			self.spendUnsettled(ctx, key, len(value))
+			self.spend.spendUnsettled(ctx, key, configLogCreate(value))
 		}
 		return err
 	}

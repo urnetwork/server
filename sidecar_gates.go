@@ -7,7 +7,11 @@ import (
 	"net/http"
 	"slices"
 	"strconv"
+	"sync/atomic"
 	"time"
+
+	"github.com/urnetwork/glog"
+	"github.com/urnetwork/sidecar"
 )
 
 // What §19.11's gates in sidecar.yml answer (D-OPS-10; sidecar_config.go reads
@@ -345,6 +349,95 @@ func (self *SidecarConfig) GatesFor(networkId Id) []string {
 		}
 	}
 	return gates
+}
+
+// DESIGN-COMPUTE §16.6's authorization features (CACL-M11-03): a network
+// turns one on at a base, which api refuses (feature_unsupported) unless every
+// service serving the network implements it, and GET /sidecar/sync/core names
+// what they all implement. The services are those that read a network's
+// authorization log beside its devices, §16.6's last row: api (its verifier,
+// compiler and exchange), evs, gkm, mxedge and the broker, whose gate is
+// compute. sidecar.yml's auth_features names what each one implements, by
+// feature name, once every host of it runs a release that does:
+//
+//	auth_features: {api: [agent_repos], evs: [agent_repos], gkm: [agent_repos], mxedge: [], compute: []}
+//
+// None by default: a service the file names nothing for implements nothing,
+// so until operations name each one every turning-on is refused, the closed
+// direction. api's own entry is held to this process's release as well
+// (sidecar.AuthFeaturesImplemented), so a feature its build lacks is never
+// named, whatever the file says. A gate that does not admit the network does
+// not serve it and is not counted; one that comes to admit it later must
+// implement the network's features by then, which is operations' to keep.
+
+// api's name in auth_features, beside the gates' (it is no gate of the file).
+const SidecarAuthFeatureServiceApi = "api"
+
+// The services auth_features names, api first and then the gates that read
+// the log, in that order.
+var sidecarAuthFeatureServices = []string{SidecarAuthFeatureServiceApi, SidecarGateEvs, SidecarGateGkm, SidecarGateMxedge, SidecarGateCompute}
+
+// A test's stand-in for this process's release's features, nil for the real
+// ones (Testing_SetSidecarAuthFeaturesImplemented).
+var testingSidecarAuthFeaturesImplemented atomic.Pointer[sidecar.AuthFeature]
+
+// The features this process's release implements.
+func sidecarAuthFeaturesImplemented() sidecar.AuthFeature {
+	if features := testingSidecarAuthFeaturesImplemented.Load(); features != nil {
+		return *features
+	}
+	return sidecar.AuthFeaturesImplemented()
+}
+
+// Stands features in for this process's release's in AuthFeaturesFor until the
+// returned function runs. Tests only: api's own verifier still holds every base
+// to the release's real features.
+func Testing_SetSidecarAuthFeaturesImplemented(features sidecar.AuthFeature) func() {
+	testingSidecarAuthFeaturesImplemented.Store(&features)
+	return func() {
+		testingSidecarAuthFeaturesImplemented.Store(nil)
+	}
+}
+
+// auth_features as the file spells it, by service: a service that reads no
+// log, or a name that is no feature's, is skipped and logged, so one bad entry
+// costs only itself and implements nothing.
+func parseSidecarAuthFeatures(y map[string][]string) map[string]sidecar.AuthFeature {
+	features := map[string]sidecar.AuthFeature{}
+	for service, names := range y {
+		if !slices.Contains(sidecarAuthFeatureServices, service) {
+			glog.Errorf("[sidecar]%s names auth_features for %s, which reads no authorization log\n", sidecarConfigResourceName, service)
+			continue
+		}
+		for _, name := range names {
+			feature, err := sidecar.ParseAuthFeature(name)
+			if err != nil {
+				glog.Errorf("[sidecar]%s names an auth_features entry for %s that is no feature\n", sidecarConfigResourceName, service)
+				continue
+			}
+			features[service] |= feature
+		}
+	}
+	return features
+}
+
+// The features auth_features names for one service, none for one it does not
+// name.
+func (self *SidecarConfig) ServiceAuthFeatures(service string) sidecar.AuthFeature {
+	return self.authFeatures[service]
+}
+
+// The authorization features every service serving the network implements:
+// api's, held to this process's release, and each log-reading gate's that
+// admits the network, intersected. None by default; see above.
+func (self *SidecarConfig) AuthFeaturesFor(networkId Id) sidecar.AuthFeature {
+	features := self.authFeatures[SidecarAuthFeatureServiceApi] & sidecarAuthFeaturesImplemented()
+	for _, service := range sidecarAuthFeatureServices[1:] {
+		if self.Service(service).Admits(networkId) {
+			features &= self.authFeatures[service]
+		}
+	}
+	return features
 }
 
 // Answers a request a closed gate refuses: 503, with Retry-After in whole

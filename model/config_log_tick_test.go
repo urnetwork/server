@@ -165,7 +165,7 @@ func TestConfigLogRetentionDeletesOnlyPastThePoint(t *testing.T) {
 	retained := map[string]bool{string(rowsSha(2)): true}
 	deletedCount := 0
 	for pass := 0; ; pass += 1 {
-		result, err := retainConfigLogBelow(ctx, cluster, networkId, 8, retained, clock.Now(), settings)
+		result, err := retainConfigLogBelow(ctx, newApiWriteSpend(cluster, sidecar.WriteP0KindLog, 0), networkId, 8, retained, clock.Now(), settings)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -196,7 +196,7 @@ func TestConfigLogRetentionDeletesOnlyPastThePoint(t *testing.T) {
 	connect.AssertEqual(t, exists(sidecar.ConfigRowsKey(networkId, rowsSha(3))), true)
 
 	// a point of 1 retires nothing
-	result, err := retainConfigLogBelow(ctx, cluster, other, 1, nil, clock.Now(), settings)
+	result, err := retainConfigLogBelow(ctx, newApiWriteSpend(cluster, sidecar.WriteP0KindLog, 0), other, 1, nil, clock.Now(), settings)
 	connect.AssertEqual(t, err, nil)
 	connect.AssertEqual(t, result.DeletedCount, 0)
 }
