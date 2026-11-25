@@ -79,14 +79,14 @@ func (self *fullTunPath) readDownloadCompletion(ctx context.Context, connection 
 }
 
 func TestNativeDownloadCompletionWaitsForStartedPackBeforeClose(t *testing.T) {
-	testNativeDownloadCompletionClose(t, nil)
+	testNativeDownloadCompletionClose(t, true, nil)
 }
 
 func TestNativeDownloadCompletionLeavesFailedTerminalStrict(t *testing.T) {
-	testNativeDownloadCompletionClose(t, errors.New("forced download completion Pack terminal failure"))
+	testNativeDownloadCompletionClose(t, true, errors.New("forced download completion Pack terminal failure"))
 }
 
-func testNativeDownloadCompletionClose(t *testing.T, terminalErr error) {
+func testNativeDownloadCompletionClose(t *testing.T, joinBeforeClose bool, terminalErr error) {
 	t.Helper()
 	synctest.Test(t, func(t *testing.T) {
 		tracker := newSendPackLifecycleTracker()
@@ -100,17 +100,21 @@ func testNativeDownloadCompletionClose(t *testing.T, terminalErr error) {
 		}
 		completion := clientconnect.SendPackLifecycleObservation{
 			ClientId: clientconnect.NewId(), DestinationId: clientconnect.NewId(),
-			Token: 1, AckRequired: true, MessageType: protocol.MessageType_IpIpPacketToProvider,
+			Token: 2, AckRequired: true, MessageType: protocol.MessageType_IpIpPacketToProvider,
 		}
+		// A detached reliable feedback Pack can already be started when the marker arrives.
+		earlierReplay := completion
+		earlierReplay.Token = 1
+		start(earlierReplay)
 		start(completion)
 		datagram := completion
-		datagram.Token, datagram.AckRequired = 2, false
+		datagram.Token, datagram.AckRequired = 3, false
 		start(datagram)
 
 		read := make(chan fullTunDownloadCompletionEvent, 1)
 		path := &fullTunPath{
 			devicePackSends:                   tracker,
-			joinDownloadCompletionBeforeClose: true,
+			joinDownloadCompletionBeforeClose: joinBeforeClose,
 			activePackFailureFloor:            &perfvarPackFailureCounts{},
 			allowDeviceNativeAckPressure:      true,
 			downloadCompletionPhaseForTest: func(event fullTunDownloadCompletionEvent) {
@@ -154,11 +158,23 @@ func testNativeDownloadCompletionClose(t *testing.T, terminalErr error) {
 		// New work starts after the prefix was captured. Its terminal and the
 		// datagram terminal do not own completion of this reliable TCP marker.
 		later := completion
-		later.Token = 3
+		later.Token = 4
 		start(later)
 		completion.Phase = clientconnect.SendPackLifecyclePhaseTerminal
 		completion.Err = terminalErr
-		observer(completion)
+		earlierReplay.Phase = clientconnect.SendPackLifecyclePhaseTerminal
+		first, last := completion, earlierReplay
+		if terminalErr != nil {
+			first, last = earlierReplay, completion
+		}
+		observer(first)
+		synctest.Wait()
+		select {
+		case err := <-closed:
+			t.Fatalf("origin closed with reliable prefix token %d still outstanding: %v", last.Token, err)
+		default:
+		}
+		observer(last)
 		synctest.Wait()
 		select {
 		case err := <-closed:
