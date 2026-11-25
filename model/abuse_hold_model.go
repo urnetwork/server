@@ -452,11 +452,22 @@ func (self *AbuseHoldStore) Create(ctx context.Context, record *sidecar.HoldReco
 // live row says. Equal bytes write nothing. A write whose outcome was unknown reads its key: its own bytes there are
 // the write landed, its answer lost, and nil; any other error, a 412's included, leaves the outcome to the caller's
 // retry, which reads again. The write is spent once the store shows it took effect, an If-Match PUT at the overwrite
-// row and a missing object's at the create row (see the type's doc).
+// row and a missing object's at the create row (see the type's doc). It replaces whatever its own read finds, so a
+// caller that decides whether to write on an earlier read of its own decides through RewriteUnless instead.
 func (self *AbuseHoldStore) Rewrite(ctx context.Context, record *sidecar.HoldRecord) error {
+	_, err := self.RewriteUnless(ctx, record, nil)
+	return err
+}
+
+// Rewrite, unless keep, shown the object this call's own read found (nil for none), says that object stays. The
+// decision and the write share the read: the PUT is If-Match the read's ETag, or If-None-Match when it found none, so
+// an object another writer put there after it, api's renewal or the pass's put-back (api and taskworker each write
+// hold/, QD-1399), fails the condition and is never replaced unread. nil keep keeps only equal bytes. written says
+// whether this call's write took effect, one whose answer was lost and a read showed landed included.
+func (self *AbuseHoldStore) RewriteUnless(ctx context.Context, record *sidecar.HoldRecord, keep func(held *AbuseHoldObject) bool) (written bool, err error) {
 	body, err := sidecar.EncodeHoldRecord(record)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrLegalHoldInvalid, err)
+		return false, fmt.Errorf("%w: %v", ErrLegalHoldInvalid, err)
 	}
 	key := sidecar.HoldObjectKey(record.NetworkId, record.CaseId)
 	read := func() (*AbuseHoldObject, bool, []byte, string, error) {
@@ -469,12 +480,15 @@ func (self *AbuseHoldStore) Rewrite(ctx context.Context, record *sidecar.HoldRec
 	}
 	object, found, heldBody, heldEtag, err := read()
 	if err != nil {
-		return err
+		return false, err
 	}
 	// an earlier write of the key, spent with its outcome unknown, may settle here
 	self.spend.settleRead(ctx, key, nil, found, heldBody, heldEtag)
 	if found && bytes.Equal(object.Body, body) {
-		return nil
+		return false, nil
+	}
+	if keep != nil && keep(object) {
+		return false, nil
 	}
 	var put *apiWrite
 	if !found {
@@ -492,23 +506,23 @@ func (self *AbuseHoldStore) Rewrite(ctx context.Context, record *sidecar.HoldRec
 	switch {
 	case err == nil:
 		self.spend.spendWritten(ctx, key, put)
-		return nil
+		return true, nil
 	case errors.As(err, &unknown):
 		// it may have landed: the read decides
 		_, found, heldBody, heldEtag, readErr := read()
 		if readErr != nil {
 			// no read told: spent as issued, once, for the write that settles it
 			self.spend.spendUnsettled(ctx, key, put)
-			return err
+			return false, err
 		}
 		if writeLanded, _ := self.spend.settleRead(ctx, key, put, found, heldBody, heldEtag); writeLanded {
 			// landed, its answer lost
-			return nil
+			return true, nil
 		}
-		return err
+		return false, err
 	default:
 		// a 412 wrote nothing and spends nothing, as does a refusal
-		return err
+		return false, err
 	}
 }
 
@@ -582,13 +596,24 @@ func ParseAbuseHoldKey(key string) (server.Id, server.Id, bool) {
 }
 
 // This process's hold/ writer, which api and taskworker install once their first metadata cluster is wired (OPS's
-// ServiceHost.Blobs). Until then placement and renewal refuse, since the object comes first, and AbuseHoldPass
-// ends nothing, since it deletes the object before the row.
+// ServiceHost.Blobs): api's for renewal, its placement going to the worker (QD-1399), and taskworker's for placement
+// and AbuseHoldPass. Until then placement and renewal refuse, since the object comes first, and AbuseHoldPass ends
+// nothing, since it deletes the object before the row.
 var abuseHoldStore atomic.Pointer[AbuseHoldStore]
 
 // Installs this process's writer; nil removes it.
 func SetAbuseHoldStore(store *AbuseHoldStore) {
 	abuseHoldStore.Store(store)
+}
+
+// Installs store as this process's writer until the returned function removes it. The removal takes out store alone
+// and leaves a writer installed since: all's process runs api and taskworker, which each install their own, and the
+// later stands in for both, since each writes hold/ as the other would.
+func InstallAbuseHoldStore(store *AbuseHoldStore) (remove func()) {
+	abuseHoldStore.Store(store)
+	return func() {
+		abuseHoldStore.CompareAndSwap(store, nil)
+	}
 }
 
 // This process's writer, or ErrLegalHoldStoreUnavailable.

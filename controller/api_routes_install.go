@@ -16,7 +16,8 @@ package controller
 //	                 (AbuseInstallParts)
 //	hold dispatch    a hold's placement handed to the worker, whose cluster user reads GroupForms
 //	                 (InstallLegalHoldDispatch)
-//	authorization    rev/'s store and the issuer's worker, and the projection: the authorization log's sequencer, the
+//	authorization    rev/'s store, hold/'s writer that renewal writes through (installApiLegalHolds; QD-1399) and the
+//	                 issuer's worker, and the projection: the authorization log's sequencer, the
 //	                 gate cache, the approval gate's states, the dns scopes' labels, the smtp routes' §8 checks, the
 //	                 report intake's seal key (SmtpReportKeySource, gkm at $UR_GKM_URL), the edge logins, the contract
 //	                 gate while sidecar.yml's acl_contract_gate is on and the exchange's scopes
