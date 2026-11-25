@@ -96,10 +96,9 @@
 // own task (the contract tables, client_reliability, network_ping) sets
 // AnalyzeByOwnTask or RetireByOwnTask, and that task calls the family's
 // methods or keeps its own code; an own task that analyzes runs at that time
-// too. Nothing runs
-// for a family whose first table is not partitioned yet (Partitioned) except
-// its BeforeCutover hook on the runway pass, so a family cut over by an
-// operator command is safe to register before its cutover.
+// too. Nothing runs for a family whose first table is not partitioned yet
+// (Partitioned) except its BeforeCutover hook on the runway pass, so a family
+// cut over by an operator command is safe to register before its cutover.
 package server
 
 import (
@@ -1441,13 +1440,13 @@ func (self *PartitionFamily) NextOpenLeafAnalyzeTime(now time.Time) time.Time {
 // analyzes or vacuums every leaf, the database-wide ANALYZE (DbMaintenance),
 // VacuumFullAllTables and a VACUUM of a partitioned parent (VacuumHotTables),
 // is followed by this, and the families' statistics passes sweep after any
-// other. Not the legacy or
-// DEFAULT partition; a leaf is chosen by its bounds, whatever its name, and
-// one that holds a page or reads never analyzed is left alone. The clear
-// takes the leaf's SHARE UPDATE EXCLUSIVE lock, as ANALYZE does, only when it
-// is free (NOWAIT), so it never queues behind an autovacuum or a transaction:
-// a locked leaf is reported and waits for the next pass. Its relcache
-// invalidation makes every cached plan that reads the leaf plan again.
+// other. Not the legacy or DEFAULT partition; a leaf is chosen by its bounds,
+// whatever its name, and one that holds a page or reads never analyzed is
+// left alone. The clear takes the leaf's SHARE UPDATE EXCLUSIVE lock, as
+// ANALYZE does, only when it is free (NOWAIT), so it never queues behind an
+// autovacuum or a transaction: a locked leaf is reported and waits for the
+// next pass. Its relcache invalidation makes every cached plan that reads the
+// leaf plan again.
 func (self *PartitionFamily) ClearEmptyLeafStatistics(ctx context.Context, now time.Time) (cleared []string, locked []string, errs []error) {
 	for _, table := range self.Tables {
 		leaves, listErr := self.listLeavesWhere(ctx, table, func(leaf PartitionLeaf) bool {
