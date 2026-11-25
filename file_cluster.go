@@ -97,6 +97,16 @@ type FileClusterSettings struct {
 	// How long a dial may take before the request fails. 5 s, since the clusters are on the LAN and
 	// answer at once, so this bounds only a dead host.
 	DialTimeout time.Duration
+	// The most connections this instance opens to one host, dialing, busy and idle alike, every
+	// cluster naming the host counted together, and the most it keeps idle there, so a burst's
+	// connections serve the next burst rather than being dialed again (§11.15's fan-out; owner
+	// decision 780; QD-1394): each block's backstop against any engine's burst, beside evs's own bound
+	// on an attempt's reads (EvsSettings.EntryReadConcurrency). A request past it waits for a
+	// connection under its own ctx, so a burst queues other requests behind it. 64: one evs attempt's
+	// bounded reads fit one host, and a cluster of 4 hosts takes 256 at once. A streamed body holds
+	// its connection at its client's pace (question evs-read-fanout-bounds-client-paced-streams).
+	// Non-positive caps nothing, leaving minio-go's 16 idle connections a host.
+	MaxConnsPerHost int
 	// A host whose request failed is passed over this long while another host is not, so a request
 	// after a failure moves hosts. 30 s.
 	HostFailureHoldoff time.Duration
@@ -122,6 +132,7 @@ func DefaultFileClusterSettings() *FileClusterSettings {
 	return &FileClusterSettings{
 		RequestTimeout:        10 * time.Second,
 		DialTimeout:           5 * time.Second,
+		MaxConnsPerHost:       64,
 		HostFailureHoldoff:    30 * time.Second,
 		CheckInterval:         30 * time.Second,
 		CheckStaleAfter:       90 * time.Second,
@@ -294,6 +305,13 @@ func newFileClusters(
 		sidecarConfig:     sidecarConfig,
 		clusterIdClusters: map[string]*FileCluster{},
 	}
+	// one base transport for each host, whichever clusters name it, so MaxConnsPerHost counts every
+	// connection this instance opens to the host
+	type baseTransportKey struct {
+		endpoint string
+		tls      bool
+	}
+	baseTransports := map[baseTransportKey]http.RoundTripper{}
 	for _, config := range configs {
 		if _, exists := self.clusterIdClusters[config.ClusterId]; exists {
 			cancel()
@@ -301,7 +319,17 @@ func newFileClusters(
 		}
 		hosts := []*fileClusterHost{}
 		for _, endpoint := range config.Endpoints {
-			host, err := newFileClusterHost(endpoint, config, settings, clock, newBaseTransport)
+			key := baseTransportKey{endpoint: endpoint, tls: config.Tls}
+			base, ok := baseTransports[key]
+			if !ok {
+				var err error
+				if base, err = newBaseTransport(config.Tls); err != nil {
+					cancel()
+					return nil, fmt.Errorf("cluster %s host %s: %w", config.ClusterId, endpoint, err)
+				}
+				baseTransports[key] = base
+			}
+			host, err := newFileClusterHost(endpoint, config, base, clock)
 			if err != nil {
 				cancel()
 				return nil, fmt.Errorf("cluster %s host %s: %w", config.ClusterId, endpoint, err)

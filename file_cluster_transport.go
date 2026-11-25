@@ -21,6 +21,13 @@ package server
 // Each host endpoint of a cluster has its own client (fileClusterHost), and a request goes to a host
 // not recently failed. A failed request is surfaced, never re-sent here, since that is the caller's
 // unknown outcome (host_blobs.go); minio-go's own retries are off (MaxRetries 1).
+//
+// The clients of one host, in every cluster of a FileClusters naming it, send through one base
+// transport, which opens at most MaxConnsPerHost connections to the host and keeps as many idle
+// (§11.15's fan-out; owner decision 780): a request past them waits for one. The wait comes before
+// ResponseHeaderTimeout starts, so the request's ctx bounds it, and the cancel at its own deadline
+// when that comes first; one that waits past RequestTimeout reaches the store with its header's
+// deadline already passed, which the fork refuses 503 and noteFailure counts against the host.
 
 import (
 	"context"
@@ -129,8 +136,9 @@ func (self *fileClusterResponseBody) Close() error {
 // What a host's base transport is: an http.Transport, or a test's fake.
 type fileClusterBaseTransportFunction func(tls bool) (http.RoundTripper, error)
 
-// The base transport of every host: dials within dialTimeout and gives up on a response
-// requestTimeout after the request's last byte.
+// The base transport of a host: dials within DialTimeout, gives up on a response RequestTimeout after
+// the request's last byte, and opens at most MaxConnsPerHost connections to the host, keeping as many
+// idle. newFileClusters makes one for each host and shares it among the clusters naming the host.
 func newFileClusterBaseTransport(settings *FileClusterSettings) fileClusterBaseTransportFunction {
 	return func(tls bool) (http.RoundTripper, error) {
 		transport, err := minio.DefaultTransport(tls)
@@ -141,6 +149,12 @@ func newFileClusterBaseTransport(settings *FileClusterSettings) fileClusterBaseT
 		transport.DialContext = dialer.DialContext
 		transport.ResponseHeaderTimeout = settings.RequestTimeout
 		transport.DisableCompression = true
+		if 0 < settings.MaxConnsPerHost {
+			transport.MaxConnsPerHost = settings.MaxConnsPerHost
+			// a burst's connections stay for the next, rather than all but minio-go's 16 closing
+			transport.MaxIdleConnsPerHost = settings.MaxConnsPerHost
+			transport.MaxIdleConns = max(transport.MaxIdleConns, settings.MaxConnsPerHost)
+		}
 		return transport, nil
 	}
 }
@@ -155,19 +169,10 @@ type fileClusterHost struct {
 	failedAtNanos atomic.Int64
 }
 
-// A client for one host. The SDK reads MaxRetries 1 as one attempt, and Region set means no bucket
-// location lookup, so every operation is the one request it names.
-func newFileClusterHost(
-	endpoint string,
-	config *FileClusterConfig,
-	settings *FileClusterSettings,
-	clock sidecar.Clock,
-	newBaseTransport fileClusterBaseTransportFunction,
-) (*fileClusterHost, error) {
-	base, err := newBaseTransport(config.Tls)
-	if err != nil {
-		return nil, err
-	}
+// A client for one host of config's cluster, sending through base, the host's base transport. The SDK
+// reads MaxRetries 1 as one attempt, and Region set means no bucket location lookup, so every
+// operation is the one request it names.
+func newFileClusterHost(endpoint string, config *FileClusterConfig, base http.RoundTripper, clock sidecar.Clock) (*fileClusterHost, error) {
 	transport := &fileClusterTransport{base: base, clock: clock}
 	core, err := minio.NewCore(endpoint, &minio.Options{
 		Creds:        credentials.NewStaticV4(config.AccessKey, config.SecretKey, ""),
