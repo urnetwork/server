@@ -38,6 +38,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/minio/minio-go/v7"
@@ -101,13 +102,22 @@ type FileClusterSettings struct {
 	// cluster naming the host counted together, and the most it keeps idle there, so a burst's
 	// connections serve the next burst rather than being dialed again (§11.15's fan-out; owner
 	// decision 780; QD-1394): each block's backstop against any engine's burst, beside evs's own bound
-	// on an attempt's reads (EvsSettings.EntryReadConcurrency). A request past it waits for a
-	// connection under its own ctx, so a burst queues other requests behind it. 64: one evs attempt's
-	// bounded reads fit one host, and a cluster of 4 hosts takes 256 at once. A GET or PutStream whose
-	// body moves at a client's own pace (sidecar.WithBlobClientPaced) is outside it, on a second
-	// transport a host with no cap (QD-1402). Non-positive caps nothing, leaving minio-go's 16 idle
-	// connections a host.
+	// on an attempt's reads (EvsSettings.EntryReadConcurrency). The host's capped client holds as many
+	// slots, one for each request in flight, and a request past them waits for one under its own ctx
+	// and until its deadline, so a burst queues other requests behind it, and one whose deadline passes
+	// in the wait fails unsent and marks no host failed (file_cluster_transport.go). 64: one evs
+	// attempt's bounded reads fit one host, and a cluster of 4
+	// hosts takes 256 at once. A GET or PutStream whose body moves at a client's own pace
+	// (sidecar.WithBlobClientPaced) is outside it, on a second transport a host with no cap (QD-1402).
+	// Non-positive caps nothing, leaving minio-go's 16 idle connections a host.
 	MaxConnsPerHost int
+	// How near its deadline a request may reach its connection and still be refused for that deadline
+	// on arrival by a store whose clock §19.6 holds, as it holds this process's, within 50 ms of true
+	// time: twice that, one for each clock, as the fork's own DeadlineMargin is. A request that reaches
+	// its connection this near its deadline, as one that waited in the cap may, is no test of its host,
+	// so its 503 and its cancel at its own deadline mark no host failed (noteFailure). 100 ms, the LAN's
+	// transit a small part of it. Non-positive lets them mark their hosts.
+	DeadlineClockMargin time.Duration
 	// A host whose request failed is passed over this long while another host is not, so a request
 	// after a failure moves hosts. 30 s.
 	HostFailureHoldoff time.Duration
@@ -134,6 +144,7 @@ func DefaultFileClusterSettings() *FileClusterSettings {
 		RequestTimeout:        10 * time.Second,
 		DialTimeout:           5 * time.Second,
 		MaxConnsPerHost:       64,
+		DeadlineClockMargin:   100 * time.Millisecond,
 		HostFailureHoldoff:    30 * time.Second,
 		CheckInterval:         30 * time.Second,
 		CheckStaleAfter:       90 * time.Second,
@@ -307,14 +318,17 @@ func newFileClusters(
 		clusterIdClusters: map[string]*FileCluster{},
 	}
 	// one base transport for each host, whichever clusters name it, so MaxConnsPerHost counts every
-	// connection this instance opens to the host, and beside it the same without the cap, for
-	// requests at a client's own pace
+	// connection this instance opens to the host, its slots counting the requests in flight on it alike
+	// (file_cluster_transport.go), and beside it the same without the cap, for requests at a client's
+	// own pace
 	type hostTransportKey struct {
 		endpoint string
 		tls      bool
 	}
 	type hostTransports struct {
-		base  http.RoundTripper
+		base http.RoundTripper
+		// nil with no cap
+		slots chan struct{}
 		paced http.RoundTripper
 	}
 	keyHostTransports := map[hostTransportKey]*hostTransports{}
@@ -334,9 +348,12 @@ func newFileClusters(
 					return nil, fmt.Errorf("cluster %s host %s: %w", config.ClusterId, endpoint, err)
 				}
 				transports = &hostTransports{base: base, paced: fileClusterPacedTransport(base)}
+				if 0 < settings.MaxConnsPerHost {
+					transports.slots = make(chan struct{}, settings.MaxConnsPerHost)
+				}
 				keyHostTransports[key] = transports
 			}
-			host, err := newFileClusterHost(endpoint, config, transports.base, transports.paced, clock)
+			host, err := newFileClusterHost(endpoint, config, transports.base, transports.slots, transports.paced, clock)
 			if err != nil {
 				cancel()
 				return nil, fmt.Errorf("cluster %s host %s: %w", config.ClusterId, endpoint, err)
@@ -477,9 +494,17 @@ func (self *FileCluster) RequestTimeout() time.Duration {
 }
 
 // The failure a client cannot tell from a lost answer marks its host, so the next request moves. A
-// request its own caller ended says nothing about the host.
+// request its own caller ended says nothing about the host, nor does one this process's own wait ended
+// or left too near its deadline (file_cluster_transport.go's header): one that never had its connection
+// (errFileClusterConnWait), and one that had it within DeadlineClockMargin of its deadline and was
+// answered 503 or cancelled at its own deadline. ctx is the request's, its caller's own or, for one
+// that carries a deadline, as withFileClusterDeadline made it from its caller's: its Err is the
+// caller's, and it carries the transport's note of such a request.
 func (self *FileCluster) noteFailure(ctx context.Context, host *fileClusterHost, err error) {
-	if err == nil || ctx.Err() != nil {
+	if err == nil || ctx.Err() != nil || errors.Is(err, errFileClusterConnWait) {
+		return
+	}
+	if send, _ := ctx.Value(fileClusterSendKey{}).(*fileClusterSend); send.tooLate(self.clusters.settings.DeadlineClockMargin, err) {
 		return
 	}
 	response, ok := fileClusterErrorResponse(err)
@@ -532,7 +557,8 @@ func fileClusterReadError(err error) error {
 // One PUT of body, conditional on header. sha256Hex signs the payload, so the store checks the bytes
 // it got are the bytes signed, and checksum, when set, rides as x-amz-checksum-sha256. streamed is
 // PutStream's: no deadline header, and a body that may move at its client's own pace, which ctx then
-// says (sidecar.WithBlobClientPaced).
+// says (sidecar.WithBlobClientPaced). A PUT that failed at its body's client marks no host
+// (fileClusterExactReader).
 func (self *FileCluster) put(
 	ctx context.Context,
 	key string,
@@ -568,7 +594,9 @@ func (self *FileCluster) put(
 	host := self.picker.pick()
 	info, err := host.client(ctx, streamed).PutObject(requestCtx, self.config.Bucket, key, body, byteCount, "", sha256Hex, putOptions)
 	if err != nil {
-		self.noteFailure(ctx, host, err)
+		if exact, ok := body.(*fileClusterExactReader); !ok || !exact.clientFailed(sidecar.BlobClientPaced(ctx)) {
+			self.noteFailure(requestCtx, host, err)
+		}
 		return "", fileClusterPutError(err)
 	}
 	return info.ETag, nil
@@ -598,30 +626,53 @@ func (self *FileCluster) PutIfMatch(ctx context.Context, key string, etag string
 }
 
 // Ends a read with an error at the first byte past byteCount, so a body longer than declared fails
-// rather than go out cut short.
+// rather than go out cut short. It notes what tells a PUT that failed at its body's client from one that
+// failed at its host (clientFailed). Read is the transport's alone; the notes are safe to read beside it.
 type fileClusterExactReader struct {
 	source    io.Reader
 	remaining int64
+	// the source failed, ended short of byteCount or ran past it
+	failed atomic.Bool
+	// a read of the source is under way
+	reading atomic.Bool
 }
 
 func (self *fileClusterExactReader) Read(buffer []byte) (int, error) {
+	self.reading.Store(true)
+	defer self.reading.Store(false)
 	if self.remaining == 0 {
 		var extra [1]byte
 		count, err := self.source.Read(extra[:])
 		if 0 < count {
+			self.failed.Store(true)
 			return 0, errors.New("a body longer than declared")
+		}
+		if err != nil && err != io.EOF {
+			self.failed.Store(true)
 		}
 		return 0, err
 	}
 	count, err := self.source.Read(buffer[:min(int64(len(buffer)), self.remaining)])
 	self.remaining -= int64(count)
+	if err != nil && (err != io.EOF || 0 < self.remaining) {
+		self.failed.Store(true)
+	}
 	return count, err
+}
+
+// Whether a PUT of this body that failed did so at the body's client rather than its host: the body
+// failed, ended short or ran long, or, for a body at its client's own pace, a read of it was still
+// waiting on the client as the PUT ended, as when the store gives up on a client that stalls (the
+// fork answers 503 RequestTimeout to a body idle past its connection's idle timeout). Such a failure
+// says nothing of the host, as a request its caller ended says nothing.
+func (self *fileClusterExactReader) clientFailed(paced bool) bool {
+	return self.failed.Load() || (paced && self.reading.Load())
 }
 
 // The segment's id is its SHA-256, so it signs the payload too, and the store refuses other bytes
 // before the object exists. No deadline header: the uploader sets the pace, and the store bounds it
 // 40 s after its last byte (§19.6). A body at a client's own pace goes outside MaxConnsPerHost
-// (sidecar.WithBlobClientPaced).
+// (sidecar.WithBlobClientPaced), and a PUT that fails at the body's client marks no host (put).
 func (self *FileCluster) PutStream(ctx context.Context, key string, body io.Reader, byteCount int64, checksumSha256 []byte) (string, error) {
 	if len(checksumSha256) != 32 {
 		return "", fmt.Errorf("%w: a segment names its 32 byte checksum", sidecar.ErrBlobPutOptions)
@@ -653,9 +704,10 @@ func fileClusterBlobInfo(key string, info minio.ObjectInfo, byteCount int64) sid
 
 func (self *FileCluster) get(ctx context.Context, key string, getOptions minio.GetObjectOptions) (io.ReadCloser, minio.ObjectInfo, http.Header, error) {
 	host := self.picker.pick()
-	body, info, header, err := host.client(ctx, true).GetObject(withFileClusterDeadline(ctx, self.RequestTimeout()), self.config.Bucket, key, getOptions)
+	requestCtx := withFileClusterDeadline(ctx, self.RequestTimeout())
+	body, info, header, err := host.client(ctx, true).GetObject(requestCtx, self.config.Bucket, key, getOptions)
 	if err != nil {
-		self.noteFailure(ctx, host, err)
+		self.noteFailure(requestCtx, host, err)
 		return nil, minio.ObjectInfo{}, nil, fileClusterReadError(err)
 	}
 	return body, info, header, nil
@@ -694,9 +746,10 @@ func (self *FileCluster) GetRange(ctx context.Context, key string, offset int64,
 
 func (self *FileCluster) Head(ctx context.Context, key string) (*sidecar.BlobInfo, error) {
 	host := self.picker.pick()
-	info, err := host.core.StatObject(withFileClusterDeadline(ctx, self.RequestTimeout()), self.config.Bucket, key, minio.StatObjectOptions{})
+	requestCtx := withFileClusterDeadline(ctx, self.RequestTimeout())
+	info, err := host.core.StatObject(requestCtx, self.config.Bucket, key, minio.StatObjectOptions{})
 	if err != nil {
-		self.noteFailure(ctx, host, err)
+		self.noteFailure(requestCtx, host, err)
 		return nil, fileClusterReadError(err)
 	}
 	blobInfo := fileClusterBlobInfo(key, info, info.Size)
@@ -712,7 +765,8 @@ func (self *FileCluster) List(ctx context.Context, keyPrefix string, startAfter 
 	}
 	limit = min(limit, fileClusterListMaxKeyCount-1)
 	host := self.picker.pick()
-	listCtx, cancel := context.WithCancel(withFileClusterDeadline(ctx, self.RequestTimeout()))
+	requestCtx := withFileClusterDeadline(ctx, self.RequestTimeout())
+	listCtx, cancel := context.WithCancel(requestCtx)
 	defer cancel()
 	objects := []*sidecar.BlobInfo{}
 	more := false
@@ -739,7 +793,7 @@ func (self *FileCluster) List(ctx context.Context, keyPrefix string, startAfter 
 		})
 	}
 	if listErr != nil {
-		self.noteFailure(ctx, host, listErr)
+		self.noteFailure(requestCtx, host, listErr)
 		return nil, false, fmt.Errorf("blob list failed: %w", listErr)
 	}
 	if err := ctx.Err(); err != nil {
@@ -757,15 +811,17 @@ func (self *FileCluster) Delete(ctx context.Context, key string) error {
 		return err
 	}
 	host := self.picker.pick()
-	if err := host.core.RemoveObject(withFileClusterDeadline(ctx, self.RequestTimeout()), self.config.Bucket, key, minio.RemoveObjectOptions{}); err != nil {
-		return fileClusterDeleteError(ctx, self, host, err)
+	requestCtx := withFileClusterDeadline(ctx, self.RequestTimeout())
+	if err := host.core.RemoveObject(requestCtx, self.config.Bucket, key, minio.RemoveObjectOptions{}); err != nil {
+		return fileClusterDeleteError(requestCtx, self, host, err)
 	}
 	return nil
 }
 
 // What a DELETE's failure means. A 412 answers a DELETE that named its object and found a newer one:
 // definite, and nothing was deleted. It is taken only from a DELETE that sent the condition, so no
-// other 412 can read as one. Everything else leaves the outcome unknown (host_blobs.go).
+// other 412 can read as one. Everything else leaves the outcome unknown (host_blobs.go). ctx is the
+// request's, as noteFailure takes it.
 func fileClusterDeleteError(ctx context.Context, cluster *FileCluster, host *fileClusterHost, err error) error {
 	if _, named := sidecar.BlobUnmodified(ctx); named {
 		if response, ok := fileClusterErrorResponse(err); ok && response.StatusCode == http.StatusPreconditionFailed {

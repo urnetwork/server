@@ -24,10 +24,30 @@ package server
 //
 // The clients of one host, in every cluster of a FileClusters naming it, send through one base
 // transport, which opens at most MaxConnsPerHost connections to the host and keeps as many idle
-// (§11.15's fan-out; owner decision 780): a request past them waits for one. The wait comes before
-// ResponseHeaderTimeout starts, so the request's ctx bounds it, and the cancel at its own deadline
-// when that comes first; one that waits past RequestTimeout reaches the store with its header's
-// deadline already passed, which the fork refuses 503 and noteFailure counts against the host.
+// (§11.15's fan-out; owner decision 780). The capped client holds one of the host's MaxConnsPerHost
+// slots, shared the same way, for each request in flight, from before the request is sent until its
+// response's body ends or closes, so a request past the cap waits for a slot here rather than for a
+// connection inside http.Transport, where no deadline reaches it: it waits under its ctx and until its
+// deadline, on a Clock timer that runs only while it waits. A request whose deadline passes first is not
+// sent, since the store would only refuse it (503 DeadlinePassed): it fails here with
+// errFileClusterConnWait, as one whose ctx ends first does, and marks no host failed, the wait being
+// this process's (noteFailure). Marking one would take a healthy host from the pool a burst queues for,
+// and raise the pressure on the hosts left.
+//
+// A request with its slot can still wait a moment inside http.Transport, for a connection another
+// request is closing or a dial another started, and http.Transport writes a request as soon as it hands
+// it a connection, with no check between. So the deadline is checked again at the handover (httptrace's
+// GotConn): a request whose deadline has passed by then has that connection closed under it before a
+// byte of it is written. That needs HTTP/1, one request on a connection at a time, which the base
+// transport keeps to. A dial still under way at the deadline is no answer from the host either; a dial
+// that fails is, and marks it. A test's base that is no http.Transport keeps no connections, and has
+// each request once the request has its slot.
+//
+// The store holds its clock, as this process holds its own, within §19.6's 50 ms of true time, so a
+// request that reaches its connection within DeadlineClockMargin of its deadline, as one that waited
+// that long may, can be refused for that deadline on arrival, and a HEAD so refused carries its 503
+// alone, with no code. Such a request's 503, and the cancel at its own deadline, say nothing of its
+// host either (fileClusterSend).
 //
 // A request whose body moves at a client's own pace, a GET, ranged GET or PutStream on a ctx
 // sidecar.WithBlobClientPaced marks (a segment upload's body, an object a read streams to its
@@ -38,9 +58,12 @@ package server
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -58,13 +81,83 @@ const fileClusterDeadlineHeader = "X-Ur-Deadline-Ms"
 // §19.6's header of a DELETE that names its object, read by the fork's handlers.
 const fileClusterUnmodifiedHeader = "X-Ur-If-Unmodified-Ms"
 
+// A request that ended waiting for a connection to its host, its deadline or its ctx coming first. It
+// was not sent, so it says nothing of the host and marks none failed (the file header). A dial that
+// fails is an error of its own, and marks its host.
+var errFileClusterConnWait = errors.New("no connection to the host before the request ended, so it was not sent")
+
 // Marks a request that carries the deadline header: every operation but PutStream sets it.
 type fileClusterDeadlineKey struct{}
 
-// ctx for a request that carries x-ur-deadline-ms. requestTimeout is the cluster's, so the transport
-// computes the deadline at the moment it sends.
+// The context key withFileClusterDeadline stores a request's fileClusterSend under.
+type fileClusterSendKey struct{}
+
+// ctx for a request that carries x-ur-deadline-ms, with a fileClusterSend the transport notes the
+// request in, which noteFailure reads. requestTimeout is the cluster's, so the transport computes the
+// deadline at the moment it sends.
 func withFileClusterDeadline(ctx context.Context, requestTimeout time.Duration) context.Context {
-	return context.WithValue(ctx, fileClusterDeadlineKey{}, requestTimeout)
+	return context.WithValue(context.WithValue(ctx, fileClusterDeadlineKey{}, requestTimeout), fileClusterSendKey{}, &fileClusterSend{})
+}
+
+// What the transport notes of one request that carries x-ur-deadline-ms, for noteFailure: its deadline,
+// when it reached its connection, and whether the cancel at its own deadline ended it after that, all
+// by Clock. A LIST's pages share one, each page's request starting it again. Safe for concurrent use;
+// a nil one notes nothing.
+type fileClusterSend struct {
+	stateLock sync.Mutex
+	deadline  time.Time
+	// zero while the request has no connection
+	connectedTime time.Time
+	cancelled     bool
+}
+
+func (self *fileClusterSend) start(deadline time.Time) {
+	if self == nil {
+		return
+	}
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.deadline = deadline
+	self.connectedTime = time.Time{}
+	self.cancelled = false
+}
+
+func (self *fileClusterSend) connect(connectedTime time.Time) {
+	if self == nil {
+		return
+	}
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.connectedTime = connectedTime
+}
+
+func (self *fileClusterSend) cancelAtDeadline() {
+	if self == nil {
+		return
+	}
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.cancelled = true
+}
+
+// Whether err, the request's failure, came too near its deadline to say anything of its host: the
+// request reached its connection within margin of the deadline, where a store whose clock §19.6 holds
+// may already read it as passed, and was answered 503, as the fork refuses one past its deadline, or
+// was cancelled at its own deadline. A non-positive margin finds none too late.
+func (self *fileClusterSend) tooLate(margin time.Duration, err error) bool {
+	if self == nil {
+		return false
+	}
+	late, cancelled := func() (bool, bool) {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		return !self.connectedTime.IsZero() && self.deadline.Sub(self.connectedTime) < margin, self.cancelled
+	}()
+	if !late {
+		return false
+	}
+	response, ok := fileClusterErrorResponse(err)
+	return cancelled || (ok && response.StatusCode == http.StatusServiceUnavailable)
 }
 
 // The context key WithFileClusterStoreTime stores under.
@@ -88,54 +181,233 @@ func fileClusterHeaderDeadline(ctx context.Context, deadline time.Time) time.Tim
 	return deadline
 }
 
-// An http.RoundTripper over one host's base transport that adds the deadline header and cancels at a
-// request's own deadline, as the file header says. Safe for concurrent use.
+// An http.RoundTripper over one host's base transport that adds the deadline header, holds a slot of
+// the host's for each request in flight, ends a request's wait for a slot or a connection at its
+// deadline, and cancels at a request's own deadline, as the file header says. Safe for concurrent use.
 type fileClusterTransport struct {
 	base  http.RoundTripper
 	clock sidecar.Clock
+	// whether base says when a request reaches its connection: an http.Transport does, through
+	// httptrace's GotConn
+	traced bool
+	// one value for each request in flight through base, MaxConnsPerHost at most, shared by the capped
+	// clients of every cluster naming the host; nil for the paced client, or with no cap
+	slots chan struct{}
 }
 
 func (self *fileClusterTransport) RoundTrip(request *http.Request) (*http.Response, error) {
-	requestTimeout, ok := request.Context().Value(fileClusterDeadlineKey{}).(time.Duration)
-	if !ok {
-		// a streamed PUT, or the admin api: no deadline but the base transport's
-		return self.base.RoundTrip(request)
-	}
+	ctx := request.Context()
 	issued := self.clock.Now()
-	deadline := sidecar.BlobRequestDeadline(request.Context(), issued, requestTimeout)
+	wait := &fileClusterConnWait{clock: self.clock, issued: issued}
+	// a streamed PUT, or the admin api, carries no deadline: its ctx alone bounds its wait, and
+	// ResponseHeaderTimeout its answer
+	requestTimeout, timed := ctx.Value(fileClusterDeadlineKey{}).(time.Duration)
+	if timed {
+		wait.deadline = sidecar.BlobRequestDeadline(ctx, issued, requestTimeout)
+		if !issued.Before(wait.deadline) {
+			return nil, fmt.Errorf("%w: its own deadline had passed when it was issued", errFileClusterConnWait)
+		}
+		wait.own = wait.deadline.Before(issued.Add(requestTimeout))
+		wait.send, _ = ctx.Value(fileClusterSendKey{}).(*fileClusterSend)
+		wait.send.start(wait.deadline)
+	}
+	requestCtx, cancel := context.WithCancel(ctx)
+	wait.cancel = cancel
+	// an own deadline's timer runs from issue: it ends the request's wait, and cancels the request at the
+	// deadline unless its response has started; RequestTimeout's runs only while the request waits for a
+	// slot, ResponseHeaderTimeout bounding the rest
+	stop := func() bool { return false }
+	if wait.own {
+		stop = self.clock.AfterFunc(wait.deadline.Sub(issued), wait.deadlineReached)
+	}
+	release := func() {}
+	fail := func(err error) (*http.Response, error) {
+		release()
+		stop()
+		cancel()
+		return nil, wait.failed(ctx, err)
+	}
+	if self.slots != nil {
+		taken, err := self.takeSlot(requestCtx, wait, timed && !wait.own)
+		if taken == nil {
+			return fail(err)
+		}
+		release = taken
+	}
 	// RoundTrip must not change the request it was given
-	request = request.Clone(request.Context())
-	request.Header.Set(fileClusterDeadlineHeader, strconv.FormatInt(fileClusterHeaderDeadline(request.Context(), deadline).UnixMilli(), 10))
-	if request.Method == http.MethodDelete {
-		if lastModified, ok := sidecar.BlobUnmodified(request.Context()); ok {
-			request.Header.Set(fileClusterUnmodifiedHeader, strconv.FormatInt(lastModified.UnixMilli(), 10))
+	request = request.Clone(ctx)
+	if timed {
+		request.Header.Set(fileClusterDeadlineHeader, strconv.FormatInt(fileClusterHeaderDeadline(ctx, wait.deadline).UnixMilli(), 10))
+		if request.Method == http.MethodDelete {
+			if lastModified, ok := sidecar.BlobUnmodified(ctx); ok {
+				request.Header.Set(fileClusterUnmodifiedHeader, strconv.FormatInt(lastModified.UnixMilli(), 10))
+			}
 		}
 	}
-	if !deadline.Before(issued.Add(requestTimeout)) {
-		// ResponseHeaderTimeout is the bound
-		return self.base.RoundTrip(request)
+	if self.traced {
+		requestCtx = httptrace.WithClientTrace(requestCtx, &httptrace.ClientTrace{GotConn: wait.gotConn})
+	} else if !wait.connect(self.clock.Now()) {
+		// a base that keeps no connections has the request once it has its slot
+		return fail(nil)
 	}
-	// the request's own deadline comes first: cancel at it unless the response has started
-	requestCtx, cancel := context.WithCancel(request.Context())
-	stop := self.clock.AfterFunc(deadline.Sub(issued), cancel)
 	response, err := self.base.RoundTrip(request.WithContext(requestCtx))
 	stop()
 	if err != nil {
-		cancel()
-		return nil, err
+		return fail(err)
 	}
-	response.Body = &fileClusterResponseBody{ReadCloser: response.Body, cancel: cancel}
+	response.Body = &fileClusterResponseBody{ReadCloser: response.Body, cancel: cancel, release: release}
 	return response, nil
 }
 
-// A response body that releases its request's context when closed.
+// Takes one of the host's slots for the request, waiting while every one is taken until one frees, the
+// request ends, or, when timed, its deadline passes, on a Clock timer that runs only while it waits. A
+// request whose deadline has passed by the time it has its slot gives the slot back unsent. Returns what
+// gives the slot back, once however often it is called, or nil for a request not to be sent, with its
+// ctx's error when that ended the wait.
+func (self *fileClusterTransport) takeSlot(ctx context.Context, wait *fileClusterConnWait, timed bool) (func(), error) {
+	release := sync.OnceFunc(func() {
+		<-self.slots
+	})
+	select {
+	case self.slots <- struct{}{}:
+		return release, nil
+	default:
+	}
+	if timed {
+		stop := self.clock.AfterFunc(wait.deadline.Sub(self.clock.Now()), wait.deadlineReached)
+		defer stop()
+	}
+	select {
+	case self.slots <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	if !wait.inTime(self.clock.Now()) {
+		release()
+		return nil, nil
+	}
+	return release, nil
+}
+
+// One request's way to its connection, which fileClusterTransport ends at the request's deadline: it
+// waits, then has its connection or, its deadline or ctx coming first, is never sent. Safe for
+// concurrent use.
+type fileClusterConnWait struct {
+	clock  sidecar.Clock
+	issued time.Time
+	// zero for a request that carries none
+	deadline time.Time
+	// the deadline is the request's own, before RequestTimeout's, so its cancel holds once the request
+	// has its connection too
+	own bool
+	// the operation's note of the request, nil for none
+	send   *fileClusterSend
+	cancel context.CancelFunc
+
+	stateLock sync.Mutex
+	connected bool
+	// the deadline passed before the request had its connection, so it was not sent
+	passed bool
+}
+
+// Whether the request is still in time at now, its deadline not yet passed. One that is not is never to
+// be sent.
+func (self *fileClusterConnWait) inTime(now time.Time) bool {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.inTimeWithLock(now)
+}
+
+func (self *fileClusterConnWait) inTimeWithLock(now time.Time) bool {
+	if self.passed || (!self.deadline.IsZero() && !now.Before(self.deadline)) {
+		self.passed = true
+		return false
+	}
+	return true
+}
+
+// The request has its connection at now: true, unless its deadline has passed, when it is not to be
+// sent.
+func (self *fileClusterConnWait) connect(now time.Time) bool {
+	connected := func() bool {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		if !self.inTimeWithLock(now) {
+			return false
+		}
+		self.connected = true
+		return true
+	}()
+	if connected {
+		self.send.connect(now)
+	}
+	return connected
+}
+
+// httptrace's GotConn, which http.Transport calls just before it writes the request on info's
+// connection: a request whose deadline has passed has that connection closed under it, so no byte of it
+// is written, and its ctx cancelled, so http.Transport sends it on no other.
+func (self *fileClusterConnWait) gotConn(info httptrace.GotConnInfo) {
+	if self.connect(self.clock.Now()) {
+		return
+	}
+	self.cancel()
+	info.Conn.Close()
+}
+
+// The deadline's timer: a request with no connection yet, waiting for a slot or a connection, is not
+// sent, and one with its connection is cancelled at its own deadline.
+func (self *fileClusterConnWait) deadlineReached() {
+	connected := func() bool {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		if !self.connected {
+			self.passed = true
+		}
+		return self.connected
+	}()
+	switch {
+	case !connected:
+		self.cancel()
+	case self.own:
+		self.send.cancelAtDeadline()
+		self.cancel()
+	}
+}
+
+// What a request that failed returns: errFileClusterConnWait for one that never had its connection,
+// its deadline or ctx, the caller's, having come first, else err as the base transport gave it.
+func (self *fileClusterConnWait) failed(ctx context.Context, err error) error {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	switch {
+	case self.passed:
+		return fmt.Errorf("%w: its deadline passed %v after it was issued", errFileClusterConnWait, self.deadline.Sub(self.issued))
+	case !self.connected && ctx.Err() != nil:
+		return fmt.Errorf("%w: %w", errFileClusterConnWait, ctx.Err())
+	}
+	return err
+}
+
+// A response body that gives its request's slot back at its end, at a read that fails or at its close,
+// whichever comes first, and releases its request's context at its close.
 type fileClusterResponseBody struct {
 	io.ReadCloser
-	cancel context.CancelFunc
+	cancel  context.CancelFunc
+	release func()
+}
+
+func (self *fileClusterResponseBody) Read(buffer []byte) (int, error) {
+	count, err := self.ReadCloser.Read(buffer)
+	if err != nil {
+		self.release()
+	}
+	return count, err
 }
 
 func (self *fileClusterResponseBody) Close() error {
 	err := self.ReadCloser.Close()
+	self.release()
 	self.cancel()
 	return err
 }
@@ -145,7 +417,9 @@ type fileClusterBaseTransportFunction func(tls bool) (http.RoundTripper, error)
 
 // The base transport of a host: dials within DialTimeout, gives up on a response RequestTimeout after
 // the request's last byte, and opens at most MaxConnsPerHost connections to the host, keeping as many
-// idle. newFileClusters makes one for each host and shares it among the clusters naming the host.
+// idle. It speaks HTTP/1 alone, one request on a connection at a time, as the check at a connection's
+// handover needs (the file header). newFileClusters makes one for each host and shares it among the
+// clusters naming the host.
 func newFileClusterBaseTransport(settings *FileClusterSettings) fileClusterBaseTransportFunction {
 	return func(tls bool) (http.RoundTripper, error) {
 		transport, err := minio.DefaultTransport(tls)
@@ -156,6 +430,8 @@ func newFileClusterBaseTransport(settings *FileClusterSettings) fileClusterBaseT
 		transport.DialContext = dialer.DialContext
 		transport.ResponseHeaderTimeout = settings.RequestTimeout
 		transport.DisableCompression = true
+		transport.Protocols = &http.Protocols{}
+		transport.Protocols.SetHTTP1(true)
 		if 0 < settings.MaxConnsPerHost {
 			transport.MaxConnsPerHost = settings.MaxConnsPerHost
 			// a burst's connections stay for the next, rather than all but minio-go's 16 closing
@@ -181,17 +457,20 @@ type fileClusterHost struct {
 }
 
 // The clients of one host of config's cluster: one sending through base, the host's base transport,
-// and one through pacedBase, the same without its cap. The SDK reads MaxRetries 1 as one attempt,
-// and Region set means no bucket location lookup, so every operation is the one request it names.
+// each request holding one of slots while in flight (nil for no cap), and one through pacedBase, the
+// same without its cap. The SDK reads MaxRetries 1 as one attempt, and Region set means no bucket
+// location lookup, so every operation is the one request it names.
 func newFileClusterHost(
 	endpoint string,
 	config *FileClusterConfig,
 	base http.RoundTripper,
+	slots chan struct{},
 	pacedBase http.RoundTripper,
 	clock sidecar.Clock,
 ) (*fileClusterHost, error) {
-	newClient := func(base http.RoundTripper) (*minio.Core, http.RoundTripper, error) {
-		transport := &fileClusterTransport{base: base, clock: clock}
+	newClient := func(base http.RoundTripper, slots chan struct{}) (*minio.Core, http.RoundTripper, error) {
+		_, traced := base.(*http.Transport)
+		transport := &fileClusterTransport{base: base, clock: clock, traced: traced, slots: slots}
 		core, err := minio.NewCore(endpoint, &minio.Options{
 			Creds:        credentials.NewStaticV4(config.AccessKey, config.SecretKey, ""),
 			Secure:       config.Tls,
@@ -202,11 +481,11 @@ func newFileClusterHost(
 		})
 		return core, transport, err
 	}
-	core, transport, err := newClient(base)
+	core, transport, err := newClient(base, slots)
 	if err != nil {
 		return nil, err
 	}
-	pacedCore, pacedTransport, err := newClient(pacedBase)
+	pacedCore, pacedTransport, err := newClient(pacedBase, nil)
 	if err != nil {
 		return nil, err
 	}
