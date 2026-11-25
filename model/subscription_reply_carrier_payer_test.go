@@ -7,6 +7,8 @@ package model
 import (
 	"context"
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -304,6 +306,38 @@ func replyCarrierTestNextPageHold(t testing.TB, payerNetworkId server.Id) {
 	}
 	hold.pageTime = hold.pageTime.Add(-exhaustedRedisPayers.hold)
 	exhaustedRedisPayers.payerIdHolds[payerNetworkId] = hold
+}
+
+// Proven refusals of one payer that race for its page take it once: exactly
+// one of them runs a page in the hold, and another payer's page is its own.
+func TestRedisExhaustedPayersGiveConcurrentRefusalsOnePage(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	payers := newRedisExhaustedPayers(5*time.Second, 4)
+	payer, other := server.NewId(), server.NewId()
+	payers.note(payer, now)
+	payers.note(other, now)
+	const refusals = 64
+	var wait sync.WaitGroup
+	var pages atomic.Int64
+	start := make(chan struct{})
+	for range refusals {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			if payers.takeRecoveryPage(payer, now) {
+				pages.Add(1)
+			}
+		}()
+	}
+	close(start)
+	wait.Wait()
+	if got := pages.Load(); got != 1 {
+		t.Fatalf("%d concurrent proven refusals ran %d pages, want 1", refusals, got)
+	}
+	if !payers.takeRecoveryPage(other, now) {
+		t.Fatal("another payer's page was taken")
+	}
 }
 
 // One proven refusal a hold runs its page. A proof's listing keeps the page's
