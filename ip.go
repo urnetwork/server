@@ -401,9 +401,10 @@ type IpInfo struct {
 // represented country, and every language but `en` of each `names` map --
 // without decoding it. An integer stored at another unsigned width than the
 // field's still decodes, and one too large for its field is an error. So is
-// every other wrong type, except a place (or `names`) that is not a map,
-// which maxminddb-golang v2.4.1 does not reliably reject; only a corrupt file
-// has one (see TestIpInfoDecodeGeoLite2CityNonMapPlaceIsNotRejected).
+// every other wrong type, a place (or `names`) that is not a map included:
+// maxminddb-golang v2.5.0 and later reject it, where v2.4.1 did not reliably.
+// Only a corrupt file has one; every record of the 2026-11-22 GeoLite2 City
+// file decodes (see TestIpInfoDecodeGeoLite2CityRejectsMalformedRecords).
 type geoLite2CityRecord struct {
 	City struct {
 		GeonameId uint32        `maxminddb:"geoname_id"`
