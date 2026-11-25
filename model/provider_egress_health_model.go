@@ -720,6 +720,10 @@ func (self ProviderEgressHealthCounts) onlineCounts() ProviderEgressHealthCounts
 // probation (a country site, or a general site the refresh has not graduated)
 // is a measured run of the rolling quota but never enters this window either:
 // it has to earn the right to cost a provider a tier (provider_egress_url_source.go).
+// Nor does an outcome measured while our own platform was overloaded, in a
+// bucket of measured time the overload judge discounted
+// (provider_egress_url_overload.go): it stays recorded and in the rolling quota,
+// and is no evidence about its provider either way.
 // Each outcome carries its catalog source, so a reader can tell the general
 // catalog's outcomes from the rest (ProviderEgressHealthCounts.General).
 func providerEgressHealthWindowSql() string {
@@ -732,12 +736,21 @@ func providerEgressHealthWindowSql() string {
 
 // Which history rows the window holds, over the rows aliased alias ("" for
 // the bare table): the window's one row predicate apart from its time bounds.
-// Every condition on what enters the window belongs here, the selected policy
-// and probation among them, so the readers that share it (the Online rule's
-// evidence, providerOnlineUrlEvidenceSql) cannot drift from it. A catalog
-// source condition does not: Quality, Speed and the index score graduated
-// country outcomes too.
+// Every condition on what enters the window belongs here, the selected policy,
+// probation and the overload discount among them, so the readers that share
+// it (the Online rule's evidence, providerOnlineUrlEvidenceSql) cannot drift
+// from it. A catalog source condition does not: Quality, Speed and the index
+// score graduated country outcomes too.
 func providerEgressHealthWindowRowsSql(alias string) string {
+	return providerEgressHealthScoredRowsSql(alias) + `
+	AND ` + providerEgressUrlOverloadDiscountSql(alias)
+}
+
+// The scored outcomes before the overload discount, over the rows aliased
+// alias: the window's rows, and those of the buckets the overload judge
+// discounted. The judge tallies the fleet's buckets from these, so a bucket it
+// discounted is still tallied whole.
+func providerEgressHealthScoredRowsSql(alias string) string {
 	prefix := ""
 	if alias != "" {
 		prefix = alias + "."

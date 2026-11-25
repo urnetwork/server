@@ -197,6 +197,9 @@ func initTaskSchedule(ctx context.Context) {
 		// a provider whose contracts carry nothing leaves every bucket and
 		// count until it carries again (model/provider_zero_carry.go)
 		work.ScheduleJudgeProviderZeroCarry(clientSession, tx)
+		// URL outcomes measured while our own platform was overloaded are
+		// recorded but not scored (model/provider_egress_url_overload.go)
+		work.ScheduleJudgeProviderEgressUrlOverload(clientSession, tx)
 		work.ScheduleExtenderProbe(clientSession, tx)
 		work.ScheduleExtenderPublish(clientSession, tx)
 		// the public seed bundle and its mirror check
@@ -638,6 +641,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.JudgeProviderZeroCarry,
 			work.JudgeProviderZeroCarryPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.JudgeProviderEgressUrlOverload,
+			work.JudgeProviderEgressUrlOverloadPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.ExtenderProbe,
