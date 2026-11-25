@@ -17,8 +17,11 @@ import (
 //   - keep partitions for the current day and ContractPartitionAheadDays after
 //     it, created standalone and attached so the parent sees only SHARE UPDATE
 //     EXCLUSIVE;
-//   - analyze each daily partition once, a day after its day, and the parents
-//     once a day (autovacuum does not analyze a partitioned parent);
+//   - analyze each daily partition a minute into its day, once it holds rows,
+//     and once more a day after its day, and the parents once a day
+//     (autovacuum does not analyze a partitioned parent); an empty partition
+//     of a day that has not ended keeps reading never analyzed
+//     (ClearEmptyLeafStatistics);
 //   - retire each day at the contract horizon reaper's horizon
 //     (db_contract_day_retirement.go): the reaper alone deletes contract rows,
 //     by its keep rules; retirement compacts a day's leaves down to the rows
@@ -97,6 +100,9 @@ type ContractPartitionReport struct {
 	AbandonedCutover bool
 	Created          []string
 	Analyzed         []string
+	// when the next run is due for the next day's partitions
+	// (NextOpenLeafAnalyzeTime of the run's now); zero before the cutover
+	OpenLeafAnalyzeAt time.Time
 	// leaves of expired days rewritten down to the rows they still hold
 	Compacted []string
 	// expired days that hold only rows the reaper keeps, by their
@@ -146,6 +152,9 @@ func maintainContractPartitions(ctx context.Context, now time.Time, cursor Contr
 			glog.Errorf("[cp]could not create the next contract partitions: %s\n", err)
 		}
 		report.Analyzed, next.AnalyzedDay = analyzeContractPartitions(ctx, now, cursor.AnalyzedDay, deadline)
+		cleared, locked, errs := contractPartitionFamily.ClearEmptyLeafStatistics(ctx, now)
+		logPartitionClearedLeafStatistics(contractPartitionFamily.Name, cleared, locked, errs)
+		report.OpenLeafAnalyzeAt = contractPartitionFamily.NextOpenLeafAnalyzeTime(now)
 		retireExpiredContractDays(ctx, now, settings, deadline, report)
 	} else if cutoverDay, prepared := preparedContractCutoverDay(ctx); prepared && !cutoverDay.IsZero() && !now.Before(cutoverDay.Add(-contractCutoverAbandonMargin)) {
 		report.AbandonedCutover = abandonStaleContractCutover(ctx, cutoverDay, deadline, DefaultContractPartitionCutoverSettings(), contractPartitionGlogf)
@@ -242,10 +251,13 @@ func contractAnalyzeAdmission(ctx context.Context, relation string, leaf bool) s
 	return strings.Join(blockers, "; ")
 }
 
-// Analyzes each daily partition once its day has settled, and the parents
-// once a day, through the registry.
+// Analyzes the current day's partitions a minute into the day once they hold
+// rows, first, since until then a lookup may read them without statistics;
+// then each daily partition once its day has settled, and the parents once a
+// day, through the registry.
 func analyzeContractPartitions(ctx context.Context, now time.Time, analyzedDay string, deadline time.Time) (analyzed []string, nextAnalyzedDay string) {
-	analyzed = contractPartitionFamily.AnalyzeClosedLeaves(ctx, now, deadline)
+	analyzed = contractPartitionFamily.AnalyzeOpenLeaves(ctx, now, deadline)
+	analyzed = append(analyzed, contractPartitionFamily.AnalyzeClosedLeaves(ctx, now, deadline)...)
 	parents, nextAnalyzedDay := contractPartitionFamily.AnalyzeParents(ctx, now, analyzedDay, deadline)
 	analyzed = append(analyzed, parents...)
 	return

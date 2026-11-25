@@ -64,6 +64,12 @@
 //   - Statistics: autovacuum never analyzes a partitioned parent, so each
 //     parent is analyzed (ANALYZE ONLY) once per range period, and with
 //     LeafAnalyzeDelay each closed leaf once that long after its range ends.
+//     Each opened leaf is analyzed once it holds rows, OpenLeafAnalyzeDelay
+//     (a minute) after its range starts (AnalyzeOpenLeaves), and an empty
+//     leaf of a range that has not ended reads never analyzed, never
+//     analyzed empty (ClearEmptyLeafStatistics): a plan made while it is
+//     empty then reads it through its indexes, and a cached generic plan
+//     keeps doing so once its rows land.
 //   - Guarded drops (DropRange), and the retirement pass (Retire): expired
 //     ranges oldest first, each through its precondition, archive and drop.
 //   - Resume state (PartitionFamilyState), carried between runs in the
@@ -85,9 +91,12 @@
 // Registering a family schedules it. The runway task (MaintainPartitionRunways)
 // creates ahead for every registered family on its own short cadence, apart
 // from slow archive work. The retention task (MaintainPartitionRetention)
-// analyzes and retires them. A family with its own task (the contract tables,
-// client_reliability, network_ping) sets AnalyzeByOwnTask or RetireByOwnTask,
-// and that task calls the family's methods or keeps its own code. Nothing runs
+// analyzes and retires them, and runs at the latest when a range has been
+// open for OpenLeafAnalyzeDelay (NextOpenLeafAnalyzeTime). A family with its
+// own task (the contract tables, client_reliability, network_ping) sets
+// AnalyzeByOwnTask or RetireByOwnTask, and that task calls the family's
+// methods or keeps its own code; an own task that analyzes runs at that time
+// too. Nothing runs
 // for a family whose first table is not partitioned yet (Partitioned) except
 // its BeforeCutover hook on the runway pass, so a family cut over by an
 // operator command is safe to register before its cutover.
@@ -104,6 +113,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/urnetwork/glog"
@@ -288,15 +298,24 @@ type PartitionFamilySettings struct {
 	// Bounds each statement of the drop transaction: catalog work and the
 	// precondition's reads of the detached leaves.
 	DropStatementTimeout time.Duration
+	// A range's leaves are analyzed this long after the range starts, once
+	// they hold rows (AnalyzeOpenLeaves), and the tasks that analyze run then
+	// (NextOpenLeafAnalyzeTime). Zero, as in a family's own settings made
+	// before this field, uses the default's.
+	OpenLeafAnalyzeDelay time.Duration
 }
 
 // Seconds of lock wait, as the contract and log families have used, and a
-// minute for a drop's statements.
+// minute for a drop's statements. A new leaf is analyzed a minute into its
+// range: a busy day's first minute writes thousands of rows, which an
+// ANALYZE of the leaf samples in well under a second, while autovacuum's
+// analyze of it can wait many minutes for a worker.
 func DefaultPartitionFamilySettings() *PartitionFamilySettings {
 	return &PartitionFamilySettings{
 		CreateLockTimeout:    5 * time.Second,
 		DropLockTimeout:      5 * time.Second,
 		DropStatementTimeout: 60 * time.Second,
+		OpenLeafAnalyzeDelay: time.Minute,
 	}
 }
 
@@ -479,6 +498,9 @@ func validatePartitionFamily(family *PartitionFamily) error {
 		if settings.CreateLockTimeout < time.Millisecond || settings.DropLockTimeout < time.Millisecond || settings.DropStatementTimeout < time.Millisecond {
 			return fmt.Errorf("family %s settings need positive timeouts of at least a millisecond", family.Name)
 		}
+		if settings.OpenLeafAnalyzeDelay < 0 {
+			return fmt.Errorf("family %s settings have a negative open leaf analyze delay", family.Name)
+		}
 	}
 	return nil
 }
@@ -572,6 +594,14 @@ func (self *PartitionFamily) settings() *PartitionFamilySettings {
 		return self.Settings
 	}
 	return DefaultPartitionFamilySettings()
+}
+
+// The family's OpenLeafAnalyzeDelay, or the default's for zero.
+func (self *PartitionFamily) openLeafAnalyzeDelay() time.Duration {
+	if delay := self.settings().OpenLeafAnalyzeDelay; 0 < delay {
+		return delay
+	}
+	return DefaultPartitionFamilySettings().OpenLeafAnalyzeDelay
 }
 
 // The name of the legacy partition of table.
@@ -1237,21 +1267,291 @@ func (self *PartitionFamily) Retire(ctx context.Context, now time.Time, state Pa
 
 // One ANALYZE in its own maintenance transaction, without a statement or
 // transaction bound: a large leaf's ANALYZE can outlast the role's 15 minutes.
-// A positive lockTimeout bounds its lock wait.
-func partitionRegistryAnalyze(ctx context.Context, statement string, lockTimeout time.Duration) bool {
+// A positive lockTimeout bounds its lock wait. With emptyLeaf set, the ANALYZE
+// runs only when that leaf has a page, read in the same transaction under the
+// same bound: an empty leaf's ANALYZE records it analyzed empty (see
+// ClearEmptyLeafStatistics). Returns whether the ANALYZE ran.
+func partitionRegistryAnalyze(ctx context.Context, statement string, lockTimeout time.Duration, emptyLeaf string) (analyzed bool) {
 	err := partitionRegistryTx(ctx, func(tx PgTx) {
 		if 0 < lockTimeout {
 			RaisePgResult(tx.Exec(ctx, fmt.Sprintf("SET LOCAL lock_timeout = '%dms'", max(int64(1), lockTimeout.Milliseconds()))))
 		}
 		RaisePgResult(tx.Exec(ctx, `SET LOCAL statement_timeout = 0`))
 		RaisePgResult(tx.Exec(ctx, liftTransactionTimeoutInTxSql))
+		if emptyLeaf != "" {
+			// a leaf dropped since it was listed reads empty
+			var leafBytes int64
+			Raise(tx.QueryRow(ctx, `SELECT COALESCE(pg_relation_size(to_regclass($1)), 0)`, "public."+quoteIdentifier(emptyLeaf)).Scan(&leafBytes))
+			if leafBytes == 0 {
+				return
+			}
+		}
 		RaisePgResult(tx.Exec(ctx, statement))
+		analyzed = true
 	})
 	if err != nil {
 		glog.Errorf("[partitions]%s: %s\n", statement, err)
 		return false
 	}
-	return true
+	return
+}
+
+// What the catalog holds for a leaf's statistics, read without a lock on the
+// leaf.
+type partitionLeafStatistics struct {
+	relpages int64
+	// -1 before the first ANALYZE or VACUUM, and after pg_clear_relation_stats
+	reltuples float64
+	// the later of the last manual and automatic ANALYZE, or nil for none
+	lastAnalyze *time.Time
+}
+
+// The statistics of each named public leaf that still exists, by name.
+func readPartitionLeafStatistics(ctx context.Context, names []string) (statistics map[string]partitionLeafStatistics, err error) {
+	statistics = map[string]partitionLeafStatistics{}
+	if len(names) == 0 {
+		return
+	}
+	err = partitionRegistryRun(func() {
+		MaintenanceDb(ctx, func(conn PgConn) {
+			result, queryErr := conn.Query(
+				ctx,
+				`
+				SELECT
+					leaf.name,
+					leaf_class.relpages::bigint,
+					leaf_class.reltuples::float8,
+					GREATEST(leaf_stats.last_analyze, leaf_stats.last_autoanalyze)
+				FROM unnest($1::text[]) AS leaf (name)
+				JOIN pg_class leaf_class ON leaf_class.oid = to_regclass('public.' || quote_ident(leaf.name))
+				LEFT JOIN pg_stat_user_tables leaf_stats ON leaf_stats.relid = leaf_class.oid
+				`,
+				names,
+			)
+			WithPgResult(result, queryErr, func() {
+				for result.Next() {
+					var name string
+					var leafStatistics partitionLeafStatistics
+					Raise(result.Scan(&name, &leafStatistics.relpages, &leafStatistics.reltuples, &leafStatistics.lastAnalyze))
+					statistics[name] = leafStatistics
+				}
+			})
+		})
+	})
+	return
+}
+
+// The family's leaves of table, as ListLeaves lists them, that keep holds.
+func (self *PartitionFamily) listLeavesWhere(ctx context.Context, table string, keep func(PartitionLeaf) bool) (leaves []PartitionLeaf, err error) {
+	var listed []PartitionLeaf
+	if runErr := partitionRegistryRun(func() {
+		MaintenanceDb(ctx, func(conn PgConn) {
+			listed, err = self.ListLeaves(ctx, conn, table)
+		})
+	}); runErr != nil {
+		return nil, runErr
+	}
+	if err != nil {
+		return nil, err
+	}
+	for _, leaf := range listed {
+		if keep(leaf) {
+			leaves = append(leaves, leaf)
+		}
+	}
+	return
+}
+
+// Analyzes each leaf of a range that has started, from OpenLeafAnalyzeDelay
+// after its start until it ends, once it holds rows: unless an ANALYZE since
+// then took statistics of its pages. Not the legacy or DEFAULT partition; a
+// leaf is chosen by its bounds, whatever its name. A day's first rows land at
+// its start, and until an analyze sees them the leaf reads never analyzed
+// (created or cleared, reltuples -1) or analyzed empty (reltuples 0, see
+// ClearEmptyLeafStatistics); autovacuum's analyze of it waits for a free
+// worker, which took about 15 minutes on 2026-11-25. So the tasks that call
+// this run at the delay (NextOpenLeafAnalyzeTime). An empty leaf is never
+// analyzed: it is retried on later runs until it holds a page. A leaf whose
+// statistics were taken while it held no page (relpages 0) is analyzed again
+// once it holds one. Each ANALYZE keeps the family's AnalyzeAdmission and
+// AnalyzeLockTimeout.
+func (self *PartitionFamily) AnalyzeOpenLeaves(ctx context.Context, now time.Time, deadline time.Time) (analyzed []string) {
+	delay := self.openLeafAnalyzeDelay()
+	for _, table := range self.Tables {
+		leaves, listErr := self.listLeavesWhere(ctx, table, func(leaf PartitionLeaf) bool {
+			return !leaf.Range.Lower.IsZero() && !now.Before(leaf.Range.Lower.Add(delay)) &&
+				(leaf.Range.Upper.IsZero() || now.Before(leaf.Range.Upper))
+		})
+		if listErr != nil {
+			glog.Errorf("[partitions]%s\n", listErr)
+			continue
+		}
+		names := []string{}
+		for _, leaf := range leaves {
+			names = append(names, leaf.Name)
+		}
+		statistics, statisticsErr := readPartitionLeafStatistics(ctx, names)
+		if statisticsErr != nil {
+			glog.Errorf("[partitions]%s: %s\n", self.Name, statisticsErr)
+			continue
+		}
+		for _, leaf := range leaves {
+			if !time.Now().Before(deadline) {
+				return
+			}
+			leafStatistics, ok := statistics[leaf.Name]
+			if !ok {
+				continue
+			}
+			opened := leaf.Range.Lower.Add(delay)
+			if 0 < leafStatistics.relpages && leafStatistics.lastAnalyze != nil && !leafStatistics.lastAnalyze.Before(opened) {
+				continue
+			}
+			if self.AnalyzeAdmission != nil {
+				if reason := self.AnalyzeAdmission(ctx, leaf.Name, true); reason != "" {
+					glog.Infof("[partitions]%s: the analyze of opened %s waits for a later run: %s\n", self.Name, leaf.Name, reason)
+					continue
+				}
+			}
+			if partitionRegistryAnalyze(ctx, fmt.Sprintf("ANALYZE public.%s", quoteIdentifier(leaf.Name)), self.AnalyzeLockTimeout, leaf.Name) {
+				analyzed = append(analyzed, leaf.Name)
+			}
+		}
+	}
+	return
+}
+
+// The first time after now that a range of the family has been open for
+// OpenLeafAnalyzeDelay, when AnalyzeOpenLeaves first analyzes its leaves: the
+// next 00:01 UTC for a daily family with the default delay, and the next
+// Monday's for a weekly one.
+func (self *PartitionFamily) NextOpenLeafAnalyzeTime(now time.Time) time.Time {
+	delay := self.openLeafAnalyzeDelay()
+	return self.Granularity.NextRangeStart(self.Granularity.RangeStart(now.Add(-delay))).Add(delay)
+}
+
+// Marks each empty leaf of a range that has not ended never analyzed again
+// (pg_clear_relation_stats, reltuples -1) once an ANALYZE or VACUUM took its
+// statistics while it was empty (reltuples 0, relpages 0). PostgreSQL plans a
+// never analyzed table of fewer than ten pages as ten, but an analyzed empty
+// one as empty, so a plan made while the leaf is empty reads it with a
+// sequential scan costed at zero; the services cache generic plans, and on
+// 2026-11-25 at 00:01Z those plans kept that scan as the day's rows landed,
+// reading the whole leaf on every contract lookup. Every statement that
+// analyzes or vacuums every leaf, the database-wide ANALYZE (DbMaintenance),
+// VacuumFullAllTables and a VACUUM of a partitioned parent (VacuumHotTables),
+// is followed by this, and the families' statistics passes sweep after any
+// other. Not the legacy or
+// DEFAULT partition; a leaf is chosen by its bounds, whatever its name, and
+// one that holds a page or reads never analyzed is left alone. The clear
+// takes the leaf's SHARE UPDATE EXCLUSIVE lock, as ANALYZE does, only when it
+// is free (NOWAIT), so it never queues behind an autovacuum or a transaction:
+// a locked leaf is reported and waits for the next pass. Its relcache
+// invalidation makes every cached plan that reads the leaf plan again.
+func (self *PartitionFamily) ClearEmptyLeafStatistics(ctx context.Context, now time.Time) (cleared []string, locked []string, errs []error) {
+	for _, table := range self.Tables {
+		leaves, listErr := self.listLeavesWhere(ctx, table, func(leaf PartitionLeaf) bool {
+			return !leaf.Range.Lower.IsZero() && (leaf.Range.Upper.IsZero() || now.Before(leaf.Range.Upper))
+		})
+		if listErr != nil {
+			errs = append(errs, listErr)
+			continue
+		}
+		names := []string{}
+		for _, leaf := range leaves {
+			names = append(names, leaf.Name)
+		}
+		statistics, statisticsErr := readPartitionLeafStatistics(ctx, names)
+		if statisticsErr != nil {
+			errs = append(errs, statisticsErr)
+			continue
+		}
+		for name, leafStatistics := range statistics {
+			// only a leaf whose statistics read analyzed empty, so a leaf that
+			// holds rows is never locked
+			if leafStatistics.reltuples < 0 || 0 < leafStatistics.relpages {
+				continue
+			}
+			// The size is read under the lock, which keeps an ANALYZE or
+			// VACUUM out. An insert, which it does not keep out, leaves a
+			// cleared leaf as it was when created, which is harmless.
+			clearedLeaf := false
+			err := partitionRegistryTx(ctx, func(tx PgTx) {
+				identifier := "public." + quoteIdentifier(name)
+				RaisePgResult(tx.Exec(ctx, fmt.Sprintf("LOCK TABLE %s IN SHARE UPDATE EXCLUSIVE MODE NOWAIT", identifier)))
+				var empty bool
+				Raise(tx.QueryRow(ctx, `SELECT pg_relation_size(oid) = 0 AND 0 <= reltuples FROM pg_class WHERE oid = to_regclass($1)`, identifier).Scan(&empty))
+				if empty {
+					RaisePgResult(tx.Exec(ctx, `SELECT pg_clear_relation_stats('public', $1)`, name))
+					clearedLeaf = true
+				}
+			})
+			var pgErr *pgconn.PgError
+			switch {
+			case err == nil:
+				if clearedLeaf {
+					cleared = append(cleared, name)
+				}
+			case errors.As(err, &pgErr) && pgErr.Code == pgerrcode.LockNotAvailable:
+				locked = append(locked, name)
+			case errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UndefinedTable:
+				// dropped since it was listed
+			default:
+				errs = append(errs, fmt.Errorf("clear the statistics of %s: %w", name, err))
+			}
+		}
+	}
+	slices.Sort(cleared)
+	slices.Sort(locked)
+	return
+}
+
+// Logs what one family's ClearEmptyLeafStatistics did.
+func logPartitionClearedLeafStatistics(family string, cleared []string, locked []string, errs []error) {
+	if 0 < len(cleared) {
+		glog.Infof("[partitions]%s: cleared the statistics of empty %v, which read never analyzed again\n", family, cleared)
+	}
+	if 0 < len(locked) {
+		glog.Infof("[partitions]%s: the statistics clear of empty %v waits for a later run: locked by another session\n", family, locked)
+	}
+	for _, err := range errs {
+		glog.Errorf("[partitions]%s: %s\n", family, err)
+	}
+}
+
+// ClearEmptyLeafStatistics for every registered, partitioned family, after a
+// statement that analyzes or vacuums every table: DbMaintenance's final
+// ANALYZE and VacuumFullAllTables. Each family's failure is logged, and the
+// rest go on.
+func ClearEmptyPartitionLeafStatistics(ctx context.Context, now time.Time) (cleared []string) {
+	for _, family := range PartitionFamilies() {
+		err := partitionRegistryRun(func() {
+			if !family.IsPartitioned(ctx) {
+				return
+			}
+			familyCleared, locked, errs := family.ClearEmptyLeafStatistics(ctx, now)
+			logPartitionClearedLeafStatistics(family.Name, familyCleared, locked, errs)
+			cleared = append(cleared, familyCleared...)
+		})
+		if err != nil {
+			glog.Errorf("[partitions]%s: the statistics clear of its empty leaves failed: %s\n", family.Name, err)
+		}
+	}
+	return
+}
+
+// The earliest NextOpenLeafAnalyzeTime of the families the registry's
+// retention task analyzes (not AnalyzeByOwnTask), or zero for none.
+func NextPartitionOpenLeafAnalyzeTime(now time.Time) (next time.Time) {
+	for _, family := range PartitionFamilies() {
+		if family.AnalyzeByOwnTask {
+			continue
+		}
+		if familyNext := family.NextOpenLeafAnalyzeTime(now); next.IsZero() || familyNext.Before(next) {
+			next = familyNext
+		}
+	}
+	return
 }
 
 // Analyzes each parent (ANALYZE ONLY: autovacuum never analyzes a
@@ -1273,7 +1573,7 @@ func (self *PartitionFamily) AnalyzeParents(ctx context.Context, now time.Time, 
 				continue
 			}
 		}
-		if partitionRegistryAnalyze(ctx, fmt.Sprintf("ANALYZE ONLY public.%s", quoteIdentifier(table)), self.AnalyzeLockTimeout) {
+		if partitionRegistryAnalyze(ctx, fmt.Sprintf("ANALYZE ONLY public.%s", quoteIdentifier(table)), self.AnalyzeLockTimeout, "") {
 			analyzed = append(analyzed, table)
 		} else {
 			parents = false
@@ -1331,7 +1631,7 @@ func (self *PartitionFamily) AnalyzeClosedLeaves(ctx context.Context, now time.T
 					continue
 				}
 			}
-			if partitionRegistryAnalyze(ctx, fmt.Sprintf("ANALYZE public.%s", quoteIdentifier(leaf.Name)), self.AnalyzeLockTimeout) {
+			if partitionRegistryAnalyze(ctx, fmt.Sprintf("ANALYZE public.%s", quoteIdentifier(leaf.Name)), self.AnalyzeLockTimeout, "") {
 				analyzed = append(analyzed, leaf.Name)
 			}
 		}
@@ -1369,14 +1669,23 @@ type PartitionRetentionReport struct {
 	Analyzed map[string][]string
 	Retired  []*PartitionRetireReport
 	More     bool
+	// when the next run is due for the next range's opened leaves
+	// (NextPartitionOpenLeafAnalyzeTime of the pass's now)
+	OpenLeafAnalyzeAt time.Time
 }
 
 // The retention task's pass, within budget: for every registered, partitioned
-// family, analyzes its parents and closed leaves unless AnalyzeByOwnTask, and
-// retires its expired ranges unless RetireByOwnTask. The pass starts with the
-// family the last one stopped at.
+// family, analyzes its opened leaves, closed leaves and parents and clears
+// the statistics of its empty leaves unless AnalyzeByOwnTask, and retires its
+// expired ranges unless RetireByOwnTask. Every family's opened leaves go
+// first, so a family that spends the budget does not hold another's new leaf
+// to a later run. The rest of the pass starts with the family the last one
+// stopped at.
 func MaintainPartitionRetention(ctx context.Context, now time.Time, state PartitionMaintenanceState, budget time.Duration) (report *PartitionRetentionReport, next PartitionMaintenanceState) {
-	report = &PartitionRetentionReport{Analyzed: map[string][]string{}}
+	report = &PartitionRetentionReport{
+		Analyzed:          map[string][]string{},
+		OpenLeafAnalyzeAt: NextPartitionOpenLeafAnalyzeTime(now),
+	}
 	deadline := time.Now().Add(budget)
 	next = PartitionMaintenanceState{Families: map[string]PartitionFamilyState{}}
 	families := PartitionFamilies()
@@ -1385,6 +1694,29 @@ func MaintainPartitionRetention(ctx context.Context, now time.Time, state Partit
 	})
 	if 0 < start {
 		families = append(families[start:], families[:start]...)
+	}
+	// a family whose check fails is passed over, as one not partitioned yet
+	partitioned := map[string]bool{}
+	for _, family := range families {
+		if family.AnalyzeByOwnTask && family.RetireByOwnTask {
+			continue
+		}
+		partitionRegistryRun(func() {
+			partitioned[family.Name] = family.IsPartitioned(ctx)
+		})
+	}
+	for _, family := range families {
+		if family.AnalyzeByOwnTask || !partitioned[family.Name] || !time.Now().Before(deadline) {
+			continue
+		}
+		err := partitionRegistryRun(func() {
+			if analyzed := family.AnalyzeOpenLeaves(ctx, now, deadline); 0 < len(analyzed) {
+				report.Analyzed[family.Name] = analyzed
+			}
+		})
+		if err != nil {
+			glog.Errorf("[partitions]%s analyze: %s\n", family.Name, err)
+		}
 	}
 	for _, family := range families {
 		familyState := state.Families[family.Name]
@@ -1396,13 +1728,8 @@ func MaintainPartitionRetention(ctx context.Context, now time.Time, state Partit
 			report.More = true
 			continue
 		}
-		if !family.AnalyzeByOwnTask || !family.RetireByOwnTask {
-			partitioned := false
-			if err := partitionRegistryRun(func() {
-				partitioned = family.IsPartitioned(ctx)
-			}); err != nil || !partitioned {
-				continue
-			}
+		if (!family.AnalyzeByOwnTask || !family.RetireByOwnTask) && !partitioned[family.Name] {
+			continue
 		}
 		if !family.AnalyzeByOwnTask {
 			err := partitionRegistryRun(func() {
@@ -1410,8 +1737,10 @@ func MaintainPartitionRetention(ctx context.Context, now time.Time, state Partit
 				var parents []string
 				parents, familyState.AnalyzedPeriod = family.AnalyzeParents(ctx, now, familyState.AnalyzedPeriod, deadline)
 				if analyzed = append(analyzed, parents...); 0 < len(analyzed) {
-					report.Analyzed[family.Name] = analyzed
+					report.Analyzed[family.Name] = append(report.Analyzed[family.Name], analyzed...)
 				}
+				cleared, locked, errs := family.ClearEmptyLeafStatistics(ctx, now)
+				logPartitionClearedLeafStatistics(family.Name, cleared, locked, errs)
 			})
 			if err != nil {
 				glog.Errorf("[partitions]%s analyze: %s\n", family.Name, err)
