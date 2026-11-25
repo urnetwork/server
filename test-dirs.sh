@@ -72,12 +72,27 @@ for ((index = 0; index < ${#arguments[@]}; index++)); do
     esac
 done
 
+# The vendored modules' tests (./third_party: go-redis, pgx, utls) are upstream
+# suites that dial localhost's default Redis and Postgres ports directly, not
+# the endpoints test-env.sh attests. On 2026-11-25 a developer machine forwarded
+# localhost's Redis ports to a production cluster, and a vendored go-redis
+# suite's FLUSHALL landed there. They're left out unless
+# URNETWORK_TEST_THIRD_PARTY=1 asks for them, on a machine where those ports
+# are disposable test servers.
+third_party_prune=(-path './third_party' -prune -o)
+if [[ "${URNETWORK_TEST_THIRD_PARTY:-}" == 1 ]]; then
+    third_party_prune=()
+elif [[ "$search_directory" == . && -d ./third_party ]]; then
+    printf '%s\n' "test-dirs.sh: ./third_party is left out: its vendored tests dial localhost's default Redis and Postgres ports; URNETWORK_TEST_THIRD_PARTY=1 includes it" >&2
+fi
+
 candidates="$(find "$search_directory" \
     -type d \( \
         -iname '*acceptance*' -o \
         -path './temp' -o -path './.vscode' -o -path './.direnv' -o \
         -name '.git' -o -name 'bin' -o -name 'build' -o -name 'profile' \
     \) -prune -o \
+    "${third_party_prune[@]}" \
     -path './connect/sim-latency/eval-*' -prune -o \
     -path './connect/sim-latency/baseline' -prune -o \
     -iname '*_test.go' -print | \

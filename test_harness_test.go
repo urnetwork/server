@@ -76,6 +76,9 @@ func testCommandEnvironment(overrideNameValues map[string]string, unsetNames ...
 		"WARP_TEST_ENV_SUITE_PROXY_STATE_DIR",
 		"WARP_TEST_ENV_TEST_HOSTS_FILE",
 		"WARP_TEST_ENV_TEST_RUN_LOCAL_LOCK_DIR",
+		// the runners' guard opt-ins: a caller's own never reaches a fixture
+		"URNETWORK_TEST_LOOPBACK_REDIS_OK",
+		"URNETWORK_TEST_THIRD_PARTY",
 	} {
 		blockedNames[name] = true
 	}
@@ -481,6 +484,50 @@ func TestLocalTestDirectoryDiscoveryPreservesTargetAndOwners(t *testing.T) {
 	}
 }
 
+// The vendored modules' suites in ./third_party dial localhost's default Redis
+// and Postgres ports, so discovery leaves them out and says so, unless
+// URNETWORK_TEST_THIRD_PARTY=1 asks for them. A nested third_party directory
+// isn't the vendored tree and stays in.
+func TestLocalTestDirectoryDiscoveryLeavesThirdPartyOutUnlessAsked(t *testing.T) {
+	fixtureDir := writeTestDirectorySelectorFixture(t)
+	for _, directory := range []string{".", "./app", "./third_party/vendored", "./third_party/vendored/nested", "./app/third_party"} {
+		path := filepath.Join(fixtureDir, directory)
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "fixture_test.go"), []byte("package fixture\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, c := range []struct {
+		optIn  string
+		want   []string
+		notice bool
+	}{
+		{optIn: "", want: []string{".", "./app", "./app/third_party"}, notice: true},
+		{optIn: "0", want: []string{".", "./app", "./app/third_party"}, notice: true},
+		{optIn: "1", want: []string{".", "./app", "./app/third_party", "./third_party/vendored", "./third_party/vendored/nested"}, notice: false},
+	} {
+		cmd := exec.Command(filepath.Join(fixtureDir, "test-dirs.sh"))
+		cmd.Env = testCommandEnvironment(map[string]string{
+			"GOFLAGS": "", "GOWORK": "off", "GOTOOLCHAIN": "local", "GOPROXY": "off", "LC_ALL": "C",
+			"URNETWORK_TEST_THIRD_PARTY": c.optIn,
+		})
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		output, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("URNETWORK_TEST_THIRD_PARTY=%q: discover fixture packages: %v\n%s", c.optIn, err, stderr.String())
+		}
+		if directories := strings.Fields(string(output)); !slices.Equal(directories, c.want) {
+			t.Errorf("URNETWORK_TEST_THIRD_PARTY=%q: got %v, want %v", c.optIn, directories, c.want)
+		}
+		if notice := strings.Contains(stderr.String(), "./third_party is left out"); notice != c.notice {
+			t.Errorf("URNETWORK_TEST_THIRD_PARTY=%q: notice %t, want %t: %q", c.optIn, notice, c.notice, stderr.String())
+		}
+	}
+}
+
 // A command-level Go failure cannot leave a successful prefix as inventory.
 func TestLocalTestDirectoryDiscoveryPropagatesGoFailure(t *testing.T) {
 	fixtureDir := writeTestDirectorySelectorFixture(t)
@@ -772,6 +819,9 @@ fi
 exit "$test_status"
 `,
 		filepath.Join(binDir, "grep"): grepScript,
+		// the loopback Redis guard's listener census: lsof's columns, its
+		// header only with a listener, and its exit 1 when it lists nothing
+		filepath.Join(binDir, "lsof"): testServerRunnerLsofScript,
 	}
 	for path, content := range files {
 		if err := os.WriteFile(path, []byte(content), 0o700); err != nil {
@@ -779,6 +829,149 @@ exit "$test_status"
 		}
 	}
 	return runnerPath, binDir, workspaceRoot
+}
+
+// A synthetic lsof listing TEST_SERVER_RUNNER_LISTENERS, one listener a line.
+const testServerRunnerLsofScript = `#!/bin/sh
+[ -n "${TEST_SERVER_RUNNER_LISTENERS:-}" ] || exit 1
+printf 'COMMAND     PID   USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME\n'
+printf '%s\n' "$TEST_SERVER_RUNNER_LISTENERS"
+`
+
+// One lsof line for a TCP listener of command on address.
+func testServerRunnerLsofListener(command string, address string) string {
+	return command + " 27230 brien    5u  IPv4 0x1a2b3c4d5e6f7081      0t0  TCP " + address + " (LISTEN)"
+}
+
+// The runner refuses to start while a loopback Redis port, 6379 to 6427 on a
+// loopback or wildcard address, is open outside Docker, before any test or
+// test-env.sh; Docker's listeners, other ports, other addresses and the
+// explicit opt-in pass, and the admission tests start.
+func TestServerTestScriptRefusesALoopbackRedisPortOutsideDocker(t *testing.T) {
+	for _, c := range []struct {
+		listeners []string
+		optIn     bool
+		refused   bool
+	}{
+		{refused: false},
+		{listeners: []string{testServerRunnerLsofListener("ssh", "127.0.0.1:6379")}, refused: true},
+		{listeners: []string{testServerRunnerLsofListener("ssh", "127.0.0.1:6427")}, refused: true},
+		{listeners: []string{testServerRunnerLsofListener("redis-ser", "*:6380")}, refused: true},
+		{listeners: []string{testServerRunnerLsofListener("socat", "[::1]:6390")}, refused: true},
+		{listeners: []string{testServerRunnerLsofListener("kubectl", "0.0.0.0:6400")}, refused: true},
+		{listeners: []string{testServerRunnerLsofListener("ssh", "127.0.0.1:6379")}, optIn: true, refused: false},
+		{listeners: []string{
+			testServerRunnerLsofListener("com.docke", "10.213.0.1:6379"),
+			testServerRunnerLsofListener("com.docke", "*:6379"),
+			testServerRunnerLsofListener("ssh", "127.0.0.1:5432"),
+			testServerRunnerLsofListener("ssh", "127.0.0.1:6432"),
+			testServerRunnerLsofListener("ssh", "127.0.0.1:6378"),
+			testServerRunnerLsofListener("ssh", "127.0.0.1:6428"),
+			testServerRunnerLsofListener("ssh", "192.0.2.10:6379"),
+		}, refused: false},
+		{listeners: []string{
+			testServerRunnerLsofListener("com.docke", "10.213.0.1:6379"),
+			testServerRunnerLsofListener("ssh", "127.0.0.1:6381"),
+		}, refused: true},
+	} {
+		runnerPath, binDir, workspaceRoot := writeTestServerRunnerFixture(t, "#!/bin/sh\nexit 87\n")
+		environment := map[string]string{
+			"PATH":                                binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			"TEST_SERVER_RUNNER_ADMISSION_STATUS": "77",
+			"TEST_SERVER_RUNNER_LISTENERS":        strings.Join(c.listeners, "\n"),
+			"URNETWORK_NETWORK_TEST_LOCK_HELD":    "1",
+			"URNETWORK_ROOT":                      workspaceRoot,
+		}
+		if c.optIn {
+			environment["URNETWORK_TEST_LOOPBACK_REDIS_OK"] = "1"
+		}
+		cmd := exec.Command("bash", runnerPath)
+		cmd.Env = testCommandEnvironment(environment)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		_, err := cmd.Output()
+		var exitErr *exec.ExitError
+		_, invocationsErr := os.Stat(filepath.Join(workspaceRoot, "go-invocations"))
+		if c.refused {
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 75 || !strings.Contains(stderr.String(), "refusing to start") {
+				t.Errorf("listeners %q: runner = %v, %q; want a refusal with exit 75", c.listeners, err, stderr.String())
+			}
+			if !errors.Is(invocationsErr, os.ErrNotExist) {
+				t.Errorf("listeners %q: a refused run invoked go", c.listeners)
+			}
+			continue
+		}
+		// the guard passed, so the first admission test ran and its status ended the run
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 77 || strings.Contains(stderr.String(), "refusing to start") {
+			t.Errorf("listeners %q, opt-in %t: runner = %v, %q; want the admission tests' exit 77", c.listeners, c.optIn, err, stderr.String())
+		}
+		if invocationsErr != nil {
+			t.Errorf("listeners %q, opt-in %t: the admission tests never ran: %v", c.listeners, c.optIn, invocationsErr)
+		}
+	}
+}
+
+// Without lsof the guard reads ss's listeners, and with neither it refuses to
+// start rather than run unchecked.
+func TestServerTestScriptChecksLoopbackRedisPortsWithSsOrRefuses(t *testing.T) {
+	restrictedPath := []string{"/usr/bin", "/bin"}
+	for _, directory := range restrictedPath {
+		for _, tool := range []string{"lsof", "ss"} {
+			if _, err := os.Stat(filepath.Join(directory, tool)); err == nil {
+				t.Skipf("%s/%s is on the restricted PATH, so the fallbacks can't be isolated here", directory, tool)
+			}
+		}
+	}
+	for _, c := range []struct {
+		ssOutput string
+		status   int
+	}{
+		{ssOutput: "LISTEN 0 128 127.0.0.1:6379 0.0.0.0:* users:((\"ssh\",pid=27230,fd=5))", status: 75},
+		{ssOutput: "LISTEN 0 128 [::]:6385 [::]:*", status: 75},
+		{ssOutput: "LISTEN 0 4096 10.213.0.1:6379 0.0.0.0:* users:((\"docker-proxy\",pid=2,fd=4))\nLISTEN 0 4096 0.0.0.0:6379 0.0.0.0:* users:((\"docker-proxy\",pid=3,fd=4))", status: 77},
+		{ssOutput: "", status: 77},
+	} {
+		runnerPath, binDir, workspaceRoot := writeTestServerRunnerFixture(t, "#!/bin/sh\nexit 87\n")
+		if err := os.Remove(filepath.Join(binDir, "lsof")); err != nil {
+			t.Fatal(err)
+		}
+		ssScript := "#!/bin/sh\nprintf '%s\\n' \"$TEST_SERVER_RUNNER_SS_OUTPUT\"\n"
+		if err := os.WriteFile(filepath.Join(binDir, "ss"), []byte(ssScript), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("bash", runnerPath)
+		cmd.Env = testCommandEnvironment(map[string]string{
+			"PATH":                                strings.Join(append([]string{binDir}, restrictedPath...), string(os.PathListSeparator)),
+			"TEST_SERVER_RUNNER_ADMISSION_STATUS": "77",
+			"TEST_SERVER_RUNNER_SS_OUTPUT":        c.ssOutput,
+			"URNETWORK_NETWORK_TEST_LOCK_HELD":    "1",
+			"URNETWORK_ROOT":                      workspaceRoot,
+		})
+		output, err := cmd.CombinedOutput()
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != c.status {
+			t.Errorf("ss listing %q: runner = %v, %q; want exit %d", c.ssOutput, err, output, c.status)
+		}
+	}
+
+	runnerPath, binDir, workspaceRoot := writeTestServerRunnerFixture(t, "#!/bin/sh\nexit 87\n")
+	if err := os.Remove(filepath.Join(binDir, "lsof")); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", runnerPath)
+	cmd.Env = testCommandEnvironment(map[string]string{
+		"PATH":                             strings.Join(append([]string{binDir}, restrictedPath...), string(os.PathListSeparator)),
+		"URNETWORK_NETWORK_TEST_LOCK_HELD": "1",
+		"URNETWORK_ROOT":                   workspaceRoot,
+	})
+	output, err := cmd.CombinedOutput()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 69 || !strings.Contains(string(output), "neither lsof nor ss") {
+		t.Errorf("without lsof or ss: runner = %v, %q; want a refusal with exit 69", err, output)
+	}
+	if _, err := os.Stat(filepath.Join(workspaceRoot, "go-invocations")); !errors.Is(err, os.ErrNotExist) {
+		t.Error("an unchecked run invoked go")
+	}
 }
 
 // Pins discovery and exact-case execution independently of caller test flags.
