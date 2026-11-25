@@ -53,6 +53,7 @@ Usage:
     bringyourctl db usage-archive-export [--mode=<mode>] [--close-time-floor=<date>] [--max-weeks-per-pass=<n>] [--remove]
     bringyourctl db reindex-index <index> [--dry-run] [--lock-timeout=<duration>] [--timeout=<duration>] [--parallel=<n>]
     bringyourctl db contract-legacy-compact [--dry-run] [--table=<table>] [--max-rows=<n>] [--count-timeout=<duration>] [--compact-timeout=<duration>]
+    bringyourctl db contract-legacy-settle [--min-close-age=<duration>] [--max-contract-id=<contract_id>] [--max-contracts-per-second=<n>] [--max-contracts=<n>] [--charge-live-grants] [(--apply --expect=<digest>)]
     bringyourctl evidence move-flat [--checkpoint=<path>] [--journal=<path>] [--snapshot=<path>] [--objects-per-second=<n>] [--workers=<n>] [--batch-rows=<n>] [--max-moves=<n>] [--until-created=<time>] [--dry-run]
     bringyourctl evidence snapshot-hashes --out=<path> [--pages-per-second=<n>] [--batch-pages=<n>]
     bringyourctl evidence move-flat-verify --journal=<path> [--checkpoint=<path>] [--fallback-sample=<n>]
@@ -351,7 +352,7 @@ Options:
                    major or full, mildest first.
 
     --private-stdin  Read the bounded private expiry request from stdin.
-    --apply          Apply the scoped expiry request; omission is a read-only preview. With reengagement suppress, write the suppression of the dry run whose digest is --expect. With db scrub-network-create-secrets, rewrite the audit rows of the dry run whose digest is --expect.
+    --apply          Apply the scoped expiry request; omission is a read-only preview. With reengagement suppress, write the suppression of the dry run whose digest is --expect. With db scrub-network-create-secrets, rewrite the audit rows of the dry run whose digest is --expect. With db contract-legacy-settle, settle the plan of the dry run whose token is --expect.
     --contract_id=<contract_id> The contract to close
     --target_id=<target_id>     The contract_close.party (either "destination" or "source")
     --used_transfer_byte_count=<used_transfer_byte_count>   Bytes used
@@ -363,12 +364,17 @@ Options:
     --signing-key-file=<path>  With crypto alchemy-webhook, the file the webhook's signing key is written to (mode 0600) when Alchemy returns it; it is never printed.
     --tx=<signature>  With crypto credit-usdc, the Solana transaction signature of the payment recorded unfulfilled (no_intent) that pays the invoice: owner's go only, for a memo-less payment whose amount is not the quote's.
     --address=<payout_address>  The address the account holder gave for a refund, in the invoice's coin.
-    --expect=<digest>  The digest the account-points backfill-blocks, network sign-out-all, network trim-proxies, balance move-redeemed, crypto credit-usdc, payouts close-attempted, contracts close-due, reengagement suppress or db scrub-network-create-secrets dry run printed; --commit and --apply refuse any other census.
+    --expect=<digest>  The digest the account-points backfill-blocks, network sign-out-all, network trim-proxies, balance move-redeemed, crypto credit-usdc, payouts close-attempted, contracts close-due, reengagement suppress, db scrub-network-create-secrets or db contract-legacy-settle dry run printed; --commit and --apply refuse any other census.
     --network_ids_file=<path>  With reengagement suppress, the networks to suppress: one network id a line; blank lines and lines starting with # are skipped.
     --after=<event_id>  With db scrub-network-create-secrets, scrub only the audit rows after this event id: a stopped --apply prints the last one it committed.
     --through=<event_id>  With db scrub-network-create-secrets, the newest audit event id in scope; the dry run defaults to the newest row and prints it, and --apply needs the one the dry run printed.
     --batch=<n>  With db scrub-network-create-secrets, the audit rows each statement reads and each transaction rewrites, at most 5000 (the default).
     --batch-pause=<duration>  With db scrub-network-create-secrets, the wait after each batch (Go duration; default 2s).
+    --min-close-age=<duration>  With db contract-legacy-settle, settle only contracts that closed at least this long ago (Go duration; default 48h).
+    --max-contract-id=<contract_id>  With db contract-legacy-settle, the contract id bound of the scope; omitted reads the upper bound of the legacy partition (no bound while the contract tables are not partitioned).
+    --max-contracts-per-second=<n>  With db contract-legacy-settle --apply, the most contracts settled a second, one transaction each (default 50).
+    --max-contracts=<n>  With db contract-legacy-settle --apply, the most planned contracts settled in this run; omitted settles every one.
+    --charge-live-grants  With db contract-legacy-settle, settle a contract whose charge falls on a grant that is still live (owner's go); held otherwise.
     --before=<before>  With contracts close-due, the deadline bound (RFC 3339) of the contracts to retire; the dry run defaults to a minute ago and prints it, and --commit needs the one the dry run printed.
     --file=<file>  For account-points backfill-blocks, the awards the dry run saves and --commit commits (omitted, operator-block-points-<digest>.json).
     --blocks=<blocks>  With account-points backfill-blocks, the operator blocks to award, comma separated; omitted, every completed block past the earning boundary that has not expired. A block that has its points is skipped; an expired block, past client_reliability retention or recorded expired by the daily award, is refused.
@@ -437,6 +443,8 @@ func main() {
 			dbReindexIndex(opts)
 		} else if contractLegacyCompact, _ := opts.Bool("contract-legacy-compact"); contractLegacyCompact {
 			dbContractLegacyCompact(opts)
+		} else if contractLegacySettle, _ := opts.Bool("contract-legacy-settle"); contractLegacySettle {
+			os.Exit(dbContractLegacySettleCommand(opts))
 		}
 	} else if evidence, _ := opts.Bool("evidence"); evidence {
 		if moveFlatVerify, _ := opts.Bool("move-flat-verify"); moveFlatVerify {
