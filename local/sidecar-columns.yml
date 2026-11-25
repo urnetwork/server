@@ -771,3 +771,220 @@ tables:
       provider: compute-7
       read_hour: compute-7
       read_time: compute-7
+  # DESIGN-COMPUTE §14.4's MG-C1, BAL's part (BAL-M12-01), registered from sidecar/model's compute_schema.go: each
+  # table under the compute row whose store names it, compute-1 the operations, charges and day rows, compute-2 the
+  # lots, promotion codes, payers and terms, compute-3 the draws, totals, pruned sums and accounts, compute-6
+  # auto-renew and the budget raises, compute-8 the disputes; compute_charge's daily partitions are the parent's
+  compute_account:
+    group: MG-C1
+    columns:
+      first_charge_day: compute-3
+      indexer_reserve_nano_usd: compute-3
+      negative_floor_nano_usd: compute-3
+      network_id: compute-3
+      search_cap_override: compute-3
+      settled_nano_usd: compute-3
+      state: compute-3
+      update_time: compute-3
+      version: compute-3
+  compute_lot:
+    group: MG-C1
+    columns:
+      amount_nano_usd: compute-2
+      create_time: compute-2
+      expire_time: compute-2
+      kind: compute-2
+      lapsed_nano_usd: compute-2
+      lot_id: compute-2
+      market: compute-2
+      market_ref: compute-2
+      network_id: compute-2
+      refunded_nano_usd: compute-2
+      remaining_nano_usd: compute-2
+      reversed_time: compute-2
+  compute_charge:
+    group: MG-C1
+    columns:
+      absorbed_nano_usd: compute-1
+      agent_id: compute-1
+      amount_nano_usd: compute-1
+      catalog_id: compute-1
+      charge_id: compute-1
+      cost_nano_usd: compute-1
+      enclave_id: compute-1
+      end_time: compute-1
+      kind: compute-1
+      member_id: compute-1
+      network_id: compute-1
+      provider: compute-1
+      settle_time: compute-1
+      sidecar_id: compute-1
+      start_time: compute-1
+      subject_ref: compute-1
+      units: compute-1
+  compute_charge_lot:
+    group: MG-C1
+    columns:
+      amount_nano_usd: compute-3
+      charge_id: compute-3
+      draw_index: compute-3
+      lot_id: compute-3
+  compute_charge_day:
+    group: MG-C1
+    columns:
+      agent_id: compute-1
+      amount_nano_usd: compute-1
+      cached_tokens: compute-1
+      catalog_id: compute-1
+      count: compute-1
+      day: compute-1
+      egress_bytes: compute-1
+      enclave_id: compute-1
+      input_tokens: compute-1
+      kind: compute-1
+      member_id: compute-1
+      network_id: compute-1
+      output_tokens: compute-1
+      provider: compute-1
+      refunded_nano_usd: compute-1
+      searches: compute-1
+      seconds: compute-1
+      sidecar_id: compute-1
+  compute_charge_total:
+    group: MG-C1
+    columns:
+      amount_nano_usd: compute-3
+      cached_tokens: compute-3
+      catalog_id: compute-3
+      count: compute-3
+      egress_bytes: compute-3
+      enclave_id: compute-3
+      input_tokens: compute-3
+      kind: compute-3
+      member_id: compute-3
+      network_id: compute-3
+      output_tokens: compute-3
+      provider: compute-3
+      refunded_nano_usd: compute-3
+      searches: compute-3
+      seconds: compute-3
+  compute_charge_pruned:
+    group: MG-C1
+    columns:
+      amount_nano_usd: compute-3
+      count: compute-3
+      kind: compute-3
+      network_id: compute-3
+  compute_op:
+    group: MG-C1
+    columns:
+      agent_id: compute-1
+      attempt: compute-1
+      catalog_id: compute-1
+      catalog_version: compute-1
+      enclave_id: compute-1
+      hold_nano_usd: compute-1
+      kind: compute-1
+      member_id: compute-1
+      network_id: compute-1
+      op_key: compute-1
+      outcome: compute-1
+      price_read: compute-1
+      provider: compute-1
+      provider_ref: compute-1
+      reserve_nano_usd: compute-1
+      shard: compute-1
+      sidecar_id: compute-1
+      start_time: compute-1
+      state: compute-1
+      subject_ref: compute-1
+  compute_auto_renew:
+    group: MG-C1
+    columns:
+      below_nano_usd: compute-6
+      enabled: compute-6
+      failure_day_count: compute-6
+      failure_run_count: compute-6
+      market: compute-6
+      mode: compute-6
+      month_limit_nano_usd: compute-6
+      monthly_credits: compute-6
+      network_id: compute-6
+      next_retry_time: compute-6
+      off_reason: compute-6
+      pack_credits: compute-6
+      payer_member_id: compute-6
+      stripe_customer_id: compute-6
+      stripe_payment_method_id: compute-6
+      stripe_subscription_id: compute-6
+      top_up_day: compute-6
+      top_up_day_count: compute-6
+      top_up_month: compute-6
+      top_up_month_nano_usd: compute-6
+      update_time: compute-6
+  compute_dispute:
+    group: MG-C1
+    columns:
+      charge_id: compute-8
+      create_time: compute-8
+      device_units: compute-8
+      network_id: compute-8
+      provider: compute-8
+      provider_units: compute-8
+      request_id: compute-8
+      state: compute-8
+      update_time: compute-8
+  compute_budget_raise:
+    group: MG-C1
+    columns:
+      amount_nano_usd: compute-6
+      approval_id: compute-6
+      approval_use: compute-6
+      create_time: compute-6
+      effect_key: compute-6
+      expire_time: compute-6
+      network_id: compute-6
+      period: compute-6
+      subject_id: compute-6
+  compute_promo_code:
+    group: MG-C1
+    columns:
+      amount_nano_usd: compute-2
+      campaign: compute-2
+      code_hash: compute-2
+      code_id: compute-2
+      create_time: compute-2
+      created_by: compute-2
+      last_day: compute-2
+      paid_lot_required: compute-2
+      reason: compute-2
+      redeem_count: compute-2
+      redeem_max_count: compute-2
+  compute_promo_redemption:
+    group: MG-C1
+    columns:
+      code_id: compute-2
+      lot_id: compute-2
+      network_id: compute-2
+      redeem_time: compute-2
+      redemption_id: compute-2
+      sidecar_id: compute-2
+  compute_payer:
+    group: MG-C1
+    columns:
+      first_purchase_day: compute-2
+      payer_hash: compute-2
+  compute_payer_day:
+    group: MG-C1
+    columns:
+      amount_nano_usd: compute-2
+      day: compute-2
+      payer_hash: compute-2
+  compute_terms:
+    group: MG-C1
+    columns:
+      accept_time: compute-2
+      clause: compute-2
+      network_id: compute-2
+      terms_version: compute-2
+      user_id: compute-2
