@@ -549,10 +549,14 @@ func nativeBrowsingAssetBodyOwnershipError(pressure *nativeBrowsingPressureObser
 			if !progress.started.Load() || !progress.finished.Load() || opened != closed || progress.bodyCloseError.Load() || !opened && (!progress.cancelRequested.Load() || progress.responseStatus.Load() != 0) {
 				return fmt.Errorf("asset response body ownership: page=%d asset=%d opened=%t closed=%t", page, asset, opened, closed)
 			}
+			if progress.connectionAcquisitions.Load() > 1 && (!opened || !progress.singleHandlerH1Retry()) {
+				return fmt.Errorf("asset transport retry ownership: page=%d asset=%d acquisitions=%d checkouts=%d writes=%d responses=%d",
+					page, asset, progress.connectionAcquisitions.Load(), progress.connectionCheckouts.Load(), progress.requestWrites.Load(), progress.responseStarts.Load())
+			}
 		}
 	}
 	drain := pressure.assetOwnershipSnapshot()
-	if drain.ClientStarted != 400 || drain.ClientFinished != 400 || drain.BodiesOpened != drain.BodiesClosed || 400-drain.BodiesOpened > drain.Canceled || drain.ServerStarted != 400 || drain.ServerFinished != 400 || drain.ServerAttempts != 400 || drain.ServerFinishedAttempts != 400 || drain.ServerActiveAttempts != 0 || drain.InvalidResponseStatuses != 0 || drain.ServerWriteErrors != 0 || drain.ServerShortWrites != 0 || drain.ClientRequestWriteErrors != 0 || drain.ClientReacquisitions != 0 || drain.RetriedAssets != 0 {
+	if drain.ClientStarted != 400 || drain.ClientFinished != 400 || drain.BodiesOpened != drain.BodiesClosed || 400-drain.BodiesOpened > drain.Canceled || drain.ServerStarted != 400 || drain.ServerFinished != 400 || drain.ServerAttempts != 400 || drain.ServerFinishedAttempts != 400 || drain.ServerActiveAttempts != 0 || drain.InvalidResponseStatuses != 0 || drain.ServerWriteErrors != 0 || drain.ServerShortWrites != 0 || drain.ClientRequestWriteErrors != 0 {
 		return fmt.Errorf("asset attempt/disposal census: %+v", drain)
 	}
 	return nil

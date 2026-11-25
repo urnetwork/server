@@ -220,30 +220,56 @@ func writeLocalRunRecordingGo(t *testing.T) (string, string) {
 // local-env.sh attested the launcher, and the process inherits that attestation
 // with the entry point's own identity.
 func TestLocalRunScriptsStartProcessesWithLauncherAttestation(t *testing.T) {
+	// Every script has its own launcher. Join that owner before starting the
+	// next script so its watchdog only covers the case that needs it.
 	for _, script := range localRunScriptIdentities {
-		lockDir, hostsPath := writeTestEnvironmentLauncherState(t, localPostgresHost, "5432", localRedisHost, "6379")
-		probePath, _ := writeLocalEnvironmentRecordingProbe(t)
-		resolverPath, _ := writeTestEnvironmentHostResolver(t, map[string][]string{
-			localPostgresHost: {localDedicatedAddress},
-			localRedisHost:    {localDedicatedAddress},
+		var ownerToken string
+		t.Run(script.path, func(scriptTest *testing.T) {
+			lockDir, hostsPath := writeTestEnvironmentLauncherState(scriptTest, localPostgresHost, "5432", localRedisHost, "6379")
+			ownerRecord, err := os.ReadFile(filepath.Join(lockDir, "owner"))
+			if err != nil {
+				scriptTest.Fatal(err)
+			}
+			ownerToken = strings.TrimSpace(string(ownerRecord))
+			probePath, _ := writeLocalEnvironmentRecordingProbe(scriptTest)
+			resolverPath, _ := writeTestEnvironmentHostResolver(scriptTest, map[string][]string{
+				localPostgresHost: {localDedicatedAddress},
+				localRedisHost:    {localDedicatedAddress},
+			})
+			goDirectory, goRecordPath := writeLocalRunRecordingGo(scriptTest)
+			overrides := localEnvironmentScriptOverrides(lockDir, hostsPath, resolverPath, probePath)
+			overrides["PATH"] = goDirectory + string(os.PathListSeparator) + os.Getenv("PATH")
+			cmd := exec.Command("bash", append([]string{filepath.Base(script.path)}, script.args...)...)
+			cmd.Dir = filepath.Dir(script.path)
+			cmd.Env = testCommandEnvironment(overrides, "WARP_ENV", "WARP_SERVICE", "WARP_BLOCK", "WARP_VERSION", "WARP_DOMAIN", "WARP_VAULT_HOME", "WARP_CONFIG_HOME")
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				scriptTest.Errorf("%s: %v\n%s", script.path, err, output)
+				return
+			}
+			expected := []string{
+				localDedicatedAddress + ":5432," + localDedicatedAddress + ":6379|local|" + script.service + "|" + script.block + "|" +
+					strings.Join(append([]string{"run", "."}, script.args...), " "),
+			}
+			if started := readLocalEnvironmentRecord(scriptTest, goRecordPath); !slices.Equal(started, expected) {
+				scriptTest.Errorf("%s: started %q; want %q", script.path, started, expected)
+			}
 		})
-		goDirectory, goRecordPath := writeLocalRunRecordingGo(t)
-		overrides := localEnvironmentScriptOverrides(lockDir, hostsPath, resolverPath, probePath)
-		overrides["PATH"] = goDirectory + string(os.PathListSeparator) + os.Getenv("PATH")
-		cmd := exec.Command("bash", append([]string{filepath.Base(script.path)}, script.args...)...)
-		cmd.Dir = filepath.Dir(script.path)
-		cmd.Env = testCommandEnvironment(overrides, "WARP_ENV", "WARP_SERVICE", "WARP_BLOCK", "WARP_VERSION", "WARP_DOMAIN", "WARP_VAULT_HOME", "WARP_CONFIG_HOME")
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Errorf("%s: %v\n%s", script.path, err, output)
+		if ownerToken == "" {
 			continue
 		}
-		expected := []string{
-			localDedicatedAddress + ":5432," + localDedicatedAddress + ":6379|local|" + script.service + "|" + script.block + "|" +
-				strings.Join(append([]string{"run", "."}, script.args...), " "),
+		// Recheck the exact process and nonce after the subtest has joined it.
+		output, err := runLocalEnvironmentScript(t, `source ./local/run-local-state.sh || exit
+command -v ps >/dev/null && command -v awk >/dev/null || exit 127
+local_run_owner_process_matches "$TEST_RETIRED_LOCAL_OWNER"`, map[string]string{"TEST_RETIRED_LOCAL_OWNER": ownerToken})
+		if err == nil {
+			t.Fatalf("LOCAL_LAUNCHER_OWNER_RETAINED after %s", script.path)
 		}
-		if started := readLocalEnvironmentRecord(t, goRecordPath); !slices.Equal(started, expected) {
-			t.Errorf("%s: started %q; want %q", script.path, started, expected)
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 ||
+			!(strings.Contains(output, "local launcher owner process is not live:") ||
+				strings.Contains(output, "local launcher owner process does not match its readiness token:")) {
+			t.Fatalf("verify retired launcher after %s: %v\n%s", script.path, err, output)
 		}
 	}
 }

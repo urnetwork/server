@@ -194,8 +194,8 @@ func runJsonlQualificationCapture(t *testing.T, mode string) jsonlQualificationC
 	// Timestamp metadata varies; message bodies, source sites, PID and paths do not.
 	header := `I[0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6} +` + strconv.Itoa(command.Process.Pid) + ` env\.go:`
 	startupPattern := `\A` + regexp.QuoteMeta("[env]glog not configured from command line. Using default configuration.\n") +
-		header + `1202\] ` + regexp.QuoteMeta("[env]try "+filepath.Join(childHome, "config")+", [settings.yml]\n") +
-		header + `1202\] ` + regexp.QuoteMeta("[env]try "+filepath.Join(childHome, "site")+", [settings.yml]\n") +
+		header + `1205\] ` + regexp.QuoteMeta("[env]try "+filepath.Join(childHome, "config")+", [settings.yml]\n") +
+		header + `1205\] ` + regexp.QuoteMeta("[env]try "+filepath.Join(childHome, "site")+", [settings.yml]\n") +
 		header + `81\] ` + regexp.QuoteMeta("[env]settings loaded\n") + `\z`
 	if !regexp.MustCompile(startupPattern).Match(result.startupStderr) {
 		t.Fatalf("initializer source grammar or private child profile mismatch: bytes=%d", len(result.startupStderr))

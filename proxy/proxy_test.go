@@ -208,6 +208,25 @@ func newProxyTestHarness(t testing.TB, setup func(*proxyTestHarness)) *proxyTest
 	return harness
 }
 
+// Transfers the bound loopback listener to the HTTP owner and closes it if setup cannot finish.
+func (self *proxyTestHarness) startApiFrontend(t testing.TB, listener net.Listener, assembly *apiServer) {
+	defer func() {
+		if listener != nil {
+			if err := listener.Close(); err != nil {
+				t.Errorf("close proxy api test listener during setup: %v", err)
+			}
+		}
+	}()
+	apiHandler, apiOptions, apiTlsConfig := assembly.httpConfiguration()
+	apiPort := proxyTestTcpPort(listener)
+	self.lifecycle.tlsFrontend = server.NewTestHttpServer(self.ctx, listener, &http.Server{
+		Handler: apiHandler, TLSConfig: apiTlsConfig,
+		ReadTimeout: apiOptions.ReadTimeout, WriteTimeout: apiOptions.WriteTimeout, IdleTimeout: apiOptions.IdleTimeout,
+	})
+	listener = nil
+	self.apiPort = apiPort
+}
+
 // Keeps the frontend startup/cancellation boundary in one acquired scope.
 func (self *proxyTestHarness) newFrontendContext() (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(self.ctx)
@@ -269,17 +288,16 @@ type proxyTestPorts struct {
 	socks int
 	http  int
 	https int
-	api   int
 	wg    int
 }
 
-// reserveProxyTestPorts allocates the proxy servers' listen ports through
+// Reserves ports for the SOCKS, HTTP, HTTPS and WireGuard constructors through
 // server.ReserveTestListenPorts: probed on the wildcard address the servers
 // actually bind, from below the OS ephemeral range so the release -> bind
 // window cannot lose a port to the process's own outbound dials (see the
 // allocator doc in server/test_util.go; certification failure c12-1).
 func reserveProxyTestPorts(t testing.TB) (*proxyTestPorts, func()) {
-	ports, release, err := server.ReserveTestListenPorts("tcp", "tcp", "tcp", "tcp", "udp")
+	ports, release, err := server.ReserveTestListenPorts("tcp", "tcp", "tcp", "udp")
 	if err != nil {
 		t.Fatalf("reserve proxy test ports: %v", err)
 	}
@@ -287,8 +305,7 @@ func reserveProxyTestPorts(t testing.TB) (*proxyTestPorts, func()) {
 		socks: ports[0],
 		http:  ports[1],
 		https: ports[2],
-		api:   ports[3],
-		wg:    ports[4],
+		wg:    ports[3],
 	}, release
 }
 
@@ -711,17 +728,9 @@ func setupProxyTestWithOptions(t testing.TB, opts *proxyTestOptions) *proxyTestH
 		// retaining independent ownership of handlers and hijacked rpc sessions.
 		apiAssembly := &apiServer{
 			ctx: ctx, cancel: cancel, proxyDeviceManager: proxyDeviceManager,
-			transportTls: transportTls, port: testPorts.api, settings: proxySettings,
+			transportTls: transportTls, settings: proxySettings,
 		}
-		apiHandler, apiOptions, apiTlsConfig := apiAssembly.httpConfiguration()
-		apiFrontendListener, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", testPorts.api))
-		if err != nil {
-			t.Fatalf("listen on proxy api test port: %v", err)
-		}
-		harness.lifecycle.tlsFrontend = server.NewTestHttpServer(ctx, apiFrontendListener, &http.Server{
-			Handler: apiHandler, TLSConfig: apiTlsConfig,
-			ReadTimeout: apiOptions.ReadTimeout, WriteTimeout: apiOptions.WriteTimeout, IdleTimeout: apiOptions.IdleTimeout,
-		})
+		harness.startApiFrontend(t, listenProxyTestTcp(t), apiAssembly)
 
 		// give the proxy listeners a moment to bind
 		select {
@@ -782,7 +791,6 @@ func setupProxyTestWithOptions(t testing.TB, opts *proxyTestOptions) *proxyTestH
 		harness.socksPort = testPorts.socks
 		harness.httpPort = testPorts.http
 		harness.httpsPort = testPorts.https
-		harness.apiPort = testPorts.api
 		harness.wgPort = testPorts.wg
 	})
 }
