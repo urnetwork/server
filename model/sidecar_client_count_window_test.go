@@ -127,7 +127,7 @@ func TestSidecarClientMarkExemptsWindowAndForwardingClients(t *testing.T) {
 }
 
 // A network at its sidecar_clients limit, both its sidecars connected: each window client and the forwarding client
-// still opens at connect's gate, registers nothing at its announce and is not counted by its resident, the resident's
+// still opens at connect's gate, which adds no entry for it, and is not counted by its resident, the resident's
 // question costing no query after the gate's; and a further sidecar, top-level or a device's child, is refused at
 // enrollment's check and at connect, while the connected sidecars stay.
 func TestSidecarClientsLimitStillOpensWindowClients(t *testing.T) {
@@ -138,16 +138,17 @@ func TestSidecarClientsLimitStillOpensWindowClients(t *testing.T) {
 		ttl := time.Hour
 
 		for _, clientId := range []server.Id{*self.sidecarClient.ClientId, *self.appSidecar.ClientId} {
-			connect.AssertEqual(t, CanConnectSidecarClient(self.ctx, clientId), true)
-			RegisterNetworkSidecarClientIfMarked(self.ctx, clientId, ttl)
+			admission := AdmitSidecarClient(self.ctx, clientId, ttl)
+			connect.AssertEqual(t, admission.Admitted, true)
+			connect.AssertEqual(t, admission.Added, true)
 		}
 		connect.AssertEqual(t, GetNetworkSidecarConnectedCount(self.ctx, self.networkId), int64(2))
 
 		for _, clientId := range self.exemptClientIds() {
-			if !CanConnectSidecarClient(self.ctx, clientId) {
-				t.Errorf("client %s was refused at the sidecar_clients limit", clientId)
+			admission := AdmitSidecarClient(self.ctx, clientId, ttl)
+			if !admission.Admitted || admission.NetworkId != nil || admission.Added {
+				t.Errorf("client %s at the sidecar_clients limit: %+v, want admitted with no entry", clientId, admission)
 			}
-			RegisterNetworkSidecarClientIfMarked(self.ctx, clientId, ttl)
 			attempts, stop := server.DenyPostgresForTest(t)
 			counts := CountsAsSidecarClient(self.ctx, clientId)
 			stop()
@@ -167,7 +168,7 @@ func TestSidecarClientsLimitStillOpensWindowClients(t *testing.T) {
 		connect.AssertEqual(t, refusal.Used, int64(2))
 
 		further := self.mint(t, self.root, &AuthNetworkClientArgs{Description: "third sidecar", DeviceSpec: "test", StrictExp: true, DeclaresNoEgress: true})
-		connect.AssertEqual(t, CanConnectSidecarClient(self.ctx, *further.ClientId), false)
+		connect.AssertEqual(t, AdmitSidecarClient(self.ctx, *further.ClientId, ttl).Admitted, false)
 		furtherChild := self.mint(t, self.sessionOf(t, self.appDevice), &AuthNetworkClientArgs{
 			SourceClientId: self.appDevice.ClientId,
 			Description:    "second app sidecar",
@@ -175,9 +176,10 @@ func TestSidecarClientsLimitStillOpensWindowClients(t *testing.T) {
 			AdminRefused:   true,
 			StrictExp:      true,
 		})
-		connect.AssertEqual(t, CanConnectSidecarClient(self.ctx, *furtherChild.ClientId), false)
-		connect.AssertEqual(t, CanConnectSidecarClient(self.ctx, *self.sidecarClient.ClientId), true)
-		connect.AssertEqual(t, CanConnectSidecarClient(self.ctx, *self.appSidecar.ClientId), true)
+		connect.AssertEqual(t, AdmitSidecarClient(self.ctx, *furtherChild.ClientId, ttl).Admitted, false)
+		connect.AssertEqual(t, AdmitSidecarClient(self.ctx, *self.sidecarClient.ClientId, ttl).Admitted, true)
+		connect.AssertEqual(t, AdmitSidecarClient(self.ctx, *self.appSidecar.ClientId, ttl).Admitted, true)
+		connect.AssertEqual(t, GetNetworkSidecarConnectedCount(self.ctx, self.networkId), int64(2))
 
 		// dark: nothing is counted, with no I/O
 		Testing_SetEnforceSidecarLimits(false)

@@ -531,6 +531,12 @@ type ExchangeSettings struct {
 	edgeInventoryProcessHostForTest string
 
 	ExchangeResidentTtl time.Duration
+	// How long a nomination abandoned after its writes may spend removing them:
+	// its resident record, and the client's sidecar entry its gate added. Past
+	// it, each lapses by its own ttl (ExchangeResidentTtl). One second: each
+	// removal is one conditional Redis write, off any packet path. Zero or
+	// negative skips the removals, leaving both to their ttls.
+	AbandonedNominationCleanupTimeout time.Duration
 
 	// Master switch for network peers, on the PEERS2 dirty-counter + poll
 	// architecture (PEERS2.md) — the v1 pubsub delivery that caused the
@@ -697,6 +703,7 @@ func DefaultExchangeSettingsWithBufferSize(bufferSize int) *ExchangeSettings {
 		ExchangeKeepAliveInterval:          time.Second,
 		ExchangeKeepAliveCount:             4,
 		ExchangeResidentTtl:                300 * time.Second,
+		AbandonedNominationCleanupTimeout:  time.Second,
 		// network peers re-enabled on the PEERS2 poll architecture (PEERS2.md) —
 		// the pubsub delivery that caused the 2026-07-15 outage is gone (no
 		// standing connections, no fanout; readers poll a per-network counter).
@@ -841,6 +848,9 @@ type Exchange struct {
 	// Nil in production; nomination tests wait for retirement after lifecycle
 	// workers start to verify that cleanup cannot precede map publication.
 	afterResidentWorkersStartedForTest func(*Resident)
+	// Nil in production; tests wait for a retired resident's cleanup, its
+	// registrations and its sidecar entry removed, to observe what it left.
+	afterResidentCleanupForTest func(*Resident)
 	// Nil in production; local transport tests hold an attach after its
 	// generation check, a pump after it takes a batch's first message and
 	// after it gathers the batch, and a pump before it waits on a delivery
@@ -1184,6 +1194,7 @@ func (self *Exchange) nominateLocalResident(
 	self.residentWorkerLock.Unlock()
 	workerStarted := false
 	var abandonedNomination *model.NetworkClientResident
+	var sidecarAdmission *model.SidecarClientAdmission
 	defer func() {
 		if !workerStarted {
 			defer self.residentWorkers.Done()
@@ -1191,11 +1202,22 @@ func (self *Exchange) nominateLocalResident(
 				// A reservation may have committed before the caller vanished.
 				// Remove only our generation, with a finite best-effort budget;
 				// the existing Redis TTL remains the unavailable-store backstop.
-				cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(admissionCtx), time.Second)
+				cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(admissionCtx), self.settings.AbandonedNominationCleanupTimeout)
 				defer cleanupCancel()
 				if err := model.RemoveResidentForClientWithDeadline(cleanupCtx, clientId, abandonedNomination.ResidentId); err != nil {
 					glog.V(1).Infof("[r]abandoned nomination cleanup = %s\n", err)
 				}
+			}
+			if sidecarAdmission != nil && sidecarAdmission.Added {
+				// The gate added the client's entry for a connection that never
+				// came: release it while it still holds the gate's expiry, with
+				// the same budget. A lost release holds the slot until the entry
+				// lapses, ExchangeResidentTtl after the gate.
+				cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(admissionCtx), self.settings.AbandonedNominationCleanupTimeout)
+				defer cleanupCancel()
+				server.HandleError(func() {
+					model.ReleaseSidecarClientAdmission(cleanupCtx, sidecarAdmission)
+				})
 			}
 		}
 	}()
@@ -1228,10 +1250,15 @@ func (self *Exchange) nominateLocalResident(
 		return false, true
 	}
 	// The same gate for a sidecar client against its network's sidecar_clients
-	// (DESIGN.md 20.7, 20.8): a refusal closes with the same 4001, a
+	// (DESIGN.md 20.7, 20.8), which counts the network's connected sidecars and
+	// adds this one in one step, so nominations racing for the network's last
+	// slots cannot each pass: a refusal closes with the same 4001, a
 	// re-nomination of a connected client is no new connection, and connected
-	// clients stay. A no-op, with no I/O, while enforce_sidecar_limits is false.
-	if !model.CanConnectSidecarClient(admissionCtx, clientId) {
+	// clients stay. A nomination that fails from here releases the entry the
+	// gate added (the defer above). A no-op, with no I/O, while
+	// enforce_sidecar_limits is false.
+	sidecarAdmission = model.AdmitSidecarClient(admissionCtx, clientId, self.settings.ExchangeResidentTtl)
+	if !sidecarAdmission.Admitted {
 		nominationRefusedCounter.WithLabelValues("sidecar_client_limit").Inc()
 		if glog.V(1) {
 			glog.Infof(
@@ -1290,6 +1317,12 @@ func (self *Exchange) nominateLocalResident(
 		return false, false
 	}
 	resident.arrivedMoveId = args.arrivedMoveId
+	// The entry the gate wrote is the resident's from here: its poll keeps it and
+	// its close removes it. A resident that does not count, sidecar clients having
+	// gone dark since the gate, leaves the entry to lapse.
+	if resident.sidecarCountNetworkId != nil && sidecarAdmission.NetworkId != nil && *sidecarAdmission.NetworkId == *resident.sidecarCountNetworkId {
+		resident.sidecarCountExpiryMs.Store(sidecarAdmission.ExpiryMs)
+	}
 	// Publish before any lifecycle worker can remove this generation. A worker
 	// that retires immediately must not leave a later insertion behind it.
 	var replacedResident *Resident
@@ -1362,11 +1395,16 @@ func (self *Exchange) nominateLocalResident(
 				}
 			}
 			// the sidecar set's entry goes with the resident, but for a drain
-			// or a move, whose returning client refreshes it before its ttl
+			// or a move, whose returning client refreshes it before its ttl,
+			// and only while it holds this resident's last write: a newer
+			// resident of the client, which replaced this one, keeps its own
 			if resident.sidecarCountNetworkId != nil && !resident.drained.Load() && !resident.moved.Load() {
 				server.HandleError(func() {
-					model.RemoveNetworkSidecarClient(cleanupCtx, *resident.sidecarCountNetworkId, clientId)
+					model.RemoveNetworkSidecarClient(cleanupCtx, *resident.sidecarCountNetworkId, clientId, resident.sidecarCountExpiryMs.Load())
 				})
+			}
+			if afterCleanup := self.afterResidentCleanupForTest; afterCleanup != nil {
+				afterCleanup(resident)
 			}
 		}()
 
@@ -1479,13 +1517,34 @@ func (self *Exchange) refreshResidentRegistration(resident *Resident) bool {
 	}
 	// heartbeat a sidecar client's entry in its network's connected sidecar
 	// set (DESIGN.md 20.8), whatever its category and whether or not peers
-	// are on, while it holds a transport, as the peer registration above
+	// are on, while it holds a transport, as the peer registration above. An
+	// entry lost while this resident's last write was live is put back, so
+	// connected clients stay; one that lapsed, this resident having held no
+	// transport for a whole ttl, is a new connection, admitted again or
+	// refused, and a refused resident closes, its client's next nomination
+	// closing with 4001 as the gate's refusal does
 	if resident.sidecarCountNetworkId != nil && 0 < resident.TransportCount() {
 		sidecarCtx, sidecarCancel := context.WithTimeout(resident.ctx, self.settings.ExchangeResidentTtl/4)
 		defer sidecarCancel()
+		held := true
 		server.HandleError(func() {
-			model.AddNetworkSidecarClient(sidecarCtx, *resident.sidecarCountNetworkId, clientId, self.settings.ExchangeResidentTtl)
+			refresh := model.RefreshNetworkSidecarClient(sidecarCtx, *resident.sidecarCountNetworkId, clientId, self.settings.ExchangeResidentTtl, resident.sidecarCountExpiryMs.Load())
+			if refresh.Held {
+				resident.sidecarCountExpiryMs.Store(refresh.ExpiryMs)
+			}
+			held = refresh.Held
+			if refresh.Restored || refresh.Lapsed {
+				if glog.V(1) {
+					glog.Infof("[r]sidecar client %s entry restored=%t lapsed=%t held=%t\n", clientId, refresh.Restored, refresh.Lapsed, refresh.Held)
+				}
+			}
 		})
+		if !held {
+			if glog.V(1) {
+				glog.Infof("[r]sidecar client %s lapsed past its network's sidecar_clients limit\n", clientId)
+			}
+			return false
+		}
 	}
 	return true
 }
@@ -4338,6 +4397,11 @@ type Resident struct {
 	// (model.CountsAsSidecarClient) as the resident is built: its network,
 	// whose connected sidecar set the poll heartbeats it in
 	sidecarCountNetworkId *server.Id
+	// the expiry, unix ms, of the client's entry in that set as the gate or
+	// this resident's poll last left it; 0 for none. The poll puts back an
+	// entry lost before it and admits again one that lapsed, and the close
+	// removes the entry only while it still holds it
+	sidecarCountExpiryMs atomic.Int64
 
 	// the client id in the resident is always `connect.ControlId`
 	client                  *connect.Client

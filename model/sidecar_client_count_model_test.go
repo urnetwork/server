@@ -140,8 +140,10 @@ func TestSidecarClientCountTable(t *testing.T) {
 		defer Testing_SetSidecarLimits(NetworkTierFree, map[string]int64{"sidecar_clients": 20})()
 		connect.AssertEqual(t, SidecarClientCountingOn(), true)
 		for _, clientId := range []server.Id{kinds.sidecarChild, kinds.declaredSidecar, kinds.egressSidecar} {
-			AddNetworkSidecarClient(ctx, kinds.networkId, clientId, time.Hour)
+			admission := AdmitSidecarClient(ctx, clientId, time.Hour)
+			connect.AssertEqual(t, admission.Admitted && admission.Added, true)
 		}
+		connect.AssertEqual(t, AdmitSidecarClient(ctx, kinds.appDevice, time.Hour).NetworkId == nil, true)
 		connect.AssertEqual(t, GetNetworkSidecarConnectedCount(ctx, kinds.networkId), int64(3))
 		// the {np_} count is untouched by them: one ordinary occupant
 		connect.AssertEqual(t, GetNetworkEnforceableConnectedCount(ctx, kinds.networkId), 1)
@@ -151,7 +153,8 @@ func TestSidecarClientCountTable(t *testing.T) {
 		connect.AssertEqual(t, SidecarClientCountingOn(), false)
 		attempts, stop := server.DenyPostgresForTest(t)
 		for _, clientId := range []server.Id{kinds.appDevice, kinds.sidecarChild, kinds.declaredSidecar, kinds.egressSidecar} {
-			connect.AssertEqual(t, CanConnectSidecarClient(ctx, clientId), true)
+			admission := AdmitSidecarClient(ctx, clientId, time.Hour)
+			connect.AssertEqual(t, admission.Admitted && admission.NetworkId == nil, true)
 		}
 		connect.AssertEqual(t, SidecarClientsExceeded(ctx, kinds.networkId) == nil, true)
 		stop()
@@ -190,8 +193,8 @@ func TestDeclaredClientUnlisted(t *testing.T) {
 }
 
 // The 21st connected Community sidecar: enrollment's check answers sidecar_clients'
-// refusal, an upgrade since Pro lifts it, and the connect gate refuses a new one while a
-// re-nomination of a connected one and a client with no mark pass.
+// refusal, an upgrade since Pro lifts it, and the connect gate refuses a new one, adding
+// nothing, while a re-nomination of a connected one and a client with no mark pass.
 func TestSidecarClientsLimitAtEnrollmentAndConnect(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -200,12 +203,14 @@ func TestSidecarClientsLimitAtEnrollmentAndConnect(t *testing.T) {
 		defer Testing_SetSidecarLimits(NetworkTierPro, map[string]int64{"sidecar_clients": 200})()
 		kinds := testingSidecarCountKinds(t, ctx)
 
-		connected := []server.Id{}
+		connected := []*SidecarClientAdmission{}
 		for i := 0; i < 20; i += 1 {
 			clientId := testingSidecarCountClient(t, ctx, kinds.networkId, nil, true, true, true)
-			connect.AssertEqual(t, CanConnectSidecarClient(ctx, clientId), true)
-			AddNetworkSidecarClient(ctx, kinds.networkId, clientId, time.Hour)
-			connected = append(connected, clientId)
+			admission := AdmitSidecarClient(ctx, clientId, time.Hour)
+			connect.AssertEqual(t, admission.Admitted, true)
+			connect.AssertEqual(t, admission.Added, true)
+			connect.AssertEqual(t, *admission.NetworkId, kinds.networkId)
+			connected = append(connected, admission)
 		}
 		connect.AssertEqual(t, GetNetworkSidecarConnectedCount(ctx, kinds.networkId), int64(20))
 
@@ -227,49 +232,59 @@ func TestSidecarClientsLimitAtEnrollmentAndConnect(t *testing.T) {
 		})
 
 		twentyFirst := testingSidecarCountClient(t, ctx, kinds.networkId, nil, true, true, false)
-		connect.AssertEqual(t, CanConnectSidecarClient(ctx, twentyFirst), false)
-		// connected clients stay: a re-nomination is no new connection, and its
-		// mark, kept from the first ask, costs it no query
+		refused := AdmitSidecarClient(ctx, twentyFirst, time.Hour)
+		connect.AssertEqual(t, refused.Admitted, false)
+		connect.AssertEqual(t, refused.Limit, int64(20))
+		connect.AssertEqual(t, refused.UsedCount, int64(20))
+		connect.AssertEqual(t, GetNetworkSidecarConnectedCount(ctx, kinds.networkId), int64(20))
+		// connected clients stay: a re-nomination is no new connection, keeps the entry
+		// it finds, and its mark, kept from the first ask, costs it no query
 		attempts, stop := server.DenyPostgresForTest(t)
-		connect.AssertEqual(t, CanConnectSidecarClient(ctx, connected[0]), true)
+		again := AdmitSidecarClient(ctx, connected[0].ClientId, time.Hour)
 		stop()
 		connect.AssertEqual(t, attempts(), uint64(0))
+		connect.AssertEqual(t, again.Admitted, true)
+		connect.AssertEqual(t, again.Added, false)
 		// the app device carries no mark
-		connect.AssertEqual(t, CanConnectSidecarClient(ctx, kinds.appDevice), true)
+		connect.AssertEqual(t, AdmitSidecarClient(ctx, kinds.appDevice, time.Hour).Admitted, true)
 
 		// one leaves, and the next is admitted
-		RemoveNetworkSidecarClient(ctx, kinds.networkId, connected[0])
+		RemoveNetworkSidecarClient(ctx, kinds.networkId, again.ClientId, again.ExpiryMs)
 		connect.AssertEqual(t, SidecarClientsExceeded(ctx, kinds.networkId) == nil, true)
-		connect.AssertEqual(t, CanConnectSidecarClient(ctx, twentyFirst), true)
+		connect.AssertEqual(t, AdmitSidecarClient(ctx, twentyFirst, time.Hour).Admitted, true)
 
 		// none: no limit
 		defer Testing_SetSidecarLimits(NetworkTierFree, map[string]int64{"sidecar_clients": -1})()
-		AddNetworkSidecarClient(ctx, kinds.networkId, twentyFirst, time.Hour)
-		AddNetworkSidecarClient(ctx, kinds.networkId, connected[0], time.Hour)
+		connect.AssertEqual(t, AdmitSidecarClient(ctx, connected[0].ClientId, time.Hour).Added, true)
+		connect.AssertEqual(t, GetNetworkSidecarConnectedCount(ctx, kinds.networkId), int64(21))
 		connect.AssertEqual(t, SidecarClientsExceeded(ctx, kinds.networkId) == nil, true)
 	})
 }
 
 // An entry counts only until its expiry: a resident that stopped refreshing it drops out
-// of sidecar_clients, and the next write ages it out.
+// of sidecar_clients, the gate judges its client as a new connection, and the next write
+// ages it out.
 func TestSidecarClientEntryExpires(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		networkId := server.NewId()
-		live := server.NewId()
-		lapsed := server.NewId()
-		AddNetworkSidecarClient(ctx, networkId, live, time.Hour)
-		AddNetworkSidecarClient(ctx, networkId, lapsed, -time.Second)
-		connect.AssertEqual(t, GetNetworkSidecarConnectedCount(ctx, networkId), int64(1))
-		connect.AssertEqual(t, isNetworkSidecarClientConnected(ctx, networkId, lapsed), false)
-		connect.AssertEqual(t, isNetworkSidecarClientConnected(ctx, networkId, live), true)
+		defer Testing_SetEnforceSidecarLimits(true)()
+		defer Testing_SetSidecarLimits(NetworkTierFree, map[string]int64{"sidecar_clients": 1})()
+		kinds := testingSidecarCountKinds(t, ctx)
+		live := kinds.declaredSidecar
+		lapsed := kinds.egressSidecar
+		Testing_AddNetworkSidecarClient(ctx, kinds.networkId, live, time.Hour)
+		Testing_AddNetworkSidecarClient(ctx, kinds.networkId, lapsed, -time.Second)
+		connect.AssertEqual(t, GetNetworkSidecarConnectedCount(ctx, kinds.networkId), int64(1))
 
-		AddNetworkSidecarClient(ctx, networkId, live, time.Hour)
+		// the lapsed client is no connected one: with the one slot taken, it is refused,
+		// and its expired entry aged out
+		connect.AssertEqual(t, AdmitSidecarClient(ctx, lapsed, time.Hour).Admitted, false)
 		var remaining int64
 		server.Redis(ctx, func(r server.RedisClient) {
-			remaining = r.ZCard(ctx, networkSidecarConnectedKey(networkId)).Val()
+			remaining = r.ZCard(ctx, networkSidecarConnectedKey(kinds.networkId)).Val()
 		})
 		connect.AssertEqual(t, remaining, int64(1))
+		connect.AssertEqual(t, AdmitSidecarClient(ctx, live, time.Hour).Admitted, true)
 	})
 }
 
@@ -316,23 +331,37 @@ func TestTopLevelClientCreateCapPerTier(t *testing.T) {
 	})
 }
 
-// A connection that survives its announce registers a marked client at once, before its
-// resident's first poll, and an unmarked one not at all; dark, nothing is read.
-func TestSidecarClientRegistersAtAnnounce(t *testing.T) {
+// The gate counts a marked client from its nomination, before any announce or poll, and an
+// unmarked one not at all; dark, it reads and writes nothing.
+func TestSidecarClientCountsFromItsGate(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		kinds := testingSidecarCountKinds(t, ctx)
 
 		defer Testing_SetEnforceSidecarLimits(false)()
 		attempts, stop := server.DenyPostgresForTest(t)
-		RegisterNetworkSidecarClientIfMarked(ctx, kinds.declaredSidecar, time.Hour)
+		dark := AdmitSidecarClient(ctx, kinds.declaredSidecar, time.Hour)
 		stop()
 		connect.AssertEqual(t, attempts(), uint64(0))
+		connect.AssertEqual(t, dark.Admitted && dark.NetworkId == nil && !dark.Added, true)
 		connect.AssertEqual(t, GetNetworkSidecarConnectedCount(ctx, kinds.networkId), int64(0))
 
 		Testing_SetEnforceSidecarLimits(true)
-		for _, clientId := range []server.Id{kinds.appDevice, kinds.sidecarChild, kinds.declaredSidecar, kinds.egressSidecar, kinds.ordinaryOccupant} {
-			RegisterNetworkSidecarClientIfMarked(ctx, clientId, time.Hour)
+		defer Testing_SetSidecarLimits(NetworkTierFree, map[string]int64{"sidecar_clients": 20})()
+		for _, c := range []struct {
+			clientId server.Id
+			counted  bool
+		}{
+			{clientId: kinds.appDevice, counted: false},
+			{clientId: kinds.sidecarChild, counted: true},
+			{clientId: kinds.declaredSidecar, counted: true},
+			{clientId: kinds.egressSidecar, counted: true},
+			{clientId: kinds.ordinaryOccupant, counted: false},
+		} {
+			admission := AdmitSidecarClient(ctx, c.clientId, time.Hour)
+			connect.AssertEqual(t, admission.Admitted, true)
+			connect.AssertEqual(t, admission.Added, c.counted)
+			connect.AssertEqual(t, admission.NetworkId != nil, c.counted)
 		}
 		connect.AssertEqual(t, GetNetworkSidecarConnectedCount(ctx, kinds.networkId), int64(3))
 	})

@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/urnetwork/connect"
 
@@ -51,7 +52,7 @@ func TestSidecarClientCountingWithoutMg0(t *testing.T) {
 		defer Testing_SetEnforceSidecarLimits(true)()
 		connect.AssertEqual(t, SidecarClientCountingOn(), false)
 		attempts, stop := server.DenyPostgresForTest(t)
-		connect.AssertEqual(t, CanConnectSidecarClient(ctx, clientId), true)
+		connect.AssertEqual(t, AdmitSidecarClient(ctx, clientId, time.Hour).Admitted, true)
 		connect.AssertEqual(t, SidecarClientsExceeded(ctx, networkId) == nil, true)
 		stop()
 		connect.AssertEqual(t, attempts(), uint64(0))

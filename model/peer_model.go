@@ -1612,7 +1612,7 @@ func CanConnectNetworkPeer(ctx context.Context, clientId server.Id, provideInten
 	if !topLevel {
 		return true
 	}
-	// a declared no-egress sidecar is exempt: CanConnectSidecarClient counts it
+	// a declared no-egress sidecar is exempt: AdmitSidecarClient counts it
 	if category == NetworkPeerCategorySidecar {
 		return true
 	}
