@@ -53,8 +53,9 @@ func loadApiFileClusters(ctx context.Context) (sidecar.BlobStore, func(), error)
 	return clusters, clusters.Close, nil
 }
 
-// Starts the issuer's authorization services before routes can be served, on the clusters loadClusters gives
-// (loadApiFileClusters in each process that serves api's routes, through InstallApiRoutes).
+// Starts the issuer's authorization services, and hold/'s writer the renew_hold staff kind writes through
+// (installApiLegalHolds), before routes can be served, on the clusters loadClusters gives (loadApiFileClusters in
+// each process that serves api's routes, through InstallApiRoutes).
 func installApiAuthorization(ctx context.Context, processHost *sidecar.ServiceHost, loadClusters func(context.Context) (sidecar.BlobStore, func(), error)) func() {
 	install := server.NewSidecarSwitchInstall("api-authorization", func() bool {
 		return server.SidecarMg1Linked() || server.SidecarMg2Linked()
@@ -79,6 +80,7 @@ func installApiAuthorization(ctx context.Context, processHost *sidecar.ServiceHo
 		}
 		host.Budget = budget
 		closeRevocations := installApiRevocations(&host, first)
+		closeLegalHolds := installApiLegalHolds(&host, first)
 		worker := newAuthorizationIssuerWorker(hostCtx)
 		claimCtx, stopClaims := context.WithCancel(ctx)
 		var lifetime sync.WaitGroup
@@ -107,6 +109,7 @@ func installApiAuthorization(ctx context.Context, processHost *sidecar.ServiceHo
 			worker.Close()
 			lifetime.Wait()
 			closeViews()
+			closeLegalHolds()
 			closeRevocations()
 			budget.Close()
 			closeClusters()
@@ -135,6 +138,21 @@ func installApiRevocations(host *sidecar.ServiceHost, first sidecar.BlobCluster)
 	store.SetWriteBudget(host.Budget, nil)
 	model.SetSidecarRevStore(store)
 	return func() { model.SetSidecarRevStore(nil) }
+}
+
+// hold/'s writer on the issuer's first cluster (§19.4's api row; §21.9's "api mirrors each hold"), which the
+// renew_hold staff kind writes through (RenewLegalHold, model.RenewLegalHold; QD-1399): a renewal reads nothing the
+// worker alone can read, so it rewrites hold/<network_id>/<case_id>/_ here, while placement stays dispatched to the
+// worker for its GroupForms read (InstallLegalHoldDispatch). api is so a second hold/ writer beside taskworker's,
+// whose pass ends holds and puts objects back; each writes If-Match the object it read, or If-None-Match for none
+// (model.AbuseHoldStore.RewriteUnless), so neither replaces what the other wrote unread. Each create, rewrite and
+// DELETE spends host's budget, P0 of kind lifecycle, at its own one of §11.13's cost rows, by the table the budget,
+// built with evsservice's default settings, prices with (model.AbuseHoldStore.SetWriteBudget's nil prices). Answers
+// what removes the writer, which leaves one installed since in place, as all's process installs taskworker's too.
+func installApiLegalHolds(host *sidecar.ServiceHost, first sidecar.BlobCluster) func() {
+	store := model.NewAbuseHoldStore(first)
+	store.SetWriteBudget(host.Budget, nil)
+	return model.InstallAbuseHoldStore(store)
 }
 
 // The API's writer and the worker's retention and effects reader use the same

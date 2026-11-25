@@ -981,7 +981,11 @@ func endAbuseHold(ctx context.Context, deps *AbuseHoldPassDeps, hold *model.Lega
 }
 
 // Puts back a live row's object when it is gone, and rewrites one that holds other terms unless those terms keep
-// at least what the row's do, such as a renewal whose row has not committed: every doubt keeps data.
+// at least what the row's do, such as a renewal whose row has not committed: every doubt keeps data. The decision and
+// the write share one read (model.AbuseHoldStore.RewriteUnless): api writes hold/ as well, renewing through its own
+// writer (QD-1399), so a renewal that lands after the read fails the write's condition and stands, the pass counting
+// the hold failed and the next pass reading it again, where a write on a later read of its own would put the renewal's
+// object back to the row's older expiry.
 func reconcileAbuseHoldObject(ctx context.Context, store *model.AbuseHoldStore, hold *model.LegalHold) (restored bool, rewritten bool, err error) {
 	record := hold.Record()
 	body, err := sidecar.EncodeHoldRecord(record)
@@ -990,26 +994,16 @@ func reconcileAbuseHoldObject(ctx context.Context, store *model.AbuseHoldStore, 
 		// unreadable object, and nothing better can be written
 		return false, false, err
 	}
-	object, found, err := store.Read(ctx, hold.NetworkId, hold.CaseId)
-	if err != nil {
+	// the object the write was decided on, nil for none
+	var held *model.AbuseHoldObject
+	written, err := store.RewriteUnless(ctx, record, func(object *model.AbuseHoldObject) bool {
+		held = object
+		return object != nil && (bytes.Equal(object.Body, body) || (object.Record != nil && abuseHoldKeepsAtLeast(object.Record, record)))
+	})
+	if err != nil || !written {
 		return false, false, err
 	}
-	if !found {
-		if err := store.Rewrite(ctx, record); err != nil {
-			return false, false, err
-		}
-		return true, false, nil
-	}
-	if bytes.Equal(object.Body, body) {
-		return false, false, nil
-	}
-	if object.Record != nil && abuseHoldKeepsAtLeast(object.Record, record) {
-		return false, false, nil
-	}
-	if err := store.Rewrite(ctx, record); err != nil {
-		return false, false, err
-	}
-	return false, true, nil
+	return held == nil, held != nil, nil
 }
 
 // Whether held keeps at least what want keeps: as late an expiry, as late a placement (which keeps more of what

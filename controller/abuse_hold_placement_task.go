@@ -14,7 +14,9 @@ import (
 )
 
 // The API authorizes the staff action. Its file-cluster identity cannot read
-// GroupForms. The worker owns that read and the existing hold mirror. The API
+// GroupForms. The worker owns that read, so it places each hold, its object
+// and its row. A renewal reads nothing the worker alone can, and writes through
+// the API's own hold/ writer (installApiLegalHolds; QD-1399). The API
 // acknowledges only after the placement transaction and mirror have succeeded.
 var legalHoldDispatch atomic.Bool
 

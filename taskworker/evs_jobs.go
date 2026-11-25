@@ -164,11 +164,12 @@ func startEvsJobsFromVault(ctx context.Context, lifetime *sync.WaitGroup) {
 // makes, the hold writer's creates, rewrites and DELETEs and the sweep's and retention's DELETEs among them, is P0
 // (QD-084), spent from the budget at its own one of §11.13's cost rows once the store shows it took effect, by the
 // table the budget, built with evsservice's default settings, prices with (SetWriteBudget's nil prices). Answers what
-// removes them.
+// removes them; the hold writer's removal leaves api's in place where all's process installed it since
+// (model.InstallAbuseHoldStore; QD-1399).
 func installEvsJobWriters(host *sidecar.ServiceHost, firstCluster sidecar.BlobCluster, evsSettings *evsservice.EvsSettings) func() {
 	holdStore := model.NewAbuseHoldStore(firstCluster)
 	holdStore.SetWriteBudget(host.Budget, nil)
-	model.SetAbuseHoldStore(holdStore)
+	removeHoldStore := model.InstallAbuseHoldStore(holdStore)
 	model.SetAbuseHoldSoftStateSource(model.NewAbuseHoldSoftStateSource(host, evsSettings))
 	// The worker's scoped credentials sweep expired revocations. Signing
 	// and all revocation writes belong to the issuer.
@@ -182,7 +183,7 @@ func installEvsJobWriters(host *sidecar.ServiceHost, firstCluster sidecar.BlobCl
 	}
 	return func() {
 		model.SetAbuseHoldSoftStateSource(nil)
-		model.SetAbuseHoldStore(nil)
+		removeHoldStore()
 		model.SetSidecarRevStore(nil)
 		if server.SidecarMg2Linked() {
 			model.SetConfigLogSequencer(nil)
