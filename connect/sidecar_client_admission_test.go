@@ -206,3 +206,44 @@ func TestResidentPollKeepsLostAndRefusesLapsedSidecarEntry(t *testing.T) {
 		connect.AssertEqual(t, model.GetNetworkSidecarConnectedCount(ctx, networkId), int64(1))
 	})
 }
+
+// A resident replaced by a newer nomination of its client, as a reconnect replaces one,
+// keeps the client's entry through its cleanup: the newer gate kept the entry at a later
+// expiry, and the replaced resident's close removes only the entry its own last write
+// left. The network's one slot stays the client's, and a further sidecar is still refused,
+// where the close's removal of the entry by client id let it in.
+func TestExchangeReplacedSidecarResidentKeepsItsSuccessorsEntry(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		defer model.Testing_SetEnforceSidecarLimits(true)()
+		defer model.Testing_SetSidecarLimits(model.NetworkTierFree, map[string]int64{"sidecar_clients": 1})()
+		model.Testing_ForgetSidecarClientMarks()
+		exchange := testingSidecarAdmissionExchange(t, ctx)
+		networkId, clientIds := testingSidecarAdmissionClients(t, ctx, 2)
+		cleaned := make(chan *Resident, 4)
+		exchange.afterResidentCleanupForTest = func(resident *Resident) {
+			cleaned <- resident
+		}
+
+		instanceId := server.NewId()
+		connect.AssertEqual(t, exchange.NominateLocalResident(clientIds[0], instanceId, nil), true)
+		replaced := exchange.testingResident(clientIds[0])
+		if replaced == nil {
+			t.Fatal("the first resident was not published")
+		}
+		connect.AssertEqual(t, model.GetNetworkSidecarConnectedCount(ctx, networkId), int64(1))
+
+		connect.AssertEqual(t, exchange.NominateLocalResident(clientIds[0], instanceId, &replaced.residentId), true)
+		select {
+		case resident := <-cleaned:
+			if resident != replaced {
+				t.Fatal("a resident other than the replaced one was cleaned up")
+			}
+		case <-time.After(exchange.settings.ExchangeResidentTtl):
+			t.Fatal("the replaced resident was never cleaned up")
+		}
+		connect.AssertEqual(t, model.GetNetworkSidecarConnectedCount(ctx, networkId), int64(1))
+		connect.AssertEqual(t, exchange.NominateLocalResident(clientIds[1], server.NewId(), nil), false)
+	})
+}

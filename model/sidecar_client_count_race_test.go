@@ -107,8 +107,9 @@ func TestSidecarClientConcurrentGatesNeverPassLimit(t *testing.T) {
 
 // A connect that fails after its gate releases the entry the gate added, and the slot is
 // the next client's; a release keeps an entry a newer connection of the client wrote since;
-// a re-nomination's admission, which added nothing, releases nothing; and the gate's script
-// run again after a lost reply reads its own entry as added, so its release still frees it.
+// a re-nomination's admission, which added nothing, releases nothing; and two gates of one
+// client in the same millisecond keep distinct expiries, so neither's release removes the
+// other's entry.
 func TestSidecarClientReleaseOfAFailedConnect(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -136,10 +137,12 @@ func TestSidecarClientReleaseOfAFailedConnect(t *testing.T) {
 		RemoveNetworkSidecarClient(ctx, networkId, clientIds[1], renominated.ExpiryMs)
 		connect.AssertEqual(t, GetNetworkSidecarConnectedCount(ctx, networkId), int64(0))
 
-		// the script run twice on the same arguments, as a retry after a lost reply runs it
+		// two gates of one client on the same clock, as two transports of one client
+		// nominate at once within a millisecond: the second keeps the entry a millisecond
+		// later, so the first's release, its nomination having lost, keeps the second's
 		now := server.NowUtc()
 		expiryMs := now.Add(time.Hour).UnixMilli()
-		replay := func() []int64 {
+		gate := func() []int64 {
 			var values []int64
 			server.Redis(ctx, func(r server.RedisClient) {
 				var err error
@@ -160,10 +163,12 @@ func TestSidecarClientReleaseOfAFailedConnect(t *testing.T) {
 			})
 			return values
 		}
-		first := replay()
-		second := replay()
+		first := gate()
+		second := gate()
 		connect.AssertEqual(t, first[0] == 1 && first[2] == 1 && first[3] == expiryMs, true)
-		connect.AssertEqual(t, second[0] == 1 && second[2] == 1 && second[3] == expiryMs, true)
+		connect.AssertEqual(t, second[0] == 1 && second[2] == 0 && second[3] == expiryMs+1, true)
+		RemoveNetworkSidecarClient(ctx, networkId, clientIds[2], first[3])
+		connect.AssertEqual(t, GetNetworkSidecarConnectedCount(ctx, networkId), int64(1))
 		RemoveNetworkSidecarClient(ctx, networkId, clientIds[2], second[3])
 		connect.AssertEqual(t, GetNetworkSidecarConnectedCount(ctx, networkId), int64(0))
 	})

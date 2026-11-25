@@ -61,7 +61,8 @@ import (
 //
 // A release and a removal each remove the entry only while it still holds the expiry their
 // own connection last wrote, so a newer connection of the client, a replacing resident's or
-// a concurrent nomination's, keeps the entry it wrote. What stays soft: once Redis loses
+// a concurrent nomination's, keeps the entry it wrote; the gate keeps two connections'
+// expiries apart even within one millisecond. What stays soft: once Redis loses
 // the set, until every connected resident's next poll puts its entry back
 // (ExchangeResidentTtl / 4), connects are judged against the entries put back so far.
 //
@@ -125,11 +126,14 @@ end
 // The gate's one step. KEYS[1] is the network's set; ARGV[1] now and ARGV[2] the prune
 // bound, as the prune reads them; ARGV[3] the client's member, ARGV[4] the entry's expiry
 // in unix ms, ARGV[5] the network's limit, -1 for none, and ARGV[6] the key's ttl in
-// seconds. A live entry of the client is a connection's already: it is kept at the later
-// of its expiry and ARGV[4], and the client passes. Otherwise the client's entry is added
-// while the live entries are fewer than the limit, and a refusal changes nothing. Returns
-// {admitted, live entries after, added, the entry's expiry}. A live entry holding exactly
-// ARGV[4] is this admission's own write, run again after a lost reply, and reads as added.
+// seconds. A live entry of the client is a connection's already, and the client passes,
+// adding nothing: the entry is kept at the later of its expiry and ARGV[4], or a
+// millisecond past ARGV[4] when the two are equal, so that no two connections of the
+// client hold one expiry and a release or a removal takes only its own. Otherwise the
+// client's entry is added while the live entries are fewer than the limit, and a refusal
+// changes nothing. Returns {admitted, live entries after, added, the entry's expiry}. A run
+// repeated after a lost reply finds its own entry and reports it kept, not added, so a
+// nomination failing after it releases nothing, and the entry lapses at its expiry.
 var sidecarClientAdmitScript = redis.NewScript(sidecarClientPruneLua + `
 local key = KEYS[1]
 local now_ms = tonumber(ARGV[1])
@@ -140,15 +144,16 @@ local count = redis.call('ZCOUNT', key, '(' .. ARGV[1], '+inf')
 local score = redis.call('ZSCORE', key, member)
 if score and now_ms < tonumber(score) then
 	local held_ms = tonumber(score)
-	local added = 0
-	if held_ms == expiry_ms then
-		added = 1
-	elseif held_ms < expiry_ms then
-		redis.call('ZADD', key, ARGV[4], member)
-		held_ms = expiry_ms
+	if held_ms <= expiry_ms then
+		if held_ms == expiry_ms then
+			held_ms = expiry_ms + 1
+		else
+			held_ms = expiry_ms
+		end
+		redis.call('ZADD', key, string.format('%.0f', held_ms), member)
 	end
 	redis.call('EXPIRE', key, ARGV[6])
-	return {1, count, added, held_ms}
+	return {1, count, 0, held_ms}
 end
 if 0 <= limit and limit <= count then
 	return {0, count, 0, 0}

@@ -848,6 +848,9 @@ type Exchange struct {
 	// Nil in production; nomination tests wait for retirement after lifecycle
 	// workers start to verify that cleanup cannot precede map publication.
 	afterResidentWorkersStartedForTest func(*Resident)
+	// Nil in production; tests wait for a retired resident's cleanup, its
+	// registrations and its sidecar entry removed, to observe what it left.
+	afterResidentCleanupForTest func(*Resident)
 	// Nil in production; local transport tests hold an attach after its
 	// generation check, a pump after it takes a batch's first message and
 	// after it gathers the batch, and a pump before it waits on a delivery
@@ -1399,6 +1402,9 @@ func (self *Exchange) nominateLocalResident(
 				server.HandleError(func() {
 					model.RemoveNetworkSidecarClient(cleanupCtx, *resident.sidecarCountNetworkId, clientId, resident.sidecarCountExpiryMs.Load())
 				})
+			}
+			if afterCleanup := self.afterResidentCleanupForTest; afterCleanup != nil {
+				afterCleanup(resident)
 			}
 		}()
 
