@@ -102,6 +102,8 @@ func TestContractExpirationNullCompanionExcludesExpiredProbeBudget(t *testing.T)
 		for _, chained := range []bool{false, true} {
 			payerNetworkId, payerId, providerNetworkId, providerId := companionReservationFixture(ctx, true)
 			if chained {
+				// the reply carrier bills the provider, whose base it answers
+				setCompanionReservationProberForTest(ctx, providerNetworkId)
 				_, err := CreateTransferEscrow(ctx, providerNetworkId, providerId, payerNetworkId, payerId, 1000)
 				server.Raise(err)
 			}

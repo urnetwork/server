@@ -239,7 +239,10 @@ type redisReservationCleanupContextKey struct{}
 // action returns a successful escrow only after its commit is acknowledged.
 // Only a known insufficient-balance refusal can retry after actual recovery;
 // success, ambiguous SQL, and a canceled caller are never replayed. The caller
-// waits for one bounded compensation pass, never for the cleanup budget.
+// waits for one bounded compensation pass, never for the cleanup budget. A
+// refusal its exhaustion proof decided runs the recovery page and rerun only
+// as its payer's first in a hold (subscription_redis_exhaustion.go); any other
+// returns at once, with no transaction.
 func runRedisContractAdmission(ctx context.Context, action func(context.Context) (*TransferEscrow, error)) (escrow *TransferEscrow, returnErr error) {
 	ctx = withRedisContractAdmission(ctx)
 	admission := redisAdmissionFromContext(ctx)
@@ -290,6 +293,14 @@ func runRedisContractAdmission(ctx context.Context, action func(context.Context)
 	}()
 	escrow, returnErr = action(ctx)
 	if errors.Is(returnErr, errRedisReservationInsufficient) && escrow == nil && ctx.Err() == nil {
+		// The proof reserved nothing, so nothing is left to compensate, and
+		// the payer's page in this hold already ran: neither the page nor its
+		// rerun runs for this refusal.
+		if payerNetworkId, proven := admission.provenExhaustion(); proven && !exhaustedRedisPayers.takeRecoveryPage(payerNetworkId, time.Now()) {
+			recoveryAttempted = true
+			redisContractReservationResults.WithLabelValues("recovery", "skipped").Inc()
+			return
+		}
 		compensatedCurrent = true
 		// The rerun needs this request's own tokens released first. A pass
 		// that leaves any of them returns the refusal without a rerun; the

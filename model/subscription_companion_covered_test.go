@@ -27,17 +27,19 @@ type coveredCompanionFixture struct {
 }
 
 // Paid public constructors retain real Redis reservations on both sides. The
-// singleton marker changes only probe admission, never the balance authority.
+// singleton marker changes only probe admission, never the balance authority;
+// it marks the network the fixture's companions bill (paying).
 func newCoveredCompanionFixture(t testing.TB, ctx context.Context, prober, chained bool) coveredCompanionFixture {
 	t.Helper()
 	f := coveredCompanionFixture{clients: newEscrowSelectionTestClients(t, ctx), chained: chained}
 	f.payerBalance = addContractPayoutTestBalance(ctx, f.clients.payerNetworkId, 8192)
 	f.providerBalance = addContractPayoutTestBalance(ctx, f.clients.providerNetworkId, 8192)
 	if prober {
+		proberNetworkId, _ := f.paying()
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO prober_identity(singleton,network_id,client_id)
 				VALUES(true,$1,$2) ON CONFLICT(singleton) DO UPDATE
-				SET network_id=excluded.network_id,client_id=excluded.client_id`, f.clients.payerNetworkId, server.NewId()))
+				SET network_id=excluded.network_id,client_id=excluded.client_id`, proberNetworkId, server.NewId()))
 		})
 	}
 	if chained {
@@ -79,6 +81,26 @@ func (self coveredCompanionFixture) createOrigin(t testing.TB, ctx context.Conte
 func (self coveredCompanionFixture) create(ctx context.Context, bytes ByteCount) (*TransferEscrow, error) {
 	return CreateCompanionTransferEscrow(ctx, self.clients.providerNetworkId, self.clients.providerId,
 		self.clients.payerNetworkId, self.clients.payerId, bytes, time.Hour)
+}
+
+// The network the fixture's companions bill, and its balance. A companion of a
+// plain origin bills its destination, the payer. A chained companion is a
+// reply carrier, which bills the network whose forward contract the chain
+// answers: the provider, the source of the chain's base.
+func (self coveredCompanionFixture) paying() (server.Id, *TransferBalance) {
+	if self.chained {
+		return self.clients.providerNetworkId, self.providerBalance
+	}
+	return self.clients.payerNetworkId, self.payerBalance
+}
+
+// The other network, which the fixture's companions never bill. It provides
+// them, so it earns their payouts.
+func (self coveredCompanionFixture) unbilled() server.Id {
+	if self.chained {
+		return self.clients.payerNetworkId
+	}
+	return self.clients.providerNetworkId
 }
 
 // The full retained contract and escrow rows expose an accidental anchor
@@ -147,21 +169,22 @@ func TestCompanionCoveredRequestPreservesReservationAndPayer(t *testing.T) {
 				if prober {
 					requests = append(requests, ByteCount(math.MaxInt64))
 				}
+				payingNetworkId, payingBalance := f.paying()
 				for _, requested := range requests {
 					want := requested
 					if prober {
 						want = min(want, 512)
 					}
-					payerBefore := GetActiveTransferBalanceByteCount(ctx, f.clients.payerNetworkId)
-					providerBefore := GetActiveTransferBalanceByteCount(ctx, f.clients.providerNetworkId)
+					payingBefore := GetActiveTransferBalanceByteCount(ctx, payingNetworkId)
+					unbilledBefore := GetActiveTransferBalanceByteCount(ctx, f.unbilled())
 					child, err := f.create(ctx, requested)
 					if err != nil {
 						t.Fatalf("prober=%t chained=%t request=%d: %v", prober, chained, requested, err)
 					}
-					assertCoveredCompanionCustody(t, ctx, child, f.anchor.ContractId, f.clients.payerNetworkId, f.payerBalance.BalanceId, want)
-					if payerBefore-GetActiveTransferBalanceByteCount(ctx, f.clients.payerNetworkId) != want ||
-						GetActiveTransferBalanceByteCount(ctx, f.clients.providerNetworkId) != providerBefore {
-						t.Fatal("companion reserved the wrong amount or charged the provider")
+					assertCoveredCompanionCustody(t, ctx, child, f.anchor.ContractId, payingNetworkId, payingBalance.BalanceId, want)
+					if payingBefore-GetActiveTransferBalanceByteCount(ctx, payingNetworkId) != want ||
+						GetActiveTransferBalanceByteCount(ctx, f.unbilled()) != unbilledBefore {
+						t.Fatal("companion reserved the wrong amount or charged the network it does not bill")
 					}
 					if after := coveredCompanionOriginSnapshot(ctx, f.origins); after != original {
 						t.Fatal("companion creation rewrote its original financial rows")
@@ -172,8 +195,10 @@ func TestCompanionCoveredRequestPreservesReservationAndPayer(t *testing.T) {
 	})
 }
 
-// A covered paid reservation pays the actual source provider once. Replayed
-// public close and the real debit worker cannot repeat the payout or debit.
+// A covered paid reservation pays the network it does not bill once: the
+// source provider of a plain origin's companion, the destination of a reply
+// carrier. Replayed public close and the real debit worker cannot repeat the
+// payout or debit.
 func TestCompanionCoveredRequestPaidSettlementAndReplay(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -185,7 +210,8 @@ func TestCompanionCoveredRequestPaidSettlementAndReplay(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			assertCoveredCompanionCustody(t, ctx, child, f.anchor.ContractId, f.clients.payerNetworkId, f.payerBalance.BalanceId, 17)
+			payingNetworkId, payingBalance := f.paying()
+			assertCoveredCompanionCustody(t, ctx, child, f.anchor.ContractId, payingNetworkId, payingBalance.BalanceId, 17)
 			original := coveredCompanionOriginSnapshot(ctx, f.origins)
 			for _, client := range []server.Id{f.clients.providerId, f.clients.payerId} {
 				server.Raise(CloseContract(ctx, child.ContractId, client, 17, false))
@@ -193,8 +219,9 @@ func TestCompanionCoveredRequestPaidSettlementAndReplay(t *testing.T) {
 			if after := coveredCompanionOriginSnapshot(ctx, f.origins); after != original {
 				t.Fatal("reverse settlement changed the live origin")
 			}
-			want := map[server.Id]contractPayoutTestAmount{f.clients.providerNetworkId: {byteCount: 17, payout: 17}}
-			if got := contractPayoutTestAmounts(t, ctx, child.ContractId); len(got) != 1 || got[f.clients.providerNetworkId] != want[f.clients.providerNetworkId] {
+			earner := f.unbilled()
+			want := map[server.Id]contractPayoutTestAmount{earner: {byteCount: 17, payout: 17}}
+			if got := contractPayoutTestAmounts(t, ctx, child.ContractId); len(got) != 1 || got[earner] != want[earner] {
 				t.Fatal("covered request changed provider allocation", got)
 			}
 			assertContractPayoutTestNoProviderTotals(t, ctx, []server.Id{f.clients.payerNetworkId, f.clients.providerNetworkId})
@@ -320,11 +347,12 @@ func TestCompanionCoveredRequestRespectsExpiredOriginsAndLinger(t *testing.T) {
 				server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET expiration_time=NULL,create_time=now()-interval '61 minutes' WHERE contract_id=$1`, f.anchor.ContractId))
 				server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET expiration_time=now()-interval '1 minute' WHERE contract_id=$1`, f.grown.ContractId))
 			})
-			before := GetActiveTransferBalanceByteCount(ctx, f.clients.payerNetworkId)
+			payingNetworkId, payingBalance := f.paying()
+			before := GetActiveTransferBalanceByteCount(ctx, payingNetworkId)
 			if child, err := f.create(ctx, 17); !errors.Is(err, ErrMissingCompanionOrigin) || child != nil {
 				t.Fatal("expired covered anchor admitted a new reservation", err)
 			}
-			if GetActiveTransferBalanceByteCount(ctx, f.clients.payerNetworkId) != before {
+			if GetActiveTransferBalanceByteCount(ctx, payingNetworkId) != before {
 				t.Fatal("expired covered refusal changed available credit")
 			}
 			live := f.createOrigin(t, ctx, 64)
@@ -337,7 +365,7 @@ func TestCompanionCoveredRequestRespectsExpiredOriginsAndLinger(t *testing.T) {
 				if err != nil {
 					t.Fatal("live covered renewal failed", err)
 				}
-				assertCoveredCompanionCustody(t, ctx, child, live.ContractId, f.clients.payerNetworkId, f.payerBalance.BalanceId, 17)
+				assertCoveredCompanionCustody(t, ctx, child, live.ContractId, payingNetworkId, payingBalance.BalanceId, 17)
 			}
 		}
 	})
@@ -352,7 +380,8 @@ func TestCompanionCoveredRequestNegativeAmountsRemainInert(t *testing.T) {
 		ctx := WithProviderWorkSessionSource(t.Context(), nil)
 		for _, chained := range []bool{false, true} {
 			f := newCoveredCompanionFixture(t, ctx, true, chained)
-			before := GetActiveTransferBalanceByteCount(ctx, f.clients.payerNetworkId)
+			payingNetworkId, _ := f.paying()
+			before := GetActiveTransferBalanceByteCount(ctx, payingNetworkId)
 			count := contractLifecycleTestCount(t, ctx, f.clients.providerId, f.clients.payerId)
 			original := coveredCompanionOriginSnapshot(ctx, f.origins)
 			for _, requested := range []ByteCount{-1, ByteCount(math.MinInt64)} {
@@ -360,7 +389,7 @@ func TestCompanionCoveredRequestNegativeAmountsRemainInert(t *testing.T) {
 				if err == nil || !strings.Contains(err.Error(), "negative contract transfer byte count") || child != nil {
 					t.Fatal("negative request changed admission", requested, err)
 				}
-				if GetActiveTransferBalanceByteCount(ctx, f.clients.payerNetworkId) != before ||
+				if GetActiveTransferBalanceByteCount(ctx, payingNetworkId) != before ||
 					contractLifecycleTestCount(t, ctx, f.clients.providerId, f.clients.payerId) != count ||
 					coveredCompanionOriginSnapshot(ctx, f.origins) != original {
 					t.Fatal("negative request published financial custody")
@@ -482,7 +511,10 @@ func TestCompanionCoveredRequestActualQueryAvoidsEligibleMaximum(t *testing.T) {
 				for _, mode := range []string{"force_custom_plan", "force_generic_plan"} {
 					server.RaisePgResult(conn.Exec(ctx, `SET plan_cache_mode=`+mode))
 					for _, requested := range []ByteCount{17, 128, 256} {
-						args := fmt.Sprintf("'%s'::uuid,'%s'::uuid,now()-interval '1 hour','%s'::uuid", f.clients.payerId, f.clients.providerId, f.clients.payerNetworkId)
+						// the selection that funds the request: a reply carrier's
+						// runs with its inherited payer, after the handoff
+						payingNetworkId, _ := f.paying()
+						args := fmt.Sprintf("'%s'::uuid,'%s'::uuid,now()-interval '1 hour','%s'::uuid", f.clients.payerId, f.clients.providerId, payingNetworkId)
 						base := 4
 						if chained {
 							args += fmt.Sprintf(",'%s'::uuid,'%s'::uuid", f.clients.providerNetworkId, f.clients.payerNetworkId)
@@ -503,7 +535,8 @@ func TestCompanionCoveredRequestActualQueryAvoidsEligibleMaximum(t *testing.T) {
 						if maximum != nil {
 							granted = min(granted, *maximum)
 						}
-						if anchor != f.anchor.ContractId || granted != requested || inherited != nil {
+						// a reply carrier inherits its own source, the provider
+						if anchor != f.anchor.ContractId || granted != requested || chained && (inherited == nil || *inherited != f.clients.providerNetworkId) {
 							t.Fatal("runtime query changed anchor, caller grant or payer")
 						}
 						var raw []byte

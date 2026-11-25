@@ -30,8 +30,9 @@
 //     createCompanionTransferEscrow selects it, and records it in
 //     companion_contract_id, which also makes the destination its usage origin;
 //   - the probe shard fence admits a shard endpoint only while its shard is
-//     active and only as the would-be payer, as escrow admission does,
-//     including a shard reply carrier that inherits its shard anchor's payer;
+//     active and only as the would-be payer, as escrow admission does; a
+//     reply carrier's would-be payer is its anchor's, its own source, as
+//     escrow admission inherits it, a shard's reply carrier included;
 //   - the endpoint lifecycle fence and the contract hole, extender and provider
 //     work records match the other creation paths.
 //
@@ -134,17 +135,18 @@ var zeroEscrowPlainOriginSql = `
 
 // createCompanionTransferEscrow's chained origin read, the earliest companion
 // in the reverse direction, without its prober reservation column. $4 and $5
-// are the companion's source and destination networks. A probe shard's reply
-// carrier inherits its anchor's private payer, the shard, as there; a zero
-// escrow anchor has no payer, and its would-be payer is its destination.
+// are the companion's source and destination networks. Between two networks
+// a reply carrier inherits its exact reverse anchor's payer, its own source,
+// as there; a zero escrow anchor has no payer, and its would-be payer is its
+// destination.
 var zeroEscrowChainedOriginSql = `
 	SELECT
 		contract_id,
-		CASE WHEN (payer_network_id IS NULL OR payer_network_id = $4) AND
+		CASE WHEN $4::uuid <> $5 AND
+			(payer_network_id IS NULL OR payer_network_id = $4) AND
 			source_network_id = $5 AND
-			destination_network_id = $4 AND
-			EXISTS (SELECT 1 FROM prober_shard_run WHERE network_id = $4)
-		THEN $4::uuid END AS inherited_private_payer
+			destination_network_id = $4
+		THEN $4::uuid END AS inherited_payer
 	FROM (
 		(
 			SELECT contract_id, create_time, payer_network_id, source_network_id, destination_network_id
@@ -276,9 +278,9 @@ func zeroEscrowPlainContractKind(sourceNetworkId server.Id, destinationNetworkId
 
 // Creates a companion contract answering the earliest reverse origin, which
 // escrow would have charged to the destination network, the source of that
-// origin, or to a probe shard whose reply carrier inherits it. With no origin
-// it returns ErrMissingCompanionOrigin, which the controller waits out. The
-// result has no balances; its size is the request.
+// origin, or, for a reply carrier that inherits its anchor's payer, to its own
+// source. With no origin it returns ErrMissingCompanionOrigin, which the
+// controller waits out. The result has no balances; its size is the request.
 func CreateZeroEscrowCompanionContract(
 	ctx context.Context,
 	sourceNetworkId server.Id,
@@ -448,7 +450,8 @@ func createZeroEscrowContractInTx(
 // The earliest open or lingering plain origin in the reverse direction, else
 // the earliest such companion, which chains an asymmetric reply carrier (see
 // createCompanionTransferEscrow). Both are nil when there is neither. The
-// inherited payer is set only for a probe shard's chained reply carrier.
+// inherited payer is set only for a chained reply carrier that inherits its
+// anchor's payer, its own source.
 // lingerReads selects the closed arms' statements: the side table once it is
 // complete, the previous statements before (contract_origin_linger.go).
 func zeroEscrowCompanionOriginInTx(
