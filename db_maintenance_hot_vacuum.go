@@ -679,9 +679,29 @@ func newDbHotVacuumRun(settings *DbHotVacuumSettings, pool *safePgPool, now func
 
 // Runs one run of the churn tables' maintenance (see the file comment) from
 // the state the previous run left, and returns the state for the next run.
+// A VACUUM of a partitioned table vacuums its every leaf, and records an empty
+// one, such as a day ahead, analyzed empty, which a plan reads with a
+// sequential scan costed at zero: after the run, the empty leaves of each
+// partitioned table's family read never analyzed again
+// (ClearEmptyLeafStatistics).
 func VacuumHotTables(ctx context.Context, state DbHotVacuumState, settings *DbHotVacuumSettings) DbHotVacuumState {
 	run := newDbHotVacuumRun(settings, safeMaintenancePool, time.Now, state)
 	run.run(ctx)
+	HandleError(func() {
+		families := map[string]bool{}
+		for _, tableName := range settings.Tables {
+			family := PartitionFamilyOfTable(tableName)
+			if ctx.Err() != nil || family == nil || families[family.Name] {
+				continue
+			}
+			families[family.Name] = true
+			if !family.IsPartitioned(ctx) {
+				continue
+			}
+			cleared, locked, errs := family.ClearEmptyLeafStatistics(ctx, NowUtc())
+			logPartitionClearedLeafStatistics(family.Name, cleared, locked, errs)
+		}
+	})
 	return run.state
 }
 

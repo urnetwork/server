@@ -29,17 +29,24 @@ func companionReservationFixture(ctx context.Context, prober bool) (
 		server.Raise(AddBasicTransferBalance(ctx, networkId, 1024*1024*1024, server.NowUtc().Add(-time.Hour), server.NowUtc().Add(time.Hour)))
 	}
 	if prober {
-		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `
-				INSERT INTO prober_identity (singleton, network_id, client_id)
-				VALUES (true, $1, $2)
-				ON CONFLICT (singleton) DO UPDATE SET
-					network_id = excluded.network_id,
-					client_id = excluded.client_id
-			`, payerNetworkId, server.NewId()))
-		})
+		setCompanionReservationProberForTest(ctx, payerNetworkId)
 	}
 	return
+}
+
+// Makes the network the internal prober, in place of any earlier one. A reply
+// carrier bills the network whose forward contract its chain answers, so a
+// chained test marks that network instead of the payer.
+func setCompanionReservationProberForTest(ctx context.Context, networkId server.Id) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(ctx, `
+			INSERT INTO prober_identity (singleton, network_id, client_id)
+			VALUES (true, $1, $2)
+			ON CONFLICT (singleton) DO UPDATE SET
+				network_id = excluded.network_id,
+				client_id = excluded.client_id
+		`, networkId, server.NewId()))
+	})
 }
 
 // Asserts both the persisted promise and its real escrow, rather than trusting
@@ -245,6 +252,8 @@ func TestProberCompanionReservationClosedAndChainedOrigins(t *testing.T) {
 			var origin *TransferEscrow
 			var err error
 			if chained {
+				// the reply carrier bills the provider, whose base it answers
+				setCompanionReservationProberForTest(ctx, providerNetworkId)
 				if _, err = CreateTransferEscrow(ctx, providerNetworkId, providerId, payerNetworkId, payerId, opening); err != nil {
 					t.Fatal(err)
 				}

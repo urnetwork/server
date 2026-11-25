@@ -149,7 +149,7 @@ if [[ "$(uname -s)" != Linux &&
     echo "test.sh: the six public native-fee roots are left out of ./model and ./controller: their sn verifier runs only on Linux, and this host is $(uname -s)" >&2
 fi
 
-test_directories="$(./test-dirs.sh)" || exit $?
+test_directories="$(./test-dirs.sh -race "$@")" || exit $?
 while IFS= read -r d; do
     [[ -n "$d" ]] || continue
     if [[ $d == $proxy_dir || $d == $perfvar_dir ]]; then

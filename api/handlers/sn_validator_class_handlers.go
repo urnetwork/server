@@ -6,6 +6,11 @@ package handlers
 // front charges those requests to the validator rate class
 // (nginx.LimitIdentity.Validator). This route itself runs under the normal
 // identity limits.
+//
+// Each minted token also asks for the validator's data grant (owner decision
+// 2026-11-25; controller.GrantSnValidatorData): the network of the minting
+// client holds one active grant per validator hotkey. Only a mint that answers
+// 200 asks; the token is answered whatever the grant's outcome.
 
 import (
 	"context"
@@ -46,7 +51,7 @@ func init() {
 // The production route over the API lifecycle's reserved upload lane.
 func SnValidatorClassWithReserved(reserved SnReservedAttemptUploadLane) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		serveSnValidatorClass(w, r, reserved, session.MintValidatorClass, time.Now)
+		serveSnValidatorClass(w, r, reserved, session.MintValidatorClass, controller.GrantSnValidatorData, time.Now)
 	}
 }
 
@@ -69,8 +74,16 @@ func snValidatorClassOutcome(err error) string {
 	}
 }
 
-// Dependencies are per call, so tests replace the minting and the clock.
-func serveSnValidatorClass(w http.ResponseWriter, r *http.Request, reservedLane SnReservedAttemptUploadLane, mint func(session.ValidatorClassClaims) (string, error), now func() time.Time) {
+// Dependencies are per call, so tests replace the minting, the data grant and
+// the clock.
+func serveSnValidatorClass(
+	w http.ResponseWriter,
+	r *http.Request,
+	reservedLane SnReservedAttemptUploadLane,
+	mint func(session.ValidatorClassClaims) (string, error),
+	grant func(ctx context.Context, networkId server.Id, hotkey [32]byte, now time.Time) string,
+	now func() time.Time,
+) {
 	router.WrapRequireClient(router.PrivateErrors(func(clientSession *session.ClientSession) (result *SnValidatorClassResult, resultErr error) {
 		defer clientSession.Cancel()
 		defer func() {
@@ -135,6 +148,9 @@ func serveSnValidatorClass(w http.ResponseWriter, r *http.Request, reservedLane 
 		if err != nil {
 			return nil, router.PrivateCause(http.StatusServiceUnavailable, "Validator class unavailable.", err)
 		}
+		// admitted, and answered 200: the validator's data grant, once per
+		// hotkey while a grant is active
+		grant(ctx, byJwt.NetworkId, class.Owner.Hotkey, issued)
 		return &SnValidatorClassResult{Token: token, ExpiresAt: expires.UTC()}, nil
 	}), w, r)
 }

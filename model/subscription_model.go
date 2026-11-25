@@ -2491,6 +2491,12 @@ func CompanionOriginExists(
 // against that account than the probe's own origin ramp. The earliest origin
 // remains the stream anchor, while a newer eligible origin may raise the
 // probe's reservation size. Ordinary accounts retain asymmetric request sizes.
+//
+// A companion's destination pays it, as the source of the plain origin it
+// answers, except a reply carrier: a companion whose origin is itself a
+// companion. Its payer is the payer of that reverse anchor when that is the
+// carrier's own source, the network whose forward contract the chain answers
+// (see createCompanionTransferEscrow).
 func CreateCompanionTransferEscrow(
 	ctx context.Context,
 	sourceNetworkId server.Id,
@@ -2505,7 +2511,8 @@ func CreateCompanionTransferEscrow(
 	transferEscrow, returnErr = runRedisContractAdmission(ctx, func(ctx context.Context) (*TransferEscrow, error) {
 		return createCompanionTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, contractTransferByteCount, originContractTimeout)
 	})
-	// the destination pays a companion, except a prober's handed-off payer
+	// The destination pays a companion, except a reply carrier's handed-off
+	// payer, its source, whose own forward refusals request its drain.
 	requestPayerDueContractCloseAfterRefusal(ctx, destinationNetworkId, returnErr)
 	return
 }
@@ -2672,12 +2679,23 @@ func createCompanionTransferEscrow(
 			// deadlock that EncryptionModeRequired surfaces as a hard
 			// establishment failure (Opportunistic silently downgraded the
 			// peer's direction to plaintext instead, which is how it went
-			// unnoticed). Ordinary destination-payer semantics stay unchanged.
-			// A private shard reply inherits only its exact reverse anchor's
-			// private payer; otherwise the shard fence still rejects it.
-			// Plain origins stay preferred; the chain is bounded
+			// unnoticed). Plain origins stay preferred; the chain is bounded
 			// in practice at depth two (a reply carrier answering a return
 			// direction).
+			//
+			// A reply carrier is paid by the payer of its exact reverse
+			// anchor when that payer is the carrier's own source: the network
+			// whose forward contract the anchor answers, which pays the
+			// forward contract and its return companions, so it pays the
+			// carrier too. Under destination payment the carrier billed the
+			// provider's network, and one provider fleet's free grant held
+			// escrow for every client of its providers until it refused them
+			// all (2026-11-25). The requester can make only its own network
+			// pay: any other anchor payer, or networks other than this
+			// request's reversed, leave the destination paying, as does a
+			// chain within one network, which that network pays either way.
+			// The shard fence still admits a private shard's reply only with
+			// the shard as its payer.
 			leaveFallbackOriginRead := server.BeginContractCompanionOriginRead(ctx, server.ContractCompanionFallbackOrigin)
 			defer leaveFallbackOriginRead()
 			var result server.PgResult
@@ -2714,10 +2732,14 @@ func createCompanionTransferEscrow(
                             WHERE ($4::uuid <> $5 OR (payer_network_id = $4 AND
                                 source_network_id = $6 AND destination_network_id = $5))
                         )) END AS prober_reservation_byte_count,
-                        CASE WHEN payer_network_id = $5 AND source_network_id = $6
-                            AND destination_network_id = $5
-                            AND EXISTS (SELECT 1 FROM prober_shard_run WHERE network_id = $5)
-                        THEN $5::uuid END AS inherited_private_payer
+                        -- between two networks a reply carrier inherits its
+                        -- exact reverse anchor's payer, this request's source;
+                        -- a zero escrow anchor's would-be payer is its
+                        -- destination
+                        CASE WHEN $5::uuid <> $6
+                            AND (payer_network_id IS NULL OR payer_network_id = $5)
+                            AND source_network_id = $6 AND destination_network_id = $5
+                        THEN $5::uuid END AS inherited_payer
                     FROM (
                         (
                             SELECT contract_id, create_time, transfer_byte_count,
@@ -2827,7 +2849,7 @@ func createCompanionTransferEscrow(
 		return nil, ErrMissingCompanionOrigin
 	}
 	if inheritedPayer != nil && payerNetworkId != *inheritedPayer || payerNetworkId != destinationNetworkId && inheritedPayer == nil {
-		return nil, errors.New("probe companion origin payer changed")
+		return nil, errors.New("companion origin payer changed")
 	}
 	if proberReservationByteCount != nil {
 		contractTransferByteCount = min(contractTransferByteCount, *proberReservationByteCount)

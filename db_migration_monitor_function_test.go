@@ -58,6 +58,7 @@ func TestPublishedMigrationMonitorCompetitionFunctionArtifacts(t *testing.T) {
 			server.CompetitionOfficialReviewEpochTwoMigrationVersion(),
 			server.CompetitionOfficialReviewEpochTwoAstra62MigrationVersion(),
 			server.CompetitionSilleStorageRecoveryMigrationVersion(),
+			server.CompetitionEpochThreeSourceRecoveryMigrationVersion(),
 		}
 		for _, version := range []int{588, 589, 592, 593, 661, 675, 676, 677, 678, 720, 721, 841, 842, 843, 844, 845, 846, 847, 921, 922, server.MigrationCount()} {
 			server.ApplyDbMigrationsUpTo(ctx, version)
@@ -77,6 +78,7 @@ func TestPublishedMigrationMonitorCompetitionFunctionArtifacts(t *testing.T) {
 				{version: server.CompetitionJobReevaluationMigrationVersion(), retiredAt: postClose},
 				{version: server.CompetitionFinalizationHoldMigrationVersion()},
 				{version: postClose, retiredAt: distributed},
+				{version: server.CompetitionEpochThreeRuntimeCorrectionMigrationVersion()},
 			} {
 				if dependency.version <= version && (dependency.retiredAt == 0 || version < dependency.retiredAt) {
 					appendOnlyMissing = append(appendOnlyMissing, dependency.version)

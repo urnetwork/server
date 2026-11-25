@@ -1,3 +1,5 @@
+//go:build linux
+
 // Namespace handles are valid foreign mount roots, never candidate quota proof.
 package competitionagent
 

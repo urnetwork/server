@@ -64,6 +64,13 @@ const (
 	extenderActivationOutcomeError = extenderProbeStepOutcomeError
 	// a probe step's budget ran out before it answered
 	extenderActivationOutcomeTimeout = extenderProbeStepOutcomeTimeout
+	// the probe stages: the activation's caller left while its required test
+	// ran, which says nothing about the extender and reaches no one, and was
+	// counted as an error of the step before, or at the webrtc stage once the
+	// webrtc path read its cap on the canceled context. The stage is the step
+	// the caller left at, and no webrtc path runs in place of a tcp path the
+	// caller left (probeExtenderActivation)
+	extenderActivationOutcomeCanceled = extenderProbeStepOutcomeCanceled
 	// the forward arrived on the other family (A7)
 	extenderActivationOutcomeOtherFamily = extenderProbeRefusalOtherFamily
 	// the webrtc stage: the webrtc test was not tried, since the operator had
@@ -120,17 +127,20 @@ var extenderActivationStageOutcomes = map[string][]string{
 	extenderActivationStageTcp: {
 		extenderActivationOutcomeError,
 		extenderActivationOutcomeTimeout,
+		extenderActivationOutcomeCanceled,
 	},
 	extenderActivationStageForward: {
 		extenderActivationOutcomeError,
 		extenderActivationOutcomeTimeout,
 		extenderActivationOutcomeOtherFamily,
+		extenderActivationOutcomeCanceled,
 	},
 	extenderActivationStageWebRtc: {
 		extenderActivationOutcomeError,
 		extenderActivationOutcomeTimeout,
 		extenderActivationOutcomeOtherFamily,
 		extenderActivationOutcomeCap,
+		extenderActivationOutcomeCanceled,
 	},
 	extenderActivationStageStore: {
 		extenderActivationOutcomeActivated,
@@ -151,6 +161,7 @@ var extenderProbeStepOutcomes = []string{
 	extenderProbeStepOutcomeOk,
 	extenderProbeStepOutcomeError,
 	extenderProbeStepOutcomeTimeout,
+	extenderProbeStepOutcomeCanceled,
 }
 
 type extenderActivationMetrics struct {
@@ -166,12 +177,12 @@ func newExtenderActivationMetrics(registerer prometheus.Registerer) *extenderAct
 				"Stages: request, refused before any budget was spent; config, the operator's extender configuration is unusable; owner, the key is registered to another network; " +
 				"busy, the api was too busy to take it before any budget was spent (probes, it was probing as many activations as it takes at once; budget_lock, other spends held a budget past the lock bound); " +
 				"budget, an activation budget refused it, the outcome naming which (client, address, proven_address -- a key's own at the address it was proved at -- account, or unproven_account -- the account's, for an account none of whose hosts has passed on the family in 7 days, answered with a wait that grows to 6 hours), or error when the budget check failed rather than refused; " +
-				"tcp and forward, the required test over public tcp, and webrtc, the required test over the peer-to-peer webrtc carrier, run only where the tcp path failed or was not offered, each of which fails on its own (error), runs out of its probe budget (timeout), or forwards on the other family (other_family); an activation that failed both required paths ends at webrtc, as does one whose webrtc test the operator's cap on extenders without tcp refused untried (cap); " +
+				"tcp and forward, the required test over public tcp, and webrtc, the required test over the peer-to-peer webrtc carrier, run only where the tcp path failed or was not offered, each of which fails on its own (error), runs out of its probe budget (timeout), forwards on the other family (other_family), or is cut off when the activation's caller leaves (canceled, at the step the caller left at, with no webrtc test run in place of a tcp path the caller left); an activation that failed both required paths ends at webrtc, as does one whose webrtc test the operator's cap on extenders without tcp refused untried (cap); " +
 				"store, activated, or storing the passed activation failed.",
 		}, []string{"stage", "outcome", "family"}),
 		stepSeconds: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name: "urnetwork_extender_activation_step_seconds",
-			Help: "How long each probe step of an extender activation ran, by step (tcp challenge, forward, the webrtc dial with its forward, each dns port, quic) and outcome (ok; error, failed on its own; timeout, its budget ran out first). " +
+			Help: "How long each probe step of an extender activation ran, by step (tcp challenge, forward, the webrtc dial with its forward, each dns port, quic) and outcome (ok; error, failed on its own; timeout, its budget ran out first; canceled, cut off when the activation's caller left). " +
 				"The steps share one 10 s probe budget, a webrtc test run in place of a failed tcp path has a 10 s budget of its own, and a dns port has 3 s of its own, so the buckets end at 10 s.",
 			Buckets: []float64{0.05, 0.1, 0.25, 0.5, 1, 2, 3, 4, 6, 8, 10},
 		}, []string{"step", "outcome"}),

@@ -17,9 +17,10 @@ import (
 // family's partitions ahead on its own short cadence, so a slow archive or a
 // stuck retention pass never leaves an insert without a partition; after
 // downtime its first run catches up at once. The retention chain analyzes the
-// parents and closed leaves and retires expired ranges, carrying each family's
-// resume state from run to run. A family with its own task leaves either part
-// to it (AnalyzeByOwnTask, RetireByOwnTask). The provider work session weeks
+// parents, opened and closed leaves and retires expired ranges, carrying each
+// family's resume state from run to run, and runs a minute after each range
+// opens to analyze its new leaves. A family with its own task leaves either
+// part to it (AnalyzeByOwnTask, RetireByOwnTask). The provider work session weeks
 // expire at the contract horizon, read from the horizon reaper's control once
 // per run (model.WithContractHorizonControl), and the close evidence weeks at
 // the evidence's own window while its brake is on, read once per run too
@@ -116,6 +117,28 @@ type MaintainPartitionRetentionArgs struct {
 type MaintainPartitionRetentionResult struct {
 	State server.PartitionMaintenanceState `json:"state"`
 	More  bool                             `json:"more"`
+	// when the next range's leaves are due their first analyze
+	// (server.PartitionRetentionReport.OpenLeafAnalyzeAt); zero from a build
+	// before it
+	OpenLeafAnalyzeAt time.Time `json:"open_leaf_analyze_at,omitzero"`
+}
+
+// The next run's time, at now: the cadence's, or the next range's first
+// analyze of its leaves when that comes first, at once when it passed while
+// the run ran. On the cadence alone a new day's leaves waited up to an
+// interval past 00:00 UTC, or for autovacuum.
+func maintainPartitionRetentionNextRunAt(settings *PartitionRegistryTaskSettings, result *MaintainPartitionRetentionResult, now time.Time) time.Time {
+	runAt := now.Add(settings.RetentionInterval)
+	if result.More {
+		runAt = now.Add(settings.RetentionRetryInterval)
+	}
+	if !result.OpenLeafAnalyzeAt.IsZero() && result.OpenLeafAnalyzeAt.Before(runAt) {
+		runAt = result.OpenLeafAnalyzeAt
+		if runAt.Before(now) {
+			runAt = now
+		}
+	}
+	return runAt
 }
 
 func ScheduleMaintainPartitionRetention(clientSession *session.ClientSession, tx server.PgTx) {
@@ -166,28 +189,26 @@ func MaintainPartitionRetention(
 		}
 	}
 	return &MaintainPartitionRetentionResult{
-		State: state,
-		More:  report.More,
+		State:             state,
+		More:              report.More,
+		OpenLeafAnalyzeAt: report.OpenLeafAnalyzeAt,
 	}, nil
 }
 
-// A run that left work behind continues a minute later.
+// A run that left work behind continues a minute later, and a run reaches
+// each range's leaves a minute after the range opens
+// (maintainPartitionRetentionNextRunAt).
 func MaintainPartitionRetentionPost(
 	_ *MaintainPartitionRetentionArgs,
 	maintainPartitionRetentionResult *MaintainPartitionRetentionResult,
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
-	settings := DefaultPartitionRegistryTaskSettings()
-	runAt := server.NowUtc().Add(settings.RetentionInterval)
-	if maintainPartitionRetentionResult.More {
-		runAt = server.NowUtc().Add(settings.RetentionRetryInterval)
-	}
 	scheduleMaintainPartitionRetention(
 		clientSession,
 		tx,
 		&MaintainPartitionRetentionArgs{State: maintainPartitionRetentionResult.State},
-		runAt,
+		maintainPartitionRetentionNextRunAt(DefaultPartitionRegistryTaskSettings(), maintainPartitionRetentionResult, server.NowUtc()),
 	)
 	return nil
 }

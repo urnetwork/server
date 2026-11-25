@@ -1,3 +1,5 @@
+//go:build linux
+
 // Cleanup and admission must agree on trusted-operator runtime ancestry.
 // Synthetic stat observations exercise ownership without root or host changes.
 package competitionagent

@@ -203,6 +203,9 @@ func selectRedisTransferBalances(ctx context.Context, admission *redisContractAd
 				redisContractReservationResults.WithLabelValues("selection", "capacity-warning").Inc()
 			}
 			exhaustedRedisPayers.note(payerNetworkId, time.Now())
+			// the admission runs this refusal's recovery page only if it is the
+			// payer's first in the hold (runRedisContractAdmission)
+			admission.noteProvenExhaustion(payerNetworkId)
 			redisContractReservationResults.WithLabelValues("exhaustion-proof", "proven").Inc()
 			return nil, 0, fmt.Errorf("%w (%d).", errRedisReservationInsufficient, room)
 		}

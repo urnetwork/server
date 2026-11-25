@@ -95,7 +95,9 @@ const dbMaintenanceLockPollInterval = time.Second
 // pending_task. A skipped table is being vacuumed or analyzed by the session
 // that holds it, or is analyzed by the next run. pending_task is now vacuumed
 // every few minutes by VacuumHotTables (db_maintenance_hot_vacuum.go), also
-// with SKIP_LOCKED.
+// with SKIP_LOCKED. It analyzes the empty partition leaves of the ranges
+// ahead too, whose statistics the run clears again after it
+// (ClearEmptyPartitionLeafStatistics).
 const dbMaintenanceAnalyzeStatement = `ANALYZE (SKIP_LOCKED)`
 
 // Bounds a single rebuild statement.
@@ -1886,6 +1888,26 @@ func DbMaintenance(ctx context.Context, epoch uint64, opts *DbMaintenanceOptions
 				)
 			}, OptNoRetry())
 		})
+		// The analyze takes every partition leaf, and records each empty one,
+		// such as the leaves of the days ahead, analyzed empty (reltuples 0
+		// where never analyzed is -1). A plan made while such a leaf is empty
+		// reads it with a sequential scan costed at zero, and the services'
+		// cached generic plans kept that scan once the day opened and filled
+		// (2026-11-25 00:01Z). So each empty leaf of a range that has not
+		// ended reads never analyzed again, also after an analyze that
+		// failed part way.
+		HandleError(func() {
+			if ctx.Err() != nil {
+				return
+			}
+			startTime := time.Now()
+			cleared := ClearEmptyPartitionLeafStatistics(ctx, NowUtc())
+			glog.Infof(
+				"[db]maintenance cleared the statistics of %d empty partition leaf(s) in %.2fs\n",
+				len(cleared),
+				float64(time.Since(startTime)/time.Millisecond)/1000.0,
+			)
+		})
 	}
 	return outcome
 }
@@ -1991,6 +2013,15 @@ func VacuumFullAllTables(ctx context.Context, excludes []string, logf func(strin
 			logf("[%d/%d] %s done: %s -> %s in %.1fs", i+1, len(todo), ti.name, ti.pretty, after, time.Since(startTime).Seconds())
 		}
 	}()
+
+	// Each rewrite and analyze recorded an empty partition leaf, such as a
+	// day ahead, analyzed empty, which a plan reads with a sequential scan
+	// costed at zero; those leaves read never analyzed again (see
+	// DbMaintenance's final analyze).
+	HandleError(func() {
+		cleared := ClearEmptyPartitionLeafStatistics(ctx, NowUtc())
+		logf("cleared the statistics of %d empty partition leaf(s): %v", len(cleared), cleared)
+	})
 
 	logf("VACUUM FULL complete")
 }

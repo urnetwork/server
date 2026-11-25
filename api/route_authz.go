@@ -318,6 +318,7 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /sn/attempt-artifact":                     routeAccessClient,
 	// the validator's client token; its hotkey signature is the authority
 	"POST /sn/head-summary":                         routeAccessClient,
+	"POST /sn/validator-class":                      routeAccessClient, // the validator's client token; its VPK class consent is the authority
 	"GET /sn/artifacts":                             routeAccessPublic,
 	"GET /sn/evidence":                              routeAccessPublic,
 	"POST /sn/evidence":                             routeAccessPublic,

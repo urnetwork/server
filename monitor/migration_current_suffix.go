@@ -1116,6 +1116,9 @@ var migrationCurrentSuffixContracts = migrationCurrentSuffixContractsInVersionOr
 	// the referral terms: the existing-link flag, the referred networks and
 	// their app use per day, versioned by its position
 	[]snMainnetMigrationContract{networkReferralTermsMigrationContract},
+	// the fleet's URL outcomes by bucket of measured time and their overload
+	// discount, versioned by its position
+	[]snMainnetMigrationContract{providerEgressUrlFleetBucketMigrationContract},
 ))
 
 // Free space a table keeps on every page it writes, so an update of an

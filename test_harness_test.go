@@ -328,9 +328,12 @@ func writeTestEnvironmentLauncherState(
 // Test directory discovery must retain local unit and integration packages
 // while leaving every acceptance-owned subtree and inert external fixture out.
 func TestLocalTestDirectoryDiscoveryPreservesPackageBoundaries(t *testing.T) {
-	output, err := exec.Command("./test-dirs.sh").CombinedOutput()
+	cmd := exec.Command("./test-dirs.sh")
+	var diagnostics bytes.Buffer
+	cmd.Stderr = &diagnostics
+	output, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("discover local test directories: %v\n%s", err, output)
+		t.Fatalf("discover local test directories: %v\n%s", err, diagnostics.String())
 	}
 	directories := strings.Fields(string(output))
 	for _, directory := range directories {
@@ -357,9 +360,8 @@ func TestLocalTestDirectoryDiscoveryPreservesPackageBoundaries(t *testing.T) {
 	}
 }
 
-// Ignored artifact trees may contain incomplete copies of tests. Discover only
-// source packages, while retaining legitimate names that resemble exclusions.
-func TestLocalTestDirectoryDiscoveryExcludesScratchArtifacts(t *testing.T) {
+func writeTestDirectorySelectorFixture(t *testing.T) string {
+	t.Helper()
 	fixtureDir := t.TempDir()
 	script, err := os.ReadFile("test-dirs.sh")
 	if err != nil {
@@ -369,6 +371,16 @@ func TestLocalTestDirectoryDiscoveryExcludesScratchArtifacts(t *testing.T) {
 	if err := os.WriteFile(scriptPath, script, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(fixtureDir, "go.mod"), []byte("module discovery.example/fixture\ngo 1.23\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return fixtureDir
+}
+
+// Ignored artifact trees may contain incomplete copies of tests. Discover only
+// source packages, while retaining legitimate names that resemble exclusions.
+func TestLocalTestDirectoryDiscoveryExcludesScratchArtifacts(t *testing.T) {
+	fixtureDir := writeTestDirectorySelectorFixture(t)
 	keptDirectories := []string{".", "./app", "./nested/temp", "./profiled", "./rebuild", "./tempest"}
 	ignoredDirectories := []string{
 		"./temp", "./temp/nested", "./bin", "./build", "./profile",
@@ -385,13 +397,117 @@ func TestLocalTestDirectoryDiscoveryExcludesScratchArtifacts(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	output, err := exec.Command(scriptPath).CombinedOutput()
+	cmd := exec.Command(filepath.Join(fixtureDir, "test-dirs.sh"))
+	cmd.Env = testCommandEnvironment(map[string]string{
+		"GOFLAGS": "", "GOWORK": "off", "GOTOOLCHAIN": "local", "GOPROXY": "off",
+	})
+	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("discover fixture packages: %v\n%s", err, output)
 	}
 	directories := strings.Fields(string(output))
 	if !slices.Equal(directories, keptDirectories) {
 		t.Fatalf("artifact discovery crossed package boundaries: got=%v want=%v", directories, keptDirectories)
+	}
+}
+
+// The real Go file census follows the requested target and preserves active
+// source, nested modules, vendor packages and an explicit testdata package.
+func TestLocalTestDirectoryDiscoveryPreservesTargetAndOwners(t *testing.T) {
+	fixtureDir := writeTestDirectorySelectorFixture(t)
+	const testSource = "package fixture\n"
+	files := map[string]string{
+		"go.mod":                                          "module discovery.example/fixture\ngo 1.23\nrequire discovery.example/vendor v1.0.0\n",
+		"fixture_test.go":                                 testSource,
+		"explicit-linux/fixture_test.go":                  "//go:build linux\n\n" + testSource,
+		"suffix-linux/fixture_linux_test.go":              testSource,
+		"suffix-darwin/fixture_darwin_test.go":            testSource,
+		"env-tagged/fixture_test.go":                      "//go:build discovery_env\n\n" + testSource,
+		"cli-tagged/fixture_test.go":                      "//go:build discovery_cli\n\n" + testSource,
+		"argument-tail/fixture_test.go":                   "//go:build discovery_tail\n\n" + testSource,
+		"active-code/fixture.go":                          "package fixture\nvar _ = deliberateBuildFailure\n",
+		"active-code/fixture_linux_test.go":               testSource,
+		"broken-package/broken.go":                        "package\n",
+		"broken-package/fixture_linux_test.go":            testSource,
+		"nested/module/go.mod":                            "module discovery.example/nested\ngo 1.23\n",
+		"nested/module/fixture_test.go":                   testSource,
+		"testdata/resource-bomb/fixture_test.go":          "package fixture_test\n",
+		"vendor/modules.txt":                              "# discovery.example/vendor v1.0.0\n## explicit; go 1.23\ndiscovery.example/vendor\n",
+		"vendor/discovery.example/vendor/fixture.go":      testSource,
+		"vendor/discovery.example/vendor/fixture_test.go": testSource,
+	}
+	for name, content := range files {
+		path := filepath.Join(fixtureDir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	always := []string{".", "./active-code", "./broken-package", "./nested/module", "./testdata/resource-bomb", "./vendor/discovery.example/vendor"}
+	for _, fixture := range []struct {
+		target     string
+		args       []string
+		additional []string
+	}{
+		{target: "darwin", additional: []string{"./env-tagged", "./suffix-darwin"}},
+		{
+			target:     "darwin",
+			args:       []string{"-test.run", "-tags", "--tags=discovery_cli", "-args", "--tags=discovery_tail"},
+			additional: []string{"./cli-tagged", "./suffix-darwin"},
+		},
+		{
+			target:     "linux",
+			args:       []string{"--", "--tags=discovery_tail"},
+			additional: []string{"./env-tagged", "./explicit-linux", "./suffix-linux"},
+		},
+	} {
+		cmd := exec.Command(filepath.Join(fixtureDir, "test-dirs.sh"), fixture.args...)
+		cmd.Env = testCommandEnvironment(map[string]string{
+			"GOOS": fixture.target, "GOARCH": "amd64", "CGO_ENABLED": "0",
+			"GOFLAGS": "-mod=vendor -tags=discovery_env -json -compiled -deps -test -export -m -u -versions -retracted -reuse=absent.json", "GOWORK": "off",
+			"GOTOOLCHAIN": "local", "GOPROXY": "off", "LC_ALL": "C",
+		})
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s metadata with %q failed: %v\n%s", fixture.target, fixture.args, err, output)
+		}
+		want := append(slices.Clone(always), fixture.additional...)
+		slices.Sort(want)
+		if found := strings.Fields(string(output)); !slices.Equal(found, want) {
+			t.Fatalf("TARGET_PACKAGE_DISCOVERY %s %q got %q want %q", fixture.target, fixture.args, found, want)
+		}
+	}
+}
+
+// A command-level Go failure cannot leave a successful prefix as inventory.
+func TestLocalTestDirectoryDiscoveryPropagatesGoFailure(t *testing.T) {
+	fixtureDir := writeTestDirectorySelectorFixture(t)
+	bin := filepath.Join(fixtureDir, "tools")
+	stop := filepath.Join(fixtureDir, "z-stop")
+	for _, directory := range []string{bin, stop} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, directory := range []string{fixtureDir, stop} {
+		if err := os.WriteFile(filepath.Join(directory, "fixture_test.go"), []byte("package fixture\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	goScript := "#!/bin/sh\ncase \"$PWD\" in */z-stop) echo fixture-metadata-error >&2; exit 43;; esac\nprintf 'applicable\\n'\n"
+	if err := os.WriteFile(filepath.Join(bin, "go"), []byte(goScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(filepath.Join(fixtureDir, "test-dirs.sh"))
+	cmd.Env = testCommandEnvironment(map[string]string{"PATH": bin + string(os.PathListSeparator) + os.Getenv("PATH")})
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	output, err := cmd.Output()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 43 || len(output) != 0 || !strings.Contains(stderr.String(), "fixture-metadata-error") {
+		t.Fatalf("metadata failure exposed a partial census: exit=%v stdout=%q stderr=%q", err, output, stderr.String())
 	}
 }
 
@@ -474,6 +590,12 @@ func writeTestConnectRunnerFixture(t *testing.T, directories []string) (*exec.Cm
 	}
 	goScript := `#!/usr/bin/env bash
 [[ "$TEST_CONNECT_ENV_READY" == 1 ]] || exit 85
+if [[ "$1" == list ]]; then
+    printf '%s\0' "${PWD#"$TEST_CONNECT_SERVER_DIR"/}" "$@" >> "$TEST_CONNECT_RUN_RECORD.list"
+    printf '\n' >> "$TEST_CONNECT_RUN_RECORD.list"
+    printf 'applicable\n'
+    exit 0
+fi
 printf '%s\0' "${PWD#"$TEST_CONNECT_SERVER_DIR"/}" "$@" >> "$TEST_CONNECT_RUN_RECORD"
 printf '\n' >> "$TEST_CONNECT_RUN_RECORD"
 printf 'synthetic package completed\n'
@@ -534,6 +656,9 @@ func TestConnectTestScriptUsesCanonicalPackageBoundaries(t *testing.T) {
 func TestConnectTestScriptPreservesPortableGoArguments(t *testing.T) {
 	directory := "connect/sim-latency/evaluator/container/testdata/resource-bomb"
 	cmd, _, recordPath := writeTestConnectRunnerFixture(t, []string{directory})
+	buildArgs := []string{"--tags", "synthetic probe", "-modfile", "relative module.mod", "-overlay=relative overlay.json", "-race=false"}
+	testArgs := append(slices.Clone(buildArgs), "--args", "-tags", "test-only")
+	cmd.Args = append(cmd.Args, testArgs...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("connect runner: %v\n%s", err, output)
@@ -542,9 +667,23 @@ func TestConnectTestScriptPreservesPortableGoArguments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantRecord := strings.Join([]string{directory, "test", "-timeout", "900m", "-run", "^Test fixture$", "-count=1", ""}, "\x00") + "\n"
+	expected := append([]string{directory, "test", "-timeout", "900m", "-run", "^Test fixture$", "-count=1"}, testArgs...)
+	wantRecord := strings.Join(append(expected, ""), "\x00") + "\n"
 	if string(record) != wantRecord {
 		t.Fatalf("connect invocation = %q; want %q", record, wantRecord)
+	}
+	listRecord, err := os.ReadFile(recordPath + ".list")
+	if err != nil {
+		t.Fatal(err)
+	}
+	list := strings.Split(strings.TrimSuffix(string(listRecord), "\x00\n"), "\x00")
+	prefix := []string{
+		directory, "list", "-find", "-e", "-compiled=false", "-deps=false", "-test=false", "-export=false",
+		"-m=false", "-u=false", "-versions=false", "-retracted=false", "-reuse=", "-json=false", "-f",
+	}
+	if len(list) < len(prefix)+1 || !slices.Equal(list[:len(prefix)], prefix) ||
+		!slices.Equal(list[len(prefix)+1:], append(buildArgs, ".")) {
+		t.Fatalf("connect discovery changed build flags: %q", list)
 	}
 }
 
@@ -596,7 +735,7 @@ func writeTestServerRunnerFixture(t *testing.T, grepScript string) (string, stri
 	}
 	files := map[string]string{
 		filepath.Join(serverDir, "test-env.sh"):  "#!/usr/bin/env bash\nreturn 0\n",
-		filepath.Join(serverDir, "test-dirs.sh"): "#!/usr/bin/env bash\nprintf './proxy\\n./connect/perfvar\\n./fixture\\n'\n",
+		filepath.Join(serverDir, "test-dirs.sh"): "#!/usr/bin/env bash\nprintf '%s\\0' \"$@\" > \"$URNETWORK_ROOT/selector-invocation\"\nprintf './proxy\\n./connect/perfvar\\n./fixture\\n'\n",
 		// test.sh names the dashboard tests' promtool before its first command;
 		// the synthetic go never runs it
 		filepath.Join(serverDir, "grafana", "promtool.sh"):                       "#!/usr/bin/env bash\nprintf '/synthetic/promtool\\n'\n",
@@ -708,7 +847,7 @@ exec "$TEST_SERVER_RUNNER_CAT"`
 	if err != nil {
 		t.Fatal(err)
 	}
-	callerArgs := []string{"-run", "^Test selected fixture$", "-count=2", "-short"}
+	callerArgs := []string{"-run", "^Test selected fixture$", "-count=2", "-short", "-race=false"}
 	cmd := exec.Command("bash", append([]string{runnerPath}, callerArgs...)...)
 	cmd.Env = testCommandEnvironment(map[string]string{
 		"WARP_TEST_ENV_FAIL_FAST":             "0",
@@ -740,6 +879,13 @@ exec "$TEST_SERVER_RUNNER_CAT"`
 		append([]string{"server/connect/perfvar", "0", "test", "-timeout", "30m", "-p=1", "-parallel=1", "-short", "-v", "-race", "-cpuprofile", "profile/cpu", "-memprofile", "profile/memory"}, callerArgs...),
 		append([]string{"server/fixture", "0", "test", "-timeout", "0", "-v", "-race", "-cpuprofile", "profile/cpu", "-memprofile", "profile/memory"}, callerArgs...),
 	}...))
+	selection, err := os.ReadFile(filepath.Join(workspaceRoot, "selector-invocation"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := strings.Join(append(append([]string{"-race"}, callerArgs...), ""), "\x00"); string(selection) != want {
+		t.Fatalf("canonical discovery arguments = %q; want %q", selection, want)
+	}
 	if count := bytes.Count(output, []byte("test-runner-admission\n")); count != 2 {
 		t.Fatalf("admission completion count = %d; want 2", count)
 	}

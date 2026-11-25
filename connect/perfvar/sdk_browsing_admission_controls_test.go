@@ -245,6 +245,47 @@ func TestNativeBrowsingBodyOwnershipRejectsUnclosedOrInventedBodies(t *testing.T
 	}
 }
 
+// A progress slot needs its own exact retry evidence and an opened response.
+func TestNativeBrowsingAssetCensusRejectsUnprovedH1Retries(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*nativeBrowsingRequestProgress)
+	}{
+		{name: "unobserved retry", mutate: func(progress *nativeBrowsingRequestProgress) {
+			progress.reusedH1RetryResponded.Store(false)
+		}},
+		{name: "third attempt", mutate: func(progress *nativeBrowsingRequestProgress) {
+			progress.connectionAcquisitions.Add(1)
+			progress.connectionCheckouts.Add(1)
+			progress.requestWrites.Add(1)
+		}},
+		{name: "two responses", mutate: func(progress *nativeBrowsingRequestProgress) {
+			progress.responseStarts.Add(1)
+		}},
+		{name: "canceled without a response body", mutate: func(progress *nativeBrowsingRequestProgress) {
+			progress.cancelRequested.Store(true)
+			progress.bodyOpened.Store(false)
+			progress.bodyClosed.Store(false)
+			progress.responseStatus.Store(0)
+		}},
+	} {
+		pressure := sdkBrowsingBodyOwnershipControl()
+		progress := &pressure.assets[20][0]
+		progress.connectionAcquisitions.Store(2)
+		progress.connectionCheckouts.Store(2)
+		progress.requestWrites.Store(2)
+		progress.responseStarts.Store(1)
+		progress.reusedH1RetryResponded.Store(true)
+		if err := nativeBrowsingAssetBodyOwnershipError(pressure); err != nil {
+			t.Fatalf("complete retry evidence: %v", err)
+		}
+		test.mutate(progress)
+		if err := nativeBrowsingAssetBodyOwnershipError(pressure); err == nil {
+			t.Errorf("%s passed the asset census", test.name)
+		}
+	}
+}
+
 // A fast existing speed route satisfies the timing gate while failing this
 // fixture's separate provider4 mechanism prerequisite.
 func TestSdkBrowsingAdmissionFastExistingRouteIsMechanismPrerequisite(t *testing.T) {

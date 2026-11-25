@@ -89,6 +89,9 @@ type redisContractAdmission struct {
 	// the insufficient-balance rerun after this request's recovery page made
 	// progress
 	rerunAfterRecovery bool
+	// the payer a proof refused this request for, reserving nothing
+	// (subscription_redis_exhaustion.go); nil when no proof refused it
+	provenExhaustedPayerId *server.Id
 
 	// Serializes an attempt starting a pending reservation with this
 	// request's own releases and enrollments of its pending tokens, which
@@ -153,6 +156,22 @@ func (self *redisContractAdmission) recoveryRerun() bool {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	return self.rerunAfterRecovery
+}
+
+func (self *redisContractAdmission) noteProvenExhaustion(payerNetworkId server.Id) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.provenExhaustedPayerId = &payerNetworkId
+}
+
+// The payer a proof refused this request for, if one did.
+func (self *redisContractAdmission) provenExhaustion() (server.Id, bool) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if self.provenExhaustedPayerId == nil {
+		return server.Id{}, false
+	}
+	return *self.provenExhaustedPayerId, true
 }
 
 func redisAdmissionFromContext(ctx context.Context) *redisContractAdmission {

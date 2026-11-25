@@ -88,6 +88,8 @@ func TestProAbsent(t *testing.T) {
 	connect.AssertEqual(t, ByteCount(0), c.DataAmount(false))
 	connect.AssertEqual(t, ByteCount(0), c.DataAmount(true))
 	connect.AssertEqual(t, ByteCount(0), c.ReferralBonus)
+	// an admitted validator's mint grants nothing either
+	connect.AssertEqual(t, false, c.ValidatorDataGrant.Enabled())
 
 	// the seeker data multiplier defaults to 1 (no boost), NEVER 0 -- a zero would scale
 	// every seeker holder's free/referral grant down to nothing.
