@@ -1,3 +1,5 @@
+//go:build linux
+
 // Configuration-only host audit must use the same closed private profile as
 // native admission, not the deliberately different legacy global daemon.
 package competitionagent

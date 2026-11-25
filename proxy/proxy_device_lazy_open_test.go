@@ -339,14 +339,24 @@ func watchLazyOpenTestProxyClients(
 	})
 	ctx, cancel := context.WithCancel(manager.ctx)
 	t.Cleanup(cancel)
+	// The synthetic change log starts when WireGuard has registered both callbacks.
+	watchRegistered := make(chan struct{})
 	notification := newProxyClientNotification(
 		ctx,
 		settings,
 		newTestProxyChangeReadSubscriptionSource(),
-		changes.getProxyClientsSince,
+		func(ctx context.Context, host string, block string, changeId int64) (map[server.Id]*model.ProxyClient, int64, error) {
+			select {
+			case <-ctx.Done():
+				return nil, changeId, ctx.Err()
+			case <-watchRegistered:
+			}
+			return changes.getProxyClientsSince(ctx, host, block, changeId)
+		},
 	)
 	unwatch := wgOwner.WatchProxyClients(notification)
 	t.Cleanup(unwatch)
+	close(watchRegistered)
 	return wgOwner, notification, settings
 }
 

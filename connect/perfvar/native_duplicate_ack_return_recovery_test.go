@@ -196,6 +196,7 @@ func (self *nativeDuplicateAckRecoveryState) start() error {
 func (self *nativeDuplicateAckRecoveryState) installNativeBridge(path *fullTunPath, mixedBroker *nativeMixedAckBroker) {
 	path.nativeIngressForTest = true
 	path.bridgeSends.observeAdmission = true
+	path.joinDownloadCompletionBeforeClose = self.loss && mixedBroker != nil
 	if mixedBroker != nil {
 		mixedBroker.bind(path)
 	}
@@ -573,6 +574,9 @@ func TestNativeDuplicateAckRecoveryAccountsReadyFeedback(t *testing.T) {
 			broker = newNativeMixedAckBroker(state, mode.loss)
 		}
 		state.installNativeBridge(path, broker)
+		if path.joinDownloadCompletionBeforeClose != (mode.loss && mode.mixed) {
+			t.Errorf("%s: unexpected download completion fence=%t", mode.name, path.joinDownloadCompletionBeforeClose)
+		}
 		if broker != nil {
 			t.Cleanup(broker.natUnsubscribe)
 			t.Cleanup(broker.natBatchUnsubscribe)

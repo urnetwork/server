@@ -80,6 +80,7 @@ type privateOriginRunWriteFixture struct {
 	transports        []*http.Transport
 	proxyWorkers      sync.WaitGroup
 	connectionWorkers sync.WaitGroup
+	beforeServerClose func()
 	closeOnce         sync.Once
 	closeErr          error
 	previousConnCalls atomic.Int64
@@ -262,7 +263,9 @@ func (self *privateOriginRunWriteFixture) close() error {
 		for _, transport := range self.transports {
 			transport.CloseIdleConnections()
 		}
-		_ = self.listener.Close()
+		if self.beforeServerClose != nil {
+			self.beforeServerClose()
+		}
 		self.closeErr = errors.Join(self.closeErr, self.server.Close())
 		ctx, cancel := context.WithTimeout(context.Background(), self.origin.settings.FixtureDrainTimeout)
 		defer cancel()
@@ -361,6 +364,8 @@ func TestPrivateOriginRunCanceledWriteQuiesces(t *testing.T) {
 func TestPrivateOriginRunHealthyFiveReusedConnections(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		fixture := newPrivateOriginRunWriteFixture(t, 32*1024)
+		// Give the existing Serve loop the first turn at the shutdown boundary.
+		fixture.beforeServerClose = synctest.Wait
 		var dials atomic.Int64
 		clientPipe, serverPipe := net.Pipe()
 		observed := &privateOriginRunWriteConn{Conn: serverPipe}

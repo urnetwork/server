@@ -5,6 +5,7 @@ package perfvar
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -104,11 +105,45 @@ func (self *nativeBrowsingAssetServer) serveAsset(writer http.ResponseWriter, re
 	canceled = nativeBrowsingWriteAssetSuffix(writer, request.Context(), self.workCtx, state, body, asset, self.streaming, progress)
 }
 
-// GetConn counts actual RoundTrip attempts, including automatic reacquisition.
-// WroteRequest may report a failed write that the origin never received.
+// Keep the two checkouts and the first-response callback scoped to this GET.
+// A successful WroteRequest alone does not certify a flush or handler entry.
 func (self *nativeBrowsingRequestProgress) retryTrace() *httptrace.ClientTrace {
+	var firstReused atomic.Pointer[tls.Conn]
+	var secondH1Checkout atomic.Bool
 	return &httptrace.ClientTrace{
-		GetConn: func(string) { self.connectionAcquisitions.Add(1) },
+		GetConn: func(string) {
+			// HTTP/1 joins the preceding writer before it asks for another
+			// connection. Require the first write callback and no response.
+			if self.connectionAcquisitions.Add(1) == 2 &&
+				(self.connectionCheckouts.Load() != 1 || self.requestWrites.Load() != 1 ||
+					self.requestWriteErrors.Load() != 0 || self.responseStarts.Load() != 0 ||
+					!nativeBrowsingVerifiedH1Checkout(firstReused.Load())) {
+				firstReused.Store(nil)
+			}
+		},
+		GotConn: func(info httptrace.GotConnInfo) {
+			checkout := self.connectionCheckouts.Add(1)
+			if checkout != self.connectionAcquisitions.Load() {
+				return
+			}
+			conn, _ := info.Conn.(*tls.Conn)
+			switch checkout {
+			case 1:
+				if info.Reused {
+					firstReused.Store(conn)
+				}
+			case 2:
+				if first := firstReused.Swap(nil); first != nil && first != conn {
+					secondH1Checkout.Store(nativeBrowsingVerifiedH1Checkout(conn))
+				}
+			}
+		},
+		GotFirstResponseByte: func() {
+			firstReused.Store(nil)
+			if self.responseStarts.Add(1) == 1 && secondH1Checkout.Load() {
+				self.reusedH1RetryResponded.Store(true)
+			}
+		},
 		WroteRequest: func(info httptrace.WroteRequestInfo) {
 			self.requestWrites.Add(1)
 			if info.Err != nil {
@@ -116,6 +151,25 @@ func (self *nativeBrowsingRequestProgress) retryTrace() *httptrace.ClientTrace {
 			}
 		},
 	}
+}
+
+// Only a successfully verified HTTP/1.1 TLS checkout can qualify.
+func nativeBrowsingVerifiedH1Checkout(conn *tls.Conn) bool {
+	if conn == nil {
+		return false
+	}
+	state := conn.ConnectionState()
+	return state.HandshakeComplete && state.NegotiatedProtocol == "http/1.1" && len(state.VerifiedChains) != 0
+}
+
+// A reacquisition is admissible only with one response and one joined origin
+// handler for this slot. The workload independently validates the body.
+func (self *nativeBrowsingRequestProgress) singleHandlerH1Retry() bool {
+	receipt, known := self.serverOwnership()
+	return known && receipt.started == 1 && receipt.finished == 1 &&
+		self.connectionAcquisitions.Load() == 2 && self.connectionCheckouts.Load() == 2 &&
+		self.requestWrites.Load() == 2 && self.requestWriteErrors.Load() == 0 &&
+		self.responseStarts.Load() == 1 && self.reusedH1RetryResponded.Load() && self.responseStatus.Load() == http.StatusOK
 }
 
 // Old trace controls can still set their direct disposal booleans. Real driver
