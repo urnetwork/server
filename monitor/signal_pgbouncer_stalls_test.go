@@ -380,6 +380,76 @@ func pgbouncerTestFindings(t *testing.T, settings SignalSettings) []finding {
 	return findings
 }
 
+// The bash the probe's command runs: the real bash, on the probe's script with
+// its PgBouncer port rewritten to a local socket file. It fails closed: a script
+// that still names a network path after the rewrite (the probe's spelling or
+// port changed) never runs, since the real bash would open 127.0.0.1's PgBouncer
+// port, which a production data tunnel can forward.
+const pgbouncerTestBashWrapper = `#!/bin/sh
+[ "$1" = -c ] || exit 64
+script=$(printf '%s' "$2" | "$PGBOUNCER_TEST_REAL_SED" "s#/dev/tcp/127.0.0.1/6432#$PGBOUNCER_TEST_SOCKET#g")
+case "$script" in
+  */dev/tcp/*|*/dev/udp/*) printf '%s\n' "refusing a probe script that still opens a network path" >&2; exit 65 ;;
+esac
+exec "$PGBOUNCER_TEST_REAL_BASH" -c "$script"
+`
+
+// The wrapper rewrites the probe's port to the socket file and runs the real
+// bash on it, and refuses, without running it, a script that would still open
+// a network path.
+func TestPgBouncerTestBashWrapperFailsClosed(t *testing.T) {
+	binDir := t.TempDir()
+	wrapperPath := filepath.Join(binDir, "bash")
+	if err := os.WriteFile(wrapperPath, []byte(pgbouncerTestBashWrapper), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	realSh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	realSed, err := exec.LookPath("sed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// a recording bash in place of the real one: nothing here opens a socket
+	recordPath := filepath.Join(binDir, "ran")
+	recorderPath := filepath.Join(binDir, "recording-bash")
+	recorder := "#!/bin/sh\nprintf '%s' \"$2\" > \"$PGBOUNCER_TEST_RECORD\"\n"
+	if err := os.WriteFile(recorderPath, []byte(recorder), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		script   string
+		refused  bool
+		rewrites string
+	}{
+		{script: ": 3<> /dev/tcp/127.0.0.1/6432", rewrites: ": 3<> " + filepath.Join(binDir, "socket")},
+		{script: ": 3<> /dev/tcp/127.0.0.1/6433", refused: true},
+		{script: ": 3<> /dev/tcp/localhost/6432", refused: true},
+		{script: ": 3<> /dev/udp/127.0.0.1/6432", refused: true},
+	} {
+		os.Remove(recordPath)
+		execute := exec.Command(realSh, wrapperPath, "-c", c.script)
+		execute.Env = append(os.Environ(), "PGBOUNCER_TEST_SOCKET="+filepath.Join(binDir, "socket"),
+			"PGBOUNCER_TEST_REAL_BASH="+recorderPath, "PGBOUNCER_TEST_REAL_SED="+realSed, "PGBOUNCER_TEST_RECORD="+recordPath)
+		output, err := execute.CombinedOutput()
+		recorded, recordErr := os.ReadFile(recordPath)
+		if c.refused {
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 65 || !strings.Contains(string(output), "refusing a probe script") {
+				t.Errorf("script %q: wrapper = %v, %q; want a refusal with exit 65", c.script, err, output)
+			}
+			if !errors.Is(recordErr, os.ErrNotExist) {
+				t.Errorf("script %q: a refused script ran as %q", c.script, recorded)
+			}
+			continue
+		}
+		if err != nil || recordErr != nil || string(recorded) != c.rewrites {
+			t.Errorf("script %q: wrapper = %v, %q; ran %q (%v), want %q", c.script, err, output, recorded, recordErr, c.rewrites)
+		}
+	}
+}
+
 func pgbouncerCommandTestSettings(t *testing.T, timeoutMode string, omitTimeout, omitBash, closed bool) SignalSettings {
 	t.Helper()
 	binDir := t.TempDir()
@@ -416,11 +486,7 @@ esac
 `
 	}
 	if !omitBash {
-		commands["bash"] = `#!/bin/sh
-[ "$1" = -c ] || exit 64
-script=$(printf '%s' "$2" | "$PGBOUNCER_TEST_REAL_SED" "s#/dev/tcp/127.0.0.1/6432#$PGBOUNCER_TEST_SOCKET#g")
-exec "$PGBOUNCER_TEST_REAL_BASH" -c "$script"
-`
+		commands["bash"] = pgbouncerTestBashWrapper
 	}
 	for name, body := range commands {
 		if err := os.WriteFile(filepath.Join(binDir, name), []byte(body), 0o755); err != nil {
