@@ -20,6 +20,7 @@ import (
 	"github.com/urfoundation/sn/protocol"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/session"
 )
 
@@ -54,11 +55,11 @@ func snValidatorClassTestRequest(tb testing.TB, origin string, authority *snRese
 	return response.StatusCode, string(body)
 }
 
-// The mint route over lane.
+// The mint route over lane, with the production data grant.
 func newSnValidatorClassEndpoint(tb testing.TB, lane SnReservedAttemptUploadLane) string {
 	tb.Helper()
 	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		serveSnValidatorClass(w, r, lane, session.MintValidatorClass, time.Now)
+		serveSnValidatorClass(w, r, lane, session.MintValidatorClass, controller.GrantSnValidatorData, time.Now)
 	}))
 	tb.Cleanup(endpoint.Close)
 	return endpoint.URL
@@ -123,7 +124,7 @@ func TestSnValidatorClassMintsOnlyForTheAdmittedValidator(t *testing.T) {
 }
 
 // An instance whose admission has not refreshed cannot judge the validator,
-// and answers 503, so the validator retries a sibling.
+// and answers 503, so the validator retries a sibling. It grants no data.
 func TestSnValidatorClassNotCurrentAnswersRetryably(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		authority := newSnReservedAttemptAuthority(tb)
@@ -140,6 +141,9 @@ func TestSnValidatorClassNotCurrentAnswersRetryably(t *testing.T) {
 		}
 		if got := testutil.ToFloat64(snValidatorClassMints.WithLabelValues("refused_503")) - refused; got != 1 {
 			tb.Errorf("%v 503 refusals counted, want 1", got)
+		}
+		if balances := snValidatorDataGrantTestBalances(tb, client.NetworkId); len(balances) != 0 {
+			tb.Errorf("a mint answered 503 left %d balances, want no data grant", len(balances))
 		}
 	})
 }
