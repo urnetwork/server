@@ -1515,7 +1515,8 @@ func newFileClusterSuiteDelayedCluster(cluster *FileCluster) (*FileCluster, erro
 		if err != nil {
 			return nil, err
 		}
-		hosts = append(hosts, &fileClusterHost{endpoint: endpoint, core: core, transport: transport})
+		// the suite reads no body at a client's pace, so one client serves both
+		hosts = append(hosts, &fileClusterHost{endpoint: endpoint, core: core, transport: transport, pacedCore: core, pacedTransport: transport})
 	}
 	delayed := &FileCluster{
 		clusters: cluster.clusters,

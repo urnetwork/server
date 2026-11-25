@@ -103,9 +103,10 @@ type FileClusterSettings struct {
 	// decision 780; QD-1394): each block's backstop against any engine's burst, beside evs's own bound
 	// on an attempt's reads (EvsSettings.EntryReadConcurrency). A request past it waits for a
 	// connection under its own ctx, so a burst queues other requests behind it. 64: one evs attempt's
-	// bounded reads fit one host, and a cluster of 4 hosts takes 256 at once. A streamed body holds
-	// its connection at its client's pace (question evs-read-fanout-bounds-client-paced-streams).
-	// Non-positive caps nothing, leaving minio-go's 16 idle connections a host.
+	// bounded reads fit one host, and a cluster of 4 hosts takes 256 at once. A GET or PutStream whose
+	// body moves at a client's own pace (sidecar.WithBlobClientPaced) is outside it, on a second
+	// transport a host with no cap (QD-1402). Non-positive caps nothing, leaving minio-go's 16 idle
+	// connections a host.
 	MaxConnsPerHost int
 	// A host whose request failed is passed over this long while another host is not, so a request
 	// after a failure moves hosts. 30 s.
@@ -306,12 +307,17 @@ func newFileClusters(
 		clusterIdClusters: map[string]*FileCluster{},
 	}
 	// one base transport for each host, whichever clusters name it, so MaxConnsPerHost counts every
-	// connection this instance opens to the host
-	type baseTransportKey struct {
+	// connection this instance opens to the host, and beside it the same without the cap, for
+	// requests at a client's own pace
+	type hostTransportKey struct {
 		endpoint string
 		tls      bool
 	}
-	baseTransports := map[baseTransportKey]http.RoundTripper{}
+	type hostTransports struct {
+		base  http.RoundTripper
+		paced http.RoundTripper
+	}
+	keyHostTransports := map[hostTransportKey]*hostTransports{}
 	for _, config := range configs {
 		if _, exists := self.clusterIdClusters[config.ClusterId]; exists {
 			cancel()
@@ -319,17 +325,18 @@ func newFileClusters(
 		}
 		hosts := []*fileClusterHost{}
 		for _, endpoint := range config.Endpoints {
-			key := baseTransportKey{endpoint: endpoint, tls: config.Tls}
-			base, ok := baseTransports[key]
+			key := hostTransportKey{endpoint: endpoint, tls: config.Tls}
+			transports, ok := keyHostTransports[key]
 			if !ok {
-				var err error
-				if base, err = newBaseTransport(config.Tls); err != nil {
+				base, err := newBaseTransport(config.Tls)
+				if err != nil {
 					cancel()
 					return nil, fmt.Errorf("cluster %s host %s: %w", config.ClusterId, endpoint, err)
 				}
-				baseTransports[key] = base
+				transports = &hostTransports{base: base, paced: fileClusterPacedTransport(base)}
+				keyHostTransports[key] = transports
 			}
-			host, err := newFileClusterHost(endpoint, config, base, clock)
+			host, err := newFileClusterHost(endpoint, config, transports.base, transports.paced, clock)
 			if err != nil {
 				cancel()
 				return nil, fmt.Errorf("cluster %s host %s: %w", config.ClusterId, endpoint, err)
@@ -523,7 +530,9 @@ func fileClusterReadError(err error) error {
 }
 
 // One PUT of body, conditional on header. sha256Hex signs the payload, so the store checks the bytes
-// it got are the bytes signed, and checksum, when set, rides as x-amz-checksum-sha256.
+// it got are the bytes signed, and checksum, when set, rides as x-amz-checksum-sha256. streamed is
+// PutStream's: no deadline header, and a body that may move at its client's own pace, which ctx then
+// says (sidecar.WithBlobClientPaced).
 func (self *FileCluster) put(
 	ctx context.Context,
 	key string,
@@ -532,7 +541,7 @@ func (self *FileCluster) put(
 	sha256Hex string,
 	match func(options *minio.PutObjectOptions),
 	options *sidecar.BlobPutOptions,
-	deadline bool,
+	streamed bool,
 ) (string, error) {
 	if err := self.checkPools(); err != nil {
 		return "", err
@@ -553,11 +562,11 @@ func (self *FileCluster) put(
 		}
 	}
 	requestCtx := ctx
-	if deadline {
+	if !streamed {
 		requestCtx = withFileClusterDeadline(ctx, self.RequestTimeout())
 	}
 	host := self.picker.pick()
-	info, err := host.core.PutObject(requestCtx, self.config.Bucket, key, body, byteCount, "", sha256Hex, putOptions)
+	info, err := host.client(ctx, streamed).PutObject(requestCtx, self.config.Bucket, key, body, byteCount, "", sha256Hex, putOptions)
 	if err != nil {
 		self.noteFailure(ctx, host, err)
 		return "", fileClusterPutError(err)
@@ -572,7 +581,7 @@ func (self *FileCluster) PutIfNoneMatch(ctx context.Context, key string, body []
 	sum := sha256.Sum256(body)
 	return self.put(ctx, key, bytes.NewReader(body), int64(len(body)), hex.EncodeToString(sum[:]), func(putOptions *minio.PutObjectOptions) {
 		putOptions.SetMatchETagExcept("*")
-	}, options, true)
+	}, options, false)
 }
 
 func (self *FileCluster) PutIfMatch(ctx context.Context, key string, etag string, body []byte, options *sidecar.BlobPutOptions) (string, error) {
@@ -585,7 +594,7 @@ func (self *FileCluster) PutIfMatch(ctx context.Context, key string, etag string
 	sum := sha256.Sum256(body)
 	return self.put(ctx, key, bytes.NewReader(body), int64(len(body)), hex.EncodeToString(sum[:]), func(putOptions *minio.PutObjectOptions) {
 		putOptions.SetMatchETag(etag)
-	}, options, true)
+	}, options, false)
 }
 
 // Ends a read with an error at the first byte past byteCount, so a body longer than declared fails
@@ -611,7 +620,8 @@ func (self *fileClusterExactReader) Read(buffer []byte) (int, error) {
 
 // The segment's id is its SHA-256, so it signs the payload too, and the store refuses other bytes
 // before the object exists. No deadline header: the uploader sets the pace, and the store bounds it
-// 40 s after its last byte (§19.6).
+// 40 s after its last byte (§19.6). A body at a client's own pace goes outside MaxConnsPerHost
+// (sidecar.WithBlobClientPaced).
 func (self *FileCluster) PutStream(ctx context.Context, key string, body io.Reader, byteCount int64, checksumSha256 []byte) (string, error) {
 	if len(checksumSha256) != 32 {
 		return "", fmt.Errorf("%w: a segment names its 32 byte checksum", sidecar.ErrBlobPutOptions)
@@ -621,7 +631,7 @@ func (self *FileCluster) PutStream(ctx context.Context, key string, body io.Read
 	}
 	return self.put(ctx, key, &fileClusterExactReader{source: body, remaining: byteCount}, byteCount, hex.EncodeToString(checksumSha256), func(putOptions *minio.PutObjectOptions) {
 		putOptions.SetMatchETagExcept("*")
-	}, &sidecar.BlobPutOptions{Sha256: checksumSha256}, false)
+	}, &sidecar.BlobPutOptions{Sha256: checksumSha256}, true)
 }
 
 // The object headers describe: ETag, LastModified and metadata. byteCount is the whole object's.
@@ -643,7 +653,7 @@ func fileClusterBlobInfo(key string, info minio.ObjectInfo, byteCount int64) sid
 
 func (self *FileCluster) get(ctx context.Context, key string, getOptions minio.GetObjectOptions) (io.ReadCloser, minio.ObjectInfo, http.Header, error) {
 	host := self.picker.pick()
-	body, info, header, err := host.core.GetObject(withFileClusterDeadline(ctx, self.RequestTimeout()), self.config.Bucket, key, getOptions)
+	body, info, header, err := host.client(ctx, true).GetObject(withFileClusterDeadline(ctx, self.RequestTimeout()), self.config.Bucket, key, getOptions)
 	if err != nil {
 		self.noteFailure(ctx, host, err)
 		return nil, minio.ObjectInfo{}, nil, fileClusterReadError(err)

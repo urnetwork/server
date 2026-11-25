@@ -3,10 +3,15 @@ package server
 // §11.15's fan-out (owner decision 780; QD-1394): a host's base transport caps the connections it opens there at
 // FileClusterSettings.MaxConnsPerHost and keeps as many idle; one serves each host whichever clusters name it; and
 // requests to a held host through both clusters of one FileClusters never open more than the cap to it, the
-// requests past the cap waiting for a connection and all of them answered.
+// requests past the cap waiting for a connection and all of them answered. A GET or PutStream at a client's own pace
+// (QD-1402) goes through a second client of the host, whose base transport is the first's without the cap, and
+// every other request through the capped one.
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +21,8 @@ import (
 	"time"
 
 	"github.com/minio/minio-go/v7"
+
+	"github.com/urnetwork/sidecar"
 )
 
 // The base transport newFileClusterBaseTransport makes for settings, as the http.Transport it is.
@@ -134,12 +141,13 @@ func newFileClusterHeldHost(t *testing.T) *fileClusterHeldHost {
 	t.Helper()
 	host := &fileClusterHeldHost{arrived: make(chan struct{}, 64), release: make(chan struct{}), stop: make(chan struct{})}
 	host.server = httptest.NewUnstartedServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		io.Copy(io.Discard, request.Body)
 		host.arrived <- struct{}{}
 		select {
 		case <-host.release:
 		case <-host.stop:
 		}
-		// what a HEAD of an object answers
+		// what a HEAD of an object answers, and an empty GET's or a PUT's
 		header := writer.Header()
 		header.Set("ETag", `"etag-1"`)
 		header.Set("Last-Modified", time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC).Format(http.TimeFormat))
@@ -220,5 +228,95 @@ func TestFileClusterTransportOpensNoMoreThanItsCapToAHost(t *testing.T) {
 	}
 	if takenCount, maxOpenCount := host.counts(); capCount < maxOpenCount || capCount < takenCount {
 		t.Fatalf("the host took %d connections, %d open at once, past the cap of %d", takenCount, maxOpenCount, capCount)
+	}
+}
+
+// A request's client: a GET or PutStream whose ctx says its body moves at a client's own pace takes the paced one,
+// whose base transport is the capped one's without the cap and as shared between the clusters naming the host; any
+// other request, and a request with no body on such a ctx, the capped one.
+func TestFileClusterHostSendsOnlyAPacedBodyOutsideTheCap(t *testing.T) {
+	settings := DefaultFileClusterSettings()
+	settings.NoChecks = true
+	clusters, err := newFileClusters(t.Context(), fileClusterTestConfigs("host-a.example:9000"), settings, newFileClusterBaseTransport(settings), func() *SidecarConfig { return &SidecarConfig{} })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(clusters.Close)
+	host := clusters.clusterIdClusters["meta-1"].picker.hosts[0]
+	paced := sidecar.WithBlobClientPaced(t.Context())
+	if host.client(paced, true) != host.pacedCore || host.client(paced, false) != host.core || host.client(t.Context(), true) != host.core {
+		t.Fatal("a request took the other client")
+	}
+	baseOf := func(transport http.RoundTripper) *http.Transport {
+		return transport.(*fileClusterTransport).base.(*http.Transport)
+	}
+	capped, uncapped := baseOf(host.transport), baseOf(host.pacedTransport)
+	if capped == uncapped || capped.MaxConnsPerHost != settings.MaxConnsPerHost || uncapped.MaxConnsPerHost != 0 || uncapped.MaxIdleConnsPerHost != settings.MaxConnsPerHost {
+		t.Fatalf("capped %d a host, paced %d a host keeping %d idle", capped.MaxConnsPerHost, uncapped.MaxConnsPerHost, uncapped.MaxIdleConnsPerHost)
+	}
+	segmentHost := clusters.clusterIdClusters["seg-1"].picker.hosts[0]
+	if baseOf(segmentHost.transport) != capped || baseOf(segmentHost.pacedTransport) != uncapped {
+		t.Fatal("the clusters naming one host send through different base transports")
+	}
+}
+
+// With two HEADs holding both capped connections at the host, a GET and a PutStream at a client's own pace go
+// through connections of their own: every request is answered, and the host took more connections than the cap,
+// which requests sharing the capped transport could never open.
+func TestFileClusterClientPacedBodiesTakeNoCappedConnection(t *testing.T) {
+	const capCount = 2
+	host := newFileClusterHeldHost(t)
+	settings := DefaultFileClusterSettings()
+	settings.MaxConnsPerHost = capCount
+	settings.NoChecks = true
+	settings.RequestTimeout = time.Minute
+	endpoint := strings.TrimPrefix(host.server.URL, "http://")
+	clusters, err := newFileClusters(t.Context(), fileClusterTestConfigs(endpoint), settings, newFileClusterBaseTransport(settings), func() *SidecarConfig { return &SidecarConfig{} })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(clusters.Close)
+	meta, segment := clusters.clusterIdClusters["meta-1"], clusters.clusterIdClusters["seg-1"]
+	// the pool check a write makes first, as a check that read one pool leaves it
+	segment.stateLock.Lock()
+	segment.adminInfo = &FileClusterAdminInfo{ReadTime: clusters.clock.Now(), PoolCount: 1}
+	segment.stateLock.Unlock()
+
+	const requestCount = capCount + 2
+	results := make(chan error, requestCount)
+	for range capCount {
+		go func() {
+			_, err := meta.Head(t.Context(), "held/object")
+			results <- err
+		}()
+	}
+	for range capCount {
+		<-host.arrived
+	}
+	paced := sidecar.WithBlobClientPaced(t.Context())
+	go func() {
+		object, err := meta.Get(paced, "held/object")
+		if err == nil {
+			_, err = io.ReadAll(object.Body)
+			object.Body.Close()
+		}
+		results <- err
+	}()
+	go func() {
+		segmentBytes := []byte("segment")
+		sum := sha256.Sum256(segmentBytes)
+		_, err := segment.PutStream(paced, "seg/held", bytes.NewReader(segmentBytes), int64(len(segmentBytes)), sum[:])
+		results <- err
+	}()
+	for range requestCount {
+		host.release <- struct{}{}
+	}
+	for range requestCount {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if takenCount, _ := host.counts(); takenCount <= capCount {
+		t.Fatalf("the host took %d connections for %d requests, two of them at a client's pace, under a cap of %d", takenCount, requestCount, capCount)
 	}
 }

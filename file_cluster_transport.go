@@ -28,6 +28,13 @@ package server
 // ResponseHeaderTimeout starts, so the request's ctx bounds it, and the cancel at its own deadline
 // when that comes first; one that waits past RequestTimeout reaches the store with its header's
 // deadline already passed, which the fork refuses 503 and noteFailure counts against the host.
+//
+// A request whose body moves at a client's own pace, a GET, ranged GET or PutStream on a ctx
+// sidecar.WithBlobClientPaced marks (a segment upload's body, an object a read streams to its
+// client), goes through a second client of the host, whose base transport is the first's without
+// the cap (QD-1402). Such a request holds its connection for as long as its client takes, and on the
+// capped transport a few slow clients would hold every connection a burst's requests wait for; on
+// its own it is bounded as before the cap, by the lb's limits on each client's connections.
 
 import (
 	"context"
@@ -159,33 +166,79 @@ func newFileClusterBaseTransport(settings *FileClusterSettings) fileClusterBaseT
 	}
 }
 
-// One MinIO host of a cluster, with its own client. Safe for concurrent use.
+// One MinIO host of a cluster, with its own clients. Safe for concurrent use.
 type fileClusterHost struct {
 	endpoint string
 	core     *minio.Core
 	// what core sends through, which the admin route uses too
 	transport http.RoundTripper
+	// the client of a request whose body moves at a client's own pace, and what it sends through: the
+	// host's base transport without MaxConnsPerHost (see the file header)
+	pacedCore      *minio.Core
+	pacedTransport http.RoundTripper
 	// Unix ns of the last request that failed here, zero for none.
 	failedAtNanos atomic.Int64
 }
 
-// A client for one host of config's cluster, sending through base, the host's base transport. The SDK
-// reads MaxRetries 1 as one attempt, and Region set means no bucket location lookup, so every
-// operation is the one request it names.
-func newFileClusterHost(endpoint string, config *FileClusterConfig, base http.RoundTripper, clock sidecar.Clock) (*fileClusterHost, error) {
-	transport := &fileClusterTransport{base: base, clock: clock}
-	core, err := minio.NewCore(endpoint, &minio.Options{
-		Creds:        credentials.NewStaticV4(config.AccessKey, config.SecretKey, ""),
-		Secure:       config.Tls,
-		Transport:    transport,
-		Region:       config.Region,
-		BucketLookup: minio.BucketLookupPath,
-		MaxRetries:   1,
-	})
+// The clients of one host of config's cluster: one sending through base, the host's base transport,
+// and one through pacedBase, the same without its cap. The SDK reads MaxRetries 1 as one attempt,
+// and Region set means no bucket location lookup, so every operation is the one request it names.
+func newFileClusterHost(
+	endpoint string,
+	config *FileClusterConfig,
+	base http.RoundTripper,
+	pacedBase http.RoundTripper,
+	clock sidecar.Clock,
+) (*fileClusterHost, error) {
+	newClient := func(base http.RoundTripper) (*minio.Core, http.RoundTripper, error) {
+		transport := &fileClusterTransport{base: base, clock: clock}
+		core, err := minio.NewCore(endpoint, &minio.Options{
+			Creds:        credentials.NewStaticV4(config.AccessKey, config.SecretKey, ""),
+			Secure:       config.Tls,
+			Transport:    transport,
+			Region:       config.Region,
+			BucketLookup: minio.BucketLookupPath,
+			MaxRetries:   1,
+		})
+		return core, transport, err
+	}
+	core, transport, err := newClient(base)
 	if err != nil {
 		return nil, err
 	}
-	return &fileClusterHost{endpoint: endpoint, core: core, transport: transport}, nil
+	pacedCore, pacedTransport, err := newClient(pacedBase)
+	if err != nil {
+		return nil, err
+	}
+	return &fileClusterHost{
+		endpoint:       endpoint,
+		core:           core,
+		transport:      transport,
+		pacedCore:      pacedCore,
+		pacedTransport: pacedTransport,
+	}, nil
+}
+
+// The client a request on ctx goes through: pacedCore when it carries a body, as a GET, ranged GET or
+// PutStream does, and ctx says the body moves at a client's own pace; else core, the capped one.
+func (self *fileClusterHost) client(ctx context.Context, body bool) *minio.Core {
+	if body && sidecar.BlobClientPaced(ctx) {
+		return self.pacedCore
+	}
+	return self.core
+}
+
+// A host's base transport for requests at a client's own pace: base without its cap on the host's
+// connections, its other settings kept. A test's base that is no http.Transport keeps no connections
+// and serves as it is.
+func fileClusterPacedTransport(base http.RoundTripper) http.RoundTripper {
+	transport, ok := base.(*http.Transport)
+	if !ok {
+		return base
+	}
+	paced := transport.Clone()
+	paced.MaxConnsPerHost = 0
+	return paced
 }
 
 // Picks the host a request goes to: the next in turn not failed within holdoff, else the one that
