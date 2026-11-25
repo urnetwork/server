@@ -68,6 +68,8 @@ const (
 	GrantKindFree     GrantKind = "free"
 	GrantKindPro      GrantKind = "pro"
 	GrantKindReferral GrantKind = "referral"
+	// an admitted SN25 validator's data grant (validator_data_grant_model.go)
+	GrantKindSn25Validator GrantKind = "sn25_validator"
 )
 
 // An optional durable execution identity makes all grants in the caller's
@@ -95,16 +97,21 @@ func grantGrace(grantKind GrantKind) (time.Duration, bool) {
 		return FreeGrantGrace, true
 	case GrantKindPro:
 		return ProGrantGrace, true
+	case GrantKindSn25Validator:
+		// a validator grant ends with its period. Its successor starts before
+		// that, in the renewal window, so the summary never leaves out an active
+		// validator grant
+		return 0, true
 	default:
 		return 0, false
 	}
 }
 
-// Adds one recurring grant at no cost -- the daily free grant, the monthly Pro grant
-// or a referral bonus -- and records its kind. The Pro grant carries pro = true,
-// which is what confers the entitlement (see pro_model.go); the caller must refresh
-// the Pro cache (UpdateProNetwork) once the tx commits. Free and referral grants
-// never confer Pro.
+// Adds one recurring grant at no cost -- the daily free grant, the monthly Pro grant,
+// a referral bonus or an SN25 validator's data grant -- and records its kind. The Pro
+// grant carries pro = true, which is what confers the entitlement (see pro_model.go);
+// the caller must refresh the Pro cache (UpdateProNetwork) once the tx commits. Free,
+// referral and validator grants never confer Pro.
 func AddGrantTransferBalanceInTx(
 	tx server.PgTx,
 	ctx context.Context,
