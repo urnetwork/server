@@ -49,7 +49,7 @@ func testingSidecarLimitServer(t testing.TB, ctx context.Context) (*providerInte
 	testServer := newProviderIntentTestServer(t, ctx)
 	occupant, _ := testServer.createClient()
 	testServer.markSidecar(t, occupant, true)
-	model.AddNetworkSidecarClient(ctx, testServer.networkId, occupant, time.Hour)
+	model.Testing_AddNetworkSidecarClient(ctx, testServer.networkId, occupant, time.Hour)
 	clientId, byJwt := testServer.createClient()
 	testServer.markSidecar(t, clientId, true)
 	return testServer, byJwt
