@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -223,9 +224,13 @@ func privateResidentHeartbeatResources(t *testing.T) (context.Context, *pgx.Conn
 		t.Skip("requires the privately owned heartbeat fixture runner")
 	}
 	for _, address := range []string{redisAddress, pgAddress} {
-		host, _, err := net.SplitHostPort(address)
+		host, portText, err := net.SplitHostPort(address)
 		if err != nil || host != "127.0.0.1" || os.Getenv("WARP_ENV") != "local" {
 			t.Fatal("heartbeat fixture must use exact local loopback resources")
+		}
+		// a production data tunnel forwards 5432, 6432 and 6379-6427 to loopback
+		if port, err := strconv.ParseUint(portText, 10, 16); err != nil || server.Testing_LoopbackTunnelPort(uint16(port)) {
+			t.Fatalf("heartbeat fixture %s is on a production data tunnel port; use a disposable resource on another port", address)
 		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

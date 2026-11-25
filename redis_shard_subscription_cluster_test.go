@@ -21,9 +21,11 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -53,7 +55,7 @@ func testRedisShardCluster(t *testing.T) (context.Context, *redis.ClusterClient)
 
 	clusterClient := redis.NewClusterClient(&redis.ClusterOptions{
 		Addrs:  []string{authority},
-		Dialer: currentTestEnvDialGuard().wrapDial("redis", NewDialer(5*time.Second).DialContext),
+		Dialer: testRedisDisposableClusterDialer(),
 	})
 	t.Cleanup(func() { clusterClient.Close() })
 
@@ -96,6 +98,77 @@ func testRedisShardCluster(t *testing.T) (context.Context, *redis.ClusterClient)
 		})
 	}()
 	return ctx, clusterClient
+}
+
+// The dialer for a disposable test cluster's nodes, the seed's and every node
+// the cluster itself names. Only the seed is checked from the environment, so
+// each dial is checked here: a production data tunnel forwards its cluster's
+// nodes to loopback ports, and a production cluster names its own hosts.
+func testRedisDisposableClusterDialer() func(ctx context.Context, network string, address string) (net.Conn, error) {
+	return testRedisDisposableClusterDialerOf(currentTestEnvDialGuard().wrapDial("redis", NewDialer(5*time.Second).DialContext))
+}
+
+// dial behind the disposable cluster's address check.
+func testRedisDisposableClusterDialerOf(dial func(ctx context.Context, network string, address string) (net.Conn, error)) func(ctx context.Context, network string, address string) (net.Conn, error) {
+	return func(ctx context.Context, network string, address string) (net.Conn, error) {
+		if err := testRedisDisposableClusterAddress(address); err != nil {
+			return nil, err
+		}
+		return dial(ctx, network, address)
+	}
+}
+
+// Whether address can be a disposable local cluster's node: a loopback host on
+// a port no production data tunnel forwards.
+func testRedisDisposableClusterAddress(address string) error {
+	host, portText, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("refusing cluster node %q: %w", address, err)
+	}
+	if !redisLoopbackHost(host) {
+		return fmt.Errorf("refusing cluster node %s: not a loopback host", address)
+	}
+	if port, err := strconv.ParseUint(portText, 10, 16); err != nil || testEnvLoopbackTunnelPort(uint16(port)) {
+		return fmt.Errorf("refusing cluster node %s: a production data tunnel port", address)
+	}
+	return nil
+}
+
+// A cluster node is dialed only on a loopback host and off the production data
+// tunnel's ports: the seed and the nodes the cluster names alike.
+func TestRedisDisposableClusterAddressRefusesTunnelPortsAndOtherHosts(t *testing.T) {
+	for address, allowed := range map[string]bool{
+		"127.0.0.1:30001":    true,
+		"localhost:30002":    true,
+		"[::1]:30003":        true,
+		"127.0.0.1:6379":     false,
+		"127.0.0.1:6427":     false,
+		"127.0.0.1:5432":     false,
+		"127.0.0.1:6432":     false,
+		"[::1]:6400":         false,
+		"192.0.2.10:30001":   false,
+		"198.51.100.7:6415":  false,
+		":30001":             false,
+		"127.0.0.1":          false,
+		"127.0.0.1:70000":    false,
+		"127.0.0.1:not-port": false,
+	} {
+		if err := testRedisDisposableClusterAddress(address); (err == nil) != allowed {
+			t.Errorf("cluster node %q: err %v, want allowed %t", address, err, allowed)
+		}
+	}
+	// the dialer checks before it dials: a recording dial, never the network
+	var dialed []string
+	dial := testRedisDisposableClusterDialerOf(func(_ context.Context, _ string, address string) (net.Conn, error) {
+		dialed = append(dialed, address)
+		return nil, errors.New("the test's recording dial")
+	})
+	for _, address := range []string{"127.0.0.1:6379", "192.0.2.10:30001", "127.0.0.1:30001"} {
+		dial(context.Background(), "tcp", address)
+	}
+	if !slices.Equal(dialed, []string{"127.0.0.1:30001"}) {
+		t.Errorf("the dialer dialed %v, want only the disposable node", dialed)
+	}
 }
 
 func TestRedisShardSubscriptionFollowsSlotMigration(t *testing.T) {
@@ -187,7 +260,7 @@ func TestRedisShardSubscriptionFollowsSlotMigration(t *testing.T) {
 
 	target := redis.NewClient(&redis.Options{
 		Addr:   targetAddr,
-		Dialer: currentTestEnvDialGuard().wrapDial("redis", NewDialer(5*time.Second).DialContext),
+		Dialer: testRedisDisposableClusterDialer(),
 	})
 	defer target.Close()
 	subscriberCounts, err := target.PubSubShardNumSub(ctx, channel).Result()
@@ -360,7 +433,7 @@ func TestRedisShardSubscriptionFollowsSlotMigrationWithSlotChannels(t *testing.T
 
 	target := redis.NewClient(&redis.Options{
 		Addr:   targetAddr,
-		Dialer: currentTestEnvDialGuard().wrapDial("redis", NewDialer(5*time.Second).DialContext),
+		Dialer: testRedisDisposableClusterDialer(),
 	})
 	defer target.Close()
 	subscriberCounts, err := target.PubSubShardNumSub(ctx, append([]string{channel}, slotChannels...)...).Result()
@@ -405,7 +478,7 @@ func testRedisMoveSlot(t *testing.T, ctx context.Context, slot int64, sourceAddr
 	for _, masterAddr := range masterAddrs {
 		nodeClients[masterAddr] = redis.NewClient(&redis.Options{
 			Addr:   masterAddr,
-			Dialer: currentTestEnvDialGuard().wrapDial("redis", NewDialer(5*time.Second).DialContext),
+			Dialer: testRedisDisposableClusterDialer(),
 		})
 	}
 	defer func() {
