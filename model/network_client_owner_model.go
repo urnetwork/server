@@ -810,6 +810,10 @@ func enrollNetworkClientWithSettings(
 			return nil, newNetworkEnrollRefusal(http.StatusForbidden, NetworkEnrollCodeNoGenesis, "The network has no genesis yet.")
 		}
 	}
+	// an early refusal once the network's connected sidecars fill its limit. It
+	// reserves nothing: the cap holds at connect, whose gate counts and adds in
+	// one step (AdmitSidecarClient), so enrollments racing below the limit each
+	// mint a client the gate then judges
 	if refusal := SidecarClientsExceeded(ctx, key.networkId); refusal != nil {
 		return nil, NewQuotaRefusalError(refusal)
 	}

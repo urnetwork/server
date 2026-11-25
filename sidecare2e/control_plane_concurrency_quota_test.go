@@ -14,8 +14,10 @@
 //     one unit, which the next new set takes, and the one after it is refused again
 //   - sidecar_clients (§20.7's connected row, §20.8): the limit set to ClientHeadroom on a network with no sidecar yet,
 //     then ClientHeadroom plus ClientOverflow sidecars enrolled from their own auth keys at once, each connecting to the
-//     exchange as it enrolls: server's connected set ({sq_<network_id>}connected_sidecar, one ZCOUNT) settles at
-//     exactly the limit and is never seen past it, exactly that many sidecars are Online, and each other one is
+//     exchange as it enrolls: server's connected set ({sq_<network_id>}connected_sidecar, one ZCOUNT), which the
+//     exchange's gate counts and adds to in one step (model.AdmitSidecarClient, a hard cap at connect;
+//     sidecar-clients-quota-race-connect-admission), so that nominations racing for the last slots cannot each pass,
+//     settles at exactly the limit and is never seen past it, exactly that many sidecars are Online, and each other one is
 //     refused, at its enrollment (QuotaRefusal sidecar_clients) or at its connection (4001, counted by the exchange's
 //     refused nominations, its client then holding its dials); with the set full one more enrollment is refused by
 //     sidecar_clients, and with the limit raised by one, one more sidecar enrolls and connects and the next is refused
