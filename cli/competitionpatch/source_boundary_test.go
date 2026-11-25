@@ -101,7 +101,7 @@ func TestCompetitionPatchCliBindsSourceApplicationAndReceiptFailures(t *testing.
 		wantExit    int
 	}{
 		{oldLine: "original"},
-		{oldLine: "not-present", wantExit: 2},
+		{oldLine: "not-present", wantExit: 42},
 		{oldLine: "original", failReceipt: true, wantExit: 2},
 	} {
 		root, content, identityDigest, original := repositoryApplyFixture(t)

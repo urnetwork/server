@@ -5,6 +5,7 @@ package proxy
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	_ "embed"
 	"errors"
 	"fmt"
@@ -19,6 +20,8 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -752,6 +755,102 @@ func TestProxyApiSharedAssemblyPreservesRoutesAuthAndTls(t *testing.T) {
 	}
 	if response.TLS == nil || len(response.TLS.PeerCertificates) == 0 || response.TLS.PeerCertificates[0].VerifyHostname("fixture.example") != nil {
 		t.Error("shared tls callback did not select the synthetic host certificate")
+	}
+}
+
+// Gives the fixture an exact contender at a premature listener close.
+type proxyTestApiListener struct {
+	net.Listener
+	acceptStarted atomic.Bool
+	closed        atomic.Bool
+	contend       func()
+}
+
+// Observes use of this exact listener before waiting for a real connection.
+func (self *proxyTestApiListener) Accept() (net.Conn, error) {
+	self.acceptStarted.Store(true)
+	return self.Listener.Accept()
+}
+
+// A real early release gives the contender its chance before the bind resumes.
+func (self *proxyTestApiListener) Close() error {
+	err := self.Listener.Close()
+	if err == nil {
+		self.closed.Store(true)
+		if !self.acceptStarted.Load() {
+			self.contend()
+		}
+	}
+	return err
+}
+
+// Proves the exact listener serves the TLS API and stays bound through setup.
+func TestProxyHarnessRetainsApiFrontendListener(t *testing.T) {
+	ctx, stop := context.WithTimeout(t.Context(), 5*time.Second)
+	defer stop()
+	listener := listenProxyTestTcp(t)
+	defer listener.Close()
+	address := listener.Addr().String()
+	guarded := &proxyTestApiListener{
+		Listener: listener,
+		contend: func() {
+			contender, err := net.Listen("tcp4", address)
+			if err != nil {
+				t.Errorf("acquire prematurely released proxy api listener: %v", err)
+				return
+			}
+			t.Cleanup(func() { contender.Close() })
+			t.Error("PROXY_API_LISTENER_RELEASED_BEFORE_HANDOFF: contender acquired the fixture address")
+		},
+	}
+	host := "fixture.example"
+	transportTls := server.NewTransportTls(map[string]bool{}, &server.TransportTlsSettings{EnableSelfSign: true, DefaultHostName: host})
+	fixtureTls, err := transportTls.GetTlsConfig(host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate, err := x509.ParseCertificate(fixtureTls.Certificates[0].Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(certificate)
+	harness := newProxyTestHarness(t, func(harness *proxyTestHarness) {
+		assembly := &apiServer{ctx: harness.ctx, cancel: harness.cancel, proxyDeviceManager: &ProxyDeviceManager{},
+			transportTls: transportTls, settings: DefaultProxySettings()}
+		harness.startApiFrontend(t, guarded, assembly)
+	})
+	defer harness.close(t)
+	if harness.apiPort != proxyTestTcpPort(listener) || guarded.closed.Load() {
+		t.Fatal("published proxy api port lost its live listener")
+	}
+	if contender, err := net.Listen("tcp4", address); err == nil {
+		contender.Close()
+		t.Fatal("another listener acquired the live proxy api address")
+	} else if !errors.Is(err, syscall.EADDRINUSE) {
+		t.Fatalf("live proxy api bind: %v", err)
+	}
+	transport := &http.Transport{
+		DisableKeepAlives: true,
+		TLSClientConfig:   &tls.Config{RootCAs: roots, ServerName: host},
+	}
+	defer transport.CloseIdleConnections()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		fmt.Sprintf("https://127.0.0.1:%d%s", harness.apiPort, deviceRpcPath), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := (&http.Client{Transport: transport}).Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized || response.TLS == nil || len(response.TLS.VerifiedChains) == 0 || !guarded.acceptStarted.Load() {
+		t.Fatal("the exact listener did not serve the verified tls API route with authorization required")
+	}
+	harness.close(t)
+	if !guarded.closed.Load() {
+		t.Fatal("harness teardown left its proxy api listener open")
 	}
 }
 

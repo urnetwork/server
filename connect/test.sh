@@ -11,7 +11,7 @@ cd "$script_dir" || exit $?
 source "$server_dir/test-env.sh" || exit $?
 
 # Share repository exclusions so immutable evidence is never treated as source.
-test_directories="$("$server_dir/test-dirs.sh")" || exit $?
+test_directories="$("$server_dir/test-dirs.sh" --connect-only "$@")" || exit $?
 while IFS= read -r d; do
     case "$d" in
         ./connect|./connect/*) ;;
