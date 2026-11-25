@@ -80,6 +80,24 @@ func makeFileClusterStackBuckets(ctx context.Context, t *testing.T, configs []*F
 	}
 }
 
+// Removes the sentinel each bucket holds from an earlier run, through a client of its own, since a cluster deletes
+// nothing before its admin info shows one pool.
+func removeFileClusterStackSentinels(ctx context.Context, t *testing.T, configs []*FileClusterConfig) {
+	t.Helper()
+	client, err := minio.New(fileClusterStackEndpoint, &minio.Options{
+		Creds:  credentials.NewStaticV4(fileClusterStackAccessKey, fileClusterStackSecretKey, ""),
+		Region: "us-east-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, config := range configs {
+		if err := client.RemoveObject(ctx, config.Bucket, fileClusterSentinelKey, minio.RemoveObjectOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestFileClustersConformOnTheLocalStack(t *testing.T) {
 	ctx := t.Context()
 	configs := fileClusterStackConfigs()
@@ -115,15 +133,14 @@ func TestFileClustersReadyOnceTheSentinelIsThere(t *testing.T) {
 	ctx := t.Context()
 	configs := fileClusterStackConfigs()
 	makeFileClusterStackBuckets(ctx, t, configs)
+	// before the clusters' first check, which runs as they are made and would read a sentinel an earlier run left,
+	// keeping them ready past any delete
+	removeFileClusterStackSentinels(ctx, t, configs)
 	clusters, err := NewFileClusters(ctx, configs, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(clusters.Close)
-	for _, config := range configs {
-		cluster := clusters.clusterIdClusters[config.ClusterId]
-		cluster.Delete(ctx, fileClusterSentinelKey)
-	}
 	clusters.Check(ctx)
 	if clusters.Ready() {
 		t.Fatal("ready with no sentinel")
