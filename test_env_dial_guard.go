@@ -101,6 +101,79 @@ func Testing_LoopbackTunnelPort(port uint16) bool {
 	return testEnvLoopbackTunnelPort(port)
 }
 
+// Whether a dial without a guard refuses loopback tunnel ports: true in a test
+// binary, false in every service. A test binary that doesn't start with
+// WARP_ENV=local (a bare go test outside ./test.sh) has no guard, and would
+// otherwise dial whatever a vault or an env var names; on 2026-11-25 a
+// developer machine's tunnel forwarded those loopback ports to production.
+// Tests of the production path turn it off.
+var testEnvGuardlessDialRefusesTunnelPorts atomic.Bool
+
+func init() {
+	testEnvGuardlessDialRefusesTunnelPorts.Store(testing.Testing())
+}
+
+// dial, refusing first any endpoint that is loopback on a production data
+// tunnel port. A name on such a port is resolved with lookupNetIp and refused
+// if any of its addresses is loopback or unspecified, or if it doesn't
+// resolve. An address that isn't host:port, such as a Unix socket, and every
+// other endpoint pass through unchanged.
+func testEnvGuardlessTestDial(
+	dial func(ctx context.Context, network string, address string) (net.Conn, error),
+	lookupNetIp func(ctx context.Context, network string, host string) ([]netip.Addr, error),
+) func(ctx context.Context, network string, address string) (net.Conn, error) {
+	if dial == nil {
+		return nil
+	}
+	return func(ctx context.Context, network string, address string) (net.Conn, error) {
+		if err := testEnvGuardlessTunnelRefusal(ctx, address, lookupNetIp); err != nil {
+			return nil, err
+		}
+		return dial(ctx, network, address)
+	}
+}
+
+// The refusal for a guard-free test dial to address, or nil to let it dial.
+func testEnvGuardlessTunnelRefusal(
+	ctx context.Context,
+	address string,
+	lookupNetIp func(ctx context.Context, network string, host string) ([]netip.Addr, error),
+) error {
+	host, portText, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil
+	}
+	port, err := strconv.ParseUint(portText, 10, 16)
+	if err != nil || !testEnvLoopbackTunnelPort(uint16(port)) {
+		return nil
+	}
+	refusal := fmt.Errorf(
+		"refusing %s: a test binary without the test-environment guard may not dial a loopback production data tunnel port; run it through ./test.sh or source ./test-env.sh",
+		address,
+	)
+	loopback := func(addr netip.Addr) bool {
+		addr = addr.Unmap()
+		return addr.IsLoopback() || addr.IsUnspecified()
+	}
+	if host == "" || strings.EqualFold(host, "localhost") {
+		return refusal
+	}
+	if addr, err := netip.ParseAddr(host); err == nil {
+		if loopback(addr) {
+			return refusal
+		}
+		return nil
+	}
+	addrs, err := lookupNetIp(ctx, "ip", host)
+	if err != nil || len(addrs) == 0 {
+		return refusal
+	}
+	if slices.ContainsFunc(addrs, loopback) {
+		return refusal
+	}
+	return nil
+}
+
 // A closed listener's endpoint may already belong to another process, so an
 // admission holds only while its listener is open.
 func testEnvListenerLive(listener *net.TCPListener) bool {
@@ -397,7 +470,8 @@ func (self *testEnvDialGuard) requireAttested() error {
 	return self.attestationErr
 }
 
-// Returns dial itself for a nil guard. Otherwise every dial resolves its
+// Returns dial itself for a nil guard in a service, and in a test binary dial
+// behind the guard-free tunnel-port refusal. Otherwise every dial resolves its
 // address once, refuses unless each resolved endpoint is attested, and then
 // dials only those address literals, in resolver order.
 func (self *testEnvDialGuard) wrapDial(
@@ -405,6 +479,9 @@ func (self *testEnvDialGuard) wrapDial(
 	dial func(ctx context.Context, network string, address string) (net.Conn, error),
 ) func(ctx context.Context, network string, address string) (net.Conn, error) {
 	if self == nil {
+		if testEnvGuardlessDialRefusesTunnelPorts.Load() {
+			return testEnvGuardlessTestDial(dial, net.DefaultResolver.LookupNetIP)
+		}
 		return dial
 	}
 	return func(ctx context.Context, network string, address string) (net.Conn, error) {
