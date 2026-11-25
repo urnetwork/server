@@ -91,6 +91,7 @@ Usage:
     bringyourctl balance-code create --duration=<duration> --balance=<balance> --cost=<usd> --email=<email> [--count=<count>]
     bringyourctl balance-code check --secret=<secret>
     bringyourctl balance move-redeemed --balance_id=<balance_id> --to_network_id=<network_id> [(--commit --expect=<digest>)]
+    bringyourctl balance grant --network_id=<network_id> --balance=<balance> --end=<end> [(--commit --expect=<digest>)]
     bringyourctl send network-welcome --user_auth=<user_auth>
     bringyourctl send auth-verify --user_auth=<user_auth>
     bringyourctl send auth-password-reset --user_auth=<user_auth>
@@ -364,7 +365,7 @@ Options:
     --signing-key-file=<path>  With crypto alchemy-webhook, the file the webhook's signing key is written to (mode 0600) when Alchemy returns it; it is never printed.
     --tx=<signature>  With crypto credit-usdc, the Solana transaction signature of the payment recorded unfulfilled (no_intent) that pays the invoice: owner's go only, for a memo-less payment whose amount is not the quote's.
     --address=<payout_address>  The address the account holder gave for a refund, in the invoice's coin.
-    --expect=<digest>  The digest the account-points backfill-blocks, network sign-out-all, network trim-proxies, balance move-redeemed, crypto credit-usdc, payouts close-attempted, contracts close-due, reengagement suppress, db scrub-network-create-secrets or db contract-legacy-settle dry run printed; --commit and --apply refuse any other census.
+    --expect=<digest>  The digest the account-points backfill-blocks, network sign-out-all, network trim-proxies, balance move-redeemed, balance grant, crypto credit-usdc, payouts close-attempted, contracts close-due, reengagement suppress, db scrub-network-create-secrets or db contract-legacy-settle dry run printed; --commit and --apply refuse any other census.
     --network_ids_file=<path>  With reengagement suppress, the networks to suppress: one network id a line; blank lines and lines starting with # are skipped.
     --after=<event_id>  With db scrub-network-create-secrets, scrub only the audit rows after this event id: a stopped --apply prints the last one it committed.
     --through=<event_id>  With db scrub-network-create-secrets, the newest audit event id in scope; the dry run defaults to the newest row and prints it, and --apply needs the one the dry run printed.
@@ -378,7 +379,7 @@ Options:
     --before=<before>  With contracts close-due, the deadline bound (RFC 3339) of the contracts to retire; the dry run defaults to a minute ago and prints it, and --commit needs the one the dry run printed.
     --file=<file>  For account-points backfill-blocks, the awards the dry run saves and --commit commits (omitted, operator-block-points-<digest>.json).
     --blocks=<blocks>  With account-points backfill-blocks, the operator blocks to award, comma separated; omitted, every completed block past the earning boundary that has not expired. A block that has its points is skipped; an expired block, past client_reliability retention or recorded expired by the daily award, is refused.
-    --commit  With account-points backfill-blocks, commit the awards of the dry run whose digest is --expect; with network sign-out-all, sign the network out as its dry run with that digest printed; with balance move-redeemed, move the balance its dry run with that digest printed; with contracts close-due, retire the contracts of the dry run whose digest is --expect; with network trim-proxies, remove the hosted proxies of the dry run whose digest is --expect; with crypto credit-usdc, credit the invoice from the payment as its dry run with that digest printed; with payouts close-attempted, write the decisions of the dry run whose digest is --expect. Without it the run is a read-only dry run.
+    --commit  With account-points backfill-blocks, commit the awards of the dry run whose digest is --expect; with network sign-out-all, sign the network out as its dry run with that digest printed; with balance move-redeemed, move the balance its dry run with that digest printed; with balance grant, write the grant its dry run with that digest printed; with contracts close-due, retire the contracts of the dry run whose digest is --expect; with network trim-proxies, remove the hosted proxies of the dry run whose digest is --expect; with crypto credit-usdc, credit the invoice from the payment as its dry run with that digest printed; with payouts close-attempted, write the decisions of the dry run whose digest is --expect. Without it the run is a read-only dry run.
     --remove-clients  With network sign-out-all, also deactivate every active client of the network as /network/remove-clients does.
     --forfeit=<payment_ids>  With payouts close-attempted, close these payments, comma separated, as the owner forfeited them, without reading Circle: each must be a canceled payment an attempt of which reached Circle, not completed and not closed, or the run refuses them all and writes nothing.
     --network_ids=<network_ids>  With network trim-proxies, the networks to trim, comma separated; omitted, every network that holds a hosted proxy (a paged scan of proxy_client).
@@ -390,6 +391,8 @@ Options:
     --rate=<rate>  With network trim-proxies --commit, hosted proxies removed a second, in batches of 500; omitted, 200.
     --balance_id=<balance_id>  With balance move-redeemed, the unused balance a redeemed balance code granted, left on a deleted network.
     --to_network_id=<network_id>  With balance move-redeemed, the network the balance and its code move to.
+    --balance=<balance>  With balance-code create, the data each code grants; with balance grant, the data the grant gives, such as 500GiB.
+    --end=<end>  With balance grant, when the grant ends (RFC 3339, such as 2026-11-26T01:00:00Z); it starts at the commit. With stats rollup-transfer and stats backfill, the last day (YYYY-MM-DD); with st ctf-outage, the outage's end.
     -c --count=<count>	Number to process [default: 1000].`
 
 func main() {
@@ -531,6 +534,8 @@ func main() {
 	} else if balance, _ := opts.Bool("balance"); balance {
 		if moveRedeemed, _ := opts.Bool("move-redeemed"); moveRedeemed {
 			os.Exit(balanceMoveRedeemedCommand(opts, os.Stdout, os.Stderr))
+		} else if grant, _ := opts.Bool("grant"); grant {
+			os.Exit(balanceGrantCommand(opts, os.Stdout, os.Stderr))
 		}
 	} else if send, _ := opts.Bool("send"); send {
 		if networkWelcome, _ := opts.Bool("network-welcome"); networkWelcome {
