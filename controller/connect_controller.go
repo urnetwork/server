@@ -1303,7 +1303,9 @@ var createZeroEscrowCompanionContract = model.CreateZeroEscrowCompanionContract
 // Later stream work may reject the response but never changes that deadline.
 // Every contract tries escrow first, so a payer is charged, shrink-to-fit
 // included, while anything is left: public, network and friends-and-family
-// contracts by their source's network, companions by their destination's.
+// contracts by their source's network, companions by their destination's, and
+// a reply carrier, a companion whose origin is itself a companion, by the
+// network whose forward contract it answers, its own source.
 // Only when escrow admission finds the balance exhausted
 // (model.ErrContractBalanceExhausted) and the contract degradation valve is
 // open (model/network_degradation_model.go) is the contract created without

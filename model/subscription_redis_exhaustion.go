@@ -33,6 +33,17 @@
 // request: a stale entry costs one read and one probe pipeline before the
 // census, a missing one the census itself. A rerun after the request's own
 // recovery page released bytes runs the census directly.
+//
+// The list also bounds the recovery pages of proven refusals. A page that
+// finds a marker holds a PostgreSQL transaction across its Redis releases; on
+// 2026-11-25 four payers refused about 40,000 requests a minute, each running
+// its page, and the pages' idle transactions filled the pooler. Only the first
+// proven refusal of a payer in a hold runs its request's page, and the rerun
+// after it: that page still releases what dead requests left on the payer's
+// marked grants within a hold. Every other proven refusal returns at once. It
+// reserved nothing, so it has nothing to compensate, and it costs no
+// transaction. A top-up is still seen at once, since every proof reads the
+// payer's grants.
 package model
 
 import (
@@ -73,6 +84,9 @@ type redisExhaustedPayerHoldState struct {
 	until time.Time
 	// the last proof decided nothing; the census runs until the hold ends
 	unproven bool
+	// when a proven refusal of the payer last ran its request's recovery
+	// page; zero when none has
+	pageTime time.Time
 }
 
 var exhaustedRedisPayers = newRedisExhaustedPayers(redisExhaustedPayerHold, redisExhaustedPayerCapacity)
@@ -104,21 +118,43 @@ func (self *redisExhaustedPayers) recent(payerNetworkId server.Id, now time.Time
 }
 
 // Lists the payer until a hold after now, unless its last proof within the
-// hold decided nothing.
+// hold decided nothing. The time of its last page is kept.
 func (self *redisExhaustedPayers) note(payerNetworkId server.Id, now time.Time) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
-	if hold, ok := self.payerIdHolds[payerNetworkId]; ok && hold.unproven && now.Before(hold.until) {
+	hold, ok := self.payerIdHolds[payerNetworkId]
+	if ok && hold.unproven && now.Before(hold.until) {
 		return
 	}
-	self.holdWithLock(payerNetworkId, redisExhaustedPayerHoldState{until: now.Add(self.hold)}, now)
+	self.holdWithLock(payerNetworkId, redisExhaustedPayerHoldState{until: now.Add(self.hold), pageTime: hold.pageTime}, now)
 }
 
-// Keeps the payer with the census until a hold after now.
+// Keeps the payer with the census until a hold after now. The time of its last
+// page is kept.
 func (self *redisExhaustedPayers) noteUnproven(payerNetworkId server.Id, now time.Time) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
-	self.holdWithLock(payerNetworkId, redisExhaustedPayerHoldState{until: now.Add(self.hold), unproven: true}, now)
+	hold := self.payerIdHolds[payerNetworkId]
+	self.holdWithLock(payerNetworkId, redisExhaustedPayerHoldState{until: now.Add(self.hold), unproven: true, pageTime: hold.pageTime}, now)
+}
+
+// Whether a proven refusal of the payer runs its request's recovery page, and
+// the rerun after it: true for the first such refusal in a hold, which then
+// owns the payer's page until a hold after now, and for a payer the list does
+// not hold. Every other proven refusal skips both.
+func (self *redisExhaustedPayers) takeRecoveryPage(payerNetworkId server.Id, now time.Time) bool {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	hold, ok := self.payerIdHolds[payerNetworkId]
+	if !ok {
+		return true
+	}
+	if !hold.pageTime.IsZero() && now.Before(hold.pageTime.Add(self.hold)) {
+		return false
+	}
+	hold.pageTime = now
+	self.payerIdHolds[payerNetworkId] = hold
+	return true
 }
 
 func (self *redisExhaustedPayers) holdWithLock(payerNetworkId server.Id, hold redisExhaustedPayerHoldState, now time.Time) {
