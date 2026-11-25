@@ -743,3 +743,31 @@ tables:
       selector: smtp-6
       sidecar_id: smtp-6
       state: smtp-6
+  # DESIGN-COMPUTE §14.4's MG-C2, PROV's part (PROV-M12-01), registered from sidecar/model's
+  # compute_provider_migrations.go: compute-7's "per provider, its id, kind, status and gate results
+  # and its hourly price reads"
+  compute_provider:
+    group: MG-C2
+    columns:
+      history: compute-7
+      kind: compute-7
+      provider: compute-7
+      slug: compute-7
+      status: compute-7
+      status_time: compute-7
+  compute_provider_price:
+    group: MG-C2
+    columns:
+      cached_input_nano_gamma_per_million: compute-7
+      capacity: compute-7
+      egress_nano_gamma_per_gib: compute-7
+      gamma_nano_usd: compute-7
+      hour_nano_gamma: compute-7
+      input_nano_gamma_per_million: compute-7
+      item_id: compute-7
+      item_kind: compute-7
+      output_nano_gamma_per_million: compute-7
+      price_varies: compute-7
+      provider: compute-7
+      read_hour: compute-7
+      read_time: compute-7
