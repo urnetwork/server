@@ -124,6 +124,28 @@ type HostDeps struct {
 	StatusListener net.Listener
 }
 
+// settings with the providers' env the block's own, WARP_ENV's, where they name none (PROV-M12-01), so the engine's
+// provider registry enables what the providers' settings name for this env; a copy, the caller's left as they were.
+// With no WARP_ENV the env stays unnamed, which reads as production and enables no adapter.
+func hostComputeSettings(settings *computeservice.ComputeEngineSettings) *computeservice.ComputeEngineSettings {
+	if settings == nil {
+		settings = computeservice.DefaultComputeEngineSettings()
+	}
+	copied := *settings
+	providers := computeservice.DefaultComputeProviderSettings()
+	if settings.Providers != nil {
+		providersCopy := *settings.Providers
+		providers = &providersCopy
+	}
+	if providers.Environment == "" {
+		if env, err := server.Env(); err == nil {
+			providers.Environment = env
+		}
+	}
+	copied.Providers = providers
+	return &copied
+}
+
 // The engine as the block runs it, with what it owns. Safe for concurrent use.
 type Host struct {
 	engine *computeservice.ComputeEngine
@@ -171,7 +193,7 @@ func NewHost(ctx context.Context, host *sidecar.ServiceHost, settings *HostSetti
 	if deps.ServiceLog != nil {
 		serviceLog = deps.ServiceLog
 	}
-	engine, err := computeservice.NewComputeEngine(ctx, host, settings.Compute, &computeservice.ComputeEngineDeps{
+	engine, err := computeservice.NewComputeEngine(ctx, host, hostComputeSettings(settings.Compute), &computeservice.ComputeEngineDeps{
 		AuthState:       deps.AuthState,
 		Env:             deps.Env,
 		AdmissionsRedis: deps.AdmissionsRedis,

@@ -316,3 +316,37 @@ func TestComputeBlockServesOnThePrivateStores(t *testing.T) {
 		}
 	})
 }
+
+// The engine's provider registry runs in the block's own env, WARP_ENV's, where the settings name none, and in the
+// settings' own where they name one; the caller's settings stay as they were (PROV-M12-01).
+func TestComputeHostNamesTheProvidersEnv(t *testing.T) {
+	wantEnv := ""
+	if env, err := server.Env(); err == nil {
+		wantEnv = env
+	}
+	if got := hostComputeSettings(nil).Providers.Environment; got != wantEnv {
+		t.Fatalf("the providers' env is %q, want WARP_ENV's %q", got, wantEnv)
+	}
+	settings := computeservice.DefaultComputeEngineSettings()
+	settings.Providers.Environment = "canary"
+	hosted := hostComputeSettings(settings)
+	if hosted.Providers.Environment != "canary" || hosted.Providers == settings.Providers {
+		t.Fatalf("named env %q, shared %v", hosted.Providers.Environment, hosted.Providers == settings.Providers)
+	}
+	settings.Providers = nil
+	if hostComputeSettings(settings).Providers.Environment != wantEnv || settings.Providers != nil {
+		t.Fatal("settings without providers' settings were changed or not given the block's env")
+	}
+	clock := sidecartest.NewFakeClock(sidecartest.DefaultClockStart())
+	computeHost, err := NewHost(t.Context(), &sidecar.ServiceHost{Metrics: sidecartest.NewFakeMetrics(nil), Clock: clock}, nil, &HostDeps{
+		GroupLinked: func(group computeservice.ComputeMigrationGroup) bool { return true },
+		SecretFile:  func(name string) ([]byte, error) { return nil, os.ErrNotExist },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer computeHost.Close()
+	if got := computeHost.Engine().Providers().Settings().Environment; got != wantEnv {
+		t.Fatalf("the block's registry runs in %q, want %q", got, wantEnv)
+	}
+}
