@@ -295,7 +295,8 @@ func TestComputeApiRoutesServeTheNetworkCredential(t *testing.T) {
 			return w
 		}
 		for _, authorization := range []string{self.root(), "Bearer " + self.apiKey} {
-			for _, key := range []string{"GET /compute/balance", "GET /compute/auto-renew", "POST /compute/refund", "POST /compute/terms"} {
+			// routes no task has built yet: auto-renew's and the refund's are built (BAL-M12-11, BAL-M12-14)
+			for _, key := range []string{"GET /compute/balance", "GET /compute/charges", "GET /compute/statement", "POST /compute/terms"} {
 				method, path, _ := strings.Cut(key, " ")
 				body := ""
 				if method == http.MethodPost {
