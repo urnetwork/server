@@ -35,6 +35,7 @@ import (
 	"github.com/urnetwork/sidecar/work"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/controller"
 )
 
 // A run of a job whose area has not registered its logic: retried on the backoff, never dropped.
@@ -97,6 +98,10 @@ func startComputeJobsFromProcess(ctx context.Context, lifetime *sync.WaitGroup) 
 		deps.ModelMirrorStore = server.NewComputeModelBlobStore(nil)
 	}
 	removeDeps := work.InstallComputeJobDeps(deps)
+	// compute_auto_renew's Stripe and payer check, and the billing notices compute_auto_renew and compute_suspend owe
+	// (BAL-M12-11, BAL-M12-12)
+	controller.InstallComputeAutoRenew()
+	controller.InstallComputeNotices()
 	lifetime.Go(func() {
 		<-ctx.Done()
 		removeDeps()

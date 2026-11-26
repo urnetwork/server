@@ -213,6 +213,17 @@ type dbTx struct {
 	tx server.PgTx
 }
 
+// The server transaction under tx, where this package's Db made tx, for server code an extension's change calls in its
+// own transaction to owe a row of server's with it (compute's billing notices on the account message outbox,
+// controller/compute_notice.go); false for a transaction another Db made.
+func ServerTxOf(tx operator.DbTx) (server.PgTx, bool) {
+	coreTx, ok := tx.(*dbTx)
+	if !ok {
+		return nil, false
+	}
+	return coreTx.tx, true
+}
+
 // The transaction's query, its args as pgx takes them.
 func (self *dbTx) Query(ctx context.Context, sql string, args ...any) (operator.DbRows, error) {
 	rows, err := self.tx.Query(ctx, sql, pgArgs(args)...)

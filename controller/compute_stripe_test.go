@@ -358,36 +358,10 @@ func (self *testComputeSpendable) open(networkId server.Id) {
 	self.networkIds[networkId] = true
 }
 
-// Auto-renew's taker of saved cards, recording each card it is handed.
-type testComputeAutoRenewCards struct {
-	stateLock sync.Mutex
-	saved     []*sidecarcontroller.ComputeCardSaved
-}
-
-func (self *testComputeAutoRenewCards) CardSaved(env operator.Env, ctx context.Context, saved *sidecarcontroller.ComputeCardSaved) error {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	for _, earlier := range self.saved {
-		if earlier.PaymentIntentId == saved.PaymentIntentId {
-			return nil
-		}
-	}
-	self.saved = append(self.saved, saved)
-	return nil
-}
-
-func (self *testComputeAutoRenewCards) cards() []*sidecarcontroller.ComputeCardSaved {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	return append([]*sidecarcontroller.ComputeCardSaved{}, self.saved...)
-}
-
 // Registered once a test binary: the registries take one each.
 var (
 	testComputeSpendableOnce sync.Once
 	testComputeSpendableSale = &testComputeSpendable{networkIds: map[operator.Id]bool{}}
-	testComputeCardsOnce     sync.Once
-	testComputeCards         = &testComputeAutoRenewCards{}
 )
 
 // One test's compute: the fake Stripe, the ledger's env over the test's database and Redis, and an instance of
@@ -406,9 +380,6 @@ type testComputeStripeEnv struct {
 func newTestComputeStripeEnv(t testing.TB) *testComputeStripeEnv {
 	testComputeSpendableOnce.Do(func() {
 		sidecarcontroller.RegisterComputeSpendableService("controller_test_spendable", testComputeSpendableSale)
-	})
-	testComputeCardsOnce.Do(func() {
-		sidecarcontroller.RegisterComputeAutoRenewCards(testComputeCards)
 	})
 	fake := newTestComputeStripeFake(t)
 	metrics := sidecartest.NewFakeMetrics(nil)
@@ -566,8 +537,8 @@ func TestComputeWebhookReplayedCreditsOnce(t *testing.T) {
 }
 
 // A card is saved for off-session use only where its payer turns threshold top-up on in that act, on the Stripe
-// customer of that network and that member, and only that card reaches auto-renew; another member of the network
-// pays through a customer of their own.
+// customer of that network and that member, and only that card reaches auto-renew, whose threshold row then names it
+// with its payer and figures (BAL-M12-11's taker); another member of the network pays through a customer of their own.
 func TestComputeCardSavedOnlyWhenItsPayerTurnsOnAutoRenew(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		compute := newTestComputeStripeEnv(tb)
@@ -590,21 +561,29 @@ func TestComputeCardSavedOnlyWhenItsPayerTurnsOnAutoRenew(t *testing.T) {
 		if compute.fake.form(other.SessionId).Get("customer") == form.Get("customer") || compute.fake.customerCount() != 2 {
 			tb.Fatal("two members of a network share a customer")
 		}
-		before := len(testComputeCards.cards())
 		for _, checkoutSession := range []*sidecarcontroller.ComputeStripeCheckoutSession{plain, renewing, other} {
 			intentId := compute.fake.pay(checkoutSession.SessionId, "fp_synthetic_saved_"+checkoutSession.SessionId)
 			compute.deliver(compute.fake.intentEvent("payment_intent.amount_capturable_updated", intentId))
 			compute.deliver(compute.fake.intentEvent("payment_intent.succeeded", intentId))
 		}
-		cards := testComputeCards.cards()[before:]
-		if len(cards) != 1 {
-			tb.Fatalf("%d cards reached auto-renew", len(cards))
+		state, err := sidecarcontroller.ComputeAutoRenew(compute.env, compute.ctx, compute.ledger, networkId)
+		if err != nil {
+			tb.Fatal(err)
 		}
-		card := cards[0]
-		if card.NetworkId != networkId || card.PayerMemberId != memberId || card.Mode != model.ComputeAutoRenewModeThreshold ||
-			card.StripeCustomerId != form.Get("customer") || card.StripePaymentMethodId == "" ||
-			card.BelowNanoUsd != 7*model.ComputeCreditNanoUsd || card.PackCredits != 30 || card.MonthLimitNanoUsd != 0 {
-			tb.Fatalf("the card auto-renew took: %+v", card)
+		threshold := state.Threshold
+		if !threshold.On || threshold.PayerMemberId == nil || *threshold.PayerMemberId != memberId ||
+			threshold.BelowNanoUsd != 7*model.ComputeCreditNanoUsd || threshold.PackCredits != 30 ||
+			threshold.MonthLimitNanoUsd != compute.ledger.ThresholdMonthLimitNanoUsd {
+			tb.Fatalf("the threshold auto-renew took: %+v", threshold)
+		}
+		customerId, cardId := "", ""
+		server.Db(compute.ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(compute.ctx, `
+				SELECT stripe_customer_id, stripe_payment_method_id FROM compute_auto_renew WHERE network_id = $1 AND mode = $2
+			`, networkId, int16(model.ComputeAutoRenewModeThreshold)).Scan(&customerId, &cardId))
+		})
+		if customerId != form.Get("customer") || cardId == "" {
+			tb.Fatalf("the threshold row names the customer %q and the card %q", customerId, cardId)
 		}
 	})
 }

@@ -1,0 +1,72 @@
+{{define "headline"}}{{.TextHeadline}}{{end}}
+{{define "why"}}Sent to the Owners and Billing admins of {{.Network}}
+about its compute balance, which pays for remote inference, enclaves and
+web search.{{end}}
+{{define "content"}}
+{{- if .IsTopUpFailed}}
+A threshold top-up of {{.AmountText}} for {{.Network}} did not go through
+on the card saved for it.
+{{- if .RetryText}}
+
+It is tried again at {{.RetryText}}. After {{.FailureCount}} failure(s) in a row,
+the third turns threshold top-ups off.
+{{- end}}
+{{- else if .IsTopUpOff}}
+A threshold top-up of {{.AmountText}} for {{.Network}} failed for the third
+time in a row, so threshold top-ups are off.
+
+To turn them on again, buy a credit pack with threshold top-up turned on,
+which saves your card for it.
+{{- else if .IsAuthenticationRequired}}
+The bank of the card saved for threshold top-ups asked its holder to
+confirm a top-up of {{.AmountText}} for {{.Network}}, so the top-up was not
+taken and threshold top-ups are off.
+
+To turn them on again, buy a credit pack with threshold top-up turned on,
+confirming it with your bank.
+{{- else if .IsCardDetached}}
+The card saved for threshold top-ups on {{.Network}} belongs to a person
+who can no longer buy credit for it, so the card was removed and threshold
+top-ups stopped.
+
+A person who may buy credit can save their own card by buying a credit
+pack with threshold top-up turned on.
+{{- else if .IsMonthlyFailed}}
+The monthly compute credit plan of {{.AmountText}} for {{.Network}} was not
+paid. Stripe tries the payment again, and the month's credit is added once
+it is paid.
+{{- else if .IsLow}}
+{{.Network}} has {{.BalanceText}} of compute credit left, under a day of
+its recent use or its threshold.
+{{- else if .IsGrace}}
+{{.Network}} has run out of compute credit ({{.BalanceText}}). New remote
+inference and web searches are refused until credit is added; running
+enclaves keep running for a short while.
+{{- else if .IsSuspended}}
+Compute on {{.Network}} is suspended ({{.BalanceText}}). Remote inference
+and web searches are refused and enclaves are stopped until credit is
+added. Local inference keeps working.
+{{- else if .IsClosed}}
+{{.Network}} was deleted, so its compute balance is closed.
+{{.RefundedText}} of unspent purchased credit goes back to the card it was
+bought with; {{.ForfeitedText}} that could not be refunded is forfeited.
+{{- end}}
+{{- if .StateNotice}}
+{{- if .AtRiskEnclaveCount}}
+
+A suspension stops {{.AtRiskEnclaveCount}} enclave(s), which keep their work
+in your storage and start again once credit is added.
+{{- end}}
+{{- if .IndexerText}}
+
+The network's mail indexer enclave has {{.IndexerText}} of its reserve and
+grace left.
+{{- end}}
+{{- end}}
+{{if .RenewUrl}}
+Add credit or manage auto-renew: {{.RenewUrl}}
+{{else}}
+Add credit or manage auto-renew on the compute screen of the URnetwork app.
+{{end}}
+Questions about this notice can go to support@ur.io.
+{{end}}

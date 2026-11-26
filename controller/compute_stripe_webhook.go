@@ -112,6 +112,11 @@ func (self *ComputeServerStripe) Webhook(ctx context.Context, event *StripeWebho
 		}
 		return true, &StripeWebhookResult{}, nil
 	}
+	// auto-renew's top-ups and monthly plan first, told apart by their compute_renewal metadata
+	// (compute_stripe_renew.go; BAL-M12-11)
+	if handled, err := self.renewWebhook(ctx, event, object); handled {
+		return answer(err)
+	}
 	switch event.Type {
 	case "checkout.session.completed", "checkout.session.expired", "checkout.session.async_payment_succeeded", "checkout.session.async_payment_failed":
 		if !computeStripeMarked(object.Metadata) {

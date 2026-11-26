@@ -40,8 +40,9 @@ package api
 // address is logged (I-13).
 //
 // The routes' handlers run on what this process installs for them: the ledger's payer and promotion hash keys
-// (controller.InstallComputeLedgerSecrets) and compute's Stripe Checkout (controller.InstallComputeStripe), each
-// once a process, when the routes are mounted.
+// (controller.InstallComputeLedgerSecrets), compute's Stripe Checkout (controller.InstallComputeStripe), auto-renew's
+// Stripe and payer check (controller.InstallComputeAutoRenew) and the billing notices (controller.InstallComputeNotices),
+// each once a process, when the routes are mounted.
 
 import (
 	"context"
@@ -159,6 +160,8 @@ type computeApiMount struct {
 func computeApiRoutes() []*router.Route {
 	controller.InstallComputeLedgerSecrets()
 	controller.InstallComputeStripe()
+	controller.InstallComputeAutoRenew()
+	controller.InstallComputeNotices()
 	mount := &computeApiMount{settings: DefaultComputeApiMountSettings()}
 	return []*router.Route{
 		router.NewRoute("GET", "/compute/balance", mount.handler(http.MethodGet, "/compute/balance")),

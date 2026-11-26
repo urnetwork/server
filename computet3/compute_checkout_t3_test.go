@@ -40,13 +40,6 @@ func (self *computeT3Spendable) open(networkId server.Id) {
 	self.networkIds[networkId] = true
 }
 
-// Auto-renew's taker of saved cards, which takes none here: its registration is what lets threshold check out.
-type computeT3Cards struct{}
-
-func (self computeT3Cards) CardSaved(env operator.Env, ctx context.Context, saved *controller.ComputeCardSaved) error {
-	return nil
-}
-
 var (
 	computeT3SpendableOnce sync.Once
 	computeT3SpendableSale = &computeT3Spendable{networkIds: map[operator.Id]bool{}}
@@ -97,7 +90,6 @@ func (self *computeT3Clocked) checkout(stripe *computeT3Stripe, request *control
 func newComputeT3Checkout(t3 *computeT3) (*computeT3Clocked, *computeT3Stripe) {
 	computeT3SpendableOnce.Do(func() {
 		controller.RegisterComputeSpendableService("computet3_test_spendable", computeT3SpendableSale)
-		controller.RegisterComputeAutoRenewCards(computeT3Cards{})
 	})
 	return newComputeT3Clocked(t3, time.Now().UTC()), &computeT3Stripe{}
 }
