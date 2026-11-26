@@ -43,18 +43,33 @@ package server
 // that fails is, and marks it. A test's base that is no http.Transport keeps no connections, and has
 // each request once the request has its slot.
 //
-// The store holds its clock, as this process holds its own, within §19.6's 50 ms of true time, so a
-// request that reaches its connection within DeadlineClockMargin of its deadline, as one that waited
-// that long may, can be refused for that deadline on arrival, and a HEAD so refused carries its 503
-// alone, with no code. Such a request's 503, and the cancel at its own deadline, say nothing of its
-// host either (fileClusterSend).
+// A request that waited for its slot reaches its host with only what the wait left of its deadline, and
+// the fork refuses it 503 DeadlinePassed once that passes: on arrival, while it waits for its key's lock,
+// as it takes the lock and before a write's commits (minio/cmd/settle-deadline.go), a HEAD so refused
+// carrying its 503 alone, with no code. The store holds its clock, as this process holds its own, within
+// §19.6's 50 ms of true time, so a request that arrives within 100 ms of its deadline may already read
+// as past there. A request that reaches its connection with less than DeadlineHostMinimum left, 1 s, was
+// cut short by this process's queue, not its host, so its 503, and the cancel at its own deadline, mark
+// no host (fileClusterSend, noteFailure; owner decision 790). A request given that much or more still
+// marks its host for either, and every request marks it for a reset, a failed dial, another 5xx answer
+// or ResponseHeaderTimeout.
 //
-// A request whose body moves at a client's own pace, a GET, ranged GET or PutStream on a ctx
-// sidecar.WithBlobClientPaced marks (a segment upload's body, an object a read streams to its
-// client), goes through a second client of the host, whose base transport is the first's without
-// the cap (QD-1402). Such a request holds its connection for as long as its client takes, and on the
-// capped transport a few slow clients would hold every connection a burst's requests wait for; on
-// its own it is bounded as before the cap, by the lb's limits on each client's connections.
+// Two kinds of request go through a second client of the host, whose base transport is the first's
+// without the cap (QD-1402, owner decision 790):
+//
+//   - One whose body moves at a client's own pace, a GET, ranged GET or PutStream on a ctx
+//     sidecar.WithBlobClientPaced marks (a segment upload's body, an object a read streams to its
+//     client). It holds its connection for as long as its client takes, and on the capped transport a
+//     few slow clients would hold every connection a burst's requests wait for; on its own it is bounded
+//     as before the cap, by the lb's limits on each client's connections.
+//   - A store check: the admin route, and a HEAD or LIST on a ctx sidecar.WithBlobProbe marks (each
+//     cluster's sentinel, evs's and gkm's probes of place/). It is one request a cluster or an engine
+//     every few seconds, never a burst, and in the cap it would wait in the block's own queue, so that the
+//     queue read as the store failing: stale admin info refuses a cluster's writes and settle, and a
+//     failed probe sets its engine not ready. Outside the cap a check measures the store, which still
+//     fails closed when it does not answer, the check going stale at CheckStaleAfter.
+//
+// Both keep their deadlines, and every request but a streamed PUT or the admin route its deadline header.
 
 import (
 	"context"
@@ -140,18 +155,18 @@ func (self *fileClusterSend) cancelAtDeadline() {
 	self.cancelled = true
 }
 
-// Whether err, the request's failure, came too near its deadline to say anything of its host: the
-// request reached its connection within margin of the deadline, where a store whose clock §19.6 holds
-// may already read it as passed, and was answered 503, as the fork refuses one past its deadline, or
-// was cancelled at its own deadline. A non-positive margin finds none too late.
-func (self *fileClusterSend) tooLate(margin time.Duration, err error) bool {
+// Whether err, the request's failure, came too late in its time to say anything of its host: the
+// request reached its connection with less than minimum of its deadline left, the rest spent before it
+// was sent, and was answered 503, as the fork refuses one past its deadline, or was cancelled at its own
+// deadline (DeadlineHostMinimum). A non-positive minimum finds none too late.
+func (self *fileClusterSend) tooLate(minimum time.Duration, err error) bool {
 	if self == nil {
 		return false
 	}
 	late, cancelled := func() (bool, bool) {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
-		return !self.connectedTime.IsZero() && self.deadline.Sub(self.connectedTime) < margin, self.cancelled
+		return !self.connectedTime.IsZero() && self.deadline.Sub(self.connectedTime) < minimum, self.cancelled
 	}()
 	if !late {
 		return false
@@ -446,10 +461,11 @@ func newFileClusterBaseTransport(settings *FileClusterSettings) fileClusterBaseT
 type fileClusterHost struct {
 	endpoint string
 	core     *minio.Core
-	// what core sends through, which the admin route uses too
+	// what core sends through
 	transport http.RoundTripper
-	// the client of a request whose body moves at a client's own pace, and what it sends through: the
-	// host's base transport without MaxConnsPerHost (see the file header)
+	// the client of a request outside the cap, one whose body moves at a client's own pace or a store
+	// check's, and what it and the admin route send through: the host's base transport without
+	// MaxConnsPerHost (see the file header)
 	pacedCore      *minio.Core
 	pacedTransport http.RoundTripper
 	// Unix ns of the last request that failed here, zero for none.
@@ -498,18 +514,35 @@ func newFileClusterHost(
 	}, nil
 }
 
-// The client a request on ctx goes through: pacedCore when it carries a body, as a GET, ranged GET or
-// PutStream does, and ctx says the body moves at a client's own pace; else core, the capped one.
-func (self *fileClusterHost) client(ctx context.Context, body bool) *minio.Core {
-	if body && sidecar.BlobClientPaced(ctx) {
+// What a request is, as the client it goes through depends on it (fileClusterHost.client).
+type fileClusterRequestKind int
+
+const (
+	// a PUT of a body in hand, or a DELETE
+	fileClusterRequestWrite fileClusterRequestKind = iota
+	// a GET, ranged GET or PutStream, whose body may move at a client's own pace
+	fileClusterRequestBody
+	// a HEAD or LIST, which a store check may send
+	fileClusterRequestHeadOrList
+)
+
+// The client a request of kind on ctx goes through: pacedCore, outside the cap, for a GET, ranged GET
+// or PutStream whose body ctx says moves at a client's own pace (sidecar.WithBlobClientPaced), and for a
+// HEAD or LIST ctx says a store check sends (sidecar.WithBlobProbe); else core, the capped one. A write
+// is capped whatever ctx says, and so is a GET on a probe's ctx or a HEAD on a paced one.
+func (self *fileClusterHost) client(ctx context.Context, kind fileClusterRequestKind) *minio.Core {
+	switch {
+	case kind == fileClusterRequestBody && sidecar.BlobClientPaced(ctx):
+		return self.pacedCore
+	case kind == fileClusterRequestHeadOrList && sidecar.BlobProbe(ctx):
 		return self.pacedCore
 	}
 	return self.core
 }
 
-// A host's base transport for requests at a client's own pace: base without its cap on the host's
-// connections, its other settings kept. A test's base that is no http.Transport keeps no connections
-// and serves as it is.
+// A host's base transport for requests outside the cap, at a client's own pace or a store check's: base
+// without its cap on the host's connections, its other settings kept. A test's base that is no
+// http.Transport keeps no connections and serves as it is.
 func fileClusterPacedTransport(base http.RoundTripper) http.RoundTripper {
 	transport, ok := base.(*http.Transport)
 	if !ok {

@@ -76,10 +76,6 @@ const fileClusterContentType = "application/octet-stream"
 // it is (minio-go's PutObjectOptions.Header).
 const fileClusterChecksumHeader = "x-amz-checksum-sha256"
 
-// S3's ceiling on one LIST's keys. A list asks one more than its limit, to learn whether more follow,
-// so a limit stays below this and a LIST stays one request.
-const fileClusterListMaxKeyCount = 1000
-
 // What the store answers when a body does not match the checksum it named. Nothing was written.
 var fileClusterChecksumErrorCodes = []string{"BadDigest", "XAmzContentChecksumMismatch", "XAmzContentSHA256Mismatch"}
 
@@ -108,21 +104,36 @@ type FileClusterSettings struct {
 	// in the wait fails unsent and marks no host failed (file_cluster_transport.go). 64: one evs
 	// attempt's bounded reads fit one host, and a cluster of 4
 	// hosts takes 256 at once. A GET or PutStream whose body moves at a client's own pace
-	// (sidecar.WithBlobClientPaced) is outside it, on a second transport a host with no cap (QD-1402).
-	// Non-positive caps nothing, leaving minio-go's 16 idle connections a host.
+	// (sidecar.WithBlobClientPaced) is outside it, on a second transport a host with no cap (QD-1402),
+	// and so are the stores' own checks, the admin route and a HEAD or LIST on a ctx
+	// sidecar.WithBlobProbe marks (each cluster's sentinel, evs's and gkm's probes), a check being one
+	// request every few seconds and no burst, so that it measures the store and not this block's queue
+	// for it (owner decision 790). Non-positive caps nothing, leaving minio-go's 16 idle connections a
+	// host.
 	MaxConnsPerHost int
-	// How near its deadline a request may reach its connection and still be refused for that deadline
-	// on arrival by a store whose clock §19.6 holds, as it holds this process's, within 50 ms of true
-	// time: twice that, one for each clock, as the fork's own DeadlineMargin is. A request that reaches
-	// its connection this near its deadline, as one that waited in the cap may, is no test of its host,
-	// so its 503 and its cancel at its own deadline mark no host failed (noteFailure). 100 ms, the LAN's
-	// transit a small part of it. Non-positive lets them mark their hosts.
-	DeadlineClockMargin time.Duration
+	// The least of its time a request must have left as it reaches its connection for a 503, or the
+	// cancel at its own deadline, to say anything of its host (owner decision 790; QD-1405). A request
+	// is issued before it waits for one of MaxConnsPerHost's slots, so the wait spends its deadline, and
+	// one that reaches its host with less than this left may be refused for a deadline this process's
+	// queue spent, not the host: the fork refuses DeadlinePassed on arrival, at a key's lock and before
+	// a write's commits. Its 503, and its cancel at its own deadline, then mark no host failed
+	// (noteFailure). Resets, failed dials, other 5xx answers and ResponseHeaderTimeout mark it however
+	// little was left, and a request given this much or more marks it for either. 1 s: four times
+	// §11.15's 250 ms p50 for a whole head read, so a request that gave its host a fair second still
+	// judges it, and past the 100 ms within which a store may read a request arriving in time as late,
+	// twice §19.6's 50 ms bound on each clock. So a request whose own deadline is under a second by
+	// design, a marker's or drop's DELETE, marks no host for a 503 or its cancel. Non-positive lets
+	// each such refusal mark its host.
+	DeadlineHostMinimum time.Duration
+	// S3's ceiling on the keys one LIST answers, 1,000: a protocol limit, so a deployment never changes
+	// it on its own. A List asks for one key past its limit, to learn whether more follow, so it answers
+	// at most one less than this and stays one request. Below 2, a List answers one key at a time.
+	ListMaxKeyCount int
 	// A host whose request failed is passed over this long while another host is not, so a request
 	// after a failure moves hosts. 30 s.
 	HostFailureHoldoff time.Duration
-	// How often each cluster's admin info and sentinel are read. 30 s, well inside §19.11's 60 s
-	// config reread, so a recorded build reads as passed within a minute.
+	// How often each cluster's admin info and sentinel are read, outside MaxConnsPerHost. 30 s, well
+	// inside §19.11's 60 s config reread, so a recorded build reads as passed within a minute.
 	CheckInterval time.Duration
 	// How old the last good check may be before readiness, writes' pool check and SettlePassed fail
 	// closed. 90 s, three checks.
@@ -144,7 +155,8 @@ func DefaultFileClusterSettings() *FileClusterSettings {
 		RequestTimeout:        10 * time.Second,
 		DialTimeout:           5 * time.Second,
 		MaxConnsPerHost:       64,
-		DeadlineClockMargin:   100 * time.Millisecond,
+		DeadlineHostMinimum:   1 * time.Second,
+		ListMaxKeyCount:       1000,
 		HostFailureHoldoff:    30 * time.Second,
 		CheckInterval:         30 * time.Second,
 		CheckStaleAfter:       90 * time.Second,
@@ -495,8 +507,8 @@ func (self *FileCluster) RequestTimeout() time.Duration {
 
 // The failure a client cannot tell from a lost answer marks its host, so the next request moves. A
 // request its own caller ended says nothing about the host, nor does one this process's own wait ended
-// or left too near its deadline (file_cluster_transport.go's header): one that never had its connection
-// (errFileClusterConnWait), and one that had it within DeadlineClockMargin of its deadline and was
+// or left short of its time (file_cluster_transport.go's header): one that never had its connection
+// (errFileClusterConnWait), and one that had it with less than DeadlineHostMinimum left and was
 // answered 503 or cancelled at its own deadline. ctx is the request's, its caller's own or, for one
 // that carries a deadline, as withFileClusterDeadline made it from its caller's: its Err is the
 // caller's, and it carries the transport's note of such a request.
@@ -504,7 +516,7 @@ func (self *FileCluster) noteFailure(ctx context.Context, host *fileClusterHost,
 	if err == nil || ctx.Err() != nil || errors.Is(err, errFileClusterConnWait) {
 		return
 	}
-	if send, _ := ctx.Value(fileClusterSendKey{}).(*fileClusterSend); send.tooLate(self.clusters.settings.DeadlineClockMargin, err) {
+	if send, _ := ctx.Value(fileClusterSendKey{}).(*fileClusterSend); send.tooLate(self.clusters.settings.DeadlineHostMinimum, err) {
 		return
 	}
 	response, ok := fileClusterErrorResponse(err)
@@ -588,11 +600,13 @@ func (self *FileCluster) put(
 		}
 	}
 	requestCtx := ctx
+	kind := fileClusterRequestBody
 	if !streamed {
 		requestCtx = withFileClusterDeadline(ctx, self.RequestTimeout())
+		kind = fileClusterRequestWrite
 	}
 	host := self.picker.pick()
-	info, err := host.client(ctx, streamed).PutObject(requestCtx, self.config.Bucket, key, body, byteCount, "", sha256Hex, putOptions)
+	info, err := host.client(ctx, kind).PutObject(requestCtx, self.config.Bucket, key, body, byteCount, "", sha256Hex, putOptions)
 	if err != nil {
 		if exact, ok := body.(*fileClusterExactReader); !ok || !exact.clientFailed(sidecar.BlobClientPaced(ctx)) {
 			self.noteFailure(requestCtx, host, err)
@@ -705,7 +719,7 @@ func fileClusterBlobInfo(key string, info minio.ObjectInfo, byteCount int64) sid
 func (self *FileCluster) get(ctx context.Context, key string, getOptions minio.GetObjectOptions) (io.ReadCloser, minio.ObjectInfo, http.Header, error) {
 	host := self.picker.pick()
 	requestCtx := withFileClusterDeadline(ctx, self.RequestTimeout())
-	body, info, header, err := host.client(ctx, true).GetObject(requestCtx, self.config.Bucket, key, getOptions)
+	body, info, header, err := host.client(ctx, fileClusterRequestBody).GetObject(requestCtx, self.config.Bucket, key, getOptions)
 	if err != nil {
 		self.noteFailure(requestCtx, host, err)
 		return nil, minio.ObjectInfo{}, nil, fileClusterReadError(err)
@@ -744,10 +758,11 @@ func (self *FileCluster) GetRange(ctx context.Context, key string, offset int64,
 	return &sidecar.BlobObject{BlobInfo: fileClusterBlobInfo(key, info, whole), Body: body}, nil
 }
 
+// A store check's HEAD, on a ctx sidecar.WithBlobProbe marks, goes outside MaxConnsPerHost.
 func (self *FileCluster) Head(ctx context.Context, key string) (*sidecar.BlobInfo, error) {
 	host := self.picker.pick()
 	requestCtx := withFileClusterDeadline(ctx, self.RequestTimeout())
-	info, err := host.core.StatObject(requestCtx, self.config.Bucket, key, minio.StatObjectOptions{})
+	info, err := host.client(ctx, fileClusterRequestHeadOrList).StatObject(requestCtx, self.config.Bucket, key, minio.StatObjectOptions{})
 	if err != nil {
 		self.noteFailure(requestCtx, host, err)
 		return nil, fileClusterReadError(err)
@@ -757,13 +772,14 @@ func (self *FileCluster) Head(ctx context.Context, key string) (*sidecar.BlobInf
 }
 
 // One LIST: it asks for one key past limit to learn whether more follow, and stops there, so the
-// listing never pages behind the caller. A limit at or past S3's 1,000 answers at most 999, with more
-// set, which "at most limit" allows.
+// listing never pages behind the caller. A limit at or past ListMaxKeyCount, S3's 1,000, answers at
+// most one less, with more set, which "at most limit" allows. A store check's LIST, on a ctx
+// sidecar.WithBlobProbe marks, goes outside MaxConnsPerHost.
 func (self *FileCluster) List(ctx context.Context, keyPrefix string, startAfter string, limit int) ([]*sidecar.BlobInfo, bool, error) {
 	if limit <= 0 {
 		return nil, false, fmt.Errorf("a list limit of %d", limit)
 	}
-	limit = min(limit, fileClusterListMaxKeyCount-1)
+	limit = min(limit, max(1, self.clusters.settings.ListMaxKeyCount-1))
 	host := self.picker.pick()
 	requestCtx := withFileClusterDeadline(ctx, self.RequestTimeout())
 	listCtx, cancel := context.WithCancel(requestCtx)
@@ -771,7 +787,7 @@ func (self *FileCluster) List(ctx context.Context, keyPrefix string, startAfter 
 	objects := []*sidecar.BlobInfo{}
 	more := false
 	var listErr error
-	for object := range host.core.ListObjectsIter(listCtx, self.config.Bucket, minio.ListObjectsOptions{
+	for object := range host.client(ctx, fileClusterRequestHeadOrList).ListObjectsIter(listCtx, self.config.Bucket, minio.ListObjectsOptions{
 		Prefix:     keyPrefix,
 		StartAfter: startAfter,
 		MaxKeys:    limit + 1,
@@ -812,7 +828,7 @@ func (self *FileCluster) Delete(ctx context.Context, key string) error {
 	}
 	host := self.picker.pick()
 	requestCtx := withFileClusterDeadline(ctx, self.RequestTimeout())
-	if err := host.core.RemoveObject(requestCtx, self.config.Bucket, key, minio.RemoveObjectOptions{}); err != nil {
+	if err := host.client(ctx, fileClusterRequestWrite).RemoveObject(requestCtx, self.config.Bucket, key, minio.RemoveObjectOptions{}); err != nil {
 		return fileClusterDeleteError(requestCtx, self, host, err)
 	}
 	return nil
@@ -835,9 +851,10 @@ func fileClusterDeleteError(ctx context.Context, cluster *FileCluster, host *fil
 // The sentinel xops writes on every cluster, read for readiness.
 const fileClusterSentinelKey = "sentinel/_"
 
-// Reads the sentinel: the cluster answers, with this block's credentials, in its bucket.
+// Reads the sentinel: the cluster answers, with this block's credentials, in its bucket. A store check,
+// so its HEAD goes outside MaxConnsPerHost (sidecar.WithBlobProbe; owner decision 790).
 func (self *FileCluster) checkSentinel(ctx context.Context) {
-	if _, err := self.Head(ctx, fileClusterSentinelKey); err != nil {
+	if _, err := self.Head(sidecar.WithBlobProbe(ctx), fileClusterSentinelKey); err != nil {
 		glog.Infof("[filecluster]%s: sentinel not read: %v\n", self.config.ClusterId, err)
 		return
 	}
