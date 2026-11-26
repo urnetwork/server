@@ -1247,8 +1247,10 @@ func (self *ConfigLogSequencer) AdmittedIdentityKey(ctx context.Context, network
 // api's sequencer cannot stand in for the worker's in a process that runs
 // both, all's: its effects and its ticks would hold under api's settings, but
 // retention deletes proj/ and projrows/ objects, and api's MinIO user on the
-// first cluster deletes nothing (§19.4's api row; server's
-// TestApiFileClusterUserReachesItsPrefixesAlone), so each keeps its own slot.
+// first cluster deletes nothing (§19.4's api row as xops' policy-api.json.j2
+// renders it for OPS-M2-04, which server's
+// TestApiFileClusterUserReachesItsPrefixesAlone holds), so each keeps its own
+// slot.
 var configLogSequencer atomic.Pointer[ConfigLogSequencer]
 var workerConfigLogSequencer atomic.Pointer[ConfigLogSequencer]
 

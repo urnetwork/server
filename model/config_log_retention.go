@@ -21,7 +21,8 @@ package model
 // runs through the worker's sequencer, taskworker's, whose first cluster user
 // deletes, and through api's only where the process holds no worker's
 // (CurrentWorkerConfigLogSequencer): api's user deletes nothing (§19.4's api
-// row), so there each DELETE is refused and the entries stay.
+// row as xops' policy-api.json.j2 renders it), so there each DELETE is
+// refused and the entries stay.
 
 import (
 	"context"
