@@ -214,6 +214,8 @@ type monitorConfig struct {
 	sidecarSlo *SidecarSloSettings
 	// the lb interfaces' split probe (SIGNALS.md §31.1), nil where monitor.yml has no lb_split_probe block
 	lbSplitProbe *LbSplitProbeSettings
+	// DESIGN-COMPUTE §14.7's families (SIGNALS.md §32), nil where monitor.yml has no compute block
+	compute *ComputeMonitorSettings
 
 	// state dir for baselines and other local persistence
 	stateDir string

@@ -447,7 +447,10 @@ type SignalSettings struct {
 	SidecarSlo *SidecarSloSettings
 	// LbSplitProbe is the lb interfaces' SNI split probe (SIGNALS.md §31.1): monitor.yml's lb_split_probe
 	// block beside services.yml. nil reports it configured off.
-	LbSplitProbe  *LbSplitProbeSettings
+	LbSplitProbe *LbSplitProbeSettings
+	// Compute is DESIGN-COMPUTE §14.7's signal families (SIGNALS.md §32): monitor.yml's compute block. nil
+	// reports every family configured off.
+	Compute       *ComputeMonitorSettings
 	disabledHosts []HostSettings
 	// Private desired-input identity participates only in in-memory generation checks.
 	routerDesiredGeneration [32]byte
@@ -541,6 +544,7 @@ func (s SignalSettings) withDefaults() SignalSettings {
 	s.SidecarStorage = cloneSidecarStorageSettings(s.SidecarStorage)
 	s.SidecarSlo = cloneSidecarSloSettings(s.SidecarSlo)
 	s.LbSplitProbe = cloneLbSplitProbeSettings(s.LbSplitProbe)
+	s.Compute = cloneComputeMonitorSettings(s.Compute)
 	s.disabledHosts = cloneRouterScopeHosts(s.disabledHosts)
 	if s.AddressMode == "" {
 		s.AddressMode = AddressModeOverlay
@@ -796,6 +800,7 @@ func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 		sidecarStorage:            cloneSidecarStorageSettings(settings.SidecarStorage),
 		sidecarSlo:                cloneSidecarSloSettings(settings.SidecarSlo),
 		lbSplitProbe:              cloneLbSplitProbeSettings(settings.LbSplitProbe),
+		compute:                   cloneComputeMonitorSettings(settings.Compute),
 		stateDir:                  settings.StateDir,
 		sharedSshAdmission:        settings.sharedSshAdmission,
 		sshConnectTimeout:         settings.SSHConnectTimeout,

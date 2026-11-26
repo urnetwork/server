@@ -480,6 +480,9 @@ func TestEveryAlertClassIsClassified(t *testing.T) {
 		"signal_provider_count.go providerCountFinding":             {"provider-count-effective-empty", "provider-count-small-list", "provider-count-small-list-unclassified"},
 		// the classes of its positional partition table, which no class site names
 		"signal_minio_storage.go evaluateMinioRequestErrors": {"minio-read-errors", "minio-write-errors", "minio-write-rejected"},
+		// §32's families: each family's visibility class and its rules' page classes, from its table
+		"compute_signals.go computeFamilyFindings": {"compute-ledger-unobservable", "compute-providers-unobservable", "compute-policy-unobservable", "compute-search-unobservable", "compute-enclaves-unobservable"},
+		"compute_signals.go computeFamilyJudge":    {"compute-ledger-unobservable", "compute-providers-unobservable", "compute-policy-unobservable", "compute-search-unobservable", "compute-enclaves-unobservable", "compute-settlement-lag", "compute-op-stale", "compute-rollup-mismatch", "compute-direct-absorbed-high", "compute-provider-failing", "compute-attestation-failures", "compute-provider-balance-low", "compute-gamma-unknown-spend", "compute-reconcile-gap", "compute-dispute-rate", "compute-canary-gap", "compute-margin-low", "compute-direct-worst-case-rise", "compute-policy-expiring", "compute-ticket-horizon", "compute-search-lapses", "compute-search-float-low", "compute-search-failure-rate", "compute-search-payer-transfer", "compute-search-nonce-unknown", "compute-search-sanctions-record", "compute-search-screen-stale", "compute-search-base-disagree", "compute-search-row-retained", "compute-search-unattributed", "compute-search-unsettled-high"},
 		// literals elsewhere name these: the finding's own class, the
 		// probeSchemaContract classes, the MinIO error patterns, and the log
 		// class and burst names

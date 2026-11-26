@@ -244,6 +244,12 @@ func NewSignals() []Signal {
 		NewPostgresPrimarySignal(),
 		NewLbSplitProbeSignal(),
 		NewLbMapStaleSignal(),
+		// DESIGN-COMPUTE §14.7's families (SIGNALS.md §32; compute_signals.go)
+		NewComputeLedgerSignal(),
+		NewComputeProvidersSignal(),
+		NewComputePolicySignal(),
+		NewComputeSearchSignal(),
+		NewComputeEnclavesSignal(),
 	}
 }
 

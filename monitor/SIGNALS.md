@@ -49916,3 +49916,175 @@ The query uses the existing byte-bounded Mimir gateway adapter: one vector, maxi
 False positives: legitimate high turnover, uninstrumented synchronous work or a transient occupancy burst can exceed the band; two sampled observations do not establish an individual hung call. False negatives: per-process counts below the band can sum to a large fleet population; work in other instrumented stages, deferred async compensation or missing publishers is not measured as OTHER. Low OTHER does not prove compensation queues drained, healthy Redis/PG, low CPU or customer recovery. Correlate the same process generation and bounded owner/stage evidence before any repair. Do not raise pools or restart based on this gauge.
 
 Synthetic controls cover public constructor → bounded vector → source-clock reducer → actual cadence gate/in-memory notifier; strict count threshold and ingress sum; no completed calls; repeated/stale/missing/invalid source cells; equal/newer generation ambiguity; cancellation with no baseline commit; independent positive siblings; default/custom/invalid policy; fixed private-label omission; and unknown/replacement versus complete below-band recovery. No Main or network execution is required for those controls.
+
+## 32. Compute — DESIGN-COMPUTE §14.7's metrics and pages
+
+CSRV-M12-06 (DESIGN-COMPUTE §14.7, §14.10; owner decision 143). The compute
+broker (`computeservice` in `server/cli/compute`), taskworker's compute jobs
+(`sidecar/work`) and `searchsigner` publish the metrics below, every label an
+opaque id or a closed set (a provider's catalog id, a model's, a state, an
+outcome class, an alarm's kind), none a network, member, sidecar, agent or
+request (I-13; compute-11's counts carry none). monitor.yml's compute block
+names the families this monitor reads:
+
+```yaml
+compute:
+  families: [ledger, providers, policy, search, enclaves]
+```
+
+Without the block every family reports itself configured off, which raises no
+incident, so nothing pages before its service ships; a block naming a family
+twice or one §32 does not know reports each blind. Each family is one bounded
+loopback Mimir query a minute through a services host. An enabled family whose
+liveness series is not current reads its `compute-<family>-unobservable`
+visibility class, which holds its pages open, and a rule whose own series is
+absent reads unobservable too. A job's alarm, which `sidecar/work` cannot raise
+through the pager, reaches its page as `urnetwork_compute_alarms_total{kind}`,
+which the family reads over its alarm window (10 min). Every line below is a
+field of `ComputeMonitorSettings`, §14.7's figure its default. Each page's
+first action is the compute runbook's (xops' `COMPUTE-OPERATIONS.md`, the
+pages), on the two-person out-of-hours rota at any hour, the realized margin's
+in business hours.
+
+The metrics:
+
+- `urnetwork_compute_provider_calls_total{provider,model,outcome}` and
+  `urnetwork_compute_call_seconds{provider,model}`: calls, latency and outcome
+  (`ok`, `provider_error`, `timeout`, `refused`, `tee_unverified`).
+- `urnetwork_compute_attestations_total{provider,result}` and
+  `urnetwork_compute_attestation_failures_total{provider,reason}`.
+- `urnetwork_compute_holds`, `urnetwork_compute_settlement_lag_seconds` (the
+  oldest settled operation row not yet booked).
+- `urnetwork_compute_accounts{state}` by §9.9's state;
+  `urnetwork_compute_auto_renew_total{result}`;
+  `urnetwork_compute_promo_redemptions_total{result,code}`, by refusal code,
+  never the promotion code itself.
+- `urnetwork_compute_provider_balance_days{provider}`;
+  `urnetwork_compute_gamma_ops_total{kind}` (deposit, mint, spend).
+- `urnetwork_compute_enclaves{state}`.
+- `urnetwork_compute_disputes_total{provider}` and
+  `urnetwork_compute_dispute_networks{provider}`, how many networks disputed a
+  provider's calls today, a count and never which.
+- `urnetwork_compute_search_authorizations_total{outcome}` (authorized,
+  settled, lapsed) and `urnetwork_compute_search_outcomes_total{class}` (`ok`,
+  `provider_error`, `timeout`, `refused`), across all networks.
+- `urnetwork_compute_ops{state}` and `urnetwork_compute_op_oldest_seconds{state}`
+  (open, settled, applied).
+- `urnetwork_compute_projection_rebuilds_total{cause}` and
+  `urnetwork_compute_projection_rebuild_seconds{cause}`.
+- `urnetwork_compute_direct_absorbed_nano_usd_total{provider}`.
+- `urnetwork_compute_search_unattributed_nano_usd`,
+  `urnetwork_compute_search_settled_nano_usd` and
+  `urnetwork_compute_search_day_unbalanced`: the day's value, and 1 where the
+  day before does not balance.
+- `urnetwork_compute_signer_unsettled_nano_usd` and
+  `urnetwork_compute_signer_max_unsettled_nano_usd`;
+  `urnetwork_compute_search_float_days`;
+  `urnetwork_compute_search_screen_age_seconds`.
+- `urnetwork_compute_policy_expiry_seconds` and
+  `urnetwork_compute_ticket_horizon_seconds`, the seconds left to each.
+- `urnetwork_compute_reconcile_gap_ratio{provider}`,
+  `urnetwork_compute_canary_gap_ratio{provider}`,
+  `urnetwork_compute_margin_ratio{provider}` and
+  `urnetwork_compute_direct_worst_case_nano_usd{provider}`.
+- `urnetwork_compute_alarms_total{kind}`: `rollup_day`, `rollup_total`,
+  `gamma_unknown_spend`, `search_payer_transfer`, `search_nonce_unknown`,
+  `search_sanctions_record`, `search_base_disagree`, `search_row_retained`.
+
+The broker's own route metrics (`urnetwork_compute_requests_total`,
+`urnetwork_compute_refusals_total`, `urnetwork_compute_request_seconds`) and
+its block's `urnetwork_compute_http_requests_total` feed §30's SLO and failure
+signals once monitor.yml's sidecar_services names `compute`; `searchsigner`'s
+row waits for its route metrics.
+
+### 32.1 Compute ledger
+
+Probe: `compute-ledger`
+
+Liveness: `urnetwork_compute_settlement_lag_seconds`.
+
+Classes:
+
+- `compute-settlement-lag` **PAGE**, sustained 2 runs: settlement lag over 60 s.
+- `compute-op-stale` **PAGE**: an operation row open past 24 hours, or settled
+  and unbooked past 60 s.
+- `compute-rollup-mismatch` **PAGE**: `compute_rollup_day`'s alarm
+  (`rollup_day`, `rollup_total`) within the alarm window.
+- `compute-direct-absorbed-high` **PAGE**: absorbed direct-call charges above
+  $50 in a day across networks.
+- `compute-ledger-unobservable` (visibility).
+
+### 32.2 Compute providers
+
+Probe: `compute-providers`
+
+Liveness: `urnetwork_compute_provider_calls_total`. Each provider is its own
+target, by its catalog id.
+
+Classes:
+
+- `compute-provider-failing` **PAGE**: a provider failing every call for 5
+  minutes.
+- `compute-attestation-failures` **PAGE**: attestation failures above 5% of a
+  provider's attestations for 10 minutes.
+- `compute-provider-balance-low` **PAGE**: a provider balance under a day.
+- `compute-gamma-unknown-spend` **PAGE**: `compute_gamma_watch`'s alarm.
+- `compute-reconcile-gap` **PAGE**: a reconciliation gap over 1%.
+- `compute-dispute-rate` **PAGE**: disputes from at least 3 networks past
+  0.5% of a provider's requests in a day.
+- `compute-canary-gap` **PAGE**: a canary gap over 2%.
+- `compute-margin-low` **PAGE**, business hours: a provider's realized margin
+  under 5% for a week.
+- `compute-direct-worst-case-rise` **PAGE**: a direct provider's costliest
+  worst case above its value an hour before.
+- `compute-providers-unobservable` (visibility).
+
+### 32.3 Compute policy
+
+Probe: `compute-policy`
+
+Liveness: `urnetwork_compute_policy_expiry_seconds`.
+
+Classes:
+
+- `compute-policy-expiring` **PAGE**: the policy within 14 days of `not_after`.
+- `compute-ticket-horizon` **PAGE**: the newest signed ticket within 7 days of
+  its horizon.
+- `compute-policy-unobservable` (visibility).
+
+### 32.4 Compute web search
+
+Probe: `compute-search`
+
+Liveness: `urnetwork_compute_search_authorizations_total`. From M13; no
+finding names a network.
+
+Classes:
+
+- `compute-search-lapses` **PAGE**: lapsed authorizations above 5% for 10
+  minutes.
+- `compute-search-float-low` **PAGE**: the payer float under one day of
+  searches.
+- `compute-search-failure-rate` **PAGE**: the search provider's failure rate
+  above 5% in an hour of at least 100 searches.
+- `compute-search-payer-transfer`, `compute-search-nonce-unknown`,
+  `compute-search-sanctions-record`, `compute-search-base-disagree`,
+  `compute-search-row-retained` **PAGE**: each its alarm within the window.
+- `compute-search-screen-stale` **PAGE**: the screen's lists unfetched for 24
+  hours.
+- `compute-search-unattributed` **PAGE**: a day's unattributed value above $10
+  or 1% of its settled value, or a day that does not balance.
+- `compute-search-unsettled-high` **PAGE**: the signer's value not yet final
+  past 80% of `max_unsettled`.
+- `compute-search-unobservable` (visibility).
+
+### 32.5 Compute enclaves
+
+Probe: `compute-enclaves`
+
+Liveness: `urnetwork_compute_enclaves`. §14.7 names no enclave page, so the
+family reports only whether the orchestrator publishes its states.
+
+Classes:
+
+- `compute-enclaves-unobservable` (visibility).

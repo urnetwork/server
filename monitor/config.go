@@ -50,7 +50,9 @@ type monitorYaml struct {
 	SidecarServices *sidecarServicesMonitorYaml `yaml:"sidecar_services"`
 	// lb_split_probe: the lb interfaces running §13.4's SNI split, which this monitor probes (SIGNALS.md §31.1)
 	LbSplitProbe *lbSplitProbeYaml `yaml:"lb_split_probe"`
-	Hosts        []struct {
+	// compute: DESIGN-COMPUTE §14.7's signal families this monitor reads (SIGNALS.md §32)
+	Compute *computeMonitorYaml `yaml:"compute"`
+	Hosts   []struct {
 		Name               string    `yaml:"name"`
 		LANIp              string    `yaml:"lan_ip"`
 		OverlayIp          string    `yaml:"overlay_ip"`
@@ -371,6 +373,7 @@ func loadSignalSettingsSnapshot() (SignalSettings, error) {
 		SidecarStorage: loadSidecarStorageSettings(y.FileClusters, y.SidecarDump, loadMonitorFileClusters),
 		SidecarSlo:     loadSidecarSloSettings(y.SidecarServices),
 		LbSplitProbe:   loadLbSplitProbeSettings(y.LbSplitProbe, servicesResource, services),
+		Compute:        loadComputeMonitorSettings(y.Compute),
 	}
 	settings = settings.withDefaults()
 	routes := lanRoutes()

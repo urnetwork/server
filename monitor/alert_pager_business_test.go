@@ -370,7 +370,9 @@ func TestHeldBusinessPageIsRetriedThroughASinkOutage(t *testing.T) {
 }
 
 // §19.8's business row, copied here so an edit to the table has to say why:
-// the six classes QD-754 names, and no other row waits for business hours.
+// the six classes QD-754 names, and DESIGN-COMPUTE §14.7's realized margin,
+// which the compute runbook pages in business hours (CSRV-M12-06), and no other
+// row waits for business hours.
 func TestPageClassesHoldSection19_8sBusinessRow(t *testing.T) {
 	want := map[string]string{
 		"filecluster-drive-dwpd-business": "M3",
@@ -379,6 +381,7 @@ func TestPageClassesHoldSection19_8sBusinessRow(t *testing.T) {
 		"filecluster-cohort-limit":        "M3",
 		"filecluster-hdd-trigger":         "M3",
 		"dns-ns-failing":                  "M5",
+		"compute-margin-low":              "M12",
 	}
 	got := []string{}
 	for _, row := range pagerBusinessTestRows() {

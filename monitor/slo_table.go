@@ -153,6 +153,23 @@ var sloTable = []sloRow{
 			{name: "availability", kind: sloObjectiveUnmeasured, target: 0.9995, waitsFor: "the clusters' request outcomes in Mimir (EVSB: no scrape brings MinIO's node metrics in yet)"},
 		},
 	},
+	// DESIGN-COMPUTE §14.2's two services (CSRV-M12-06), which the compute design gives no SLO figure: the row is a
+	// reading, evs's availability line, until a design-records fold gives theirs. compute's block serves through
+	// sidecarhost.Run, which publishes its route metrics; searchsigner's serves on a port of its own (CSRV-M13-01).
+	{
+		service: "compute",
+		terms:   "99.9% non-5xx (a reading)",
+		objectives: []sloObjective{
+			{name: "availability", kind: sloObjectiveAvailability, target: 0.999},
+		},
+	},
+	{
+		service: "searchsigner",
+		terms:   "99.9% non-5xx (a reading)",
+		objectives: []sloObjective{
+			{name: "availability", kind: sloObjectiveUnmeasured, target: 0.999, waitsFor: "searchsigner's route metrics on its own port (CSRV-M13-01)"},
+		},
+	},
 }
 
 // The row of a service, false for a service §19.8 gives no SLO.

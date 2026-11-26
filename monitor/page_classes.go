@@ -23,6 +23,11 @@ import (
 // and a custom host pending past 20 min (OPS-M6-01). A refused drop job, at
 // M10, is evs-format2's (EVS2-M10-34).
 //
+// DESIGN-COMPUTE §14.7's pages are the compute rows (CSRV-M12-06): each reported by its family's signal (SIGNALS.md
+// §32) once monitor.yml's compute block enables it, on the two-person out-of-hours rota (owner decision 143), the
+// realized margin's in business hours, as the compute runbook has it; a job's alarm reaches its row as a counter the
+// signal reads.
+//
 // A row's hours say when its page may reach the rota (QD-754): any, the
 // default, pages at once at any hour, and business is §19.8's business row,
 // which the notifier holds until the business calendar opens. The business
@@ -183,6 +188,164 @@ var pageClasses = []pageClass{
 		firstMilestone: "M5",
 		action:         "§12.6's runbook",
 		hours:          pageHoursBusiness,
+	},
+	// DESIGN-COMPUTE §14.7's pages (SIGNALS.md §32), each first action the compute runbook's (xops' COMPUTE-OPERATIONS.md)
+	{
+		class:          "compute-provider-failing",
+		row:            "a compute provider failing every call for 5 minutes",
+		firstMilestone: "M12",
+		action:         "the provider's status and compute_canary's last run; calls fail with a named error, never another model; a suspended account is the provider adapters' runbook",
+	},
+	{
+		class:          "compute-attestation-failures",
+		row:            "attestation failures above 5% for 10 minutes",
+		firstMilestone: "M12",
+		action:         "the failing check in the metric's reason; a provider's new image not yet in the policy is a sitting the same day; never widen a profile to pass it",
+	},
+	{
+		class:          "compute-settlement-lag",
+		row:            "compute settlement lag over 60 s",
+		firstMilestone: "M12",
+		action:         "compute_settle's last run, Postgres's health, a network fence held; restart the job's chain, never edit a hold in Redis",
+	},
+	{
+		class:          "compute-provider-balance-low",
+		row:            "a compute provider balance under a day",
+		firstMilestone: "M12",
+		action:         "the treasury's status and compute_gamma_mint's and compute_gamma_spend's last runs; the week's transfer early if the float is short",
+	},
+	{
+		class:          "compute-gamma-unknown-spend",
+		row:            "an unknown GammaSpent from our hotkeys",
+		firstMilestone: "M12",
+		action:         "the deposit's cap is 0: pause the provider in the treasury, rotate K_P and reconcile the provider's VM list",
+	},
+	{
+		class:          "compute-policy-expiring",
+		row:            "the compute policy within 14 days of its not_after",
+		firstMilestone: "M12",
+		action:         "call a sitting of the compute-policy key's holders",
+	},
+	{
+		class:          "compute-ticket-horizon",
+		row:            "the newest signed ticket within 7 days of its horizon",
+		firstMilestone: "M12",
+		action:         "call the tickets' sitting; past the horizon remote calls, enclave creates and searches stop",
+	},
+	{
+		class:          "compute-reconcile-gap",
+		row:            "a compute reconciliation gap over 1%",
+		firstMilestone: "M12",
+		action:         "compute_reconcile's report: the provider's bill against our charges and spends; raise a billing fault before the next week's transfer",
+	},
+	{
+		class:          "compute-rollup-mismatch",
+		row:            "a day's spend rollup differing from its charges, or a network's totals from its day rows and pruned sums",
+		firstMilestone: "M12",
+		action:         "compute_rollup_day's alarm names the day; take no partition by hand, and file the difference with the rows that show it",
+	},
+	{
+		class:          "compute-search-lapses",
+		row:            "lapsed search authorizations above 5% for 10 minutes",
+		firstMilestone: "M13",
+		action:         "the search signer's Base sources and the facilitator's settlements; holds lapse on their own through compute_search_tickets",
+	},
+	{
+		class:          "compute-search-float-low",
+		row:            "the search payer float under one day of searches",
+		firstMilestone: "M13",
+		action:         "compute_search_float's last refill and Coinbase's withdrawal to the payer address",
+	},
+	{
+		class:          "compute-search-failure-rate",
+		row:            "the search provider's failure rate above 5% in an hour of at least 100 searches",
+		firstMilestone: "M13",
+		action:         "the provider's status; nothing is retried elsewhere; the month's rates go to the owner",
+	},
+	{
+		class:          "compute-search-payer-transfer",
+		row:            "a USDC transfer from the payer that settles no authorization the signer issued",
+		firstMilestone: "M13",
+		action:         "signing and refills have stopped: treat the payer key as leaked, the search payer's runbook",
+	},
+	{
+		class:          "compute-search-nonce-unknown",
+		row:            "a used nonce the search signer did not issue",
+		firstMilestone: "M13",
+		action:         "signing and refills have stopped: treat the payer key as leaked, the search payer's runbook",
+	},
+	{
+		class:          "compute-search-sanctions-record",
+		row:            "a payee the screen refused, or an authorization settled outside the facilitator",
+		firstMilestone: "M13",
+		action:         "keep the sanctions record, tell counsel, and suspend the network's searches if its sidecar sent it",
+	},
+	{
+		class:          "compute-search-screen-stale",
+		row:            "the search screen's lists unfetched for 24 hours",
+		firstMilestone: "M13",
+		action:         "compute_sanctions_list's fetch and each list's source; at 72 hours signing stops on its own",
+	},
+	{
+		class:          "compute-search-base-disagree",
+		row:            "Base's two sources disagreeing",
+		firstMilestone: "M13",
+		action:         "find the source that is behind or forked and let finality settle it; never pick one by hand",
+	},
+	{
+		class:          "compute-dispute-rate",
+		row:            "compute disputes from at least 3 networks past 0.5% of a provider's requests in a day",
+		firstMilestone: "M12",
+		action:         "compare the provider's usage with the devices'; a provider over-reporting leaves the catalog by the policy's next line",
+	},
+	{
+		class:          "compute-canary-gap",
+		row:            "a compute canary gap over 2%",
+		firstMilestone: "M12",
+		action:         "compute_canary's run against the provider's usage and its bill; as the disputes row",
+	},
+	{
+		class:          "compute-margin-low",
+		row:            "a compute provider's realized margin under 5% for a week",
+		firstMilestone: "M12",
+		action:         "compute_reconcile's weekly margins; a price change is the owner's, through the catalog's next prices",
+		hours:          pageHoursBusiness,
+	},
+	{
+		class:          "compute-direct-worst-case-rise",
+		row:            "a direct compute provider's costliest worst case rising",
+		firstMilestone: "M12",
+		action:         "compute_provider_prices' exposure rule: hold the provider out of direct at the next sitting if the rise outruns the holds",
+	},
+	{
+		class:          "compute-op-stale",
+		row:            "a compute operation row open past 24 hours, or settled and unbooked past 60 s",
+		firstMilestone: "M12",
+		action:         "compute_op_recover's and compute_settle's last runs; a row open 24 hours is released at no charge: let the job do it",
+	},
+	{
+		class:          "compute-search-row-retained",
+		row:            "a web search row past 72 hours",
+		firstMilestone: "M13",
+		action:         "compute_search_purge's last run: no per-search row may outlive 72 hours",
+	},
+	{
+		class:          "compute-search-unattributed",
+		row:            "a day's unattributed search value above $10 or 1% of its settled value, or a search day that does not balance",
+		firstMilestone: "M13",
+		action:         "the signer's day totals against the broker's charges for the day; unattributed settlements are URnetwork's cost",
+	},
+	{
+		class:          "compute-search-unsettled-high",
+		row:            "the search signer's value not yet final past 80% of max_unsettled",
+		firstMilestone: "M13",
+		action:         "the signer stops at max_unsettled on its own; read Base's finalized head and the facilitator's backlog",
+	},
+	{
+		class:          "compute-direct-absorbed-high",
+		row:            "absorbed direct-call charges above $50 in a day across networks",
+		firstMilestone: "M12",
+		action:         "compute_direct_settle: a provider whose lookups fail keeps its holds pending; raise its usage lookup with it",
 	},
 }
 
