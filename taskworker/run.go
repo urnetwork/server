@@ -177,6 +177,9 @@ func startTaskworkerRuntime(admission context.Context, ctx context.Context, canc
 	// from and run on the process's evs host (evs_jobs.go)
 	if options.WorkloadProfile == WorkloadProfileProduction {
 		startEvsJobs(ctx, &owner.lifetime)
+		// DESIGN-COMPUTE §14.5's compute jobs, sidecar/work's, bound in the same registry, compute_settle's and
+		// compute_gamma_watch's loops on the lifetime, each only where the binary links its group (compute_jobs.go)
+		startComputeJobs(ctx, &owner.lifetime)
 		// gkm's reconciler, on the evs host startEvsJobs just built (gkm_reconciler.go)
 		startGkmReconciler(ctx, &owner.lifetime)
 		// the drop jobs' {evsd_} hints, on the same host's Redis subscriber (evs_drop.go)
