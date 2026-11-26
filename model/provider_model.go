@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"slices"
 	"sort"
 	"time"
 
@@ -53,22 +54,44 @@ const (
 // one primary-key scan over its keys, which visits a leaf page once for all of
 // its keys, and are matched back to their contracts by id. Ids without the
 // time prefix group less tightly; the totals are the same either way.
+//
+// Since the contract tables were partitioned by day (2026-11-25), PostgreSQL
+// plans each partition on its own, and the provider array is read through a
+// lateral subquery (providerStatsProviderArraySql). A group's lookup also
+// bounds the id by the first and last id of its prefix, so only the
+// partition that holds the group runs: the array alone prunes nothing, and
+// every partition of contract_close sorted and searched every group's array,
+// six partitions on 2026-11-26 and one more each day until the legacy
+// partition returns. A group whose prefix spans midnight runs two.
 const providerStatsTransferBytesSQL = `
 	WITH eligible AS MATERIALIZED (
-		SELECT contract_id, destination_id
-		FROM transfer_contract
-		WHERE destination_id = ANY($1::uuid[]) AND close_time >= $2
+		SELECT contract.contract_id, contract.destination_id
+		FROM ` + providerStatsProviderArraySql + `
+		CROSS JOIN LATERAL (
+			SELECT contract_id, destination_id
+			FROM transfer_contract
+			WHERE destination_id = ANY(provider.destination_ids) AND close_time >= $2
+			OFFSET 0
+		) contract
 	), id_range AS MATERIALIZED (
-		SELECT array_agg(contract_id) AS contract_ids
-		FROM eligible
-		GROUP BY substr(uuid_send(contract_id), 1, 4)
+		SELECT
+			array_agg(contract_id) AS contract_ids,
+			(id_prefix || '000000000000000000000000')::uuid AS first_contract_id,
+			(id_prefix || 'ffffffffffffffffffffffff')::uuid AS last_contract_id
+		FROM (
+			SELECT contract_id, encode(substr(uuid_send(contract_id), 1, 4), 'hex') AS id_prefix
+			FROM eligible
+		) eligible_prefix
+		GROUP BY id_prefix
 	), report AS MATERIALIZED (
 		SELECT cc.contract_id, cc.used_transfer_byte_count
 		FROM id_range
 		CROSS JOIN LATERAL (
 			SELECT contract_id, used_transfer_byte_count
 			FROM contract_close
-			WHERE contract_id = ANY(id_range.contract_ids) AND party = 'destination'
+			WHERE contract_id = ANY(id_range.contract_ids)
+				AND contract_id BETWEEN id_range.first_contract_id AND id_range.last_contract_id
+				AND party = 'destination'
 			OFFSET 0
 		) cc
 	)
@@ -78,14 +101,93 @@ const providerStatsTransferBytesSQL = `
 	GROUP BY eligible.destination_id
 `
 
+// The provider array $1 of a per-provider contract read, as the relation
+// provider with the one column destination_ids. A read takes its providers'
+// contracts from a lateral subquery, `destination_id =
+// ANY(provider.destination_ids)`, and both subqueries end in OFFSET 0, so
+// neither is pulled up and the array reaches the contract scans as an
+// executor parameter.
+//
+// PostgreSQL estimates `destination_id = ANY(array)` from each partition's
+// statistics, element by element. Since the contract tables were partitioned
+// by day (2026-11-25) a day is planned on its own, and a day's statistics hold
+// about 130,000 distinct destinations while the largest networks pass 100,000
+// to 300,000 providers. Such a read then expected half or more of each filled
+// day to match, and read the days whole with a sequential scan: 172M rows for
+// each of a provider list fill's two contract reads on 2026-11-26, where the
+// network's contracts were 0 to 7% of a day, and the reads ran 40 s to past
+// the fill's 2-minute budget. The plain table was planned whole, and its
+// destination index stayed the cheaper read. An array that reaches a scan as
+// an executor parameter is estimated at ten elements whatever its length, so
+// every partition is read through its destination index, reading only the
+// network's contracts. Callers pass the ids in uuid order
+// (providerStatsIdStrings): the index scan of each partition sorts the array
+// first, which is then a pass over sorted input.
+const providerStatsProviderArraySql = `(SELECT $1::uuid[] AS destination_ids OFFSET 0) provider`
+
 // Contracts opened in the window and the distinct clients they served, per
-// provider.
+// provider. The window start bounds the contract id as well ($3,
+// providerStatsCreatedFromContractId), so the partitions minted before it are
+// not read: a contract created in the window has an id of its creation
+// millisecond, within ContractIdCreateTimeMargin.
 const providerStatsContractsSQL = `
-	SELECT destination_id, COUNT(*), COUNT(DISTINCT source_id)
-	FROM transfer_contract
-	WHERE destination_id = ANY($1::uuid[]) AND create_time >= $2
-	GROUP BY destination_id
+	SELECT contract.destination_id, COUNT(*), COUNT(DISTINCT contract.source_id)
+	FROM ` + providerStatsProviderArraySql + `
+	CROSS JOIN LATERAL (
+		SELECT destination_id, source_id
+		FROM transfer_contract
+		WHERE destination_id = ANY(provider.destination_ids) AND create_time >= $2 AND contract_id >= $3
+		OFFSET 0
+	) contract
+	GROUP BY contract.destination_id
 `
+
+// The network overview's settled transfer bytes per close day, summed over its
+// providers. Its providers' contracts are read as the provider list's are
+// (providerStatsProviderArraySql); each contract's report is found by its key,
+// in the one partition of contract_close that holds it.
+const providerStatsOverviewTransferBytesSQL = `
+	SELECT to_char(contract.close_time, 'YYYY-MM-DD') AS day, COALESCE(SUM(cc.used_transfer_byte_count), 0)
+	FROM ` + providerStatsProviderArraySql + `
+	CROSS JOIN LATERAL (
+		SELECT contract_id, close_time
+		FROM transfer_contract
+		WHERE destination_id = ANY(provider.destination_ids) AND close_time >= $2
+		OFFSET 0
+	) contract
+	INNER JOIN contract_close cc ON
+		cc.contract_id = contract.contract_id AND cc.party = 'destination'
+	GROUP BY day
+`
+
+// The network overview's contracts opened per day and the distinct clients
+// they served, bounded as providerStatsContractsSQL is.
+const providerStatsOverviewContractsSQL = `
+	SELECT to_char(contract.create_time, 'YYYY-MM-DD') AS day, COUNT(*), COUNT(DISTINCT contract.source_id)
+	FROM ` + providerStatsProviderArraySql + `
+	CROSS JOIN LATERAL (
+		SELECT create_time, source_id
+		FROM transfer_contract
+		WHERE destination_id = ANY(provider.destination_ids) AND create_time >= $2 AND contract_id >= $3
+		OFFSET 0
+	) contract
+	GROUP BY day
+`
+
+// The smallest contract id a contract created at or after windowStart has
+// (ContractIdCreateTimeRange).
+func providerStatsCreatedFromContractId(windowStart time.Time) server.Id {
+	lower, _ := ContractIdCreateTimeRange(windowStart, windowStart)
+	return lower
+}
+
+// The provider ids of a per-provider contract read in uuid order, which is the
+// order of their canonical text (CODESTYLE.md, Identifiers).
+func providerStatsIdStrings(ids []server.Id) []string {
+	idStrs := idStrings(ids)
+	slices.Sort(idStrs)
+	return idStrs
+}
 
 // resolveStatsWindow computes the lookback window from a last_n hours value
 // (preferred) or a legacy lookback in days, clamped to [1 hour, maxStatsWindow].
@@ -187,7 +289,7 @@ func statsProviders(
 			Providers:   []*ProviderStats{},
 		}, nil
 	}
-	ids := idStrings(order)
+	ids := providerStatsIdStrings(order)
 
 	// Three reads, each on its own pooled primary connection: the payout
 	// attribution (it reads the network's sweeps, not its provider list), the
@@ -289,7 +391,7 @@ func queryProviderStatsActivity(
 	}
 
 	// contracts + distinct served clients per provider
-	result, err := conn.Query(ctx, providerStatsContractsSQL, ids, windowStart)
+	result, err := conn.Query(ctx, providerStatsContractsSQL, ids, windowStart, providerStatsCreatedFromContractId(windowStart))
 	server.WithPgResult(result, err, func() {
 		for result.Next() {
 			var clientId server.Id
@@ -672,19 +774,12 @@ func StatsProvidersOverview(
 		if len(providerIds) == 0 {
 			return
 		}
-		ids := idStrings(providerIds)
+		ids := providerStatsIdStrings(providerIds)
 
 		// transfer bytes per day (summed across providers)
 		result, err = conn.Query(
 			clientSession.Ctx,
-			`
-			SELECT to_char(tc.close_time, 'YYYY-MM-DD') AS day, COALESCE(SUM(cc.used_transfer_byte_count), 0)
-			FROM transfer_contract tc
-			INNER JOIN contract_close cc ON
-				cc.contract_id = tc.contract_id AND cc.party = 'destination'
-			WHERE tc.destination_id = ANY($1::uuid[]) AND tc.close_time >= $2
-			GROUP BY day
-			`,
+			providerStatsOverviewTransferBytesSQL,
 			ids,
 			windowStart,
 		)
@@ -721,14 +816,10 @@ func StatsProvidersOverview(
 		// contracts + distinct served clients per day
 		result, err = conn.Query(
 			clientSession.Ctx,
-			`
-			SELECT to_char(create_time, 'YYYY-MM-DD') AS day, COUNT(*), COUNT(DISTINCT source_id)
-			FROM transfer_contract
-			WHERE destination_id = ANY($1::uuid[]) AND create_time >= $2
-			GROUP BY day
-			`,
+			providerStatsOverviewContractsSQL,
 			ids,
 			windowStart,
+			providerStatsCreatedFromContractId(windowStart),
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
