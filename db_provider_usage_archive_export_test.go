@@ -13,8 +13,11 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/urnetwork/connect"
 
@@ -333,13 +336,13 @@ func TestProviderUsageArchiveExportedWeekDropsOnlyWhenVerified(t *testing.T) {
 		report = pass("off")
 		connect.AssertEqual(t, len(report.Dropped)+len(report.Blocked), 0)
 		// on, but no copy is in the ledger
-		stays(pass("on"), "no verified export holds the week's 3 rows")
+		stays(pass("on"), "no verified export of the week is in the ledger")
 
 		dir := t.TempDir()
 		clock := testExportClock()
 		_, firstManifest := testExportWeek(t, ctx, leaf, dir, clock)
 		// a copy on disk that is not in the ledger drops nothing
-		stays(pass("on"), "no verified export holds the week's 3 rows")
+		stays(pass("on"), "no verified export of the week is in the ledger")
 		testRegisterExport(t, ctx, firstManifest)
 
 		// a ledger digest that differs from the rows keeps the week
@@ -406,6 +409,103 @@ func TestProviderUsageArchiveExportedWeekDropsOnlyWhenVerified(t *testing.T) {
 		}
 		if err := testArchiveExec(ctx, `TRUNCATE st_provider_usage_archive_restore_test`); err == nil || !strings.Contains(err.Error(), "append-only") {
 			t.Fatalf("the restored week admitted a truncate: %v", err)
+		}
+	})
+}
+
+// The statements a fixture's connections send, as PostgreSQL receives them.
+type testArchiveStatementObserver struct {
+	stateLock  sync.Mutex
+	statements []string
+}
+
+func (self *testArchiveStatementObserver) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.statements = append(self.statements, data.SQL)
+	return ctx
+}
+
+func (self *testArchiveStatementObserver) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {
+}
+
+func (self *testArchiveStatementObserver) taken() []string {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return slices.Clone(self.statements)
+}
+
+// A pass counts a week's rows only when the ledger holds an export of the
+// week: the count is there to find the export that holds as many rows, and to
+// match the digest against. A week no export is recorded for stays without a
+// read of its rows. On Main (2026-11-26) the 15-minute pass counted each of
+// the seven retained weeks, none of them exported, every pass: about 6.6M
+// block reads and 193M buffer hits a pass, to print the counts in the
+// blockers.
+func TestProviderUsageArchiveExportCountsOnlyAWeekWithAnExport(t *testing.T) {
+	env := DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		family := providerUsageArchivePartitionFamily
+		now := NowUtc()
+		week := family.RangeAt(now.Add(-20 * testArchiveWeek))
+		_, err := family.EnsureRangeFor(ctx, week.Lower)
+		connect.AssertEqual(t, err, nil)
+		leaf := family.LeafName(testArchiveTable, week)
+		closeTime := week.Lower.Add(2 * time.Hour)
+		for i := range 3 {
+			testExportArchiveContract(t, ctx, week.Lower.Add(time.Duration(i+1)*time.Hour), &closeTime, testArchiveUsage(int64(i+1)))
+		}
+		settings := DefaultProviderUsageArchiveExportSettings()
+		floor := now.Add(-10 * testArchiveWeek).Format(time.RFC3339)
+		quotedLeaf := "public." + quoteIdentifier(leaf)
+		// one pass: why the week stays, and the pass's statements that count
+		// the week's rows
+		pass := func(mode string) (string, []string) {
+			t.Helper()
+			observer := &testArchiveStatementObserver{}
+			scope, err := NewTestPgQueryScope(ctx, observer)
+			if err != nil {
+				t.Fatal(err)
+			}
+			report := func() *PartitionRetireReport {
+				defer func() {
+					if err := scope.Close(); err != nil {
+						t.Error(err)
+					}
+				}()
+				control := NarrowProviderUsageArchiveExportControl(map[string]string{"mode": mode, "closeTimeFloor": floor}, settings)
+				report, _ := family.Retire(WithProviderUsageArchiveExportControlValue(ctx, control), NowUtc(), PartitionFamilyState{}, time.Now().Add(time.Minute))
+				return report
+			}()
+			connect.AssertEqual(t, len(report.Dropped), 0)
+			counts := []string{}
+			for _, statement := range observer.taken() {
+				if strings.Contains(statement, "count(*)") && strings.Contains(statement, quotedLeaf) {
+					counts = append(counts, statement)
+				}
+			}
+			return report.Blocked[leaf], counts
+		}
+
+		// no export in the ledger: the week stays, and its rows are not read
+		blocker, counts := pass("on")
+		if len(counts) != 0 {
+			t.Fatalf("the pass counted a week no export is recorded for: %q", counts)
+		}
+		connect.AssertEqual(t, blocker, "no verified export of the week is in the ledger")
+
+		// with its export in the ledger, the pass counts the week to match the
+		// export, and a dry run verifies it
+		_, manifestPath := testExportWeek(t, ctx, leaf, t.TempDir(), testExportClock())
+		testRegisterExport(t, ctx, manifestPath)
+		blocker, counts = pass("dry_run")
+		if len(counts) == 0 {
+			t.Fatal("the pass did not count a week its export is recorded for")
+		}
+		if !strings.Contains(blocker, "dry run: would drop, its 3 rows held by export") {
+			t.Fatalf("the exported week stays for %q", blocker)
 		}
 	})
 }
