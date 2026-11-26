@@ -48,8 +48,8 @@ func (self *deadlineTurnPending) lock(balanceIds []server.Id) {
 }
 
 // How much of a valid escrow's positive need its grant's room allows. The
-// room is deadlineEscrowRowsSql's available: the balance less the pending sum,
-// at least 0.
+// room is a close alone's available (readDeadlineEscrowRoomsInTx): the
+// balance less the pending sum, at least 0.
 func (self *deadlineTurnPending) count(ctx context.Context, tx server.PgTx, escrow *contractDeadlineEscrow, need ByteCount) ByteCount {
 	if escrow.balance <= 0 {
 		// A pending sum is never negative, so no read can give room.

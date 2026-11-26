@@ -384,18 +384,12 @@ func TestSettlementChargesEscrowsInFundingOrder(t *testing.T) {
 			return
 		}
 		deadlineOrder := func(contractId server.Id, payerNetworkId server.Id) (order []server.Id, charged map[server.Id]ByteCount) {
-			escrows := []contractDeadlineEscrow{}
-			server.Db(ctx, func(conn server.PgConn) {
-				result, err := conn.Query(ctx, deadlineEscrowRowsSql, contractId)
-				server.WithPgResult(result, err, func() {
-					for result.Next() {
-						var escrow contractDeadlineEscrow
-						server.Raise(result.Scan(&escrow.balanceId, &escrow.amount, &escrow.start, &escrow.revenue, &escrow.networkId,
-							&escrow.available, &escrow.settled, &escrow.priorPayout, &escrow.redisReserved, &escrow.journal))
-						escrows = append(escrows, escrow)
-					}
-				})
-			})
+			var escrows []contractDeadlineEscrow
+			// a close alone's read: the rows, then each grant's room
+			server.Tx(ctx, func(tx server.PgTx) {
+				escrows = readDeadlineEscrowRowsInTx(ctx, tx, contractId)
+				readDeadlineEscrowRoomsInTx(ctx, tx, escrows)
+			}, server.TxReadCommitted)
 			adjustments := []string{}
 			payouts := deadlineEscrowPayouts(1*Mib, escrows, payerNetworkId, true, &adjustments)
 			charged = map[server.Id]ByteCount{}
