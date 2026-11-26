@@ -1,11 +1,11 @@
 package controller
 
 // GET /sidecar/label (§12.5; plan-DNS-labels-before-m5, QD-021; owner decision 421, QD-935): the bearer's own
-// network's label, allocated on first need, and its live alias, which feed a sidecar's NetworkLabelTable from M2,
-// before the dns block's GET /dns/zone answers the same from M5. The answer is the sidecar's own
-// sidecar.SidecarLabel, so the body is what the client's GetSidecarLabel reads. Client class and on §7.4's
-// strict_exp allowlist (api/route_authz.go): any credential of the network reaches it, a sidecar's token among
-// them, and a forwarding client's token is refused before this runs.
+// network's label, allocated on first need, its live alias and its retiring aliases, which feed a sidecar's
+// NetworkLabelTable from M2, before the dns block's GET /dns/zone answers the same from M5. The answer is the
+// sidecar's own sidecar.SidecarLabel, so the body is what the client's GetSidecarLabel reads. Client class and on
+// §7.4's strict_exp allowlist (api/route_authz.go): any credential of the network reaches it, a sidecar's token
+// among them, and a forwarding client's token is refused before this runs.
 //
 //   - The network is the credential's, never the request's: the route reads no parameter and no body, so no
 //     request names another network.
@@ -17,6 +17,10 @@ package controller
 //     and a refusal rolls the draw back. The alias is
 //     model.GetNetworkDnsAliasNameInTx's, dns_label's live alias row, read in the same transaction and left out
 //     while the network has none.
+//   - The retiring aliases are model.GetNetworkDnsRetiringAliasesInTx's, each alias the network changed or
+//     released with the time its 90 days end (D-DNS-10), read in the same transaction and left out while there
+//     is none: a sidecar's table keeps each until then, so `.ur`, git remotes and network:<net> naming it still
+//     resolve, a table that never saw the alias live included.
 //   - A binary that does not link MG2 holds no dns_label, and the route answers 503 without a query, never a
 //     label that is not the network's.
 //
@@ -42,8 +46,9 @@ func sidecarLabelUnavailable(message string) error {
 	return &sidecar.DnsApiError{Status: http.StatusServiceUnavailable, Code: sidecar.DnsApiCodeUnavailable, Message: message}
 }
 
-// GET /sidecar/label: {network_id, label, alias} for the credential's own network, the label allocated on
-// first need and the alias omitted while there is none.
+// GET /sidecar/label: {network_id, label, alias, retiring_aliases} for the credential's own network, the label
+// allocated on first need, the alias omitted while there is none, and each retiring alias with its tombstone
+// time, omitted while there is none.
 func GetSidecarLabel(clientSession *session.ClientSession) (*sidecar.SidecarLabel, error) {
 	if !server.SidecarMg2Linked() {
 		return nil, sidecarLabelUnavailable("network labels are not available")
@@ -75,6 +80,7 @@ func GetSidecarLabel(clientSession *session.ClientSession) (*sidecar.SidecarLabe
 			}
 			answer.Label = label
 			answer.Alias = model.GetNetworkDnsAliasNameInTx(ctx, tx, networkId, root)
+			answer.RetiringAliases = model.GetNetworkDnsRetiringAliasesInTx(ctx, tx, networkId, root)
 		}, server.TxReadCommitted)
 	}()
 	switch {

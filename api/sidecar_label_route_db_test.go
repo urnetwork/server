@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -116,7 +117,7 @@ func TestSidecarLabelRouteAnswersASidecarItsNetworksLabel(t *testing.T) {
 
 		defer model.Testing_SetDnsLabelRandom(failingSidecarLabelRouteReader{})()
 		status, _, second, body := self.sidecarLabel(t, "/sidecar/label", laptop.authorization(), nil)
-		if status != http.StatusOK || *second != *first {
+		if status != http.StatusOK || !reflect.DeepEqual(second, first) {
 			t.Fatalf("the second request: %d %s, the first %+v", status, body, first)
 		}
 		if rows := testSidecarLabelRouteRows(ctx, self.networkId, root); !slices.Equal(rows, []string{first.Label}) {
@@ -230,7 +231,7 @@ func TestSidecarLabelRouteNamesNoOtherNetwork(t *testing.T) {
 		} {
 			status, _, answer, body := self.sidecarLabel(t, path, laptop.authorization(), nil)
 			requireOwn(path, status, answer, body)
-			if *answer != *own {
+			if !reflect.DeepEqual(answer, own) {
 				t.Fatalf("%s answered %+v, with no parameter %+v", path, answer, own)
 			}
 		}

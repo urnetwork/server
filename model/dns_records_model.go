@@ -853,9 +853,9 @@ func DnsEntryCountInTx(ctx context.Context, query server.PgCanQuery, networkId s
 	return
 }
 
-// The network's zone in root, its label allocated on first need: the label, its live alias, its version and every
-// RRset it holds, withheld ones left out, in owner then type order. What GET /network/dns shows the console and GET
-// /dns/zone filters by the caller's grants.
+// The network's zone in root, its label allocated on first need: the label, its live alias, its retiring aliases
+// with their tombstone times, its version and every RRset it holds, withheld ones left out, in owner then type order.
+// What GET /network/dns shows the console and GET /dns/zone filters by the caller's grants.
 func GetDnsZoneView(ctx context.Context, root string, networkId server.Id) (*sidecar.DnsZone, error) {
 	if !server.SidecarMg2Linked() || !server.SidecarMg5Linked() {
 		return nil, dnsRecordsUnavailable("the zone tables are not linked")
@@ -915,6 +915,8 @@ func getDnsZoneViewInTx(ctx context.Context, tx server.PgTx, root string, networ
 			}
 		})
 	}
+	// the aliases retiring, each with its tombstone time, which a sidecar's label table keeps until then (§12.5)
+	zone.RetiringAliases = GetNetworkDnsRetiringAliasesInTx(ctx, tx, networkId, root)
 	if zone.Version, err = getDnsZoneVersionOrZeroInTx(ctx, tx, root, networkId); err != nil {
 		return nil, err
 	}
