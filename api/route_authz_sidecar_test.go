@@ -249,10 +249,24 @@ var sidecarAllowlist = []string{
 	"GET /network/config/projection",
 	// §7.9's site loss (TEAM-M3-02)
 	"POST /network/config/reseed",
+	// DESIGN-COMPUTE §14.3's api/compute routes (CSRV-M12-04)
+	"GET /compute/balance",
+	"POST /compute/checkout",
+	"GET /compute/auto-renew",
+	"POST /compute/auto-renew",
+	"GET /compute/charges",
+	"GET /compute/statement",
+	"GET /compute/spend",
+	"POST /compute/refund",
+	"POST /compute/promo/redeem",
+	"GET /compute/terms",
+	"POST /compute/terms",
 }
 
 // The route families §7.4 classifies sidecar. A route under one of these paths
-// joins the allowlist, or is named below as refused.
+// joins the allowlist, or is named below as refused. DESIGN-COMPUTE §14.3's
+// /compute/ is one too, beside its model routes, which read no credential and
+// are on no list.
 var sidecarRouteFamilies = []string{
 	"/sidecar/",
 	"/network/config/",
@@ -266,6 +280,7 @@ var sidecarRouteFamilies = []string{
 	"/socket/",
 	"/dns/",
 	"/abuse/status",
+	"/compute/",
 }
 
 // The routes under those families whose own class keeps them refused (§7.4).

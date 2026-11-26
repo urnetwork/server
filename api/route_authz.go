@@ -492,6 +492,22 @@ var routeAccessByRoute = map[string]routeAccess{
 	"HEAD /compute/models/([^/]+)/index":          routeAccessPublic,
 	"GET /compute/models/([^/]+)/chunks/([^/]+)":  routeAccessPublic,
 	"HEAD /compute/models/([^/]+)/chunks/([^/]+)": routeAccessPublic,
+
+	// DESIGN-COMPUTE §14.3's api/compute routes (CSRV-M12-04): a sidecar's token, for the sidecar its client is bound
+	// to, or the network's own credential, which the mount resolves into the caller and the frame narrows by §9.10's
+	// rights, as /smtp/reports' handler narrows a client token (sidecar_handler_mount.go); on the strict_exp
+	// allowlist, so a sidecar reaches them, and off the forwarding one, so a forwarding client's token is refused
+	"GET /compute/balance":       routeAccessClient,
+	"POST /compute/checkout":     routeAccessClient,
+	"GET /compute/auto-renew":    routeAccessClient,
+	"POST /compute/auto-renew":   routeAccessClient,
+	"GET /compute/charges":       routeAccessClient,
+	"GET /compute/statement":     routeAccessClient,
+	"GET /compute/spend":         routeAccessClient,
+	"POST /compute/refund":       routeAccessClient,
+	"POST /compute/promo/redeem": routeAccessClient,
+	"GET /compute/terms":         routeAccessClient,
+	"POST /compute/terms":        routeAccessClient,
 }
 
 // The routes that read no credential at all: public routes serving public bytes to every caller alike, in front of
@@ -604,6 +620,19 @@ var strictExpRoutes = map[string]bool{
 	"GET /network/config/projection":  true,
 	// §7.9's site loss, only while sidecar.yml's reseed is true (TEAM-M3-02)
 	"POST /network/config/reseed": true,
+	// DESIGN-COMPUTE §14.3's api/compute routes (CSRV-M12-04), each a sidecar's: §9.10's rights refuse what a device
+	// may not do (the frame), and a client bound to no admitted sidecar is refused by the mount
+	"GET /compute/balance":       true,
+	"POST /compute/checkout":     true,
+	"GET /compute/auto-renew":    true,
+	"POST /compute/auto-renew":   true,
+	"GET /compute/charges":       true,
+	"GET /compute/statement":     true,
+	"GET /compute/spend":         true,
+	"POST /compute/refund":       true,
+	"POST /compute/promo/redeem": true,
+	"GET /compute/terms":         true,
+	"POST /compute/terms":        true,
 }
 
 // The only routes a forward_only bearer reaches (§7.4's mark row, owner
