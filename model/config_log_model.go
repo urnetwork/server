@@ -96,7 +96,9 @@ import (
 // statement signed, at its window's end, and again when a retry finds that
 // statement in the log (config_log_tick.go; QD-745). api's
 // process installs a sequencer built
-// with NewApiConfigLogSettings, which sets all of these; a test's sequencer sets
+// with NewApiConfigLogSettings, which sets all of these, and taskworker's one
+// with none of them in a slot of its own (SetConfigLogSequencer's and
+// InstallWorkerConfigLogSequencer's); a test's sequencer sets
 // what it tests. Ticks' schedule and retention are config_log_tick.go's and
 // config_log_retention.go's (TEAM-M2-14); a site loss's uploads, adoption and
 // resumption are config_log_reseed.go's (TEAM-M3-02, §19.10), whose resumed
@@ -106,7 +108,8 @@ import (
 // Tunables of the sequencer. §7.9's 4,096 is ConfigLog's.
 type ConfigLogSettings struct {
 	// Taskworker dispatches due timers to API, the projection and cache writer.
-	// Its own sequencer verifies inputs for retention and effects.
+	// Its own sequencer verifies inputs for retention and effects. Read from the
+	// worker's slot alone: the issuer's handoff appends whatever its own says.
 	QueueTicksAtIssuer bool
 	// How many positions one append tries before it answers 503: each try is
 	// another instance's landed entry or a lost race, so this bounds only a
@@ -1225,23 +1228,60 @@ func (self *ConfigLogSequencer) AdmittedIdentityKey(ctx context.Context, network
 	return bytes.Clone(row.GetIdentityPublicKey()), nil
 }
 
-// This process's sequencer, which api installs once its first metadata cluster
-// is wired (OPS's ServiceHost.Blobs); until then every log route answers 503,
-// so nothing is taken unverified.
+// This process's sequencers, in two slots (§19.4's writers that share a
+// process, owner decision 788):
+//
+//	issuer  api's, built with NewApiConfigLogSettings on api's first cluster
+//	        once it is wired (OPS's ServiceHost.Blobs): every log route reads
+//	        it, and so do the issuer's handoffs of the worker's ticks
+//	        (PublishConfigLogTickTask, PublishConfigLogActivationTask); until
+//	        it is installed every log route answers 503, so nothing is taken
+//	        unverified
+//	worker  taskworker's, on its own first cluster under its own credentials
+//	        (installEvsJobWriters): retention, effects and the tick and
+//	        activation tasks, which hand their appends to the issuer, read it
+//	        (CurrentWorkerConfigLogSequencer), and api's where the process holds
+//	        none, as all's process does when its vault holds api's clusters
+//	        alone
+//
+// api's sequencer cannot stand in for the worker's in a process that runs
+// both, all's: its effects and its ticks would hold under api's settings, but
+// retention deletes proj/ and projrows/ objects, and api's MinIO user on the
+// first cluster deletes nothing (§19.4's api row; server's
+// TestApiFileClusterUserReachesItsPrefixesAlone), so each keeps its own slot.
 var configLogSequencer atomic.Pointer[ConfigLogSequencer]
+var workerConfigLogSequencer atomic.Pointer[ConfigLogSequencer]
 
-// Installs this process's sequencer; nil removes it.
+// Installs this process's issuer sequencer, api's; nil removes it.
 func SetConfigLogSequencer(sequencer *ConfigLogSequencer) {
 	configLogSequencer.Store(sequencer)
 }
 
-// This process's sequencer, or a 503 error while api has none.
+// This process's issuer sequencer, api's, or a 503 error while api has none.
 func CurrentConfigLogSequencer() (*ConfigLogSequencer, error) {
 	sequencer := configLogSequencer.Load()
 	if sequencer == nil {
 		return nil, &ConfigLogError{Status: http.StatusServiceUnavailable, Code: "unavailable", Err: errors.New("api holds no first metadata cluster")}
 	}
 	return sequencer, nil
+}
+
+// Installs sequencer as this process's worker sequencer, taskworker's, until
+// the returned function removes it; the removal takes out sequencer alone.
+func InstallWorkerConfigLogSequencer(sequencer *ConfigLogSequencer) (remove func()) {
+	workerConfigLogSequencer.Store(sequencer)
+	return func() {
+		workerConfigLogSequencer.CompareAndSwap(sequencer, nil)
+	}
+}
+
+// The sequencer taskworker's log duties run through: the worker's, else api's,
+// else a 503 error.
+func CurrentWorkerConfigLogSequencer() (*ConfigLogSequencer, error) {
+	if sequencer := workerConfigLogSequencer.Load(); sequencer != nil {
+		return sequencer, nil
+	}
+	return CurrentConfigLogSequencer()
 }
 
 // Appends a statement to the network's log through this process's sequencer.

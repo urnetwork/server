@@ -36,7 +36,11 @@ package model
 // Reaps run in taskworker as well as api, so the tick appender is shared code,
 // AppendApiTick through the process's sequencer, whose script stays the one
 // writer of {acl_}e. A process with no sequencer appends nothing, and the task
-// retries.
+// retries. The tick and activation tasks run in taskworker on the worker's
+// sequencer (CurrentWorkerConfigLogSequencer), whose QueueTicksAtIssuer hands
+// each run to the issuer, and the issuer's handoff tasks append on api's
+// alone (CurrentConfigLogSequencer), so in all's process, which holds both, a
+// handoff appends rather than handing off again.
 
 import (
 	"bytes"
@@ -236,14 +240,15 @@ func init() {
 }
 
 // One tick of the network: the reaped ephemeral admissions at the tip, if any,
-// appended as one ApiTick. Without this process's sequencer it retries a tick
-// interval on.
+// appended as one ApiTick through the worker's sequencer, or handed to the
+// issuer where that sequencer queues ticks there. Without a sequencer it
+// retries a tick interval on.
 func AppendConfigLogTickTask(
 	appendConfigLogTick *AppendConfigLogTickArgs,
 	clientSession *session.ClientSession,
 ) (*AppendConfigLogTickResult, error) {
 	settings := DefaultConfigLogTickSettings()
-	sequencer, err := CurrentConfigLogSequencer()
+	sequencer, err := CurrentWorkerConfigLogSequencer()
 	if err != nil {
 		return nil, task.WithRetryDelay(err, settings.TickInterval)
 	}
@@ -471,14 +476,15 @@ func scheduleConfigLogActivationInTx(tx server.PgTx, owner *session.ClientSessio
 }
 
 // One look at a proposal whose recovery window was due: the tick that
-// activates it, when the tip's row says it may activate now. Without this
-// process's sequencer it retries a tick interval on.
+// activates it, when the tip's row says it may activate now, through the
+// worker's sequencer, or handed to the issuer where that sequencer queues
+// ticks there. Without a sequencer it retries a tick interval on.
 func AppendConfigLogActivationTask(
 	appendConfigLogActivation *AppendConfigLogActivationArgs,
 	clientSession *session.ClientSession,
 ) (*AppendConfigLogActivationResult, error) {
 	settings := DefaultConfigLogTickSettings()
-	sequencer, err := CurrentConfigLogSequencer()
+	sequencer, err := CurrentWorkerConfigLogSequencer()
 	if err != nil {
 		return nil, task.WithRetryDelay(err, settings.TickInterval)
 	}
@@ -545,10 +551,24 @@ func AppendConfigLogActivationTaskPost(
 
 // The issuer rechecks the current projection when it runs each timer's durable
 // handoff. A late, repeated, vetoed or already satisfied timer changes nothing.
+// It appends through api's sequencer alone and never hands the run on again,
+// whatever a worker's sequencer in the same process queues; without api's it
+// retries a tick interval on.
 func PublishConfigLogTickTask(args *AppendConfigLogTickArgs, client *session.ClientSession) (*AppendConfigLogTickResult, error) {
-	return AppendConfigLogTickTask(args, client)
+	settings := DefaultConfigLogTickSettings()
+	sequencer, err := CurrentConfigLogSequencer()
+	if err != nil {
+		return nil, task.WithRetryDelay(err, settings.TickInterval)
+	}
+	return appendConfigLogTickAt(client.Ctx, sequencer, args.NetworkId, settings)
 }
 
+// As PublishConfigLogTickTask, for an activation's handoff.
 func PublishConfigLogActivationTask(args *AppendConfigLogActivationArgs, client *session.ClientSession) (*AppendConfigLogActivationResult, error) {
-	return AppendConfigLogActivationTask(args, client)
+	settings := DefaultConfigLogTickSettings()
+	sequencer, err := CurrentConfigLogSequencer()
+	if err != nil {
+		return nil, task.WithRetryDelay(err, settings.TickInterval)
+	}
+	return appendConfigLogActivationAt(client.Ctx, sequencer, args.NetworkId, args.ProposalId, settings)
 }

@@ -870,14 +870,15 @@ func scheduleConfigLogEffectsInTx(tx server.PgTx, owner *session.ClientSession, 
 	)
 }
 
-// One run of the network's effects through this process's sequencer. Without
-// one it retries RetryDelay on.
+// One run of the network's effects through this process's worker sequencer,
+// taskworker's, or api's where the process holds none
+// (CurrentWorkerConfigLogSequencer). Without either it retries RetryDelay on.
 func ApplyConfigLogEffectsTask(
 	applyConfigLogEffects *ApplyConfigLogEffectsArgs,
 	clientSession *session.ClientSession,
 ) (*ApplyConfigLogEffectsResult, error) {
 	settings := DefaultConfigLogEffectsSettings()
-	sequencer, err := CurrentConfigLogSequencer()
+	sequencer, err := CurrentWorkerConfigLogSequencer()
 	if err != nil {
 		return nil, task.WithRetryDelay(err, settings.RetryDelay)
 	}

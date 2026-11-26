@@ -130,14 +130,14 @@ func newAuthorizationIssuerWorker(ctx context.Context) *task.TaskWorker {
 
 // rev/'s writer on the issuer's first cluster, spending host's budget: each create, raise and DELETE at its own
 // one of §11.13's cost rows, by the table the budget, built with evsservice's default settings, prices with
-// (model.SidecarRevStore.SetWriteBudget's nil prices).
+// (model.SidecarRevStore.SetWriteBudget's nil prices). Answers what removes it, which leaves a sweep store taskworker
+// installed beside it in all's process (model.InstallSidecarRevStore; owner decision 788).
 func installApiRevocations(host *sidecar.ServiceHost, first sidecar.BlobCluster) func() {
 	settings := model.DefaultSidecarRevSettings()
 	settings.Clock = host.Clock
 	store := model.NewSidecarRevStore(first, oauth.SignRevocation, settings)
 	store.SetWriteBudget(host.Budget, nil)
-	model.SetSidecarRevStore(store)
-	return func() { model.SetSidecarRevStore(nil) }
+	return model.InstallSidecarRevStore(store)
 }
 
 // hold/'s writer on the issuer's first cluster (§19.4's api row; §21.9's "api mirrors each hold"), which the

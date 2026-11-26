@@ -1,6 +1,7 @@
 package taskworker
 
 import (
+	"encoding/base64"
 	"testing"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/session"
 )
 
 // The writers taskworker installs beside evs's jobs spend the process's write budget (installEvsJobWriters): on a
@@ -103,5 +105,97 @@ func TestEvsJobWritersSpendTheProcessBudget(t *testing.T) {
 	}
 	if got, want := spent(sidecar.WriteP0KindRevocation), price(evsservice.WriteOperationDelete, revKey); got != want {
 		t.Errorf("the sweep's DELETE spent %d, and §11.13's delete row prices it at %d", got, want)
+	}
+}
+
+// A compact JWS shape around payload, as oauth.SignRevocation writes one: what the writer reads back of an object.
+func testEvsJobWritersSignRevocation(payload []byte) ([]byte, error) {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"test","typ":"ur-rev+jwt"}`))
+	return []byte(header + "." + base64.RawURLEncoding.EncodeToString(payload) + "." + base64.RawURLEncoding.EncodeToString([]byte("test"))), nil
+}
+
+// all's process installs api's parts, its signing rev/ store among them, before taskworker's runtime installs these
+// writers (§19.4's writers that share a process; owner decision 788): the worker's sweep store keeps out of use beside
+// api's, so a removal's write task still publishes its object, and the sweep, reading whichever store is current,
+// deletes it through api's 20 minutes on, spending api's budget and none of the worker's. The writers' removal leaves
+// api's store current, and api's own removal then leaves none. Before, the worker's store replaced api's: the write
+// task failed as unsigned, and the writers' removal left no store at all.
+func TestEvsJobWritersKeepApisSigningRevStore(t *testing.T) {
+	ctx := t.Context()
+	clock := sidecartest.NewFakeClock(sidecartest.DefaultClockStart())
+	blobs := evsservice.NewBudgetedBlobs(sidecartest.NewFakeBlobs(clock, sidecartest.NewFaultQueue(), nil, sidecartest.DefaultFakeBlobsSettings()))
+	first, err := blobs.FirstCluster()
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.SetSidecarRevStore(nil)
+	defer model.SetSidecarRevStore(nil)
+	// api's signing store, as installApiRevocations makes it, on api's own budget
+	apiBudget := sidecartest.NewFakeWriteBudget(nil)
+	apiSettings := model.DefaultSidecarRevSettings()
+	apiSettings.Clock = clock
+	apiStore := model.NewSidecarRevStore(first, testEvsJobWritersSignRevocation, apiSettings)
+	apiStore.SetWriteBudget(apiBudget, nil)
+	removeApi := model.InstallSidecarRevStore(apiStore)
+	defer removeApi()
+	workerBudget := sidecartest.NewFakeWriteBudget(nil)
+	host := &sidecar.ServiceHost{Blobs: blobs, Budget: workerBudget, Clock: clock}
+	closeWriters := installEvsJobWriters(host, first, nil)
+	defer closeWriters()
+
+	clientSession := session.NewLocalClientSession(ctx, "", nil)
+	defer clientSession.Cancel()
+	write := func() (string, error) {
+		revocation := &model.SidecarRevocation{
+			NetworkId: server.NewId(),
+			Kind:      sidecar.RevocationKindClient,
+			SubjectId: server.NewId(),
+			NotBefore: sidecar.RevocationNotBefore(clock.Now()),
+			Reason:    sidecar.RevocationReasonRemoved,
+		}
+		_, err := model.WriteSidecarRevTask(&model.WriteSidecarRevArgs{Revocations: []*model.SidecarRevocation{revocation}}, clientSession)
+		return sidecar.RevocationKey(sidecar.Id(revocation.NetworkId), revocation.Kind, sidecar.Id(revocation.SubjectId)), err
+	}
+	published := func(key string) bool {
+		_, err := first.Head(ctx, key)
+		return err == nil
+	}
+	spent := func(budget *sidecartest.FakeWriteBudget) int64 {
+		if violations := budget.Violations(); len(violations) != 0 {
+			t.Errorf("the budget's violations: %v", violations)
+		}
+		return budget.P0ByteCount(first.ClusterId(), sidecar.WriteP0KindRevocation)
+	}
+
+	key, err := write()
+	if err != nil || !published(key) {
+		t.Fatalf("api's store, beside the worker's writers, did not publish: %v", err)
+	}
+	created := spent(apiBudget)
+	if created <= 0 {
+		t.Fatalf("api's create spent %d", created)
+	}
+	clock.Advance(apiSettings.DeleteAfter + time.Minute)
+	if deletedCount, err := model.SweepSidecarRevocations(ctx); err != nil || deletedCount != 1 {
+		t.Fatalf("the sweep deleted %d: %v", deletedCount, err)
+	}
+	if published(key) {
+		t.Fatal("the sweep left the expired object")
+	}
+	if swept := spent(apiBudget); swept <= created {
+		t.Errorf("api's budget spent %d after the sweep and %d before it: the sweep did not go through api's store", swept, created)
+	}
+	if got := spent(workerBudget); got != 0 {
+		t.Errorf("the worker's budget spent %d of rev/ while api's store was current", got)
+	}
+
+	// the writers' removal leaves api's store, and api's own then none
+	closeWriters()
+	if key, err := write(); err != nil || !published(key) {
+		t.Fatalf("api's store after the writers' removal did not publish: %v", err)
+	}
+	removeApi()
+	if _, err := write(); err == nil {
+		t.Fatal("a write landed with neither store installed")
 	}
 }

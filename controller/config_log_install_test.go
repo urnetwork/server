@@ -104,7 +104,7 @@ func TestIssuerPublishesNormalAndRetriedRevocation(t *testing.T) {
 			t.Fatal("the committed removal did not publish a signed record")
 		}
 		closeIssuer()
-		model.SetSidecarRevStore(model.NewSidecarRevStore(first, nil, nil))
+		t.Cleanup(model.InstallSidecarRevStore(model.NewSidecarRevStore(first, nil, nil)))
 		queued := owe()
 		if read(queued) != nil {
 			t.Fatal("a sweep-only worker published a revocation")

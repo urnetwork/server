@@ -1,7 +1,8 @@
 package work
 
 // §7.9's log jobs (TEAM-M2-14): retention, a pass every RetentionInterval
-// through the process's sequencer (model.RetainConfigLogs), a run that stops
+// through the process's worker sequencer (model.RetainConfigLogs,
+// model.CurrentWorkerConfigLogSequencer), a run that stops
 // short of the end handing its cursor to the next, which runs at once; and
 // each network's tick, model.AppendConfigLogTickTask, which reaps schedule. A
 // binary that does not link MG2, whose network_acl_head lists the networks
