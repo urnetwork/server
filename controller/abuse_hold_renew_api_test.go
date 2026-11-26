@@ -4,8 +4,8 @@ package controller
 // that serves api's routes and runs no taskworker, as production's api does, a renewal of a hold the worker placed
 // rewrites its object and spends api's write budget; api's writes and the worker's to one key, each conditioned on the
 // object its own writer read, never replace one another unread; and in all's process, which installs both writers,
-// removing one leaves the other. The first three run on MG5's tables, in a build with sidecar_pending, over FakeBlobs
-// first clusters; the last needs neither.
+// the worker's is the process's in either order and removing one leaves the other (QD-1420). The first three run on
+// MG5's tables, in a build with sidecar_pending, over FakeBlobs first clusters; the last needs neither.
 
 import (
 	"bytes"
@@ -38,7 +38,7 @@ func pushTestHoldsOn(clock *sidecartest.FakeClock) (pop func()) {
 // source over softState, both installed for the placement alone, so the process goes on with neither, as api's.
 func placeTestHoldAsTheWorker(t testing.TB, ctx context.Context, store *model.AbuseHoldStore, softState *sidecar.ServiceHost, networkId server.Id, caseId server.Id) *model.LegalHold {
 	t.Helper()
-	removeStore := model.InstallAbuseHoldStore(store)
+	removeStore := model.InstallWorkerAbuseHoldStore(store)
 	model.SetAbuseHoldSoftStateSource(model.NewAbuseHoldSoftStateSource(softState, nil))
 	result, err := placeLegalHoldLocally(ctx, &model.LegalHoldArgs{NetworkId: networkId, CaseId: caseId, Kind: sidecar.HoldKindPreserve2703f})
 	model.SetAbuseHoldSoftStateSource(nil)
@@ -459,10 +459,12 @@ func btoi(value bool) int {
 	return 0
 }
 
-// all's process runs api and taskworker, each installing its own hold/ writer (installApiLegalHolds, and taskworker's
-// installEvsJobWriters, each through model.InstallAbuseHoldStore): the later stands in for both, and removing the other
-// leaves it, in either order, so neither part's end takes away the writer the other installed since.
-func TestRemovingOneHoldWriterLeavesTheOneInstalledSince(t *testing.T) {
+// all's process runs api and taskworker, each installing its own hold/ writer (installApiLegalHolds through
+// model.InstallAbuseHoldStore, and taskworker's installEvsJobWriters through model.InstallWorkerAbuseHoldStore): the
+// worker's is the process's whenever it is installed, in either order, since the pass deletes through it and api's
+// MinIO user deletes nothing (QD-1420), api's only where the worker's is not, and removing either leaves the other, so
+// neither part's end takes away the writer the other installed.
+func TestTheWorkersHoldWriterStaysCurrentBesideApis(t *testing.T) {
 	blobs := sidecartest.NewFakeBlobs(nil, nil, nil, nil)
 	first, err := blobs.FirstCluster()
 	if err != nil {
@@ -480,29 +482,29 @@ func TestRemovingOneHoldWriterLeavesTheOneInstalledSince(t *testing.T) {
 	removeApi := installApiLegalHolds(host, first)
 	apiStore := current()
 	workerStore := model.NewAbuseHoldStore(first)
-	removeWorker := model.InstallAbuseHoldStore(workerStore)
+	removeWorker := model.InstallWorkerAbuseHoldStore(workerStore)
 	if apiStore == nil || current() != workerStore {
-		t.Fatal("the writer installed later is not the process's")
+		t.Fatal("the worker's writer, installed later, is not the process's")
 	}
 	removeApi()
 	if current() != workerStore {
-		t.Fatal("removing api's writer took away the worker's, installed since")
+		t.Fatal("removing api's writer took away the worker's")
 	}
 	removeWorker()
 	if current() != nil {
 		t.Fatal("a writer stands with both removed")
 	}
 
-	// the worker's first, as when api's mount comes after taskworker's start
-	removeWorker = model.InstallAbuseHoldStore(workerStore)
+	// the worker's first, as when api's mount comes after taskworker's start: it stays the process's
+	removeWorker = model.InstallWorkerAbuseHoldStore(workerStore)
 	removeApi = installApiLegalHolds(host, first)
-	apiStore = current()
-	if apiStore == nil || apiStore == workerStore {
-		t.Fatal("api's writer, installed later, is not the process's")
+	if current() != workerStore {
+		t.Fatal("api's writer, installed later, took the worker's place")
 	}
 	removeWorker()
-	if current() != apiStore {
-		t.Fatal("removing the worker's writer took away api's, installed since")
+	apiStore = current()
+	if apiStore == nil || apiStore == workerStore {
+		t.Fatal("removing the worker's writer took away api's")
 	}
 	removeApi()
 	if current() != nil {

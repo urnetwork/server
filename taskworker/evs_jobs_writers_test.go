@@ -2,6 +2,7 @@ package taskworker
 
 import (
 	"encoding/base64"
+	"errors"
 	"testing"
 	"time"
 
@@ -114,88 +115,139 @@ func testEvsJobWritersSignRevocation(payload []byte) ([]byte, error) {
 	return []byte(header + "." + base64.RawURLEncoding.EncodeToString(payload) + "." + base64.RawURLEncoding.EncodeToString([]byte("test"))), nil
 }
 
-// all's process installs api's parts, its signing rev/ store among them, before taskworker's runtime installs these
-// writers (§19.4's writers that share a process; owner decision 788): the worker's sweep store keeps out of use beside
-// api's, so a removal's write task still publishes its object, and the sweep, reading whichever store is current,
-// deletes it through api's 20 minutes on, spending api's budget and none of the worker's. The writers' removal leaves
-// api's store current, and api's own removal then leaves none. Before, the worker's store replaced api's: the write
-// task failed as unsigned, and the writers' removal left no store at all.
+// all's process installs api's parts, its signing rev/ store and its hold/ writer among them, before taskworker's
+// runtime installs these writers, or after them when api's mount comes later than taskworker's start (§19.4's writers
+// that share a process; owner decision 788, amended by QD-1420). In either order every rev/ write goes through api's
+// store, so a removal's write task publishes its object, spending api's budget, and the sweep deletes it through the
+// worker's sweep store, spending the worker's budget at §11.13's delete row and none of api's, since api's MinIO user
+// deletes nothing; and the worker's hold/ writer is the current one. The writers' removal leaves api's store and writer
+// current, and api's own removal then leaves neither. Before the places, the worker's store replaced api's: the write
+// task failed as unsigned, and the writers' removal left no store at all; before QD-1420 the sweep went through api's
+// store, and api's hold/ writer, installed later, became the current one.
 func TestEvsJobWritersKeepApisSigningRevStore(t *testing.T) {
-	ctx := t.Context()
-	clock := sidecartest.NewFakeClock(sidecartest.DefaultClockStart())
-	blobs := evsservice.NewBudgetedBlobs(sidecartest.NewFakeBlobs(clock, sidecartest.NewFaultQueue(), nil, sidecartest.DefaultFakeBlobsSettings()))
-	first, err := blobs.FirstCluster()
+	deletePrice, err := evsservice.DefaultWriteBudgetSettings().PriceTable.Price(evsservice.WriteOperation{Kind: evsservice.WriteOperationDelete, Count: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	model.SetSidecarRevStore(nil)
-	defer model.SetSidecarRevStore(nil)
-	// api's signing store, as installApiRevocations makes it, on api's own budget
-	apiBudget := sidecartest.NewFakeWriteBudget(nil)
-	apiSettings := model.DefaultSidecarRevSettings()
-	apiSettings.Clock = clock
-	apiStore := model.NewSidecarRevStore(first, testEvsJobWritersSignRevocation, apiSettings)
-	apiStore.SetWriteBudget(apiBudget, nil)
-	removeApi := model.InstallSidecarRevStore(apiStore)
-	defer removeApi()
-	workerBudget := sidecartest.NewFakeWriteBudget(nil)
-	host := &sidecar.ServiceHost{Blobs: blobs, Budget: workerBudget, Clock: clock}
-	closeWriters := installEvsJobWriters(host, first, nil)
-	defer closeWriters()
+	for _, apiFirst := range []bool{true, false} {
+		func() {
+			ctx := t.Context()
+			// the worker's sweep reads real time, as in production, and this clock stands months before it, so what
+			// the sweep finds is past its 20 minutes as soon as it is written
+			clock := sidecartest.NewFakeClock(sidecartest.DefaultClockStart())
+			blobs := evsservice.NewBudgetedBlobs(sidecartest.NewFakeBlobs(clock, sidecartest.NewFaultQueue(), nil, sidecartest.DefaultFakeBlobsSettings()))
+			first, err := blobs.FirstCluster()
+			if err != nil {
+				t.Fatal(err)
+			}
+			model.SetSidecarRevStore(nil)
+			defer model.SetSidecarRevStore(nil)
+			model.SetAbuseHoldStore(nil)
+			defer model.SetAbuseHoldStore(nil)
+			// api's signing store and hold/ writer, as installApiRevocations and installApiLegalHolds make them, on
+			// api's own budget
+			apiBudget := sidecartest.NewFakeWriteBudget(nil)
+			apiSettings := model.DefaultSidecarRevSettings()
+			apiSettings.Clock = clock
+			apiStore := model.NewSidecarRevStore(first, testEvsJobWritersSignRevocation, apiSettings)
+			apiStore.SetWriteBudget(apiBudget, nil)
+			apiHoldStore := model.NewAbuseHoldStore(first)
+			apiHoldStore.SetWriteBudget(apiBudget, nil)
+			installApi := func() func() {
+				removeRevStore := model.InstallSidecarRevStore(apiStore)
+				removeHoldStore := model.InstallAbuseHoldStore(apiHoldStore)
+				return func() {
+					removeRevStore()
+					removeHoldStore()
+				}
+			}
+			workerBudget := sidecartest.NewFakeWriteBudget(nil)
+			host := &sidecar.ServiceHost{Blobs: blobs, Budget: workerBudget, Clock: clock}
+			var removeApi func()
+			var closeWriters func()
+			if apiFirst {
+				removeApi = installApi()
+				closeWriters = installEvsJobWriters(host, first, nil)
+			} else {
+				closeWriters = installEvsJobWriters(host, first, nil)
+				removeApi = installApi()
+			}
+			apiRemoved, writersClosed := false, false
+			defer func() {
+				if !writersClosed {
+					closeWriters()
+				}
+				if !apiRemoved {
+					removeApi()
+				}
+			}()
 
-	clientSession := session.NewLocalClientSession(ctx, "", nil)
-	defer clientSession.Cancel()
-	write := func() (string, error) {
-		revocation := &model.SidecarRevocation{
-			NetworkId: server.NewId(),
-			Kind:      sidecar.RevocationKindClient,
-			SubjectId: server.NewId(),
-			NotBefore: sidecar.RevocationNotBefore(clock.Now()),
-			Reason:    sidecar.RevocationReasonRemoved,
-		}
-		_, err := model.WriteSidecarRevTask(&model.WriteSidecarRevArgs{Revocations: []*model.SidecarRevocation{revocation}}, clientSession)
-		return sidecar.RevocationKey(sidecar.Id(revocation.NetworkId), revocation.Kind, sidecar.Id(revocation.SubjectId)), err
-	}
-	published := func(key string) bool {
-		_, err := first.Head(ctx, key)
-		return err == nil
-	}
-	spent := func(budget *sidecartest.FakeWriteBudget) int64 {
-		if violations := budget.Violations(); len(violations) != 0 {
-			t.Errorf("the budget's violations: %v", violations)
-		}
-		return budget.P0ByteCount(first.ClusterId(), sidecar.WriteP0KindRevocation)
-	}
+			if holdStore, err := model.CurrentAbuseHoldStore(); err != nil || holdStore == apiHoldStore {
+				t.Fatalf("api first %t: the current hold/ writer is api's beside the worker's: %v", apiFirst, err)
+			}
 
-	key, err := write()
-	if err != nil || !published(key) {
-		t.Fatalf("api's store, beside the worker's writers, did not publish: %v", err)
-	}
-	created := spent(apiBudget)
-	if created <= 0 {
-		t.Fatalf("api's create spent %d", created)
-	}
-	clock.Advance(apiSettings.DeleteAfter + time.Minute)
-	if deletedCount, err := model.SweepSidecarRevocations(ctx); err != nil || deletedCount != 1 {
-		t.Fatalf("the sweep deleted %d: %v", deletedCount, err)
-	}
-	if published(key) {
-		t.Fatal("the sweep left the expired object")
-	}
-	if swept := spent(apiBudget); swept <= created {
-		t.Errorf("api's budget spent %d after the sweep and %d before it: the sweep did not go through api's store", swept, created)
-	}
-	if got := spent(workerBudget); got != 0 {
-		t.Errorf("the worker's budget spent %d of rev/ while api's store was current", got)
-	}
+			clientSession := session.NewLocalClientSession(ctx, "", nil)
+			defer clientSession.Cancel()
+			write := func() (string, error) {
+				revocation := &model.SidecarRevocation{
+					NetworkId: server.NewId(),
+					Kind:      sidecar.RevocationKindClient,
+					SubjectId: server.NewId(),
+					NotBefore: sidecar.RevocationNotBefore(clock.Now()),
+					Reason:    sidecar.RevocationReasonRemoved,
+				}
+				_, err := model.WriteSidecarRevTask(&model.WriteSidecarRevArgs{Revocations: []*model.SidecarRevocation{revocation}}, clientSession)
+				return sidecar.RevocationKey(sidecar.Id(revocation.NetworkId), revocation.Kind, sidecar.Id(revocation.SubjectId)), err
+			}
+			published := func(key string) bool {
+				_, err := first.Head(ctx, key)
+				return err == nil
+			}
+			spent := func(budget *sidecartest.FakeWriteBudget) int64 {
+				if violations := budget.Violations(); len(violations) != 0 {
+					t.Errorf("the budget's violations: %v", violations)
+				}
+				return budget.P0ByteCount(first.ClusterId(), sidecar.WriteP0KindRevocation)
+			}
 
-	// the writers' removal leaves api's store, and api's own then none
-	closeWriters()
-	if key, err := write(); err != nil || !published(key) {
-		t.Fatalf("api's store after the writers' removal did not publish: %v", err)
-	}
-	removeApi()
-	if _, err := write(); err == nil {
-		t.Fatal("a write landed with neither store installed")
+			key, err := write()
+			if err != nil || !published(key) {
+				t.Fatalf("api first %t: api's store, beside the worker's writers, did not publish: %v", apiFirst, err)
+			}
+			created := spent(apiBudget)
+			if created <= 0 || spent(workerBudget) != 0 {
+				t.Fatalf("api first %t: api's create spent %d of api's budget and %d of the worker's", apiFirst, created, spent(workerBudget))
+			}
+			if deletedCount, err := model.SweepSidecarRevocations(ctx); err != nil || deletedCount != 1 {
+				t.Fatalf("api first %t: the sweep deleted %d: %v", apiFirst, deletedCount, err)
+			}
+			if published(key) {
+				t.Fatalf("api first %t: the sweep left the expired object", apiFirst)
+			}
+			if got := spent(workerBudget); got != deletePrice {
+				t.Errorf("api first %t: the sweep spent %d of the worker's budget, and §11.13's delete row prices it at %d", apiFirst, got, deletePrice)
+			}
+			if got := spent(apiBudget); got != created {
+				t.Errorf("api first %t: api's budget spent %d after the sweep and %d before it: the sweep went through api's store", apiFirst, got, created)
+			}
+
+			// the writers' removal leaves api's store and writer, and api's own then neither
+			closeWriters()
+			writersClosed = true
+			if holdStore, err := model.CurrentAbuseHoldStore(); err != nil || holdStore != apiHoldStore {
+				t.Fatalf("api first %t: the writers' removal took away api's hold/ writer: %v", apiFirst, err)
+			}
+			if key, err := write(); err != nil || !published(key) {
+				t.Fatalf("api first %t: api's store after the writers' removal did not publish: %v", apiFirst, err)
+			}
+			removeApi()
+			apiRemoved = true
+			if _, err := write(); err == nil {
+				t.Fatalf("api first %t: a write landed with neither store installed", apiFirst)
+			}
+			if _, err := model.CurrentAbuseHoldStore(); !errors.Is(err, model.ErrLegalHoldStoreUnavailable) {
+				t.Fatalf("api first %t: a hold/ writer stands with both removed: %v", apiFirst, err)
+			}
+		}()
 	}
 }

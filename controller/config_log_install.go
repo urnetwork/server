@@ -131,7 +131,8 @@ func newAuthorizationIssuerWorker(ctx context.Context) *task.TaskWorker {
 // rev/'s writer on the issuer's first cluster, spending host's budget: each create, raise and DELETE at its own
 // one of §11.13's cost rows, by the table the budget, built with evsservice's default settings, prices with
 // (model.SidecarRevStore.SetWriteBudget's nil prices). Answers what removes it, which leaves a sweep store taskworker
-// installed beside it in all's process (model.InstallSidecarRevStore; owner decision 788).
+// installed beside it in all's process (model.InstallSidecarRevStore; owner decision 788). There every write goes
+// through this store and the sweep through taskworker's, since api's MinIO user deletes nothing (QD-1420).
 func installApiRevocations(host *sidecar.ServiceHost, first sidecar.BlobCluster) func() {
 	settings := model.DefaultSidecarRevSettings()
 	settings.Clock = host.Clock
@@ -148,7 +149,9 @@ func installApiRevocations(host *sidecar.ServiceHost, first sidecar.BlobCluster)
 // (model.AbuseHoldStore.RewriteUnless), so neither replaces what the other wrote unread. Each create, rewrite and
 // DELETE spends host's budget, P0 of kind lifecycle, at its own one of §11.13's cost rows, by the table the budget,
 // built with evsservice's default settings, prices with (model.AbuseHoldStore.SetWriteBudget's nil prices). Answers
-// what removes the writer, which leaves one installed since in place, as all's process installs taskworker's too.
+// what removes the writer, which leaves taskworker's in place. It is current only where taskworker's is not
+// (model.InstallAbuseHoldStore; QD-1420): in all's process, which installs taskworker's too, every hold/ write, a
+// renewal's included, goes through taskworker's, since api's MinIO user deletes nothing and the pass deletes.
 func installApiLegalHolds(host *sidecar.ServiceHost, first sidecar.BlobCluster) func() {
 	store := model.NewAbuseHoldStore(first)
 	store.SetWriteBudget(host.Budget, nil)
