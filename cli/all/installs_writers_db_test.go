@@ -28,10 +28,12 @@ package main
 //	           DELETE and no hold/ PUT
 //	removal    the worker's removal leaves api's store, writer and sequencer in place
 //
-// Before the places, the worker's install replaced api's in each one-pointer slot: the revocation stayed owed and
-// unpublished, api's appends ran on the worker's sequencer without the entry cache, and each handoff handed off again.
-// Before QD-1420 the sweep read api's store, so its DELETEs went to api's user, which refuses them: the sweep failed
-// every pass.
+// A second test installs taskworker's writers first and api's parts after them, as when api's mount comes later than
+// taskworker's start (its switch retrying a build that failed), and the sweep and the hold pass still delete through
+// taskworker's. Before the places, the worker's install replaced api's in each one-pointer slot: the revocation stayed
+// owed and unpublished, api's appends ran on the worker's sequencer without the entry cache, and each handoff handed
+// off again. Before QD-1420 the sweep read api's store, and api's hold/ writer, installed later, became the pass's, so
+// both DELETEs went to api's user, which refuses them: the sweep failed every pass and ended holds kept their objects.
 
 import (
 	"context"
@@ -608,5 +610,45 @@ func TestAllRunsApisAndTheWorkersWritersSideBySide(t *testing.T) {
 		if revocation := world.oweRevocation(); !world.published(revocation) {
 			tb.Fatal("after the worker's removal the committed removal published no signed revocation")
 		}
+	})
+}
+
+// taskworker's writers first and api's parts after them, as when api's mount comes later than taskworker's start: every
+// rev/ write still goes through api's signing store, and the sweep and the hold pass still delete through taskworker's
+// sweep store and hold/ writer, api's, installed later, standing in for neither; api's removal leaves them.
+func TestAllDeletesThroughTheWorkersWritersWhenApisMountComesLater(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		world := newAllWritersWorld(tb, ctx)
+		defer world.close()
+
+		removeWriters := world.installWorkerWriters()
+		defer removeWriters()
+		undoParts := world.installApiParts()
+		undone := false
+		defer func() {
+			if !undone {
+				undoParts()
+			}
+		}()
+		if _, err := model.CurrentConfigLogSequencer(); err != nil {
+			tb.Fatalf("api's later mount installed no sequencer of api's: %v", err)
+		}
+
+		world.requireRevThroughEachRole()
+		world.requireHoldPassThroughTheWorkers()
+
+		// api's removal leaves the worker's sweep store and hold/ writer; the object may stand again, since api's issuer
+		// worker may have run the revocation's durable write task after the sweep, so the count is not held here
+		undone = true
+		undoParts()
+		if _, err := model.CurrentAbuseHoldStore(); err != nil {
+			tb.Fatalf("api's removal took away the worker's hold/ writer: %v", err)
+		}
+		if deletedCount, err := model.SweepSidecarRevocations(ctx); err != nil {
+			tb.Fatalf("after api's removal the worker's sweep, %d deleted: %v", deletedCount, err)
+		}
+		world.requireApiSentNoDelete("the sweep after api's removal")
 	})
 }
