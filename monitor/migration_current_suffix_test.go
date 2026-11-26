@@ -608,6 +608,7 @@ func TestMigrationsCurrentSuffixConcurrentIndexReadiness(t *testing.T) {
 				{server.WritePathMigrationVersion(server.WritePathConnectionOpenAddressIndex), "network_client_connection", "network_client_connection_connected_client_address_hash"},
 				{server.WritePathMigrationVersion(server.WritePathConnectionClosedDisconnectIndex), "network_client_connection", "network_client_connection_closed_disconnect_time"},
 				{server.SnTopReplicaSchemaMigrationVersion(), "sn_head_summary", "sn_head_summary_replica_genesis"},
+				{server.StPayoutWalletResolutionColdkeyIndexMigrationVersion(), "st_payout_wallet_resolution", "st_payout_wallet_resolution_coldkey"},
 			} {
 				// read as the signal's index catalog reads it, so a partitioned
 				// contract table's parent index compares without ONLY

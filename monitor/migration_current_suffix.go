@@ -1119,6 +1119,9 @@ var migrationCurrentSuffixContracts = migrationCurrentSuffixContractsInVersionOr
 	// the fleet's URL outcomes by bucket of measured time and their overload
 	// discount, versioned by its position
 	[]snMainnetMigrationContract{providerEgressUrlFleetBucketMigrationContract},
+	// the settled earning wallets by coldkey within an epoch, the v2 earnings
+	// readers' attribution index, versioned by its position
+	[]snMainnetMigrationContract{stPayoutWalletResolutionColdkeyIndexMigrationContract},
 ))
 
 // Free space a table keeps on every page it writes, so an update of an

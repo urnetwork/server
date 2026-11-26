@@ -11961,6 +11961,13 @@ var migrations = []any{
 	// locked or rewritten, and the running release never reads it. Apply
 	// before deploying: every URL window of a release with it reads it.
 	providerEgressUrlFleetBucketMigration,
+
+	// The settled earning wallets by coldkey within an epoch, smallest client
+	// first (db_network_wallet_mapping_consent.go): each v2 earnings read of a
+	// recorded amount probes its coldkey's smallest client instead of sorting
+	// every resolution of its epochs. Online, with a recovery drop of an
+	// interrupted build. Apply before deploying the reader that probes it.
+	stPayoutWalletResolutionColdkeyIndexMigration,
 }
 
 // The deleted_network backfill (the migration above): every network an App
