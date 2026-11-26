@@ -143,6 +143,61 @@ func TestDeadlineOwnerTurnReadsGrantPendingOnce(t *testing.T) {
 	})
 }
 
+// On a busy grant settlements outside the owner append debits during most
+// turns. One that leaves every charge with room to spare changes no decision,
+// so the shared sibling turn commits with its one read and one check, and does
+// not fall back to a read per member.
+func TestDeadlineOwnerTurnCommitsAroundAConcurrentSettlementWithinItsRoom(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := WithProviderWorkSessionSource(t.Context(), nil)
+		f := newNetEscrowOrderingTestFixture(t, ctx)
+		primary := deadlinePendingTestContract(t, ctx, f, 100, 50)
+		siblings := []server.Id{
+			deadlinePendingTestContract(t, ctx, f, 300, 300),
+			deadlinePendingTestContract(t, ctx, f, 300, 300),
+		}
+		slices.SortFunc(siblings, server.Id.Cmp)
+		concurrent := createRedisAdmissionTest(ctx, f, 100).ContractId
+		deadline := time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC)
+		due := func(_ context.Context, _ server.PgCanQuery, contractIds []server.Id) []ContractDeadline {
+			deadlines := []ContractDeadline{}
+			for _, contractId := range contractIds {
+				if slices.Contains(siblings, contractId) {
+					deadlines = append(deadlines, ContractDeadline{ContractId: contractId, Deadline: deadline})
+				}
+			}
+			return deadlines
+		}
+		tracer := &deadlinePendingTracer{before: siblings[1], inject: func() {
+			_ = asyncDebitTestSettle(ctx, concurrent, 100)
+		}}
+		var result *ContractOwnerDeadlineResult
+		var err error
+		deadlinePendingTraced(t, ctx, tracer, func() {
+			result, err = ReconcileContractOwnerAtDeadline(ctx, []server.Id{f.balanceId}, ContractDeadline{ContractId: primary, Deadline: deadline}, due)
+		})
+		if err != nil || result == nil || result.Busy || result.Reconciliation == nil || result.SiblingsClosed != 2 || !tracer.injected.Load() {
+			t.Fatal("the owner did not close its primary and both siblings around the concurrent settlement", result, err, tracer.injected.Load())
+		}
+		// The primary's turn reads once; the siblings' turn reads once and
+		// checks once. A failed check would add a read per sibling.
+		if sums := tracer.sums.Load(); sums != 3 {
+			t.Fatalf("the owner's turns summed the grant's pending journal %d times, want 3 with no fallback", sums)
+		}
+		debits, pending, balance := deadlinePendingTestDebits(t, ctx, f.balanceId, []server.Id{primary, siblings[0], siblings[1], concurrent})
+		if !slices.Equal(debits, []ByteCount{50, 300, 300, 100}) || pending != 750 || balance != 1000 {
+			t.Fatal("the siblings' charges differ from a read per member", debits, pending, balance)
+		}
+		applied, released, flushBusy, flushErr := flushTransferDebitBalance(ctx, f.balanceId)
+		_, pending, balance = deadlinePendingTestDebits(t, ctx, f.balanceId, nil)
+		if flushErr != nil || flushBusy || applied != 4 || released != 4 || pending != 0 || balance != 250 {
+			t.Fatal("the flush did not apply the charges exactly", applied, released, flushBusy, flushErr, pending, balance)
+		}
+	})
+}
+
 // A settlement outside the owner appends a debit to the grant while a shared
 // sibling turn holds it, after the first sibling's charge and before the
 // second's. Read per member, the second sibling sees it and is held to the
