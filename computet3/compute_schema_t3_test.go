@@ -20,7 +20,12 @@ import (
 var computeT3LedgerIndexes = []string{
 	"compute_lot_draw", "compute_charge_network", "compute_op_shard_state", "compute_op_state_start",
 	"compute_auto_renew_retry", "compute_dispute_network", "compute_budget_raise_subject",
-	"compute_promo_redemption_network", "compute_lot_lapse",
+	"compute_promo_redemption_network", "compute_lot_lapse", "compute_account_update", "compute_account_review",
+}
+
+// The steps that add a column to a table an earlier step made, each with its table and column (BAL-M12-12's state_time).
+var computeT3LedgerColumns = map[string][2]string{
+	"compute_account_state_time": {"compute_account", "state_time"},
 }
 
 // Every table, index and partition is made; a second lot with one (market, market_ref) is refused; the day and total
@@ -37,6 +42,12 @@ func TestComputeLedgerMigrationsApply(t *testing.T) {
 		}
 		for _, step := range model.ComputeLedgerMigrations() {
 			if step.Id == "compute_charge_today" {
+				continue
+			}
+			if column, ok := computeT3LedgerColumns[step.Id]; ok {
+				if t3.queryInt(`SELECT count(*) FROM information_schema.columns WHERE table_name = $1 AND column_name = $2`, column[0], column[1]) != 1 {
+					t.Errorf("%s did not add %s.%s", step.Id, column[0], column[1])
+				}
 				continue
 			}
 			kinds := "{r,p}"

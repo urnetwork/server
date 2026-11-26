@@ -796,6 +796,8 @@ tables:
       search_cap_override: compute-3
       settled_nano_usd: compute-3
       state: compute-3
+      # when the account entered its state, which §9.9's grace age reads (BAL-M12-12), a later step of BAL's part
+      state_time: compute-3
       update_time: compute-3
       version: compute-3
   compute_lot:
