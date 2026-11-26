@@ -547,18 +547,23 @@ func drawUniqueExitCandidates(
 	return candidates, nil
 }
 
+// The providers of a network's assignments that are not released. It reads
+// proxy_exit_assignment_network_id_live, whose predicate is exactly these
+// states (server db_proxy_unique_exit_schema.go).
+const networkLiveExitProviderIdsSql = `
+	SELECT provider_client_id
+	FROM proxy_exit_assignment
+	WHERE
+		network_id = $1 AND
+		state IN ('pending', 'active', 'replacing')
+`
+
 func networkLiveExitProviderIds(ctx context.Context, networkId server.Id) []server.Id {
 	clientIds := []server.Id{}
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
-			`
-				SELECT provider_client_id
-				FROM proxy_exit_assignment
-				WHERE
-					network_id = $1 AND
-					state IN ('pending', 'active', 'replacing')
-			`,
+			networkLiveExitProviderIdsSql,
 			networkId,
 		)
 		server.WithPgResult(result, err, func() {

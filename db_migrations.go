@@ -11961,6 +11961,13 @@ var migrations = []any{
 	// locked or rewritten, and the running release never reads it. Apply
 	// before deploying: every URL window of a release with it reads it.
 	providerEgressUrlFleetBucketMigration,
+
+	// A network's unreleased unique-exit assignments
+	// (db_proxy_unique_exit_schema.go): the allocator's read of a network's
+	// live exits probes it instead of walking every unreleased assignment.
+	// Online, with a recovery drop of an interrupted build, over a table of
+	// about 48 MB. Apply before or after the deploy.
+	proxyExitAssignmentNetworkLiveIndexMigration,
 }
 
 // The deleted_network backfill (the migration above): every network an App

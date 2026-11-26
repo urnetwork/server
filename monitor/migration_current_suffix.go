@@ -1119,6 +1119,9 @@ var migrationCurrentSuffixContracts = migrationCurrentSuffixContractsInVersionOr
 	// the fleet's URL outcomes by bucket of measured time and their overload
 	// discount, versioned by its position
 	[]snMainnetMigrationContract{providerEgressUrlFleetBucketMigrationContract},
+	// a network's unreleased unique-exit assignments, built online, versioned
+	// by its position
+	[]snMainnetMigrationContract{proxyExitAssignmentNetworkLiveIndexMigrationContract},
 ))
 
 // Free space a table keeps on every page it writes, so an update of an
