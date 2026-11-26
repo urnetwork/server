@@ -9,6 +9,7 @@ package computet3
 // flagged, and a Play purchase counting to its network alone.
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -341,6 +342,36 @@ func TestComputePlayCountsToTheNetworkAlone(t *testing.T) {
 		answer2 := check(played, computeT3Usd(30), nil)
 		if answer2.Allowed || len(answer2.Breaches) != 1 || answer2.Breaches[0].Reason != controller.ComputeLimitNewAccountDay || answer2.Breaches[0].Payer || answer2.Code() != "daily_limit" {
 			t.Errorf("the Play network's next purchase: %+v", answer2.Breaches)
+		}
+	})
+}
+
+// A deleted network's closed account is credited nothing (§9.5): the credit is refused and no lot is written, so its
+// purchase is refunded where its market allows; a replay of a lot credited before the closure answers that lot.
+func TestComputeCreditToAClosedNetworkCreditsNothing(t *testing.T) {
+	runComputeT3(t, func(t3 *computeT3) {
+		t := t3.t
+		clocked := newComputeT3Clocked(t3, time.Now().UTC())
+		networkId := server.NewId()
+		before := clocked.purchase(networkId, computeT3Usd(10), nil)
+		t3.mustExec(`UPDATE compute_account SET state = $2 WHERE network_id = $1`, networkId, int16(model.ComputeAccountStateClosed))
+		_, err := controller.ComputeCreditLot(clocked.env, t3.ctx, clocked.settings, &controller.ComputeCreditRequest{
+			NetworkId: networkId, Kind: model.ComputeLotKindPurchase, Market: model.ComputeMarketGooglePlay,
+			MarketRef: "GPA.3300-0000-0000-00009", AmountNanoUsd: computeT3Usd(10), Store: true,
+		})
+		if !errors.Is(err, controller.ErrComputeAccountClosed) {
+			t.Fatalf("a credit to a closed account: %v", err)
+		}
+		if t3.queryInt(`SELECT count(*) FROM compute_lot WHERE network_id = $1`, networkId) != 1 ||
+			t3.queryInt(`SELECT settled_nano_usd FROM compute_account WHERE network_id = $1`, networkId) != computeT3Usd(10) {
+			t.Error("the closed account was credited")
+		}
+		replay := clocked.credit(&controller.ComputeCreditRequest{
+			NetworkId: networkId, Kind: model.ComputeLotKindPurchase, Market: model.ComputeMarketStripe,
+			MarketRef: before.Lot.MarketRef, AmountNanoUsd: computeT3Usd(10),
+		})
+		if replay.Credited || replay.Lot.LotId != before.Lot.LotId {
+			t.Errorf("a replay to the closed account: %+v", replay)
 		}
 	})
 }

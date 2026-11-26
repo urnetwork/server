@@ -20,7 +20,7 @@ import (
 var computeT3LedgerIndexes = []string{
 	"compute_lot_draw", "compute_charge_network", "compute_op_shard_state", "compute_op_state_start",
 	"compute_auto_renew_retry", "compute_dispute_network", "compute_budget_raise_subject",
-	"compute_promo_redemption_network",
+	"compute_promo_redemption_network", "compute_lot_lapse",
 }
 
 // Every table, index and partition is made; a second lot with one (market, market_ref) is refused; the day and total
