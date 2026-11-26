@@ -454,6 +454,28 @@
         {"refId": "A", "expr": "sum by (table, outcome) (increase(urnetwork_db_hot_vacuum_attempts_total{env=\"$env\",service=\"taskworker\",outcome!=\"vacuumed\",instance!=\"\"}[1h]))", "legendFormat": "{{table}} {{outcome}}", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}},
         {"refId": "B", "expr": "sum by (table) (increase(urnetwork_db_hot_vacuum_stale_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[1h]))", "legendFormat": "stale {{table}}", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}
       ]
+    },
+    {
+      "id": 36,
+      "title": "invalid indexes no build owns, at the newest hot vacuum run",
+      "description": "Indexes PostgreSQL marks invalid (pg_index.indisvalid false) whose table has no index build in progress, as the newest hot vacuum run listed them (db_maintenance_invalid_index.go). A concurrent build adds its index invalid and validates it last, and a concurrent drop marks it invalid first, so one interrupted leaves an invalid index that every write still maintains and no read uses, such as a rebuild's _ccnew copy. The rotation and the hot vacuum drop the copies they can prove; anything else stays until someone drops it. Each taskworker process keeps the report of its own last run, so the panel reads the process with the newest run. The run's log names each index: grep the taskworker log for \"invalid index(es) no build owns\".",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 99},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0, "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 0, "showPoints": "never", "spanNulls": false, "axisPlacement": "auto", "stacking": {"mode": "none", "group": "A"}}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"refId": "A", "expr": "max by (env) (urnetwork_db_invalid_indexes{env=\"$env\",service=\"taskworker\",instance!=\"\"} and on (env, service, block, host, instance) topk by (env) (1, urnetwork_db_invalid_index_sample_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"}))", "legendFormat": "invalid indexes", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+    },
+    {
+      "id": 37,
+      "title": "oldest invalid index, at the newest hot vacuum run",
+      "description": "How long the oldest of those indexes has been invalid: pg_index records no time, so the hot vacuum chain carries when a run first found each index invalid in its task arguments. DbInvalidIndexLingering (warp grafana/alerting/db-invalid-index.yml) warns above two hours. An index the debris cleanup can prove is a rebuild's copy goes at the next rebuild of its table; otherwise check the log's index name and drop it by hand with DROP INDEX CONCURRENTLY. 0: nothing invalid.",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 99},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "s", "min": 0, "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 0, "showPoints": "never", "spanNulls": false, "axisPlacement": "auto", "stacking": {"mode": "none", "group": "A"}}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 7200}]}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"refId": "A", "expr": "max by (env) (urnetwork_db_invalid_index_max_age_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"} and on (env, service, block, host, instance) topk by (env) (1, urnetwork_db_invalid_index_sample_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"}))", "legendFormat": "oldest invalid index", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
     }
   ]
 }
