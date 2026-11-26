@@ -164,6 +164,13 @@ func TestStLedgerV2AttributionReadsOneResolutionPerAmount(t *testing.T) {
 	env.Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		buildAttributionPlanFixture(t)
+		forgetStLedgerV2AttributionIndex()
+		t.Cleanup(forgetStLedgerV2AttributionIndex)
+		server.Db(ctx, func(conn server.PgConn) {
+			if !stLedgerV2AttributionIndexReady(ctx, conn) {
+				t.Fatal("the migrated database lacks a valid st_payout_wallet_resolution_coldkey")
+			}
+		})
 
 		key := testStDeploymentKey
 		epochs := []uint64{}
@@ -206,34 +213,94 @@ func TestStLedgerV2AttributionReadsOneResolutionPerAmount(t *testing.T) {
 			}
 		}
 
-		// Coldkey c (1..30) has its smallest client c-1, of network (c-1) mod 5;
-		// coldkeys 31..40 have no resolution. Each epoch's amount of coldkey c
-		// is 999 + c.
-		var total, networkAmount uint64
-		byNetwork := map[server.Id]uint256.Int{}
-		for c := 1; c <= amountsPerEpoch; c += 1 {
-			amount := uint64(999 + c)
-			total += amount
-			if c <= attributionPlanColdkeys {
-				owner := attributionPlanNetworkId((c - 1) % attributionPlanNetworks)
-				sum := byNetwork[owner]
-				sum.Add(&sum, uint256.NewInt(amount))
-				byNetwork[owner] = sum
-				if owner == network {
-					networkAmount += amount
-				}
+		checkAttributionPlanAmounts(t, epochs, network)
+	})
+}
+
+// The readers' amounts on the fixture: coldkey c (1..30) has its smallest
+// client c-1, of network (c-1) mod 5; coldkeys 31..40 have no resolution. Each
+// epoch's amount of coldkey c is 999 + c.
+func checkAttributionPlanAmounts(t testing.TB, epochs []uint64, network server.Id) {
+	t.Helper()
+	ctx := t.Context()
+	key := testStDeploymentKey
+	amountsPerEpoch := attributionPlanColdkeys + attributionPlanUnresolvedCkeys
+	var total, networkAmount uint64
+	byNetwork := map[server.Id]uint256.Int{}
+	for c := 1; c <= amountsPerEpoch; c += 1 {
+		amount := uint64(999 + c)
+		total += amount
+		if c <= attributionPlanColdkeys {
+			owner := attributionPlanNetworkId((c - 1) % attributionPlanNetworks)
+			sum := byNetwork[owner]
+			sum.Add(&sum, uint256.NewInt(amount))
+			byNetwork[owner] = sum
+			if owner == network {
+				networkAmount += amount
 			}
 		}
-		wantAmounts := map[uint64]*StLedgerV2EpochAmount{}
-		for _, epoch := range epochs {
-			wantAmounts[epoch] = &StLedgerV2EpochAmount{Amount: *uint256.NewInt(networkAmount), Total: *uint256.NewInt(total)}
+	}
+	wantAmounts := map[uint64]*StLedgerV2EpochAmount{}
+	for _, epoch := range epochs {
+		wantAmounts[epoch] = &StLedgerV2EpochAmount{Amount: *uint256.NewInt(networkAmount), Total: *uint256.NewInt(total)}
+	}
+	if got := GetStLedgerV2AmountsForNetwork(ctx, key, network, 1, epochs); !reflect.DeepEqual(got, wantAmounts) {
+		t.Fatalf("network amounts %+v, want %+v", got, wantAmounts)
+	}
+	gotByNetwork, gotTotal := GetStLedgerV2NetworkAmounts(ctx, key, 1, epochs[1])
+	if !reflect.DeepEqual(gotByNetwork, byNetwork) || gotTotal.Uint64() != total {
+		t.Fatalf("epoch amounts by network %+v total %s, want %+v total %d", gotByNetwork, gotTotal.Dec(), byNetwork, total)
+	}
+}
+
+// A release that reaches a database before its migration builds the index,
+// or after an interrupted build left it invalid, reads the same amounts by
+// the sort, since a probe without the index walks whole epochs; it probes
+// once the index is valid.
+func TestStLedgerV2AttributionSortsUntilTheIndexIsValid(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		buildAttributionPlanFixture(t)
+		epochs := []uint64{attributionPlanFirstEpoch, attributionPlanFirstEpoch + 1, attributionPlanFirstEpoch + 2}
+		network := attributionPlanNetworkId(2)
+		forgetStLedgerV2AttributionIndex()
+		t.Cleanup(forgetStLedgerV2AttributionIndex)
+
+		ready := func() (ready bool) {
+			forgetStLedgerV2AttributionIndex()
+			server.Db(ctx, func(conn server.PgConn) {
+				ready = stLedgerV2AttributionIndexReady(ctx, conn)
+			})
+			return
 		}
-		if got := GetStLedgerV2AmountsForNetwork(ctx, key, network, 1, epochs); !reflect.DeepEqual(got, wantAmounts) {
-			t.Fatalf("network amounts %+v, want %+v", got, wantAmounts)
-		}
-		gotByNetwork, gotTotal := GetStLedgerV2NetworkAmounts(ctx, key, 1, epochs[1])
-		if !reflect.DeepEqual(gotByNetwork, byNetwork) || gotTotal.Uint64() != total {
-			t.Fatalf("epoch amounts by network %+v total %s, want %+v total %d", gotByNetwork, gotTotal.Dec(), byNetwork, total)
+		for _, step := range []struct {
+			name      string
+			sql       string
+			wantFail  bool
+			wantReady bool
+		}{
+			{"absent", `DROP INDEX st_payout_wallet_resolution_coldkey`, false, false},
+			// A concurrent build that fails leaves its index in the catalog,
+			// invalid, as an interrupted one does: here a unique build over
+			// the fixture's coldkeys of many clients.
+			{"invalid", `CREATE UNIQUE INDEX CONCURRENTLY st_payout_wallet_resolution_coldkey
+				ON st_payout_wallet_resolution (deployment_key, no_id, epoch, coldkey) INCLUDE (network_id)`, true, false},
+			{"valid", `DROP INDEX st_payout_wallet_resolution_coldkey;
+				CREATE INDEX st_payout_wallet_resolution_coldkey
+				ON st_payout_wallet_resolution (deployment_key, no_id, epoch, coldkey, client_id) INCLUDE (network_id)`, false, true},
+		} {
+			server.MaintenanceDb(ctx, func(conn server.PgConn) {
+				_, err := conn.Exec(ctx, step.sql)
+				if (err != nil) != step.wantFail {
+					t.Fatalf("%s index: %s: error %v", step.name, step.sql, err)
+				}
+			}, server.OptReadWrite(), server.OptNoRetry())
+			if got := ready(); got != step.wantReady {
+				t.Fatalf("%s index: ready %t, want %t", step.name, got, step.wantReady)
+			}
+			checkAttributionPlanAmounts(t, epochs, network)
 		}
 	})
 }
