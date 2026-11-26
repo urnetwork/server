@@ -146,11 +146,18 @@ func (self *validatedAppleTransaction) creditNetRevenue() model.NanoCents {
 
 // Returns true only when this call committed a new entitlement. Valid retries
 // return false and are acknowledged without adding balances a second time.
+//
+// A compute.* product's notification goes to compute's own path
+// (compute_store_apple.go), routed by product family before anything here
+// reads it, so it never grants Pro and Pro's products never credit compute.
 func ProcessAppleNotification(
 	ctx context.Context,
 	notification AppleNotificationDecodedPayload,
 	allowedProductIds []string,
 ) (processed bool, returnErr error) {
+	if computeAppleNotificationOf(notification) {
+		return computeAppleStoreProcess().Notification(ctx, notification)
+	}
 	notificationId, err := server.ParseId(notification.NotificationUUID)
 	if err != nil {
 		return false, errors.New("invalid notification UUID")

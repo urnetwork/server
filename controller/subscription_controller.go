@@ -795,6 +795,10 @@ type PlayRtdnMessage struct {
 	Version                  string                        `json:"version"`
 	PackageName              string                        `json:"packageName"`
 	SubscriptionNotification *PlaySubscriptionNotification `json:"subscriptionNotification,omitempty"`
+	// compute's consumables and Play's voided purchases (compute_store_play.go);
+	// Pro's paths read neither
+	OneTimeProductNotification *PlayOneTimeProductNotification `json:"oneTimeProductNotification,omitempty"`
+	VoidedPurchaseNotification *PlayVoidedPurchaseNotification `json:"voidedPurchaseNotification,omitempty"`
 }
 
 type PlaySubscriptionNotification struct {
@@ -1050,6 +1054,16 @@ func PlayWebhook(
 	}
 
 	if rtdnMessage.PackageName == playPackageNameFunc() {
+		// a compute.* product's message, and a voided purchase of a compute
+		// order, go to compute's own path, routed by product before Pro's reads
+		// it, so it never grants Pro and Pro's products never credit compute
+		// (compute_store_play.go)
+		if handled, err := computePlayStoreProcess().Rtdn(clientSession.Ctx, rtdnMessage); handled {
+			if err != nil {
+				return nil, err
+			}
+			return &PlayWebhookResult{}, nil
+		}
 		// https://developers.google.com/android-publisher/api-ref/rest/v3/purchases.subscriptionsv2/get
 		// https://developers.google.com/android-publisher/api-ref/rest/v3/purchases.subscriptionsv2#SubscriptionPurchaseV2
 		// https://developers.google.com/android-publisher/api-ref/rest/v3/purchases.subscriptions/acknowledge
