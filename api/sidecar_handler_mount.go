@@ -162,6 +162,7 @@ func computeApiRoutes() []*router.Route {
 	controller.InstallComputeStripe()
 	controller.InstallComputeAutoRenew()
 	controller.InstallComputeNotices()
+	controller.InstallComputeRefunds()
 	mount := &computeApiMount{settings: DefaultComputeApiMountSettings()}
 	return []*router.Route{
 		router.NewRoute("GET", "/compute/balance", mount.handler(http.MethodGet, "/compute/balance")),

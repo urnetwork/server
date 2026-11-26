@@ -168,6 +168,20 @@ func newTestComputeRenewFake(t testing.TB) *testComputeRenewFake {
 		}
 		writeJson(w, http.StatusOK, map[string]any{"object": "list", "data": data, "has_more": false})
 	})
+	mux.HandleFunc("GET /v1/refunds", func(w http.ResponseWriter, r *http.Request) {
+		fake.stateLock.Lock()
+		defer fake.stateLock.Unlock()
+		data := []any{}
+		for index, values := range fake.refunds {
+			if values.Get("payment_intent") == r.URL.Query().Get("payment_intent") {
+				data = append(data, map[string]any{
+					"id": fmt.Sprintf("re_synthetic_renew_%d", index+1), "object": "refund", "status": "succeeded",
+					"payment_intent": values.Get("payment_intent"), "metadata": metadataOf(values),
+				})
+			}
+		}
+		writeJson(w, http.StatusOK, map[string]any{"object": "list", "data": data, "has_more": false})
+	})
 	mux.HandleFunc("POST /v1/refunds", func(w http.ResponseWriter, r *http.Request) {
 		values := form(r)
 		fake.stateLock.Lock()
@@ -361,4 +375,17 @@ func TestComputeRenewalEventsCreditOnceAndReachNoProHandler(t *testing.T) {
 			tb.Fatalf("Pro's invoice: handled %t, %v", handled, err)
 		}
 	})
+}
+
+// The refunds made, each its form's first values, under the fake's lock, which the caller holds.
+func (self *testComputeRenewFake) refundsMade() []map[string]string {
+	made := []map[string]string{}
+	for _, values := range self.refunds {
+		refund := map[string]string{}
+		for key := range values {
+			refund[key] = values.Get(key)
+		}
+		made = append(made, refund)
+	}
+	return made
 }

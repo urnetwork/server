@@ -33,6 +33,7 @@ const networkRemovePlayFailedMessage = "Could not cancel your Google Play subscr
 const networkRemoveAppleRenewingMessage = "Your subscription is billed through the App Store and cannot be cancelled by URnetwork. Cancel it in your App Store subscriptions (Settings > your name > Subscriptions), then delete your account."
 const networkRemoveStoreRenewalChangedMessage = "Your subscription changed while your account was being deleted. Please try again."
 const networkRemoveLastTeamOwnerMessage = "You are the last Owner of a team. Make another member Owner, or delete the team, then delete your account."
+const networkRemoveComputeFailedMessage = "Could not close your compute balance. Please try again."
 
 // The code of the last Owner's refusal, beside its message and its team.
 const networkRemoveLastTeamOwnerCode = "last_team_owner"
@@ -40,7 +41,7 @@ const networkRemoveLastTeamOwnerCode = "last_team_owner"
 // networkRemoveSteps are the checks, store steps and storage step of an
 // account deletion. NetworkRemove runs them in this order: the last Owner
 // check, the store snapshot, the App Store check, Stripe cancellation, Google
-// Play cancellation, then the network removal.
+// Play cancellation, the compute balance's closure, then the network removal.
 type networkRemoveSteps struct {
 	// the team the caller is the last Owner of, nil for none; it changes
 	// nothing, so its refusal leaves every store subscription as it was
@@ -54,6 +55,10 @@ type networkRemoveSteps struct {
 	unsubscribeStripe func(clientSession *session.ClientSession) error
 	// cancels the renewal of the Google Play subscriptions
 	cancelPlay func(clientSession *session.ClientSession, purchaseTokens []string) error
+	// closes the network's compute balance (DESIGN-COMPUTE §9.12; BAL-M12-14): its unspent Stripe credit refunded
+	// within 90 days of purchase, the rest forfeited with notice to its billing contacts, its compute plan cancelled
+	// (compute_stripe_refund.go); nil, as a test's steps leave it, closes nothing
+	closeCompute func(clientSession *session.ClientSession) error
 	// removes the network unless an App Store or Google Play renewal outside
 	// the snapshot is active, or the caller is the last Owner of a team; the
 	// removal names the removed user auths
@@ -72,6 +77,7 @@ var defaultNetworkRemoveSteps = networkRemoveSteps{
 	appleRenewing:     networkRemoveAppleRenewing,
 	unsubscribeStripe: UnsubscribeStripe,
 	cancelPlay:        networkRemoveCancelPlay,
+	closeCompute:      networkRemoveCloseCompute,
 	removeNetwork: func(clientSession *session.ClientSession, storeSnapshot *model.RemoveNetworkStoreSnapshot) *model.RemoveNetworkResult {
 		return model.RemoveNetworkWithStoreSnapshot(
 			clientSession.Ctx,
@@ -149,6 +155,15 @@ func networkRemoveWithSteps(
 	if err := steps.cancelPlay(clientSession, storeSnapshot.PlayPurchaseTokens); err != nil {
 		glog.Errorf("[network]remove failed to cancel Google Play: %v\n", err)
 		return networkRemoveError(networkRemovePlayFailedMessage), nil
+	}
+
+	// the compute balance closed while its billing contacts still read, as the store steps run: a refusal of the
+	// removal after it leaves the account closed, which a deletion the caller asked for would have made anyway
+	if steps.closeCompute != nil {
+		if err := steps.closeCompute(clientSession); err != nil {
+			glog.Errorf("[network]remove could not close the compute balance: %v\n", err)
+			return networkRemoveError(networkRemoveComputeFailedMessage), nil
+		}
 	}
 
 	removal := steps.removeNetwork(clientSession, storeSnapshot)

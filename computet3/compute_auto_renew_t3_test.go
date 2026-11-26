@@ -277,6 +277,35 @@ func (self *computeT3Renewing) topUpLots() int64 {
 	return self.t3.queryInt(`SELECT count(*) FROM compute_lot WHERE network_id = $1 AND market_ref LIKE 'pi_t3_top_up_%'`, self.networkId)
 }
 
+// A chargeback's suspension charges no saved card: a network below T with threshold on, one of its Stripe lots charged
+// back, is passed over, its threshold left on for the review that lifts the suspension (§9.9, §9.11).
+func TestChargebackChargesNoCard(t *testing.T) {
+	runComputeT3(t, func(t3 *computeT3) {
+		t := t3.t
+		renewing := newComputeT3Renewing(t3, computeT3Midday(time.Now().UTC()))
+		renewing.saveCard(0, 0, 0)
+		disputed := "pi_test_disputed_" + renewing.networkId.String()
+		renewing.credit(&controller.ComputeCreditRequest{
+			NetworkId: renewing.networkId, Kind: model.ComputeLotKindPurchase, Market: model.ComputeMarketStripe,
+			MarketRef: disputed, AmountNanoUsd: computeT3Usd(10), PayerHash: renewing.payer("fp_" + renewing.card),
+		})
+		if reversed := renewing.reverse(model.ComputeMarketStripe, disputed, true); !reversed.Reversed {
+			t.Fatalf("the chargeback: %+v", reversed)
+		}
+		renewing.spend(computeT3Usd(6))
+		if stored, _ := renewing.states(); stored != model.ComputeAccountStateSuspended || renewing.settled() != computeT3Usd(4) {
+			t.Fatalf("after the chargeback: %s, %d settled", stored, renewing.settled())
+		}
+		renewing.run()
+		if sent := computeT3Renew.sent(renewing.networkId); len(sent) != 0 {
+			t.Fatalf("a charged-back network's card was charged: %+v", sent)
+		}
+		if renewing.settled() != computeT3Usd(4) || renewing.topUpLots() != 0 || !renewing.state().Threshold.On {
+			t.Fatalf("after the run: %d settled, %d lots, %+v", renewing.settled(), renewing.topUpLots(), renewing.state().Threshold)
+		}
+	})
+}
+
 // A network below T with threshold on is charged P once: the lot credited, the day's count one; the next run, above
 // T, charges nothing, and a run's retry sends the same key, which Stripe charges once.
 func TestThresholdFiresOnceBelowT(t *testing.T) {
