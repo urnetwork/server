@@ -316,6 +316,14 @@ func StripeWebhook(
 
 	glog.Infof("Stripe webhook hit: %s", stripeWebhook.Id)
 
+	// compute's own purchases, told apart by the metadata compute's checkout
+	// writes, go to compute's branch and never to a Pro handler, so a compute
+	// event grants no Pro and Pro's events credit no compute
+	// (compute_stripe_webhook.go)
+	if handled, result, err := ComputeStripeWebhook(stripeWebhook, clientSession); handled {
+		return result, err
+	}
+
 	if stripeWebhook.Type == "checkout.session.completed" {
 
 		/**
