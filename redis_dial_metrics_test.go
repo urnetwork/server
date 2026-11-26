@@ -18,6 +18,8 @@ import (
 // same port, missing announcements, a tunnel and malformed input. Each call
 // must preserve the selected address, context, result and number of attempts.
 func TestRedisDialFailureObservesSelectedRouteAndReturnedError(t *testing.T) {
+	// the production pool dialer: a service's guard-free dial is its own
+	testEnvGuardlessRefusalForTest(t, false)
 	refusal := &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
 	timeout := &net.OpError{Op: "dial", Net: "tcp", Err: os.ErrDeadlineExceeded}
 	wrappedDeadline := &net.OpError{Op: "dial", Err: fmt.Errorf("wrapped: %w", os.ErrDeadlineExceeded)}
@@ -65,6 +67,8 @@ func TestRedisDialFailureObservesSelectedRouteAndReturnedError(t *testing.T) {
 // A later successful retry returns its original connection. Only the actual
 // failed dial is counted, even when both calls use the same context and port.
 func TestRedisDialFailureCountsAttemptsWithoutCountingRecovery(t *testing.T) {
+	// the production pool dialer: a service's guard-free dial is its own
+	testEnvGuardlessRefusalForTest(t, false)
 	registry := prometheus.NewRegistry()
 	registry.MustRegister(redisDialFailures)
 	total := func() float64 {

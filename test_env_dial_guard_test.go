@@ -450,10 +450,116 @@ func TestLocalVaultHomeTestBinaryIsGuardedAndReadsNoLauncherCredentials(t *testi
 	}
 }
 
+// Sets whether a guard-free dial refuses loopback tunnel ports, as a service
+// (false) or a test binary (true), until the test ends.
+func testEnvGuardlessRefusalForTest(t *testing.T, refuses bool) {
+	t.Helper()
+	previous := testEnvGuardlessDialRefusesTunnelPorts.Load()
+	testEnvGuardlessDialRefusesTunnelPorts.Store(refuses)
+	t.Cleanup(func() { testEnvGuardlessDialRefusesTunnelPorts.Store(previous) })
+}
+
+// A test binary refuses guard-free dials to loopback tunnel ports from the
+// start; a service binary never does, so this test binary sees it on.
+func TestGuardlessTunnelRefusalIsOnInATestBinary(t *testing.T) {
+	if !testEnvGuardlessDialRefusesTunnelPorts.Load() {
+		t.Fatal("a test binary's guard-free dials don't refuse loopback tunnel ports")
+	}
+}
+
+// A guard-free test dial refuses a loopback endpoint on a production data
+// tunnel port, by literal, by localhost, by an empty or unspecified host, and
+// by a name that resolves to loopback or doesn't resolve; every other endpoint,
+// and an address that isn't host:port, dials unchanged.
+func TestGuardlessTestDialRefusesLoopbackTunnelPorts(t *testing.T) {
+	lookup := func(_ context.Context, _ string, host string) ([]netip.Addr, error) {
+		switch host {
+		case "loopback.example":
+			return []netip.Addr{netip.MustParseAddr("198.51.100.7"), netip.MustParseAddr("127.0.0.1")}, nil
+		case "mapped.example":
+			return []netip.Addr{netip.MustParseAddr("::ffff:127.0.0.1")}, nil
+		case "remote.example":
+			return []netip.Addr{netip.MustParseAddr("198.51.100.7")}, nil
+		}
+		return nil, errors.New("synthetic lookup failure")
+	}
+	dialed := []string{}
+	dial := testEnvGuardlessTestDial(func(_ context.Context, _ string, address string) (net.Conn, error) {
+		dialed = append(dialed, address)
+		return nil, errors.New("synthetic unreachable")
+	}, lookup)
+	refused := []string{
+		"127.0.0.1:5432", "127.0.0.1:6432", "127.0.0.1:6379", "127.0.0.1:6427", "127.9.8.7:6400",
+		"[::1]:6380", "localhost:6432", "LOCALHOST:5432", ":6379", "0.0.0.0:6390", "[::]:6391",
+		"loopback.example:5432", "mapped.example:6379", "unresolvable.example:6400",
+	}
+	passed := []string{
+		"127.0.0.1:30001", "127.0.0.1:6378", "127.0.0.1:6428", "[::1]:5433", "localhost:26379",
+		"192.0.2.10:5432", "remote.example:6379", "unresolvable.example:30001", "/private/tmp/.s.PGSQL.5432",
+	}
+	for _, address := range refused {
+		if _, err := dial(t.Context(), "tcp", address); err == nil || !strings.Contains(err.Error(), "loopback production data tunnel port") {
+			t.Errorf("dial %s = %v; want the tunnel-port refusal", address, err)
+		}
+	}
+	for _, address := range passed {
+		if _, err := dial(t.Context(), "tcp", address); err == nil || strings.Contains(err.Error(), "loopback production data tunnel port") {
+			t.Errorf("dial %s = %v; want the caller's own dial", address, err)
+		}
+	}
+	if !slices.Equal(dialed, passed) {
+		t.Fatalf("dialed %q; want exactly %q", dialed, passed)
+	}
+	if testEnvGuardlessTestDial(nil, lookup) != nil {
+		t.Fatal("a missing dial became a dial")
+	}
+}
+
+// In a test binary, a nil guard's Redis and PostgreSQL dials refuse a loopback
+// tunnel port before the caller's dial, and dial other endpoints through it.
+func TestNilTestEnvDialGuardRefusesTunnelPortsInATestBinary(t *testing.T) {
+	testEnvGuardlessRefusalForTest(t, true)
+	var guard *testEnvDialGuard
+	dialed := []string{}
+	dial := func(_ context.Context, _ string, address string) (net.Conn, error) {
+		dialed = append(dialed, address)
+		return nil, errors.New("synthetic unreachable")
+	}
+	wrapped := guard.wrapDial("redis", dial)
+	if _, err := wrapped(t.Context(), "tcp", "127.0.0.1:6379"); err == nil || !strings.Contains(err.Error(), "loopback production data tunnel port") {
+		t.Fatalf("a guard-free Redis dial to 127.0.0.1:6379 = %v; want the refusal", err)
+	}
+	wrapped(t.Context(), "tcp", "127.0.0.1:30001")
+	if !slices.Equal(dialed, []string{"127.0.0.1:30001"}) {
+		t.Fatalf("dialed %q; want only the endpoint off the tunnel ports", dialed)
+	}
+
+	config, err := pgx.ParseConfig("postgres://synthetic@127.0.0.1:5432/synthetic?sslmode=disable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// a recording dial in place of pgx's own, so no refusal failure can open a socket
+	dialed = []string{}
+	config.DialFunc = dial
+	lookupPointer := testEnvFuncPointer(config.LookupFunc)
+	configurePgTestEnvDial(guard, config)
+	if testEnvFuncPointer(config.LookupFunc) != lookupPointer {
+		t.Fatal("a guard-free test binary changed the PostgreSQL lookup")
+	}
+	if _, err := config.DialFunc(t.Context(), "tcp", "127.0.0.1:5432"); err == nil || !strings.Contains(err.Error(), "loopback production data tunnel port") {
+		t.Fatalf("a guard-free PostgreSQL dial to 127.0.0.1:5432 = %v; want the refusal", err)
+	}
+	config.DialFunc(t.Context(), "tcp", "127.0.0.1:30002")
+	if !slices.Equal(dialed, []string{"127.0.0.1:30002"}) {
+		t.Fatalf("the PostgreSQL dial reached %q; want only the endpoint off the tunnel ports", dialed)
+	}
+}
+
 // A nil guard is the production case: it hands back the caller's own dial and
 // lookup, which then see the unresolved name exactly as before, and leaves
 // every client configuration untouched.
 func TestNilTestEnvDialGuardLeavesDialPathsUnchanged(t *testing.T) {
+	testEnvGuardlessRefusalForTest(t, false)
 	var guard *testEnvDialGuard
 	dialed := []string{}
 	unreachable := errors.New("synthetic unreachable")
@@ -1488,6 +1594,8 @@ func TestServiceBinaryChoosesGuardAfterMainSetsLocalEnvironment(t *testing.T) {
 // nil guard, so its pool dial and lookup stay the callers' own functions; a
 // later environment change cannot add a guard to it.
 func TestProductionServiceChoosesNilGuardAtFirstUse(t *testing.T) {
+	// a service binary's guard-free dial is its own
+	testEnvGuardlessRefusalForTest(t, false)
 	values := map[string]string{}
 	newGuard := func() *testEnvDialGuard {
 		return newTestEnvDialGuard(testEnvGetenv(values), testEnvUnusedResolver(t))
