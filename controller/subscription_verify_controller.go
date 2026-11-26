@@ -139,6 +139,14 @@ func VerifyPlayPurchase(
 		return nil, err
 	}
 
+	// a compute.* product goes to compute's own path, a consumable through
+	// purchases.products and a subscription through subscriptionsv2, routed by
+	// product family before Pro's reads anything, so it never grants Pro
+	// (compute_store_play.go)
+	if sidecar.ComputeStoreProductFamilyOf(verifyPlayPurchase.ProductId) {
+		return computePlayStoreProcess().VerifyPurchase(verifyPlayPurchase, clientSession)
+	}
+
 	subUrl := fmt.Sprintf(
 		"%s/androidpublisher/v3/applications/%s/purchases/subscriptionsv2/tokens/%s",
 		playPublisherApiBaseUrl,
