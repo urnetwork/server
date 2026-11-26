@@ -16,6 +16,7 @@ import (
 )
 
 func TestReleaseDatabasePreflightOnlySelectsAndChecksIdentityHeadCapacity(t *testing.T) {
+	settings := defaultReleasePreflightSettings()
 	for _, test := range []struct {
 		name    string
 		mutate  func([]any) []any
@@ -41,7 +42,7 @@ func TestReleaseDatabasePreflightOnlySelectsAndChecksIdentityHeadCapacity(t *tes
 					t.Fatalf("non-read-only SQL: %s", sql)
 				}
 				deadline, bounded := ctx.Deadline()
-				if !bounded || time.Until(deadline) > 30*time.Second {
+				if !bounded || time.Until(deadline) > settings.DatabaseTimeout {
 					t.Fatal("database probe has no bounded deadline")
 				}
 				var values []any
@@ -67,7 +68,7 @@ func TestReleaseDatabasePreflightOnlySelectsAndChecksIdentityHeadCapacity(t *tes
 				return nil
 			}
 			var output bytes.Buffer
-			err := checkReleaseDatabase(context.Background(), query, 9, "main", "release-reader", &output)
+			err := checkReleaseDatabase(context.Background(), settings, query, 9, "main", "release-reader", &output)
 			if test.failure == "" {
 				if err != nil {
 					t.Fatal(err)
@@ -83,21 +84,22 @@ func TestReleaseDatabasePreflightOnlySelectsAndChecksIdentityHeadCapacity(t *tes
 }
 
 func TestReleasePreflightRedactsConnectionAndHTTPFailures(t *testing.T) {
-	err := checkReleaseDatabase(context.Background(), func(context.Context, string, ...any) error { return errors.New("password=never-log-me") }, 9, "main", "reader", io.Discard)
+	settings := defaultReleasePreflightSettings()
+	err := checkReleaseDatabase(context.Background(), settings, func(context.Context, string, ...any) error { return errors.New("password=never-log-me") }, 9, "main", "reader", io.Discard)
 	if err == nil || strings.Contains(err.Error(), "never-log-me") {
 		t.Fatalf("connection failure not redacted: %v", err)
 	}
 	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusInternalServerError} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.Method != http.MethodGet {
 					t.Errorf("authorization probe wrote: %s", r.Method)
 				}
 				w.WriteHeader(status)
 				fmt.Fprint(w, "credential-bearing provider body never-log-me")
 			}))
-			defer server.Close()
-			err := releasePreflightGET(context.Background(), server.Client(), server.URL, "admin", "never-log-me", "", nil)
+			defer httpServer.Close()
+			err := releasePreflightGET(context.Background(), settings, httpServer.Client(), httpServer.URL, "admin", "never-log-me", "", nil)
 			if err == nil || strings.Contains(err.Error(), "never-log-me") {
 				t.Fatalf("provider failure not redacted: %v", err)
 			}
@@ -107,7 +109,7 @@ func TestReleasePreflightRedactsConnectionAndHTTPFailures(t *testing.T) {
 
 func TestReleasePreflightHTTPReadsExactAuthorizationSurfaces(t *testing.T) {
 	var methods, paths []string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		methods = append(methods, r.Method)
 		paths = append(paths, r.URL.RequestURI())
 		if r.ContentLength > 0 {
@@ -128,9 +130,9 @@ func TestReleasePreflightHTTPReadsExactAuthorizationSurfaces(t *testing.T) {
 		}
 		fmt.Fprint(w, `{"isGrafanaAdmin":true}`)
 	}))
-	defer server.Close()
+	defer httpServer.Close()
 	var output bytes.Buffer
-	err := checkReleaseHTTP(context.Background(), server.Client(), server.URL, "synthetic-grafana", server.URL+"/v3", "synthetic-brevo", &output)
+	err := checkReleaseHTTP(context.Background(), defaultReleasePreflightSettings(), httpServer.Client(), httpServer.URL, "synthetic-grafana", httpServer.URL+"/v3", "synthetic-brevo", &output)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +146,7 @@ func TestReleasePreflightHTTPReadsExactAuthorizationSurfaces(t *testing.T) {
 
 func TestReleasePreflightRequiresGrafanaAdminAndNeverFollowsRedirects(t *testing.T) {
 	for _, admin := range []bool{false, true} {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/api/user" {
 				fmt.Fprintf(w, `{"isGrafanaAdmin":%t}`, admin)
 				return
@@ -152,10 +154,10 @@ func TestReleasePreflightRequiresGrafanaAdminAndNeverFollowsRedirects(t *testing
 			w.Header().Set("Location", "/would-mutate-if-followed")
 			w.WriteHeader(http.StatusTemporaryRedirect)
 		}))
-		client := server.Client()
+		client := httpServer.Client()
 		client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-		err := checkReleaseHTTP(context.Background(), client, server.URL, "synthetic", server.URL, "synthetic", io.Discard)
-		server.Close()
+		err := checkReleaseHTTP(context.Background(), defaultReleasePreflightSettings(), client, httpServer.URL, "synthetic", httpServer.URL, "synthetic", io.Discard)
+		httpServer.Close()
 		if err == nil {
 			t.Fatal("insufficient authorization/redirect accepted")
 		}

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"time"
 
 	"github.com/docopt/docopt-go"
 	"github.com/urnetwork/server"
@@ -22,7 +21,8 @@ func releasePreflightCommand(opts docopt.Opts) {
 		}
 	}()
 	server.RequirePgReadOnly()
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	settings := defaultReleasePreflightSettings()
+	ctx, cancel := context.WithTimeout(context.Background(), settings.Timeout)
 	defer cancel()
 	var probeErr error
 	server.MaintenanceDb(ctx, func(conn server.PgConn) {
@@ -30,15 +30,15 @@ func releasePreflightCommand(opts docopt.Opts) {
 			return conn.QueryRow(ctx, sql).Scan(dest...)
 		}
 		selected := conn.Conn().Config()
-		probeErr = checkReleaseDatabase(ctx, query, server.MigrationCount(), selected.Database, selected.User, os.Stdout)
+		probeErr = checkReleaseDatabase(ctx, settings, query, server.MigrationCount(), selected.Database, selected.User, os.Stdout)
 	}, server.OptNoRetry())
 	if probeErr == nil {
 		grafanaURL, password := grafanaAdminTarget(opts)
 		brevoKey := server.Vault.RequireSimpleResource("brevo.yml").RequireString("brevo", "api_key")
-		client := &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+		client := &http.Client{Timeout: settings.HttpClientTimeout, CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 			return http.ErrUseLastResponse
 		}}
-		probeErr = checkReleaseHTTP(ctx, client, grafanaURL, password, "https://api.brevo.com/v3", brevoKey, os.Stdout)
+		probeErr = checkReleaseHTTP(ctx, settings, client, grafanaURL, password, "https://api.brevo.com/v3", brevoKey, os.Stdout)
 	}
 	if probeErr == nil {
 		// §12.5: every services.yml host label is reserved (release_preflight_dns.go)

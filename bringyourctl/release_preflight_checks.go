@@ -13,6 +13,39 @@ import (
 // The narrow callback supports deterministic tests with no database or secrets.
 type releasePreflightQuery func(context.Context, string, ...any) error
 
+// Tunables of the release preflight (QD-702), from defaultReleasePreflightSettings.
+type releasePreflightSettings struct {
+	// The whole run's bound, from the read-only database session to the last
+	// check: 90 s, the database probe's 30 s and three authorization reads'
+	// 20 s each.
+	Timeout time.Duration
+	// The database probe's bound, within Timeout: 30 s.
+	DatabaseTimeout time.Duration
+	// The fewest ordinary connection slots, past the reserved ones, the main
+	// database must have free for the preflight to pass: 5. With fewer it is
+	// saturated.
+	DatabaseFreeConnectionMinCount int
+	// The HTTP client's bound on one exchange: 20 s.
+	HttpClientTimeout time.Duration
+	// One authorization read's bound, its answer's body included: 20 s.
+	HttpRequestTimeout time.Duration
+	// The most bytes of an authorization read's JSON answer that are decoded:
+	// 1 MiB. A longer answer does not decode, and the read fails.
+	HttpResponseMaxByteCount int64
+}
+
+// The preflight's defaults, their only source. A fresh value each call.
+func defaultReleasePreflightSettings() *releasePreflightSettings {
+	return &releasePreflightSettings{
+		Timeout:                        90 * time.Second,
+		DatabaseTimeout:                30 * time.Second,
+		DatabaseFreeConnectionMinCount: 5,
+		HttpClientTimeout:              20 * time.Second,
+		HttpRequestTimeout:             20 * time.Second,
+		HttpResponseMaxByteCount:       1024 * 1024,
+	}
+}
+
 const releaseIdentitySQL = `SELECT current_database(), current_user,
     COALESCE(inet_server_addr()::text, ''), pg_is_in_recovery(),
     current_setting('transaction_read_only'),
@@ -24,8 +57,8 @@ const releaseAuditExistsSQL = `SELECT to_regclass('migration_audit') IS NOT NULL
 const releaseMigrationHeadSQL = `SELECT COALESCE(MAX(end_version_number), 0)
     FROM migration_audit WHERE status = 'success'`
 
-func checkReleaseDatabase(ctx context.Context, query releasePreflightQuery, expectedHead int, expectedDatabase, expectedUser string, out io.Writer) error {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+func checkReleaseDatabase(ctx context.Context, settings *releasePreflightSettings, query releasePreflightQuery, expectedHead int, expectedDatabase, expectedUser string, out io.Writer) error {
+	ctx, cancel := context.WithTimeout(ctx, settings.DatabaseTimeout)
 	defer cancel()
 	var database, user, address, readOnly string
 	var replica bool
@@ -39,8 +72,8 @@ func checkReleaseDatabase(ctx context.Context, query releasePreflightQuery, expe
 	if database != expectedDatabase || user != expectedUser {
 		return fmt.Errorf("Main database/user does not match the selected LAN connection settings")
 	}
-	if maxConnections-reserved-connected < 5 {
-		return fmt.Errorf("Main database saturated: connections=%d maximum=%d reserved=%d; fewer than 5 ordinary slots remain", connected, maxConnections, reserved)
+	if maxConnections-reserved-connected < settings.DatabaseFreeConnectionMinCount {
+		return fmt.Errorf("Main database saturated: connections=%d maximum=%d reserved=%d; fewer than %d ordinary slots remain", connected, maxConnections, reserved, settings.DatabaseFreeConnectionMinCount)
 	}
 	var exists bool
 	if err := query(ctx, releaseAuditExistsSQL, &exists); err != nil || !exists {
@@ -57,8 +90,8 @@ func checkReleaseDatabase(ctx context.Context, query releasePreflightQuery, expe
 	return nil
 }
 
-func releasePreflightGET(ctx context.Context, client *http.Client, url, user, password, apiKey string, result any) error {
-	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+func releasePreflightGET(ctx context.Context, settings *releasePreflightSettings, client *http.Client, url, user, password, apiKey string, result any) error {
+	ctx, cancel := context.WithTimeout(ctx, settings.HttpRequestTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -80,30 +113,30 @@ func releasePreflightGET(ctx context.Context, client *http.Client, url, user, pa
 		return fmt.Errorf("read-only authorization request returned HTTP %d", response.StatusCode)
 	}
 	if result != nil {
-		if err := json.NewDecoder(io.LimitReader(response.Body, 1024*1024)).Decode(result); err != nil {
+		if err := json.NewDecoder(io.LimitReader(response.Body, settings.HttpResponseMaxByteCount)).Decode(result); err != nil {
 			return fmt.Errorf("read-only authorization response is not valid JSON")
 		}
 	}
 	return nil
 }
 
-func checkReleaseHTTP(ctx context.Context, client *http.Client, grafanaURL, grafanaPassword, brevoURL, brevoKey string, out io.Writer) error {
+func checkReleaseHTTP(ctx context.Context, settings *releasePreflightSettings, client *http.Client, grafanaURL, grafanaPassword, brevoURL, brevoKey string, out io.Writer) error {
 	var identity struct {
 		Admin bool `json:"isGrafanaAdmin"`
 	}
-	if err := releasePreflightGET(ctx, client, grafanaURL+"/api/user", "admin", grafanaPassword, "", &identity); err != nil {
+	if err := releasePreflightGET(ctx, settings, client, grafanaURL+"/api/user", "admin", grafanaPassword, "", &identity); err != nil {
 		return fmt.Errorf("Grafana: %w", err)
 	}
 	if !identity.Admin {
 		return fmt.Errorf("Grafana preflight identity is not a server administrator")
 	}
-	if err := releasePreflightGET(ctx, client, grafanaURL+"/api/v1/provisioning/policies", "admin", grafanaPassword, "", nil); err != nil {
+	if err := releasePreflightGET(ctx, settings, client, grafanaURL+"/api/v1/provisioning/policies", "admin", grafanaPassword, "", nil); err != nil {
 		return fmt.Errorf("Grafana provisioning read: %w", err)
 	}
 	if brevoKey == "" {
 		return fmt.Errorf("Brevo API credential is absent")
 	}
-	if err := releasePreflightGET(ctx, client, brevoURL+"/smtp/templates?limit=1&offset=0", "", "", brevoKey, nil); err != nil {
+	if err := releasePreflightGET(ctx, settings, client, brevoURL+"/smtp/templates?limit=1&offset=0", "", "", brevoKey, nil); err != nil {
 		return fmt.Errorf("Brevo template read: %w", err)
 	}
 	fmt.Fprintln(out, "Grafana admin/provisioning and Brevo template authorization reads passed; no writes or messages sent")
