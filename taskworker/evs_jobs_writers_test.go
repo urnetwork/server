@@ -218,6 +218,9 @@ func TestEvsJobWritersKeepApisSigningRevStore(t *testing.T) {
 			if created <= 0 || spent(workerBudget) != 0 {
 				t.Fatalf("api first %t: api's create spent %d of api's budget and %d of the worker's", apiFirst, created, spent(workerBudget))
 			}
+			// 20 minutes on by api's clock as well, so the object is expired to either store: which one swept shows
+			// only in whose budget its DELETE spent
+			clock.Advance(apiSettings.DeleteAfter + time.Minute)
 			if deletedCount, err := model.SweepSidecarRevocations(ctx); err != nil || deletedCount != 1 {
 				t.Fatalf("api first %t: the sweep deleted %d: %v", apiFirst, deletedCount, err)
 			}

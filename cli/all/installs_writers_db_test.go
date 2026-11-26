@@ -428,6 +428,9 @@ func (self *allWritersWorld) requireRevThroughEachRole() {
 	if self.apiUser.putCount("rev/") == 0 || self.workerUser.putCount("rev/") != 0 {
 		self.tb.Fatalf("api's user sent %d rev/ PUTs and the worker's %d", self.apiUser.putCount("rev/"), self.workerUser.putCount("rev/"))
 	}
+	// 20 minutes on by this clock as well, so the object is expired to api's store too, which reads it: a sweep
+	// through api's store would send its DELETE, and api's user would refuse it
+	self.clock.Advance(model.DefaultSidecarRevSettings().DeleteAfter + time.Minute)
 	spentBefore := self.workerSpent(sidecar.WriteP0KindRevocation)
 	if deletedCount, err := model.SweepSidecarRevocations(self.ctx); err != nil || deletedCount != 1 {
 		self.tb.Fatalf("the sweep deleted %d: %v", deletedCount, err)
@@ -523,7 +526,7 @@ func TestAllRunsApisAndTheWorkersWritersSideBySide(t *testing.T) {
 
 		world.requireRevThroughEachRole()
 		// the rest at the time the appends always ran at, 21 minutes past real time
-		clock.Advance(time.Hour + model.DefaultSidecarRevSettings().DeleteAfter + time.Minute)
+		clock.Advance(time.Hour)
 
 		// appends: a network's log through api's sequencer, three bases with statements between them
 		suiteSettings := sidecartest.DefaultAdmissionSuiteSettings()
