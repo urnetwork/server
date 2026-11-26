@@ -268,6 +268,9 @@ func readContractDeadlineOwnerSiblingsInTx(ctx context.Context, tx server.PgTx, 
 // the business callback began, which separates an admission or route failure
 // from a failed member. Discovery reads precede every row lock. Member posts
 // run only after an acknowledged commit; postCtx carries their coalescers.
+// The members share one read of each grant's pending journal sum
+// (deadlineTurnPending); a check before commit fails the turn when a
+// settlement outside the owner changed that sum enough to matter.
 func reconcileContractOwnerBatchAtDeadline(ctx context.Context, postCtx context.Context, balanceIds []server.Id, members []ContractDeadline, discover func(server.PgTx) []ContractDeadline) (results map[server.Id]*ContractDeadlineReconciliation, discovered []ContractDeadline, busy bool, entered bool, returnErr error) {
 	// The owner's grants are the whole key set: a member close publishes no
 	// provider totals (BILLING-SPLIT.md).
@@ -281,6 +284,7 @@ func reconcileContractOwnerBatchAtDeadline(ctx context.Context, postCtx context.
 		admitted := server.TryOwnedTx(ctx, keys, func(tx server.PgTx) {
 			entered = true
 			results, discovered, posts = map[server.Id]*ContractDeadlineReconciliation{}, nil, nil
+			pending := newDeadlineTurnPending()
 			if discover != nil {
 				discovered = discover(tx)
 			}
@@ -304,11 +308,12 @@ func reconcileContractOwnerBatchAtDeadline(ctx context.Context, postCtx context.
 				case outcomes[contractId] != nil:
 					results[contractId] = &ContractDeadlineReconciliation{ContractId: contractId, Outcome: *outcomes[contractId], AlreadyClosed: true}
 				default:
-					result, memberPosts := reconcileContractAtDeadlineWithOwnershipInTx(postCtx, tx, contractId, member.Deadline, true)
+					result, memberPosts := reconcileContractAtDeadlineWithOwnershipInTx(postCtx, tx, contractId, member.Deadline, true, pending)
 					results[contractId] = result
 					posts = append(posts, memberPosts...)
 				}
 			}
+			pending.check(ctx, tx)
 		}, contractDeadlineOwnerTurnTxOptions(ctx, contractIds)...)
 		if !admitted {
 			results, busy = nil, true

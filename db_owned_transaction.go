@@ -117,6 +117,23 @@ func TryOwnedTx(ctx context.Context, keys []PgOwnershipKey, callback func(PgTx),
 	return ownedTxWithResourcePolicy(ctx, keys, requirePgOwnershipResource(), AcquireMaintenanceDbConn, false, callback, options...)
 }
 
+// Admit one key as TryOwnedTx does, except that a held key is waited for:
+// the probe's session joins PostgreSQL's lock queue for the key for at most
+// wait. A probe never queues, and PostgreSQL refuses a probe while a
+// conflicting request waits, so the holder's release admits this waiter ahead
+// of any owner that probes after it, however closely that owner follows. An
+// owner whose turns follow each other with no gap would otherwise refuse
+// every probe. The wait holds only this checkout, no key or row; the queue
+// is the only blocking acquisition of an ownership key. False means the key
+// stayed held for the whole wait: PostgreSQL's lock bound ended it, the
+// checkout is released and no business transaction ran. Every route,
+// acquisition, protocol, callback or commit failure still propagates.
+func QueuedOwnedTx(ctx context.Context, key PgOwnershipKey, wait time.Duration, callback func(PgTx), options ...any) bool {
+	dbPhaseObservation(options).enter(DbOperationOwnershipConfiguration)
+	checkPostgresAllowed(ctx)
+	return ownedTxWithResourceAdmission(ctx, []PgOwnershipKey{key}, requirePgOwnershipResource(), AcquireMaintenanceDbConn, false, wait, callback, options...)
+}
+
 // The production caller supplies only the explicit direct resource/acquirer.
 // A private transport seam exercises actual pgx replies without global pools.
 func ownedTxWithResource(ctx context.Context, keys []PgOwnershipKey, resource pgOwnershipResource,
@@ -128,10 +145,22 @@ func ownedTxWithResource(ctx context.Context, keys []PgOwnershipKey, resource pg
 // cleanup. Only a known pre-BEGIN refusal can return without business work.
 func ownedTxWithResourcePolicy(ctx context.Context, keys []PgOwnershipKey, resource pgOwnershipResource,
 	acquire func(context.Context) (PgConn, error), wait bool, callback func(PgTx), options ...any) bool {
+	return ownedTxWithResourceAdmission(ctx, keys, resource, acquire, wait, 0, callback, options...)
+}
+
+// A positive queue makes a refused probe of its one key wait in the key's lock
+// queue for at most that long (QueuedOwnedTx) before it is a refusal; it never
+// polls. The admission budget grows by the queue, so PostgreSQL's lock bound,
+// not the budget, ends a wait.
+func ownedTxWithResourceAdmission(ctx context.Context, keys []PgOwnershipKey, resource pgOwnershipResource,
+	acquire func(context.Context) (PgConn, error), wait bool, queue time.Duration, callback func(PgTx), options ...any) bool {
 	phase := dbPhaseObservation(options)
 	keys = normalizePgOwnershipKeys(keys)
 	if len(keys) == 0 {
 		panic(errors.New("database ownership requires at least one key"))
+	}
+	if 0 < queue && (wait || len(keys) != 1) {
+		panic(errors.New("queued database ownership admits exactly one key and does not poll"))
 	}
 	observation, _ := ctx.Value(pgOwnershipObservationKey{}).(*PgOwnershipObservation)
 	var timing *DbTiming
@@ -143,7 +172,7 @@ func ownedTxWithResourcePolicy(ctx context.Context, keys []PgOwnershipKey, resou
 			timing = value
 		}
 	}
-	admissionCtx, cancel := context.WithTimeout(ctx, PgOwnershipAdmissionTimeout)
+	admissionCtx, cancel := context.WithTimeout(ctx, PgOwnershipAdmissionTimeout+max(0, queue))
 	defer cancel()
 	for {
 		phase.enter(DbOperationOwnershipAcquire)
@@ -165,6 +194,15 @@ func ownedTxWithResourcePolicy(ctx context.Context, keys []PgOwnershipKey, resou
 			Raise(resource.validate(conn))
 			var err error
 			admitted, err = tryPgOwnershipKeys(admissionCtx, conn, keys, false, owner.backendPid, phase)
+			if err == nil && !admitted && 0 < queue {
+				// A refused probe of one key holds nothing: the session waits
+				// in the queue with no key and outside any transaction.
+				if bound := pgOwnershipQueueBound(admissionCtx, queue); 0 < bound {
+					owner.observe(PgOwnershipWaiting)
+					phase.enterAdmission(DbAdmissionProbe)
+					admitted, err = queuePgOwnershipKey(admissionCtx, conn, keys[0], bound, owner.backendPid)
+				}
+			}
 			if err != nil {
 				if admissionCtx.Err() != nil {
 					err = dbContextDoneCause(admissionCtx, err)
@@ -515,6 +553,53 @@ func tryPgOwnershipKeyReplies(ctx context.Context, query PgCanQuery, keys []PgOw
 		}
 	}
 	return true, backendPid, nil
+}
+
+// A queued wait keeps this much of its admission budget, so the lock bound
+// ends the wait well before the budget would cancel it on the wire.
+const pgOwnershipQueueReserve = 500 * time.Millisecond
+
+// The queued wait the admission budget still allows; zero when none is left.
+func pgOwnershipQueueBound(ctx context.Context, queue time.Duration) time.Duration {
+	if deadline, ok := ctx.Deadline(); ok {
+		queue = min(queue, time.Until(deadline)-pgOwnershipQueueReserve)
+	}
+	if queue < time.Millisecond {
+		return 0
+	}
+	return queue
+}
+
+// Waits in key's lock queue on the idle direct session for at most wait. The
+// lock is session-level, as a probe's is, so it outlives the transaction that
+// only scopes the bound; a lock timeout (55P03) rolls that transaction back
+// and leaves the session idle, holding nothing. The statement bound sits above
+// the lock bound, so a shorter session default cannot end the wait first. Any
+// other reply is an unknown outcome for the caller to discard with the session.
+func queuePgOwnershipKey(ctx context.Context, conn PgConn, key PgOwnershipKey, wait time.Duration, backendPid uint32) (bool, error) {
+	lockTimeout := max(int64(1), wait.Milliseconds())
+	// one simple-protocol round trip; SET LOCAL ends with the transaction
+	if _, err := conn.Exec(ctx, "begin; set local lock_timeout = "+strconv.FormatInt(lockTimeout, 10)+
+		"; set local statement_timeout = "+strconv.FormatInt(lockTimeout+pgOwnershipQueueReserve.Milliseconds(), 10)); err != nil {
+		return false, err
+	}
+	var observedBackendPid uint32
+	if err := conn.QueryRow(ctx, `SELECT pg_backend_pid() FROM pg_advisory_lock($1::integer,$2::integer)`, key.first, key.second).Scan(&observedBackendPid); err != nil {
+		if !IsLockTimeout(err) {
+			return false, err
+		}
+		if _, err := conn.Exec(ctx, "rollback"); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	if _, err := conn.Exec(ctx, "commit"); err != nil {
+		return false, err
+	}
+	if observedBackendPid != backendPid {
+		return false, errors.New("database ownership requires a direct backend session")
+	}
+	return true, nil
 }
 
 // Called exactly once by dbWithPool instead of acquiring a second connection.

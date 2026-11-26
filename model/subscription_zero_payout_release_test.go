@@ -58,7 +58,7 @@ func TestDeadlineCloseZeroPayoutReleaseSurvivesLostPost(t *testing.T) {
 		var result *ContractDeadlineReconciliation
 		server.OwnedTx(ctx, keys, func(tx server.PgTx) {
 			// The process stops right after this commit, so every post is lost.
-			result, _ = reconcileContractAtDeadlineWithOwnershipInTx(ctx, tx, escrow.ContractId, server.NowUtc(), true)
+			result, _ = reconcileContractAtDeadlineWithOwnershipInTx(ctx, tx, escrow.ContractId, server.NowUtc(), true, nil)
 		}, server.TxReadCommitted, server.OptNoRetry())
 		if result == nil || result.AlreadyClosed || result.Missing || result.Charged != 0 {
 			t.Fatalf("unused contract did not close at its deadline without a charge: %+v", result)

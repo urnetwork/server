@@ -39,6 +39,48 @@ func transferDebitPageHasTime(bounded context.Context) bool {
 
 var errTransferDebitPageDeadline = errors.New("transfer debit page deadline")
 
+// A flush that finds its grant's owner held waits for it in the owner's lock
+// queue (server.QueuedOwnedTx) instead of skipping the grant at once. A
+// deadline close holds the owner for a whole turn, and its turns can follow
+// each other with no gap, so a flush that only probed found the owner held on
+// every pass and its grant's debits and reservations stayed pending for hours
+// (2026-11-25). Queued, the flush is admitted when the current turn releases
+// the owner, ahead of the next turn. It waits at most this long, for the
+// apply and again for the cleanup, and only while the page keeps its reserve
+// for the work after the wait; then it skips the grant as before.
+const transferDebitOwnerWait = 5 * time.Second
+
+// After a queued apply the page still needs time for the apply's statements,
+// the Redis release and the cleanup; after a queued cleanup, for its delete.
+const transferDebitApplyWaitReserve = transferDebitRepeatMargin
+const transferDebitCleanupWaitReserve = time.Second
+
+// A private test seam replaces transferDebitOwnerWait. Production contexts
+// carry none.
+type transferDebitOwnerWaitKey struct{}
+
+// The bounded wait for a held owner at now: at most transferDebitOwnerWait,
+// and none once the page has no more than reserve left.
+func transferDebitOwnerWaitAt(ctx context.Context, reserve time.Duration, now time.Time) time.Duration {
+	wait := transferDebitOwnerWait
+	if override, ok := ctx.Value(transferDebitOwnerWaitKey{}).(time.Duration); ok {
+		wait = override
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		wait = min(wait, deadline.Sub(now)-reserve)
+	}
+	return max(0, wait)
+}
+
+// A queued admission when the bound allows a wait; otherwise one probe.
+func transferDebitOwnedTx(ctx context.Context, balanceId server.Id, reserve time.Duration, callback func(server.PgTx), options ...any) bool {
+	keys := transferBalanceOwnershipKeys([]server.Id{balanceId})
+	if wait := transferDebitOwnerWaitAt(ctx, reserve, time.Now()); 0 < wait {
+		return server.QueuedOwnedTx(ctx, keys[0], wait, callback, options...)
+	}
+	return server.TryOwnedTx(ctx, keys, callback, options...)
+}
+
 // The age of a shard's oldest journal row in one applied state, 0 for none. It
 // reads transfer_debit_journal_shard_create_time oldest first and filters the
 // state, since no index keys applied: marking a row applied stays HOT.
@@ -255,9 +297,12 @@ func transferDebitFlushFailurePhase(operation string, phase server.DbOperationPh
 	}
 }
 
-// Probe common same-backend ownership once before shared grant SQL; a known
-// busy owner leaves the journal for the next fair traversal. SKIP LOCKED keeps
-// the compatibility guard against older writers that lack that ownership.
+// Admit common same-backend ownership before shared grant SQL, waiting in its
+// queue for a bounded time; an owner still held leaves the journal for the
+// next fair traversal. The wait holds no row or key, and both admitted
+// transactions take the owner before the grant row, as every owner does, so a
+// waiting flush cannot join a deadlock. SKIP LOCKED keeps the compatibility
+// guard against older writers that lack that ownership.
 // No Redis I/O occurs while PostgreSQL rows are locked. An ambiguous SQL commit
 // is safe: a retry observes applied=true before attempting another debit.
 func flushTransferDebitBalance(ctx context.Context, balanceId server.Id) (appliedCount, releasedCount int, busy bool, returnErr error) {
@@ -266,7 +311,7 @@ func flushTransferDebitBalance(ctx context.Context, balanceId server.Id) (applie
 	operation := "apply"
 	var phase server.DbPhaseObservation
 	server.HandleError(func() {
-		admitted := server.TryOwnedTx(ctx, transferBalanceOwnershipKeys([]server.Id{balanceId}), func(tx server.PgTx) {
+		admitted := transferDebitOwnedTx(ctx, balanceId, transferDebitApplyWaitReserve, func(tx server.PgTx) {
 			records = nil
 			appliedCount = 0
 			busy = false
@@ -359,12 +404,13 @@ func flushTransferDebitBalance(ctx context.Context, balanceId server.Id) (applie
 			ids = append(ids, record.contractId)
 		}
 		// Another admitted pass may hold these applied rows after Redis release.
-		// Refuse known contention before cleanup SQL; the retained journal makes
-		// the later release/deletion replay safe without another financial debit.
+		// An owner still held after the bounded wait refuses cleanup SQL; the
+		// retained journal makes the later release/deletion replay safe without
+		// another financial debit.
 		operation = "cleanup"
 		phase = server.DbPhaseObservation{}
 		var deletedCount int
-		if !server.TryOwnedTx(ctx, transferBalanceOwnershipKeys([]server.Id{balanceId}), func(tx server.PgTx) {
+		if !transferDebitOwnedTx(ctx, balanceId, transferDebitCleanupWaitReserve, func(tx server.PgTx) {
 			tag := server.RaisePgResult(tx.Exec(ctx, `DELETE FROM transfer_debit_journal WHERE balance_id=$1 AND contract_id=ANY($2) AND applied`, balanceId, ids))
 			deletedCount = int(tag.RowsAffected())
 		}, server.TxReadCommitted, server.OptNoRetry(), &phase) {

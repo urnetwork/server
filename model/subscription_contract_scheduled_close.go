@@ -60,6 +60,28 @@ var deadlineEscrowRowsSql = fmt.Sprintf(`SELECT e.balance_id,e.balance_byte_coun
 	LEFT JOIN transfer_balance b USING(balance_id)
 	ORDER BY COALESCE(%s,false) DESC,b.end_time NULLS LAST,e.balance_id`, deadlineEscrowRowLimit+1, transferBalanceFundsFirstSqlOf("b"))
 
+// An owner turn's read of the same rows in the same order. It returns each
+// grant's balance where deadlineEscrowRowsSql returns its room, and leaves the
+// grant's pending journal sum to the turn (deadlineTurnPending), which reads
+// it at most once per grant. That sum scans every journal row of the grant;
+// read for each member, a paid grant with a large backlog spent seconds per
+// member under its owner, its turns took minutes back to back and the debit
+// flush never got the owner (2026-11-25).
+var deadlineEscrowTurnRowsSql = fmt.Sprintf(`SELECT e.balance_id,e.balance_byte_count,COALESCE(b.start_balance_byte_count,0),
+	COALESCE(b.net_revenue_nano_cents,0),b.network_id,COALESCE(b.balance_byte_count,0),
+	e.settled,e.payout_byte_count,e.redis_reserved,
+	(SELECT debit_byte_count FROM transfer_debit_journal j WHERE j.balance_id=e.balance_id AND j.contract_id=e.contract_id)
+	FROM unnest(ARRAY[$1::uuid]) AS requested(contract_id)
+	CROSS JOIN LATERAL (SELECT contract_id,balance_id,balance_byte_count,settled,payout_byte_count,redis_reserved
+		FROM transfer_escrow WHERE contract_id=requested.contract_id ORDER BY balance_id LIMIT %d) AS e
+	LEFT JOIN transfer_balance b USING(balance_id)
+	ORDER BY COALESCE(%s,false) DESC,b.end_time NULLS LAST,e.balance_id`, deadlineEscrowRowLimit+1, transferBalanceFundsFirstSqlOf("b"))
+
+// A grant's pending (not applied) journal sum, the one deadlineEscrowRowsSql
+// subtracts, saturated at the largest bigint.
+const deadlinePendingDebitSql = `SELECT LEAST(COALESCE(sum(debit_byte_count),0),9223372036854775807)::bigint
+	FROM transfer_debit_journal WHERE balance_id=$1 AND NOT applied`
+
 // The planner still costs the read at the row limit, and each estimated row
 // pays for two debit journal probes. Once dead journal tuples left that small
 // table a few hundred pages, the cost passed the JIT inline and optimize
@@ -72,8 +94,10 @@ const deadlineEscrowRowsJitSql = `SELECT set_config('jit', 'off', true)`
 // so every reservation can be retired, including orphaned legacy escrows.
 type contractDeadlineEscrow struct {
 	contractSettlementEscrow
-	networkId     *server.Id
-	available     ByteCount
+	networkId *server.Id
+	available ByteCount
+	// The grant's balance, read in an owner turn instead of available.
+	balance       ByteCount
 	settled       bool
 	priorPayout   *ByteCount
 	redisReserved bool
@@ -109,7 +133,7 @@ func ReconcileContractAtDeadline(ctx context.Context, contractId server.Id, dead
 		balanceIds := readDeadlineBalanceIds(ctx, contractId)
 		keys := deadlineFinancialOwnershipKeys(balanceIds)
 		body := func(tx server.PgTx) {
-			result, posts = reconcileContractAtDeadlineWithOwnershipInTx(ctx, tx, contractId, deadline, true)
+			result, posts = reconcileContractAtDeadlineWithOwnershipInTx(ctx, tx, contractId, deadline, true, nil)
 		}
 		if len(keys) == 0 {
 			server.Tx(ctx, body, server.TxReadCommitted, server.OptNoRetry())
@@ -154,10 +178,13 @@ func deadlineFinancialOwnershipKeys(balanceIds []server.Id) []server.PgOwnership
 // callers may not wait for admission while holding that row. All errors abort
 // that transaction; returned posts require a confirmed commit.
 func reconcileContractAtDeadlineInTx(ctx context.Context, tx server.PgTx, contractId server.Id, deadline time.Time) (*ContractDeadlineReconciliation, []server.PostFunction) {
-	return reconcileContractAtDeadlineWithOwnershipInTx(ctx, tx, contractId, deadline, false)
+	return reconcileContractAtDeadlineWithOwnershipInTx(ctx, tx, contractId, deadline, false, nil)
 }
 
-func reconcileContractAtDeadlineWithOwnershipInTx(ctx context.Context, tx server.PgTx, contractId server.Id, deadline time.Time, preAdmitted bool) (result *ContractDeadlineReconciliation, posts []server.PostFunction) {
+// An owner turn passes its pending, which reads each grant's pending journal
+// sum at most once for all its members; nil reads it with each member's
+// escrows, as a close alone does.
+func reconcileContractAtDeadlineWithOwnershipInTx(ctx context.Context, tx server.PgTx, contractId server.Id, deadline time.Time, preAdmitted bool, pending *deadlineTurnPending) (result *ContractDeadlineReconciliation, posts []server.PostFunction) {
 	result = &ContractDeadlineReconciliation{ContractId: contractId}
 	owner, err := readContractSettlementRowsInTx(ctx, tx, contractId)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -205,23 +232,40 @@ func reconcileContractAtDeadlineWithOwnershipInTx(ctx context.Context, tx server
 			}
 		}
 	}
+	lockedBalanceIds := []server.Id{}
 	rows, err := tx.Query(ctx, `SELECT balance_id FROM transfer_balance WHERE balance_id=ANY($1) ORDER BY balance_id FOR UPDATE`, balanceIds)
 	server.WithPgResult(rows, err, func() {
 		for rows.Next() {
+			if pending != nil {
+				var balanceId server.Id
+				server.Raise(rows.Scan(&balanceId))
+				lockedBalanceIds = append(lockedBalanceIds, balanceId)
+			}
 		}
 	})
+	if pending != nil {
+		pending.lock(lockedBalanceIds)
+	}
 	positive, redisReservations := lockSettlementReservations(ctx, tx, contractId, balanceIds)
 	// Read under the grant and reservation locks, as settlement does, so the
 	// cached snapshots can follow this close's two revision advances.
 	reservationSnapshots := readDeadlineNetEscrowSnapshots(ctx, tx, positive)
 	escrows := []contractDeadlineEscrow{}
 	server.RaisePgResult(tx.Exec(ctx, deadlineEscrowRowsJitSql))
-	rows, err = tx.Query(ctx, deadlineEscrowRowsSql, contractId)
+	escrowRowsSql := deadlineEscrowRowsSql
+	if pending != nil {
+		escrowRowsSql = deadlineEscrowTurnRowsSql
+	}
+	rows, err = tx.Query(ctx, escrowRowsSql, contractId)
 	server.WithPgResult(rows, err, func() {
 		for rows.Next() {
 			var escrow contractDeadlineEscrow
+			room := &escrow.available
+			if pending != nil {
+				room = &escrow.balance
+			}
 			server.Raise(rows.Scan(&escrow.balanceId, &escrow.amount, &escrow.start, &escrow.revenue, &escrow.networkId,
-				&escrow.available, &escrow.settled, &escrow.priorPayout, &escrow.redisReserved, &escrow.journal))
+				room, &escrow.settled, &escrow.priorPayout, &escrow.redisReserved, &escrow.journal))
 			escrows = append(escrows, escrow)
 		}
 	})
@@ -232,7 +276,15 @@ func reconcileContractAtDeadlineWithOwnershipInTx(ctx context.Context, tx server
 	if len(escrows) == 0 && owner.participants.payerNetworkId == nil {
 		fundedUsage = 0
 	}
-	payouts := deadlineEscrowPayouts(fundedUsage, escrows, originNetworkId, len(participants) > 0, &result.Adjustments)
+	var payouts map[server.Id]sweepPayout
+	if pending == nil {
+		payouts = deadlineEscrowPayouts(fundedUsage, escrows, originNetworkId, len(participants) > 0, &result.Adjustments)
+	} else {
+		payouts = deadlineEscrowPayoutsOf(fundedUsage, escrows, originNetworkId, len(participants) > 0, &result.Adjustments,
+			func(escrow *contractDeadlineEscrow, need ByteCount) ByteCount {
+				return pending.count(ctx, tx, escrow, need)
+			})
+	}
 	participantPayouts := allocateContractParticipantPayouts(participants, originNetworkId, payouts)
 	usageParticipants, _, usageErr := contractParticipantsFromOwnerInTx(ctx, tx, contractId, owner.participants, owner.usageOriginIsSource)
 	if usageErr != nil {
@@ -270,6 +322,9 @@ func reconcileContractAtDeadlineWithOwnershipInTx(ctx context.Context, tx server
 				server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_debit_journal
 					(contract_id,balance_id,debit_byte_count,shard) VALUES($1,$2,$3,$4)`,
 					contractId, balanceId, payout.payoutByteCount, transferDebitShard(balanceId)))
+				if pending != nil {
+					pending.journaled(balanceId, payout.payoutByteCount)
+				}
 				journaledBalanceIds = append(journaledBalanceIds, balanceId)
 				result.Charged += payout.payoutByteCount
 			}
@@ -355,6 +410,14 @@ func deadlineReportAmounts(reports []contractSettlementReport, outcome ContractO
 // Spend only this reservation and the remaining grant, after accepted journals.
 // Missing or invalid grants pay zero. Prior consumption is never repeated.
 func deadlineEscrowPayouts(used ByteCount, escrows []contractDeadlineEscrow, payerId server.Id, validParticipants bool, adjustments *[]string) map[server.Id]sweepPayout {
+	return deadlineEscrowPayoutsOf(used, escrows, payerId, validParticipants, adjustments, nil)
+}
+
+// bound, when set, bounds a valid escrow's positive need by its grant's room
+// in place of the read available (deadlineTurnPending.count); it is not asked
+// when the room cannot matter.
+func deadlineEscrowPayoutsOf(used ByteCount, escrows []contractDeadlineEscrow, payerId server.Id, validParticipants bool, adjustments *[]string,
+	bound func(escrow *contractDeadlineEscrow, need ByteCount) ByteCount) map[server.Id]sweepPayout {
 	payouts := map[server.Id]sweepPayout{}
 	remaining := used
 	var totalRevenue NanoCents
@@ -372,15 +435,19 @@ func deadlineEscrowPayouts(used ByteCount, escrows []contractDeadlineEscrow, pay
 			*adjustments = append(*adjustments, "retained_prior_consumption")
 		}
 	}
-	for _, escrow := range escrows {
+	for index := range escrows {
+		escrow := escrows[index]
 		if escrow.settled || escrow.journal != nil {
 			continue
 		}
-		count := min(remaining, max(0, escrow.amount), max(0, escrow.available))
 		valid := escrow.networkId != nil && *escrow.networkId == payerId && escrow.start > 0 && escrow.revenue >= 0 && validParticipants
+		var count ByteCount
 		if !valid {
-			count = 0
 			*adjustments = append(*adjustments, "unfunded_or_invalid_escrow")
+		} else if need := min(remaining, max(0, escrow.amount)); bound == nil {
+			count = min(need, max(0, escrow.available))
+		} else if 0 < need {
+			count = bound(&escrows[index], need)
 		}
 		var revenue NanoCents
 		if count > 0 {

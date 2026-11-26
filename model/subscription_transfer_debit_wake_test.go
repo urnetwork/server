@@ -135,7 +135,7 @@ func TestDeadlineCloseWakesABackedOffFlushChain(t *testing.T) {
 		var result *ContractDeadlineReconciliation
 		var posts []server.PostFunction
 		server.OwnedTx(ctx, keys, func(tx server.PgTx) {
-			result, posts = reconcileContractAtDeadlineWithOwnershipInTx(ctx, tx, escrow.ContractId, server.NowUtc(), true)
+			result, posts = reconcileContractAtDeadlineWithOwnershipInTx(ctx, tx, escrow.ContractId, server.NowUtc(), true, nil)
 		}, server.TxReadCommitted, server.OptNoRetry())
 		if result == nil || result.AlreadyClosed || result.Missing {
 			t.Fatalf("the contract did not close at its deadline: %+v", result)

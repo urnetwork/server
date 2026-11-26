@@ -57,7 +57,7 @@ func tryReconcileContractAtDeadline(ctx context.Context, contractId server.Id, d
 	server.HandleError(func() {
 		keys := deadlineFinancialOwnershipKeys(balanceIds)
 		body := func(tx server.PgTx) {
-			result, posts = reconcileContractAtDeadlineWithOwnershipInTx(ctx, tx, contractId, deadline, true)
+			result, posts = reconcileContractAtDeadlineWithOwnershipInTx(ctx, tx, contractId, deadline, true, nil)
 		}
 		if len(keys) == 0 {
 			server.Tx(ctx, body, server.TxReadCommitted, server.OptNoRetry())
