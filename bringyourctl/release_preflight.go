@@ -58,6 +58,10 @@ func releasePreflightCommand(opts docopt.Opts) {
 			return checkReleaseDnsReservedLabels(servicesYamlBytes, env, os.Stdout)
 		}()
 	}
+	if probeErr == nil {
+		// §12.4: the embedded host table's user_root is dns.yml's root (QD-1407; release_preflight_checks.go)
+		probeErr = releasePreflightDnsUserRoot(releaseConfigDnsYaml, os.Stdout)
+	}
 	if probeErr != nil {
 		fmt.Fprintln(os.Stderr, probeErr)
 		os.Exit(1)
