@@ -90,6 +90,9 @@ func sendSmsSendCapTestText(t testing.TB, sender *AWSMessageSender, clock *smsSe
 // limit (the 429 status and a wait no longer than the window) to country.
 func requireSmsSendCapRefusal(t testing.TB, err error, capKind string, country string) *smsSendCapRefusal {
 	var refusal *smsSendCapRefusal
+	if err == nil {
+		t.Fatalf("the text was sent, want a refusal by the %s send cap", capKind)
+	}
 	if !errors.As(err, &refusal) {
 		t.Fatalf("send error = %v, want a refusal by the %s send cap", err, capKind)
 	}
@@ -115,9 +118,17 @@ func TestSmsSendCapStopsTextsToManyNumbersInOneCountry(t *testing.T) {
 		sender := endpoint.cappedSender(clock)
 		refusedBefore := testutil.ToFloat64(smsSendCapRefusalCounter.WithLabelValues(smsSendCapCountry))
 
+		// the whole burst first, then what reached Pinpoint, then each answer
 		const overCap = 5
-		for i, number := range smsSendCapTestNumbers(t, "FR", AccountSmsSendCountryCap+overCap) {
-			err := sendSmsSendCapTestText(t, sender, clock, number)
+		numbers := smsSendCapTestNumbers(t, "FR", AccountSmsSendCountryCap+overCap)
+		sendErrs := []error{}
+		for _, number := range numbers {
+			sendErrs = append(sendErrs, sendSmsSendCapTestText(t, sender, clock, number))
+		}
+		if calls := endpoint.requestCount.Load(); calls != AccountSmsSendCountryCap {
+			t.Fatalf("Pinpoint was asked for %d of %d texts to different numbers in one country, want %d: the country cap must stop the rest before the call", calls, len(numbers), AccountSmsSendCountryCap)
+		}
+		for i, err := range sendErrs {
 			if i < AccountSmsSendCountryCap {
 				if err != nil {
 					t.Fatalf("text %d to a new number under the country cap: send error = %v", i, err)
@@ -129,9 +140,6 @@ func TestSmsSendCapStopsTextsToManyNumbersInOneCountry(t *testing.T) {
 			if want := AccountSmsSendCapWindow - time.Duration(i)*time.Second; refusal.retryAfter != want {
 				t.Fatalf("text %d: refusal waits %s, want %s", i, refusal.retryAfter, want)
 			}
-		}
-		if calls := endpoint.requestCount.Load(); calls != AccountSmsSendCountryCap {
-			t.Fatalf("Pinpoint was asked for %d texts, want %d: the country cap must stop the rest before the call", calls, AccountSmsSendCountryCap)
 		}
 		if refused := testutil.ToFloat64(smsSendCapRefusalCounter.WithLabelValues(smsSendCapCountry)) - refusedBefore; refused != overCap {
 			t.Fatalf("counted %v country cap refusals, want %d", refused, overCap)
@@ -159,49 +167,53 @@ func TestSmsSendCapGlobalBindsAcrossCountries(t *testing.T) {
 		sender := endpoint.cappedSender(clock)
 		refusedBefore := testutil.ToFloat64(smsSendCapRefusalCounter.WithLabelValues(smsSendCapGlobal))
 
-		// a burst at one country: the country cap admits its cap and refuses
-		// the rest, which must not spend the global cap
-		const refusedByCountry = 5
-		admitted := 0
-		for i, number := range smsSendCapTestNumbers(t, "GB", AccountSmsSendCountryCap+refusedByCountry) {
-			err := sendSmsSendCapTestText(t, sender, clock, number)
-			if i < AccountSmsSendCountryCap {
-				if err != nil {
-					t.Fatalf("text %d to GB under its cap: send error = %v", i, err)
-				}
-				admitted += 1
-				continue
-			}
-			requireSmsSendCapRefusal(t, err, smsSendCapCountry, "GB")
+		// a burst at one country, which its cap stops; then texts to several
+		// countries in turn, none past its own cap. The whole burst first, then
+		// what reached Pinpoint, then each answer.
+		type sentText struct {
+			country string
+			err     error
 		}
-
-		// then texts to several countries in turn, none past its own cap: the
-		// global cap admits exactly its remaining room
+		sent := []sentText{}
+		const refusedByCountry = 5
+		for _, number := range smsSendCapTestNumbers(t, "GB", AccountSmsSendCountryCap+refusedByCountry) {
+			sent = append(sent, sentText{country: "GB", err: sendSmsSendCapTestText(t, sender, clock, number)})
+		}
 		countries := []string{"US", "CA", "FR", "DE", "NL"}
 		numbers := map[string][]string{}
 		for _, country := range countries {
 			numbers[country] = smsSendCapTestNumbers(t, country, 5)
 		}
-		globalRefusals := 0
 		for i := range 5 {
 			for _, country := range countries {
-				err := sendSmsSendCapTestText(t, sender, clock, numbers[country][i])
-				if admitted < AccountSmsSendGlobalCap {
-					if err != nil {
-						t.Fatalf("text %d to %s with %d of the global cap spent: send error = %v", i, country, admitted, err)
-					}
-					admitted += 1
-					continue
+				sent = append(sent, sentText{country: country, err: sendSmsSendCapTestText(t, sender, clock, numbers[country][i])})
+			}
+		}
+		if calls := endpoint.requestCount.Load(); calls != AccountSmsSendGlobalCap {
+			t.Fatalf("Pinpoint was asked for %d of %d texts across %d countries, want the global cap %d", calls, len(sent), 1+len(countries), AccountSmsSendGlobalCap)
+		}
+
+		// the country cap admits its cap and refuses the rest, which must not
+		// spend the global cap: the global cap then admits exactly its
+		// remaining room
+		admitted := 0
+		globalRefusals := 0
+		for i, text := range sent {
+			switch {
+			case text.country == "GB" && AccountSmsSendCountryCap <= i:
+				requireSmsSendCapRefusal(t, text.err, smsSendCapCountry, "GB")
+			case admitted < AccountSmsSendGlobalCap:
+				if text.err != nil {
+					t.Fatalf("text %d to %s with %d of the global cap spent: send error = %v", i, text.country, admitted, text.err)
 				}
-				requireSmsSendCapRefusal(t, err, smsSendCapGlobal, country)
+				admitted += 1
+			default:
+				requireSmsSendCapRefusal(t, text.err, smsSendCapGlobal, text.country)
 				globalRefusals += 1
 			}
 		}
 		if want := AccountSmsSendCountryCap + 5*len(countries) - AccountSmsSendGlobalCap; globalRefusals != want {
 			t.Fatalf("the global cap refused %d texts, want %d", globalRefusals, want)
-		}
-		if calls := endpoint.requestCount.Load(); calls != AccountSmsSendGlobalCap {
-			t.Fatalf("Pinpoint was asked for %d texts, want the global cap %d", calls, AccountSmsSendGlobalCap)
 		}
 		if refused := testutil.ToFloat64(smsSendCapRefusalCounter.WithLabelValues(smsSendCapGlobal)) - refusedBefore; refused != float64(globalRefusals) {
 			t.Fatalf("counted %v global cap refusals, want %d", refused, globalRefusals)
