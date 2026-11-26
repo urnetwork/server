@@ -144,11 +144,13 @@ func (self *MinioObjectStore) Read(ctx context.Context, key string, limit int64)
 		return nil, ObjectInfo{}, normalizeMinioError(key, err)
 	}
 	defer object.Close()
-	data, err := io.ReadAll(io.LimitReader(object, limit+1))
+	// Stat before reading: from minio-go v7.4, an Object's Stat reports the
+	// bytes left after the read offset, so after a full read it reports 0
+	info, err := object.Stat()
 	if err != nil {
 		return nil, ObjectInfo{}, normalizeMinioError(key, err)
 	}
-	info, err := object.Stat()
+	data, err := io.ReadAll(io.LimitReader(object, limit+1))
 	if err != nil {
 		return nil, ObjectInfo{}, normalizeMinioError(key, err)
 	}

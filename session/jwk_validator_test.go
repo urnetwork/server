@@ -32,12 +32,14 @@ func TestJwkKeySetRejectsOversizedRSAParameters(t *testing.T) {
 	for _, test := range []struct {
 		name string
 		key  map[string]string
-		want string
+		// any one of go-jose's refusals: v4.1.9 refuses an oversized modulus
+		// itself, before the size check whose message v4.1.6 gave
+		want []string
 	}{
 		{
 			name: "oversized public modulus",
 			key:  map[string]string{"kty": "RSA", "n": integer(16385), "e": "AQAB"},
-			want: "modulus too large",
+			want: []string{"modulus too large", "unsupported key type, format, curve, or RSA modulus size"},
 		},
 		{
 			name: "oversized private prime",
@@ -45,7 +47,7 @@ func TestJwkKeySetRejectsOversizedRSAParameters(t *testing.T) {
 				"kty": "RSA", "n": integer(2049), "e": "AQAB",
 				"d": "Aw", "p": integer(16384), "q": "Aw",
 			},
-			want: "p * q != n",
+			want: []string{"p * q != n"},
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -54,8 +56,9 @@ func TestJwkKeySetRejectsOversizedRSAParameters(t *testing.T) {
 				t.Fatal(err)
 			}
 			var keySet jose.JSONWebKeySet
-			if err := json.Unmarshal(data, &keySet); err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("parsing malicious RSA key: got %v, want %q", err, test.want)
+			err = json.Unmarshal(data, &keySet)
+			if err == nil || !slices.ContainsFunc(test.want, func(want string) bool { return strings.Contains(err.Error(), want) }) {
+				t.Fatalf("parsing malicious RSA key: got %v, want one of %q", err, test.want)
 			}
 		})
 	}
