@@ -771,6 +771,17 @@ tables:
       provider: compute-7
       read_hour: compute-7
       read_time: compute-7
+  # DESIGN-COMPUTE §14.4's MG-C2, INFER's part (INFER-M12-01; compute-plan-catalog-versions, QD-1237), registered from
+  # sidecar/model's compute_catalog_migrations.go: compute-7's "each published version of the remote catalog"
+  compute_catalog_version:
+    group: MG-C2
+    columns:
+      answer: compute-7
+      answer_sha256: compute-7
+      exposure: compute-7
+      exposure_time: compute-7
+      published_time: compute-7
+      version: compute-7
   # DESIGN-COMPUTE §14.4's MG-C1, BAL's part (BAL-M12-01), registered from sidecar/model's compute_schema.go: each
   # table under the compute row whose store names it, compute-1 the operations, charges and day rows, compute-2 the
   # lots, promotion codes, payers and terms, compute-3 the draws, totals, pruned sums and accounts, compute-6

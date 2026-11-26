@@ -2167,6 +2167,7 @@ func sidecarMgC1LedgerMigrations() []any {
 func sidecarMgC2Migrations() []any {
 	return slices.Concat(
 		sidecarMgC2ProviderMigrations(),
+		sidecarMgC2CatalogMigrations(),
 		sidecarMgC2GammaMigrations(),
 		sidecarMgC2SearchMigrations(),
 		[]any{
@@ -2179,6 +2180,12 @@ func sidecarMgC2Migrations() []any {
 // MG-C2's §4 part, PROV's: compute_provider and compute_provider_price, registered from sidecar/model (C-30).
 func sidecarMgC2ProviderMigrations() []any {
 	return sidecarComputeMigrationValues(model.ComputeMigrationPart(model.ComputeMigrationGroupC2, model.ComputeMigrationOwnerProv))
+}
+
+// MG-C2's §6.3 part, INFER's: compute_catalog_version, the remote catalog's published versions, which read the
+// provider tables before it, registered from sidecar/model (C-30; compute-plan-catalog-versions, QD-1237).
+func sidecarMgC2CatalogMigrations() []any {
+	return sidecarComputeMigrationValues(model.ComputeMigrationPart(model.ComputeMigrationGroupC2, model.ComputeMigrationOwnerInfer))
 }
 
 // MG-C2's §10 part, GAMMA's: compute_provider_ledger, compute_gamma_deposit and compute_gamma_op, registered from
