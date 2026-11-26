@@ -9,12 +9,17 @@ package server
 //
 // The capped client holds the host's slots, one for each request in flight, and the wait for one ends at the
 // request's deadline: a request whose deadline passes in it, as it is given its slot, or as its connection is handed
-// over, is never sent and marks no host failed, nor does a request that reached its connection within
-// DeadlineClockMargin of its deadline and was answered 503 or cancelled at its own deadline, nor admin info that
-// ended in the wait, nor a PUT that failed at its body's client; a host that fails a request is still marked.
+// over, is never sent and marks no host failed, nor does a request that reached its connection with less than
+// DeadlineHostMinimum left and was answered 503 or cancelled at its own deadline (owner decision 790; QD-1405), nor a
+// PUT that failed at its body's client; a host that fails a request it had time for is still marked.
+//
+// The stores' own checks go outside the cap too (owner decision 790; QD-1406): the admin route, and a HEAD or LIST
+// on a ctx sidecar.WithBlobProbe marks, so with the cap held full a cluster's check and an engine's probe still reach
+// the store and read it, while a store that fails still fails them, and its cluster closes once they go stale.
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"errors"
 	"io"
@@ -136,11 +141,20 @@ func TestFileClustersShareOneBaseTransportAHost(t *testing.T) {
 	}
 }
 
+// The path part that marks a request a store-backed held host holds: a key under held/.
+const fileClusterHeldPathPart = "/held/"
+
+// The host name a store-backed held host gives its store, as fakeS3.downHosts names it.
+const fileClusterHeldHostName = "held-host"
+
 // One MinIO host whose every request waits at the host for the test's word, counting the connections it takes, at
 // once and in all. A request whose body its client breaks off ends at the handler, unanswered and never arrived.
-// Safe for concurrent use.
+// Over a store, only a request for a key under held/ waits, and the store answers every other at once, the admin
+// route among them. Safe for concurrent use.
 type fileClusterHeldHost struct {
 	server *httptest.Server
+	// nil for none: every request is held
+	store *fakeS3
 	// one value as each request reaches a handler
 	arrived chan struct{}
 	// one value answers one request at a handler
@@ -161,13 +175,23 @@ type fileClusterHeldHost struct {
 
 func newFileClusterHeldHost(t *testing.T) *fileClusterHeldHost {
 	t.Helper()
-	host := &fileClusterHeldHost{arrived: make(chan struct{}, 64), release: make(chan struct{}), stop: make(chan struct{})}
+	return newFileClusterHeldHostOver(t, nil)
+}
+
+// A held host over store, nil for none (the type's doc).
+func newFileClusterHeldHostOver(t *testing.T, store *fakeS3) *fileClusterHeldHost {
+	t.Helper()
+	host := &fileClusterHeldHost{store: store, arrived: make(chan struct{}, 64), release: make(chan struct{}), stop: make(chan struct{})}
 	host.server = httptest.NewUnstartedServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		func() {
 			host.stateLock.Lock()
 			defer host.stateLock.Unlock()
 			host.paths = append(host.paths, request.URL.Path)
 		}()
+		if host.store != nil && !strings.Contains(request.URL.Path, fileClusterHeldPathPart) {
+			host.serveFromStore(writer, request)
+			return
+		}
 		if _, err := io.Copy(io.Discard, request.Body); err != nil {
 			return
 		}
@@ -204,6 +228,21 @@ func newFileClusterHeldHost(t *testing.T) *fileClusterHeldHost {
 	host.server.Start()
 	t.Cleanup(host.shutdown)
 	return host
+}
+
+// Answers request as the store does, and resets its connection when the store fails it at the transport, as a host
+// that is down does.
+func (self *fileClusterHeldHost) serveFromStore(writer http.ResponseWriter, request *http.Request) {
+	response, err := self.store.serve(fileClusterHeldHostName, request)
+	if err != nil {
+		panic(http.ErrAbortHandler)
+	}
+	defer response.Body.Close()
+	for name, values := range response.Header {
+		writer.Header()[name] = values
+	}
+	writer.WriteHeader(response.StatusCode)
+	io.Copy(writer, response.Body)
 }
 
 // The connections the host took in all, and the most open at once.
@@ -295,10 +334,11 @@ func TestFileClusterTransportOpensNoMoreThanItsCapToAHost(t *testing.T) {
 }
 
 // A request's client: a GET or PutStream whose ctx says its body moves at a client's own pace takes the paced one,
-// whose base transport is the capped one's without the cap and as shared between the clusters naming the host; any
-// other request, and a request with no body on such a ctx, the capped one, whose slots the clusters naming the host
-// share as they share its base transport.
-func TestFileClusterHostSendsOnlyAPacedBodyOutsideTheCap(t *testing.T) {
+// whose base transport is the capped one's without the cap and as shared between the clusters naming the host, and
+// so does a HEAD or LIST whose ctx says a store check sends it, and the admin route; any other request, a write on
+// either ctx, a GET on a probe's and a HEAD or LIST on a paced one among them, the capped one, whose slots the
+// clusters naming the host share as they share its base transport.
+func TestFileClusterHostSendsOnlyPacedBodiesAndChecksOutsideTheCap(t *testing.T) {
 	settings := DefaultFileClusterSettings()
 	settings.NoChecks = true
 	clusters, err := newFileClusters(t.Context(), fileClusterTestConfigs("host-a.example:9000"), settings, newFileClusterBaseTransport(settings), func() *SidecarConfig { return &SidecarConfig{} })
@@ -306,10 +346,36 @@ func TestFileClusterHostSendsOnlyAPacedBodyOutsideTheCap(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(clusters.Close)
-	host := clusters.clusterIdClusters["meta-1"].picker.hosts[0]
+	cluster := clusters.clusterIdClusters["meta-1"]
+	host := cluster.picker.hosts[0]
 	paced := sidecar.WithBlobClientPaced(t.Context())
-	if host.client(paced, true) != host.pacedCore || host.client(paced, false) != host.core || host.client(t.Context(), true) != host.core {
-		t.Fatal("a request took the other client")
+	probe := sidecar.WithBlobProbe(t.Context())
+	for _, c := range []struct {
+		name  string
+		ctx   context.Context
+		kind  fileClusterRequestKind
+		paced bool
+	}{
+		{name: "a paced body", ctx: paced, kind: fileClusterRequestBody, paced: true},
+		{name: "a probe's HEAD or LIST", ctx: probe, kind: fileClusterRequestHeadOrList, paced: true},
+		{name: "a body", ctx: t.Context(), kind: fileClusterRequestBody},
+		{name: "a HEAD or LIST", ctx: t.Context(), kind: fileClusterRequestHeadOrList},
+		{name: "a write", ctx: t.Context(), kind: fileClusterRequestWrite},
+		{name: "a paced write", ctx: paced, kind: fileClusterRequestWrite},
+		{name: "a probe's write", ctx: probe, kind: fileClusterRequestWrite},
+		{name: "a probe's GET", ctx: probe, kind: fileClusterRequestBody},
+		{name: "a paced HEAD or LIST", ctx: paced, kind: fileClusterRequestHeadOrList},
+	} {
+		want := host.core
+		if c.paced {
+			want = host.pacedCore
+		}
+		if host.client(c.ctx, c.kind) != want {
+			t.Errorf("%s took the other client", c.name)
+		}
+	}
+	if cluster.adminClient(host).Transport != host.pacedTransport {
+		t.Error("the admin route goes through the capped transport")
 	}
 	baseOf := func(transport http.RoundTripper) *http.Transport {
 		return transport.(*fileClusterTransport).base.(*http.Transport)
@@ -697,72 +763,85 @@ func TestFileClusterRequestHandedItsConnectionPastItsDeadlineIsNotSent(t *testin
 	}
 }
 
-// A request that reaches its connection within DeadlineClockMargin of its deadline, as one that waited in the cap
-// that long does, and is answered 503, as the fork refuses on arrival a request its clock reads as past its
-// deadline, marks no host failed. One with its time ahead of it that is answered 503 still marks its host.
-func TestFileClusterRequestConnectedNearItsDeadlineMarksNoHostFor503(t *testing.T) {
-	host := newFileClusterHeldHost(t)
-	clock := newFileClusterHandClock(sidecartest.DefaultClockStart())
-	settings := fileClusterHeldSettings(1, clock)
-	clusters := newFileClustersOnHost(t, host.server.URL, settings, settings)
-	cluster := clusters.clusterIdClusters["meta-1"]
-	clusterHost := cluster.picker.hosts[0]
-
-	first := make(chan error, 1)
+// A HEAD to a host whose one capped connection another holds, which reaches that connection with left of its
+// RequestTimeout deadline and is answered with the status the host is set to by then: the holder takes the slot at
+// once, the HEAD waits for it, and the hand clock moves to left before the deadline as the holder's answer frees
+// it. The holder is answered 200, the HEAD what the test sets once it has arrived; this returns the HEAD's error.
+func fileClusterHeadConnectedWithLeft(t *testing.T, host *fileClusterHeldHost, clock *fileClusterHandClock, cluster *FileCluster, left time.Duration, status int) error {
+	t.Helper()
+	holder := make(chan error, 1)
 	go func() {
-		_, err := cluster.Head(t.Context(), "held/first")
-		first <- err
+		_, err := cluster.Head(t.Context(), "held/holder")
+		holder <- err
 	}()
 	<-host.arrived
-	late := make(chan error, 1)
+	issued := clock.Now()
+	waiting := make(chan error, 1)
 	go func() {
-		_, err := cluster.Head(t.Context(), "held/late")
-		late <- err
+		_, err := cluster.Head(t.Context(), "held/waiting")
+		waiting <- err
 	}()
-	// the second request's deadline, set as it starts to wait for the slot
+	// the waiting request's deadline, set as it starts to wait for the slot
 	clock.awaitTimers(t, 1)
-	// the slot frees half the margin before that deadline
-	clock.set(clock.Now().Add(settings.RequestTimeout - settings.DeadlineClockMargin/2))
+	clock.set(issued.Add(cluster.RequestTimeout() - left))
+	host.setAnswerStatus(http.StatusOK)
 	host.release <- struct{}{}
-	if err := <-first; err != nil {
+	if err := <-holder; err != nil {
 		t.Fatal(err)
 	}
 	<-host.arrived
-	host.setAnswerStatus(http.StatusServiceUnavailable)
+	host.setAnswerStatus(status)
 	host.release <- struct{}{}
-	if err := <-late; err == nil || errors.Is(err, errFileClusterConnWait) {
-		t.Fatalf("the request connected near its deadline: %v", err)
-	}
-	if clusterHost.failedAtNanos.Load() != 0 {
-		t.Fatal("a 503 to a request connected near its deadline marked its host failed")
-	}
+	return <-waiting
+}
 
-	onTime := make(chan error, 1)
-	go func() {
-		_, err := cluster.Head(t.Context(), "held/on-time")
-		onTime <- err
-	}()
-	<-host.arrived
-	host.release <- struct{}{}
-	if err := <-onTime; err == nil {
-		t.Fatal("a 503 read as an answer")
+// A request that reaches its connection with less than DeadlineHostMinimum left, as one that waited in the cap does,
+// and is answered 503, as the fork refuses a request its deadline passes at, marks no host failed: here half the
+// floor, 500 ms, five times what the clocks alone account for. One that reaches it with the floor left, or with its
+// whole deadline ahead, and is answered 503 still marks its host, as one under the floor answered 500 does.
+func TestFileClusterRequestConnectedUnderTheFloorMarksNoHostFor503(t *testing.T) {
+	host := newFileClusterHeldHost(t)
+	clock := newFileClusterHandClock(sidecartest.DefaultClockStart())
+	settings := fileClusterHeldSettings(1, clock)
+	if settings.DeadlineHostMinimum != time.Second {
+		t.Fatalf("DeadlineHostMinimum %v by default, want 1 s", settings.DeadlineHostMinimum)
 	}
-	if clusterHost.failedAtNanos.Load() == 0 {
-		t.Error("a 503 to a request with its time ahead of it did not mark its host failed")
+	clusters := newFileClustersOnHost(t, host.server.URL, settings, settings)
+	cluster := clusters.clusterIdClusters["meta-1"]
+	clusterHost := cluster.picker.hosts[0]
+
+	for _, c := range []struct {
+		name   string
+		left   time.Duration
+		status int
+		marked bool
+	}{
+		{name: "under the floor, 503", left: settings.DeadlineHostMinimum / 2, status: http.StatusServiceUnavailable},
+		{name: "at the floor, 503", left: settings.DeadlineHostMinimum, status: http.StatusServiceUnavailable, marked: true},
+		{name: "with its whole deadline, 503", left: settings.RequestTimeout, status: http.StatusServiceUnavailable, marked: true},
+		{name: "under the floor, 500", left: settings.DeadlineHostMinimum / 2, status: http.StatusInternalServerError, marked: true},
+	} {
+		clusterHost.failedAtNanos.Store(0)
+		if err := fileClusterHeadConnectedWithLeft(t, host, clock, cluster, c.left, c.status); err == nil || errors.Is(err, errFileClusterConnWait) {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if marked := clusterHost.failedAtNanos.Load() != 0; marked != c.marked {
+			t.Errorf("%s: the host marked failed %v, want %v", c.name, marked, c.marked)
+		}
 	}
 }
 
-// A request with its own deadline that reaches its connection within DeadlineClockMargin of it, and is cancelled
-// there with the host not yet answering, marks no host failed. One cancelled at its own deadline that reached its
-// connection with its time ahead of it still marks its host.
-func TestFileClusterRequestConnectedNearItsOwnDeadlineMarksNoHostForItsCancel(t *testing.T) {
+// A request with its own deadline that reaches its connection with less than DeadlineHostMinimum of it left, and is
+// cancelled there with the host not yet answering, marks no host failed. One cancelled at its own deadline that
+// reached its connection with more than the floor left still marks its host.
+func TestFileClusterRequestConnectedUnderTheFloorMarksNoHostForItsCancel(t *testing.T) {
 	host := newFileClusterHeldHost(t)
 	clock := newFileClusterHandClock(sidecartest.DefaultClockStart())
 	settings := fileClusterHeldSettings(1, clock)
 	clusters := newFileClustersOnHost(t, host.server.URL, settings, settings)
 	cluster := clusters.clusterIdClusters["meta-1"]
 	clusterHost := cluster.picker.hosts[0]
-	ownTimeout := time.Second
+	ownTimeout := 2 * settings.DeadlineHostMinimum
 
 	first := make(chan error, 1)
 	go func() {
@@ -778,7 +857,7 @@ func TestFileClusterRequestConnectedNearItsOwnDeadlineMarksNoHostForItsCancel(t 
 	}()
 	// the second request's own deadline, set at issue
 	clock.awaitTimers(t, 1)
-	clock.set(own.Add(-settings.DeadlineClockMargin / 2))
+	clock.set(own.Add(-settings.DeadlineHostMinimum / 2))
 	host.release <- struct{}{}
 	if err := <-first; err != nil {
 		t.Fatal(err)
@@ -791,7 +870,7 @@ func TestFileClusterRequestConnectedNearItsOwnDeadlineMarksNoHostForItsCancel(t 
 		t.Fatalf("the request cancelled at its own deadline: %v", err)
 	}
 	if clusterHost.failedAtNanos.Load() != 0 {
-		t.Fatal("the cancel of a request connected near its own deadline marked its host failed")
+		t.Fatal("the cancel of a request connected under the floor marked its host failed")
 	}
 	host.release <- struct{}{}
 
@@ -808,42 +887,263 @@ func TestFileClusterRequestConnectedNearItsOwnDeadlineMarksNoHostForItsCancel(t 
 		t.Fatal("a request cancelled at its own deadline read as answered")
 	}
 	if clusterHost.failedAtNanos.Load() == 0 {
-		t.Error("the cancel of a request that had its time ahead of it did not mark its host failed")
+		t.Error("the cancel of a request that had more than the floor left did not mark its host failed")
 	}
 	host.release <- struct{}{}
 }
 
-// Admin info that waits for the capped connection past its RequestTimeout fails with errFileClusterConnWait,
-// never sent, and marks no host failed. AdminInfo bounds its request in real time, so the clusters' RequestTimeout
-// is a millisecond here; the held HEAD keeps the one connection throughout, so that bound, and no race, ends the
-// wait. The base transport keeps the default bound, which the held HEAD outlasts.
-func TestFileClusterAdminInfoEndedInTheCappedWaitMarksNoHost(t *testing.T) {
+// A request whose own deadline is under DeadlineHostMinimum by design, as a marker's or drop's DELETE 50 ms before
+// until_ms is, reaches its connection under the floor however soon it is sent: neither its 503 nor its cancel at its
+// own deadline marks its host, while a 500 to it still does.
+func TestFileClusterShortOwnDeadlineMarksNoHostFor503OrItsCancel(t *testing.T) {
 	host := newFileClusterHeldHost(t)
-	clock := sidecartest.NewFakeClock(sidecartest.DefaultClockStart())
+	clock := newFileClusterHandClock(sidecartest.DefaultClockStart())
 	settings := fileClusterHeldSettings(1, clock)
-	settings.RequestTimeout = time.Millisecond
-	clusters := newFileClustersOnHost(t, host.server.URL, settings, fileClusterHeldSettings(1, clock))
+	clusters := newFileClustersOnHost(t, host.server.URL, settings, settings)
 	cluster := clusters.clusterIdClusters["meta-1"]
-
-	first := make(chan error, 1)
-	go func() {
-		_, err := cluster.Head(t.Context(), "held/first")
-		first <- err
-	}()
-	<-host.arrived
-	if _, err := cluster.AdminInfo(t.Context()); !errors.Is(err, errFileClusterConnWait) {
-		t.Fatalf("admin info past its RequestTimeout in the wait: %v", err)
+	fileClusterTestPoolsChecked(cluster)
+	clusterHost := cluster.picker.hosts[0]
+	short := settings.DeadlineHostMinimum / 2
+	// a DELETE with its own deadline short ahead, arrived at the host
+	deleteHeld := func(key string) (own time.Time, result chan error) {
+		own = clock.Now().Add(short)
+		result = make(chan error, 1)
+		go func() {
+			result <- cluster.Delete(sidecar.WithBlobDeadline(t.Context(), own), key)
+		}()
+		<-host.arrived
+		return own, result
 	}
-	if cluster.picker.hosts[0].failedAtNanos.Load() != 0 {
-		t.Error("admin info's wait marked a healthy host failed")
+
+	host.setAnswerStatus(http.StatusServiceUnavailable)
+	_, refused := deleteHeld("held/refused")
+	host.release <- struct{}{}
+	if err := <-refused; err == nil || errors.Is(err, errFileClusterConnWait) {
+		t.Fatalf("a short DELETE answered 503: %v", err)
+	}
+	if clusterHost.failedAtNanos.Load() != 0 {
+		t.Fatal("a 503 to a short DELETE marked its host failed")
+	}
+
+	own, cancelled := deleteHeld("held/cancelled")
+	clock.set(own)
+	clock.fireDue()
+	if err := <-cancelled; err == nil || errors.Is(err, errFileClusterConnWait) {
+		t.Fatalf("a short DELETE cancelled at its own deadline: %v", err)
+	}
+	if clusterHost.failedAtNanos.Load() != 0 {
+		t.Fatal("the cancel of a short DELETE at its own deadline marked its host failed")
 	}
 	host.release <- struct{}{}
-	if err := <-first; err != nil {
+
+	host.setAnswerStatus(http.StatusInternalServerError)
+	_, failed := deleteHeld("held/failed")
+	host.release <- struct{}{}
+	if err := <-failed; err == nil {
+		t.Fatal("a DELETE answered 500 read as done")
+	}
+	if clusterHost.failedAtNanos.Load() == 0 {
+		t.Error("a 500 to a short DELETE did not mark its host failed")
+	}
+}
+
+// Clusters over a store-backed held host whose cap of one connection a HEAD holds, so every capped request waits,
+// with the sentinel xops writes in each bucket and one repo's place/. The base transport gives a held request a
+// minute, which no test step outlasts, and sidecarYaml is sidecar.yml. Returns the clusters, and what releases the
+// holding HEAD and returns its error.
+func newFileClustersWithTheCapHeld(t *testing.T, store *fakeS3, clock sidecar.Clock, sidecarYaml string) (*FileClusters, *fileClusterHeldHost, func() error) {
+	t.Helper()
+	for _, key := range []string{"meta-bucket/" + fileClusterSentinelKey, "seg-bucket/" + fileClusterSentinelKey, "meta-bucket/" + sidecar.EvsPlaceKeyPrefix + "repo-1"} {
+		store.objects[key] = &fakeS3Object{body: []byte("synthetic"), etag: "etag-synthetic"}
+	}
+	host := newFileClusterHeldHostOver(t, store)
+	settings := fileClusterHeldSettings(1, clock)
+	baseSettings := fileClusterHeldSettings(1, clock)
+	baseSettings.RequestTimeout = time.Minute
+	config, err := parseSidecarConfig([]byte(sidecarYaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint := strings.TrimPrefix(host.server.URL, "http://")
+	clusters, err := newFileClusters(t.Context(), fileClusterTestConfigs(endpoint), settings, newFileClusterBaseTransport(baseSettings), func() *SidecarConfig { return config })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(clusters.Close)
+	holder := make(chan error, 1)
+	go func() {
+		_, err := clusters.clusterIdClusters["meta-1"].Head(t.Context(), "held/holder")
+		holder <- err
+	}()
+	<-host.arrived
+	return clusters, host, func() error {
+		host.release <- struct{}{}
+		return <-holder
+	}
+}
+
+// Runs work, whose requests all go outside the cap, and fails the test as soon as one of them waits in it instead: a
+// request waiting for a capped slot sets a timer on clock for its deadline, and nothing else in work sets one. No
+// timer is pending as it starts. work must not touch t, and its results are the caller's to read once this returns.
+func requireFileClusterNoCappedWait(t *testing.T, clock *sidecartest.FakeClock, work func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		work()
+	}()
+	waitCtx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	waited := make(chan error, 1)
+	go func() {
+		waited <- clock.AwaitTimers(waitCtx, 1)
+	}()
+	select {
+	case <-done:
+	case err := <-waited:
+		if err == nil {
+			t.Fatal("a request that goes outside the cap waited in it")
+		}
+		<-done
+	}
+}
+
+// With the host's one capped connection held, each cluster's check, admin info and the sentinel's HEAD, reads the
+// store, so both clusters are ready, and a probe's LIST of place/ and HEAD read it too, on connections of their own
+// past the cap, none of them waiting in it; an unmarked LIST still waits in the cap, its deadline passing there
+// unsent, and no host is marked.
+func TestFileClusterChecksAndProbesReachTheStorePastAFullCap(t *testing.T) {
+	store := newFakeS3(1, "build-1")
+	clock := sidecartest.NewFakeClock(sidecartest.DefaultClockStart())
+	clusters, host, releaseHolder := newFileClustersWithTheCapHeld(t, store, clock, "")
+	meta := clusters.clusterIdClusters["meta-1"]
+
+	requireFileClusterNoCappedWait(t, clock, func() {
+		clusters.Check(t.Context())
+	})
+	for _, clusterId := range clusters.ClusterIds() {
+		cluster := clusters.clusterIdClusters[clusterId]
+		if cluster.LastAdminInfo() == nil || !cluster.Ready() {
+			t.Errorf("%s: its check did not read the store past the full cap", clusterId)
+		}
+	}
+	probe := sidecar.WithBlobProbe(t.Context())
+	var objects []*sidecar.BlobInfo
+	var listErr, headErr error
+	requireFileClusterNoCappedWait(t, clock, func() {
+		objects, _, listErr = meta.List(probe, sidecar.EvsPlaceKeyPrefix, "", 1)
+		_, headErr = meta.Head(probe, fileClusterSentinelKey)
+	})
+	if listErr != nil || len(objects) != 1 {
+		t.Fatalf("a probe's LIST past the full cap: %v, %d keys", listErr, len(objects))
+	}
+	if headErr != nil {
+		t.Fatalf("a probe's HEAD past the full cap: %v", headErr)
+	}
+
+	unmarked := make(chan error, 1)
+	go func() {
+		_, _, err := meta.List(t.Context(), sidecar.EvsPlaceKeyPrefix, "", 1)
+		unmarked <- err
+	}()
+	// the unmarked LIST's deadline, set as it starts to wait for the slot
+	if err := clock.AwaitTimers(t.Context(), 1); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(meta.RequestTimeout())
+	if err := <-unmarked; !errors.Is(err, errFileClusterConnWait) {
+		t.Fatalf("an unmarked LIST with the cap full: %v", err)
+	}
+	if err := releaseHolder(); err != nil {
+		t.Fatal(err)
+	}
+	if meta.picker.hosts[0].failedAtNanos.Load() != 0 {
+		t.Error("a host was marked failed")
+	}
+	host.shutdown()
+
+	// outside the cap a request keeps its deadline header, which the admin route never carries
+	adminCount, sentinelCount, listCount := 0, 0, 0
+	for _, request := range store.takeRequests() {
+		switch {
+		case request.path == fileClusterAdminInfoPath:
+			adminCount += 1
+			if request.deadline != "" {
+				t.Errorf("admin info carried a deadline header %s", request.deadline)
+			}
+		case request.method == http.MethodHead && strings.HasSuffix(request.path, "/"+fileClusterSentinelKey):
+			sentinelCount += 1
+			if request.deadline == "" {
+				t.Errorf("a sentinel HEAD outside the cap carried no deadline header")
+			}
+		case strings.Contains(request.query, "list-type=2"):
+			listCount += 1
+			if request.deadline == "" {
+				t.Errorf("a probe's LIST outside the cap carried no deadline header")
+			}
+		}
+	}
+	// a check of each of the two clusters, then the probe's HEAD and LIST; never the unmarked LIST
+	if adminCount != 2 || sentinelCount != 3 || listCount != 1 {
+		t.Errorf("the store saw %d admin info reads, %d sentinel HEADs and %d LISTs, want 2, 3 and 1", adminCount, sentinelCount, listCount)
+	}
+	if takenCount, _ := host.counts(); takenCount <= 1 {
+		t.Errorf("the host took %d connections, the checks and probes none past the held one", takenCount)
+	}
+}
+
+// With the host's one capped connection held, a store that answers its checks keeps its clusters ready, writable and
+// settled; once it resets every request but the held one, a check and a probe fail, and when the last good read
+// goes stale at CheckStaleAfter the cluster is not ready, refuses a write before it is sent and reads not settled.
+func TestFileClusterChecksPastAFullCapStillFailClosed(t *testing.T) {
+	store := newFakeS3(1, "build-1")
+	clock := sidecartest.NewFakeClock(sidecartest.DefaultClockStart())
+	clusters, host, releaseHolder := newFileClustersWithTheCapHeld(t, store, clock, "sidecar:\n  file_clusters:\n    meta-1: {settle_passed_build: build-1}\n")
+	meta := clusters.clusterIdClusters["meta-1"]
+
+	requireFileClusterNoCappedWait(t, clock, func() {
+		clusters.Check(t.Context())
+	})
+	if !meta.Ready() || meta.checkPools() != nil || !meta.SettlePassed() {
+		t.Fatal("a cluster whose store answers its checks is not ready, writable and settled")
+	}
+
+	func() {
+		store.stateLock.Lock()
+		defer store.stateLock.Unlock()
+		store.downHosts[fileClusterHeldHostName] = true
+	}()
+	var probeErr error
+	requireFileClusterNoCappedWait(t, clock, func() {
+		clusters.Check(t.Context())
+		_, _, probeErr = meta.List(sidecar.WithBlobProbe(t.Context()), sidecar.EvsPlaceKeyPrefix, "", 1)
+	})
+	if probeErr == nil {
+		t.Fatal("a probe of a store that resets it read as answered")
+	}
+	// the last good read stands until it goes stale
+	if !meta.Ready() {
+		t.Fatal("not ready before its last good read went stale")
+	}
+	clock.Advance(clusters.settings.CheckStaleAfter)
+	if meta.Ready() || clusters.Ready() {
+		t.Error("ready on checks gone stale")
+	}
+	if meta.SettlePassed() {
+		t.Error("settled on checks gone stale")
+	}
+	store.takeRequests()
+	if _, err := meta.PutIfNoneMatch(t.Context(), "head/a/_", []byte("v1"), nil); !errors.Is(err, ErrFileClusterPools) {
+		t.Errorf("a write on checks gone stale: %v", err)
+	}
+	if err := releaseHolder(); err != nil {
 		t.Fatal(err)
 	}
 	host.shutdown()
-	if paths := host.requestPaths(); slices.Contains(paths, fileClusterAdminInfoPath) {
-		t.Errorf("admin info reached the host: %q", paths)
+	for _, request := range store.takeRequests() {
+		if request.method == http.MethodPut {
+			t.Errorf("a write on checks gone stale reached the store: %s", request.path)
+		}
 	}
 }
 

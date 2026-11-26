@@ -189,7 +189,8 @@ func parseFileClusterAdminInfo(body []byte, readTime time.Time) (*FileClusterAdm
 	return info, nil
 }
 
-// Reads the cluster's admin info from one host, in one signed request bounded by RequestTimeout.
+// Reads the cluster's admin info from one host, in one signed request bounded by RequestTimeout,
+// outside the host's cap on its connections (adminClient).
 func (self *FileCluster) AdminInfo(ctx context.Context) (*FileClusterAdminInfo, error) {
 	host := self.picker.pick()
 	scheme := "http"
@@ -225,10 +226,13 @@ func (self *FileCluster) AdminInfo(ctx context.Context) (*FileClusterAdminInfo, 
 	return parseFileClusterAdminInfo(body, self.clusters.clock.Now())
 }
 
-// The admin route goes through the host's own transport, without the deadline header.
+// The admin route goes through the host's uncapped transport, the paced client's, without the deadline
+// header. Admin info is read only as a check, the clusters' own every CheckInterval and monitor's and
+// the operators' reads beside it, one request a cluster and never a burst, so it measures the store and
+// not this block's queue for its host (owner decision 790; file_cluster_transport.go's header).
 func (self *FileCluster) adminClient(host *fileClusterHost) *http.Client {
 	return &http.Client{
-		Transport: host.transport,
+		Transport: host.pacedTransport,
 		CheckRedirect: func(request *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
@@ -281,8 +285,9 @@ func (self *FileCluster) LastAdminInfo() *FileClusterAdminInfo {
 	return self.freshAdminInfo()
 }
 
-// One pass of every cluster's checks: admin info, then the sentinel. A failed read keeps the last good
-// one, which goes stale in CheckStaleAfter and then fails closed.
+// One pass of every cluster's checks: admin info, then the sentinel, each outside its host's cap on
+// connections, so a check waits on no burst and reads the store (owner decision 790). A failed read keeps
+// the last good one, which goes stale in CheckStaleAfter and then fails closed.
 func (self *FileClusters) Check(ctx context.Context) {
 	for _, cluster := range self.clusterIdClusters {
 		info, err := cluster.AdminInfo(ctx)
