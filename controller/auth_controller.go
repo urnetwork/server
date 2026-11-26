@@ -267,6 +267,12 @@ func authVerifySend(
 		},
 	)
 	if err != nil {
+		// a text the send caps refused (aws_sms_send_cap.go) is a rate limit
+		// with its wait, as the code budgets answer
+		if capError := smsSendCapVerifySendError(err); capError != nil {
+			result.Error = capError
+			return result, nil
+		}
 		// the sender counts the failure and reports it at most once per
 		// interval; a client can repeat this request, so the detail is verbose
 		if glog.V(1) {
@@ -413,6 +419,12 @@ func authPasswordReset(
 		},
 	)
 	if err != nil {
+		// a text the send caps refused (aws_sms_send_cap.go) is a rate limit
+		// with its wait, as the code budgets answer
+		if capError := smsSendCapVerifySendError(err); capError != nil {
+			result.Error = capError
+			return result, nil
+		}
 		// the sender counts the failure and reports it at most once per
 		// interval; a client can repeat this request, so the detail is verbose
 		if glog.V(1) {

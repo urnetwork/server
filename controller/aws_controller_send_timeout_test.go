@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -32,15 +33,17 @@ type awsEndpointFixture struct {
 	release     chan struct{}
 	contentType string
 	body        string
+	// every request the endpoint read, kept or not
+	requestCount atomic.Int64
 }
 
 // Answers no request until the test ends.
-func newSilentAwsEndpoint(t *testing.T) *awsEndpointFixture {
+func newSilentAwsEndpoint(t testing.TB) *awsEndpointFixture {
 	return newAwsEndpoint(t, "", "")
 }
 
 // Answers every request with `body`. An empty body never answers.
-func newAwsEndpoint(t *testing.T, contentType string, body string) *awsEndpointFixture {
+func newAwsEndpoint(t testing.TB, contentType string, body string) *awsEndpointFixture {
 	fixture := &awsEndpointFixture{
 		received:    make(chan *http.Request, 16),
 		release:     make(chan struct{}),
@@ -48,6 +51,7 @@ func newAwsEndpoint(t *testing.T, contentType string, body string) *awsEndpointF
 		body:        body,
 	}
 	fixture.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fixture.requestCount.Add(1)
 		requestBody, _ := io.ReadAll(r.Body)
 		clone := r.Clone(context.Background())
 		clone.Body = io.NopCloser(bytes.NewReader(requestBody))
@@ -74,13 +78,23 @@ func newAwsEndpoint(t *testing.T, contentType string, body string) *awsEndpointF
 	return fixture
 }
 
-// A sender pointed at the fixture with synthetic credentials.
+// A sender pointed at the fixture with synthetic credentials. Its texts pass
+// caps that admit every one, so these tests need no Redis; the send caps' own
+// tests (aws_sms_send_cap_test.go) give the sender the production caps.
 func (self *awsEndpointFixture) sender(sendTimeout time.Duration) *AWSMessageSender {
 	return &AWSMessageSender{
 		sendTimeout: sendTimeout,
 		endpoint:    self.server.URL,
 		credentials: credentials.NewStaticCredentials("synthetic-access-key", "synthetic-secret-key", ""),
+		smsCaps:     admitEverySms{},
 	}
+}
+
+// Send caps that admit every text.
+type admitEverySms struct{}
+
+func (admitEverySms) admitSms(ctx context.Context, phoneNumber string) error {
+	return nil
 }
 
 // The oldest request the endpoint read and the test has not taken, or nil.
@@ -95,7 +109,7 @@ func (self *awsEndpointFixture) receivedRequest() *http.Request {
 
 // Sends on another goroutine and returns its error, failing the test if the
 // send outlives the guard.
-func sendWithGuard(t *testing.T, send func() error) error {
+func sendWithGuard(t testing.TB, send func() error) error {
 	done := make(chan error, 1)
 	go func() {
 		done <- send()
