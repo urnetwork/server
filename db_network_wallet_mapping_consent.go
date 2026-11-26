@@ -75,3 +75,13 @@ var stPayoutWalletResolutionColdkeyIndexMigration = newRestartableOnlineSqlMigra
 		 CREATE INDEX st_payout_wallet_resolution_coldkey
 		 ON st_payout_wallet_resolution (deployment_key, no_id, epoch, coldkey, client_id) INCLUDE (network_id)`,
 )
+
+// The index migration's version: its position in the list, from 1.
+func StPayoutWalletResolutionColdkeyIndexMigrationVersion() int {
+	for i, migration := range migrations {
+		if migration == stPayoutWalletResolutionColdkeyIndexMigration {
+			return i + 1
+		}
+	}
+	return 0
+}
