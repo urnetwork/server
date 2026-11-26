@@ -17,7 +17,12 @@ package model
 //	         written ahead of its entry are never taken
 //
 // The bases come from the sequencer's verifier, which loads every entry the
-// store holds, so a pass in a process with no sequencer deletes nothing.
+// store holds, so a pass in a process with no sequencer deletes nothing. A pass
+// runs through the worker's sequencer, taskworker's, whose first cluster user
+// deletes, and through api's only where the process holds no worker's
+// (CurrentWorkerConfigLogSequencer): api's user deletes nothing (§19.4's api
+// row as xops' policy-api.json.j2 renders it), so there each DELETE is
+// refused and the entries stay.
 
 import (
 	"context"
@@ -263,11 +268,11 @@ func configLogRetentionNetworks(ctx context.Context, afterNetworkId *server.Id, 
 	return
 }
 
-// One retention pass at now through this process's sequencer, after
+// One retention pass at now through this process's worker sequencer, after
 // afterNetworkId: each network's entries and rows past its retention point. A
 // process with no sequencer deletes nothing and answers its error.
 func RetainConfigLogs(ctx context.Context, now time.Time, afterNetworkId *server.Id, settings *ConfigLogRetentionSettings) (*ConfigLogRetentionResult, error) {
-	sequencer, err := CurrentConfigLogSequencer()
+	sequencer, err := CurrentWorkerConfigLogSequencer()
 	if err != nil {
 		return nil, err
 	}

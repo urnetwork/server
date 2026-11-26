@@ -5,7 +5,9 @@ package model
 // taskworker's deletion of each 20 minutes after its last write. The format and
 // the reader evs, gkm and sockets' block use (sockets' since QD-1029) are the
 // root's (sidecar/config_rev.go); the signature is oauth.SignRevocation's, which
-// the API issuer provides. The taskworker holds only the expiry sweep.
+// the API issuer provides. The taskworker holds only the expiry sweep, and a
+// process that runs both, all's, writes and sweeps through the issuer's
+// (InstallSidecarRevStore).
 //
 //	owe     WriteRevocation, in the caller's transaction: schedules a write
 //	        task that retries until it lands, and after the commit tries the
@@ -219,21 +221,61 @@ func (self *SidecarRevStore) SetWriteBudget(budget sidecar.WriteBudget, prices *
 	self.spend.setBudget(budget, prices)
 }
 
-// The API issuer's writer or taskworker's expiry sweep on the process's own
-// metadata cluster. Unpublished objects stay owed in the durable queue.
-var sidecarRevStore atomic.Pointer[SidecarRevStore]
+// This process's rev/ stores, each on its own process's first metadata
+// cluster: the API issuer's writer, which signs (controller's
+// installApiRevocations), and taskworker's expiry sweep, which has no signer
+// (taskworker's installEvsJobWriters). One of them is current, and every write
+// and sweep goes through it: the issuer's while one is installed, since a
+// signing store sweeps as well as writes, and the worker's only while none is,
+// so in all's process, which runs api and taskworker together and installs
+// both, the worker's never stands in for api's (§19.4's writers that share a
+// process, owner decision 788). Each is kept in a place of its own, so the
+// rule holds whichever was installed first and whichever is removed first.
+// Unpublished objects stay owed in the durable queue.
+var sidecarRevIssuerStore atomic.Pointer[SidecarRevStore]
+var sidecarRevSweepStore atomic.Pointer[SidecarRevStore]
 
-// Installs this process's writer; nil removes it.
-func SetSidecarRevStore(store *SidecarRevStore) {
-	sidecarRevStore.Store(store)
+// The place store's role keeps: the issuer's for a store that signs, the
+// worker's for a sweep.
+func sidecarRevStorePlace(store *SidecarRevStore) *atomic.Pointer[SidecarRevStore] {
+	if store.sign != nil {
+		return &sidecarRevIssuerStore
+	}
+	return &sidecarRevSweepStore
 }
 
-func currentSidecarRevStore() (*SidecarRevStore, error) {
-	store := sidecarRevStore.Load()
-	if store == nil {
-		return nil, errors.New("this process holds no first metadata cluster for rev/")
+// Installs store in its role's place until the returned function removes it,
+// the removal taking out store alone, so neither of two installs in one
+// process clears the other's. A sweep store installed beside a signing one
+// stays out of use until the signing one is removed.
+func InstallSidecarRevStore(store *SidecarRevStore) (remove func()) {
+	place := sidecarRevStorePlace(store)
+	place.Store(store)
+	return func() {
+		place.CompareAndSwap(store, nil)
 	}
-	return store, nil
+}
+
+// Installs store as this process's one rev/ store, whatever was installed
+// before; nil removes every store. A process with one store, or a test that
+// stands for one, installs it this way.
+func SetSidecarRevStore(store *SidecarRevStore) {
+	sidecarRevIssuerStore.Store(nil)
+	sidecarRevSweepStore.Store(nil)
+	if store != nil {
+		sidecarRevStorePlace(store).Store(store)
+	}
+}
+
+// The current store: the issuer's, else the worker's sweep.
+func currentSidecarRevStore() (*SidecarRevStore, error) {
+	if store := sidecarRevIssuerStore.Load(); store != nil {
+		return store, nil
+	}
+	if store := sidecarRevSweepStore.Load(); store != nil {
+		return store, nil
+	}
+	return nil, errors.New("this process holds no first metadata cluster for rev/")
 }
 
 // The payload an object holds, read without its signature: what this writer
@@ -546,8 +588,9 @@ func WriteSidecarRevTaskPost(
 	return nil
 }
 
-// One sweep by this process's writer: what taskworker's rev/ deletion runs. A
-// process with no writer deletes nothing, so an object outlives its 20 minutes
+// One sweep through this process's current store, the issuer's where one is
+// installed and else the worker's: what taskworker's rev/ deletion runs. A
+// process with no store deletes nothing, so an object outlives its 20 minutes
 // rather than going early.
 func SweepSidecarRevocations(ctx context.Context) (int, error) {
 	store, err := currentSidecarRevStore()
