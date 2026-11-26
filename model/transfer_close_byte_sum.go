@@ -11,12 +11,15 @@ package model
 // The open snapshot pinned the cluster xmin horizon, so vacuum could not
 // remove the dead tuples of the high-churn contract, escrow and task tables.
 //
-// Each chunk here is one autocommit statement over at most
-// transferCloseByteChunkSize contracts in (close_time, contract_id) order. It
-// reads the close-time partial indexes onward from the last key, so both its
-// work and its snapshot are bounded by the chunk rather than the window. The
-// state between chunks is a plain value that a task checkpoints in its args.
-// Each caller marks its chunks with its own comment for pg_stat_activity.
+// Each chunk here is one statement over at most transferCloseByteChunkSize
+// contracts in (close_time, contract_id) order. It reads the close-time
+// partial indexes onward from the last key, so both its work and its snapshot
+// are bounded by the chunk rather than the window. The statement runs in a
+// read committed, read only transaction of its own that first turns JIT off
+// (transferCloseByteChunkJitSql); the setting takes no snapshot, so the chunk
+// read's is still the only one. The state between chunks is a plain value that
+// a task checkpoints in its args. Each caller marks its chunks with its own
+// comment for pg_stat_activity.
 //
 // Consistency: the sum equals the single-statement sum for every contract
 // whose close key and destination close do not change during the walk. The
@@ -37,6 +40,8 @@ import (
 	"math"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/urnetwork/server"
 )
 
@@ -44,6 +49,17 @@ import (
 // few thousand index and heap pages, about a second at the slowest daily rate
 // observed on Main (3,469 s for about seven million contracts).
 const transferCloseByteChunkSize = 2000
+
+// The planner costs a chunk at its row limit, a few thousand index probes of
+// the contract and close tables, which passes the JIT thresholds. On Main
+// (2026-11-26) both chunk reads, the rollup day's and the clock tail's, ran
+// about 700 times a minute each, and 42 to 48 ms of each call's 62 to 74 ms was
+// JIT compilation of 51 to 55 functions, about a core between them. Index
+// probes over a bounded chunk gain nothing from compiled expressions, so each
+// chunk's transaction turns JIT off for itself, as the deadline close does for
+// its escrow read (deadlineEscrowRowsJitSql). PostgreSQL checks the setting
+// when the executor starts, so it holds for a cached generic plan too.
+const transferCloseByteChunkJitSql = `SELECT set_config('jit', 'off', true)`
 
 // The resumable state of a destination-close byte sum over the contracts with
 // Start <= close_time < End. The json form is a task checkpoint. Advanced by
@@ -61,9 +77,9 @@ type TransferCloseByteSum struct {
 	Complete        bool      `json:"complete,omitempty"`
 }
 
-// Reads up to chunkCount more chunks, each in its own autocommit statement
-// marked with the caller's constant marker, and reports whether the sum is
-// complete.
+// Reads up to chunkCount more chunks, each in its own read only transaction
+// without JIT and marked with the caller's constant marker, and reports
+// whether the sum is complete.
 func (self *TransferCloseByteSum) advance(ctx context.Context, marker string, chunkCount int) bool {
 	for i := 0; i < chunkCount && !self.Complete; i += 1 {
 		resume := 0 < self.ContractCount
@@ -80,8 +96,11 @@ func (self *TransferCloseByteSum) advance(ctx context.Context, marker string, ch
 		var lastContractId server.Id
 		var contractCount int64
 		var byteCount ByteCount
-		server.Db(ctx, func(conn server.PgConn) {
-			result, err := conn.Query(
+		server.Tx(ctx, func(tx server.PgTx) {
+			// a retried transaction reads the chunk again
+			found = false
+			server.RaisePgResult(tx.Exec(ctx, transferCloseByteChunkJitSql))
+			result, err := tx.Query(
 				ctx,
 				transferCloseByteChunkSql(marker, self.TerminalOnly, resume),
 				afterCloseTime,
@@ -95,7 +114,7 @@ func (self *TransferCloseByteSum) advance(ctx context.Context, marker string, ch
 					found = true
 				}
 			})
-		})
+		}, server.TxReadCommitted, pgx.ReadOnly)
 
 		if !found {
 			// no contract remains after the cursor
