@@ -25,15 +25,38 @@ type StLedgerV2EpochAmount struct {
 
 // The pool's recorded amounts of the epochs $3, each with the network its
 // coldkey belongs to in its epoch, NULL for none.
+//
+// Each amount reads the smallest client of its own coldkey and epoch, one
+// probe of st_payout_wallet_resolution_coldkey (db_network_wallet_mapping_consent.go).
+// Until 2026-11-26 the attribution was a DISTINCT ON over every resolution of
+// the epochs, joined to the amounts afterwards: an epoch holds a resolution
+// per client, hundreds of thousands, against about a hundred amounts, so each
+// read sorted the whole table to keep a few hundred rows.
 const stLedgerV2AttributedAmounts = `
 	st_ledger_v2_amount a
-	LEFT JOIN (
-		SELECT DISTINCT ON (epoch, coldkey) epoch, coldkey, network_id
-		FROM st_payout_wallet_resolution
-		WHERE deployment_key = $1 AND no_id = $2 AND epoch = ANY($3)
-		ORDER BY epoch, coldkey, client_id
-	) attribution ON attribution.epoch = a.epoch AND attribution.coldkey = a.coldkey
+	LEFT JOIN LATERAL (
+		SELECT resolution.network_id
+		FROM st_payout_wallet_resolution resolution
+		WHERE resolution.deployment_key = $1 AND resolution.no_id = $2
+			AND resolution.epoch = a.epoch AND resolution.coldkey = a.coldkey
+		ORDER BY resolution.client_id
+		LIMIT 1
+	) attribution ON true
 	WHERE a.deployment_key = $1 AND a.no_id = $2 AND a.epoch = ANY($3)
+`
+
+// Each epoch's amount for the network $4 and its total.
+const stLedgerV2AmountsForNetworkSql = `
+	SELECT a.epoch, coalesce(sum(a.amount) FILTER (WHERE attribution.network_id = $4), 0)::text, sum(a.amount)::text
+	FROM ` + stLedgerV2AttributedAmounts + `
+	GROUP BY a.epoch
+`
+
+// The epochs' amounts by network, NULL for amounts no resolution selected.
+const stLedgerV2NetworkAmountsSql = `
+	SELECT attribution.network_id, sum(a.amount)::text
+	FROM ` + stLedgerV2AttributedAmounts + `
+	GROUP BY attribution.network_id
 `
 
 // GetStLedgerV2FinalizedEpochs returns, newest first and at most limit, the
@@ -82,11 +105,7 @@ func GetStLedgerV2AmountsForNetwork(ctx context.Context, deploymentKey StDeploym
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
-			`
-				SELECT a.epoch, coalesce(sum(a.amount) FILTER (WHERE attribution.network_id = $4), 0)::text, sum(a.amount)::text
-				FROM `+stLedgerV2AttributedAmounts+`
-				GROUP BY a.epoch
-			`,
+			stLedgerV2AmountsForNetworkSql,
 			key, int64(noId), stLedgerV2Epochs(epochs), networkId,
 		)
 		server.WithPgResult(result, err, func() {
@@ -113,11 +132,7 @@ func GetStLedgerV2NetworkAmounts(ctx context.Context, deploymentKey StDeployment
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
-			`
-				SELECT attribution.network_id, sum(a.amount)::text
-				FROM `+stLedgerV2AttributedAmounts+`
-				GROUP BY attribution.network_id
-			`,
+			stLedgerV2NetworkAmountsSql,
 			key, int64(noId), stLedgerV2Epochs([]uint64{epoch}),
 		)
 		server.WithPgResult(result, err, func() {
