@@ -166,15 +166,17 @@ func startEvsJobsFromVault(ctx context.Context, lifetime *sync.WaitGroup) {
 // store shows it took effect, by the table the budget, built with evsservice's default settings, prices with
 // (SetWriteBudget's nil prices). Answers what removes them, each removal taking out only what this install put in.
 //
-// all's process runs api's parts beside this (§19.4's writers that share a process; owner decisions 785, 788), and
-// none of these replaces what api installed: the hold writer's removal leaves api's in place where it was installed
-// since (model.InstallAbuseHoldStore; QD-1399); the sweep store is current only while no signing store, api's, is
-// installed, which then writes and sweeps (model.InstallSidecarRevStore); and the sequencer takes the worker's slot,
-// beside api's, which api's log routes and the issuer's handoffs read (model.InstallWorkerConfigLogSequencer; QD-1403).
+// all's process runs api's parts beside this (§19.4's writers that share a process; owner decisions 785, 788), each
+// service on its own block's MinIO user, and none of these replaces what api installed, while every delete runs under
+// this process's user, since api's deletes nothing (QD-1420): the hold writer is the current one whenever it is
+// installed, in either order, and its removal leaves api's in place (model.InstallWorkerAbuseHoldStore); the sweep
+// store is the one the sweep reads, while every write goes through api's signing store (model.InstallSidecarRevStore);
+// and the sequencer takes the worker's slot, beside api's, which api's log routes and the issuer's handoffs read
+// (model.InstallWorkerConfigLogSequencer; QD-1403).
 func installEvsJobWriters(host *sidecar.ServiceHost, firstCluster sidecar.BlobCluster, evsSettings *evsservice.EvsSettings) func() {
 	holdStore := model.NewAbuseHoldStore(firstCluster)
 	holdStore.SetWriteBudget(host.Budget, nil)
-	removeHoldStore := model.InstallAbuseHoldStore(holdStore)
+	removeHoldStore := model.InstallWorkerAbuseHoldStore(holdStore)
 	model.SetAbuseHoldSoftStateSource(model.NewAbuseHoldSoftStateSource(host, evsSettings))
 	// The worker's scoped credentials sweep expired revocations. Signing
 	// and all revocation writes belong to the issuer.

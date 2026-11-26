@@ -595,34 +595,56 @@ func ParseAbuseHoldKey(key string) (server.Id, server.Id, bool) {
 	return server.Id(networkId), server.Id(caseId), true
 }
 
-// This process's hold/ writer, which api and taskworker install once their first metadata cluster is wired (OPS's
-// ServiceHost.Blobs): api's for renewal, its placement going to the worker (QD-1399), and taskworker's for placement
-// and AbuseHoldPass. Until then placement and renewal refuse, since the object comes first, and AbuseHoldPass ends
-// nothing, since it deletes the object before the row.
-var abuseHoldStore atomic.Pointer[AbuseHoldStore]
+// This process's hold/ writers, which api and taskworker install once their first metadata cluster is wired (OPS's
+// ServiceHost.Blobs), each on its own service's cluster under that block's MinIO user: taskworker's for placement and
+// AbuseHoldPass (InstallWorkerAbuseHoldStore), and api's for renewal, its placement going to the worker (QD-1399;
+// InstallAbuseHoldStore). One is current, and placement, renewal, the restore and AbuseHoldPass each write through
+// it: taskworker's whenever it is installed, whatever the order of installs, and api's only while no worker's is. The
+// pass deletes an ended hold's object, and api's user deletes nothing while taskworker's deletes (§19.4's api and
+// taskworker rows; xops' policy-api.json.j2), so in all's process, which runs api and taskworker together and installs
+// both, every hold/ DELETE runs under the worker's user, and a renewal from api's staff route writes through the
+// worker's writer too, If-Match the object it read as any write here (QD-1420, amending the rule that the later
+// install stood in for both). Each is kept in a place of its own, so the rule holds whichever was installed first and
+// whichever is removed first. Until one is installed placement and renewal refuse, since the object comes first, and
+// AbuseHoldPass ends nothing, since it deletes the object before the row.
+var abuseHoldWorkerStore atomic.Pointer[AbuseHoldStore]
+var abuseHoldApiStore atomic.Pointer[AbuseHoldStore]
 
-// Installs this process's writer; nil removes it.
+// Installs store as this process's one writer, whatever was installed before; nil removes every writer. A process
+// with one writer, or a test that stands for one, installs it this way.
 func SetAbuseHoldStore(store *AbuseHoldStore) {
-	abuseHoldStore.Store(store)
+	abuseHoldApiStore.Store(nil)
+	abuseHoldWorkerStore.Store(store)
 }
 
-// Installs store as this process's writer until the returned function removes it. The removal takes out store alone
-// and leaves a writer installed since: all's process runs api and taskworker, which each install their own, and the
-// later stands in for both, since each writes hold/ as the other would.
+// Installs api's writer (controller's installApiLegalHolds) until the returned function removes it, the removal
+// taking out store alone, so neither of two installs in one process clears the other's. It is current only while no
+// worker's writer is installed.
 func InstallAbuseHoldStore(store *AbuseHoldStore) (remove func()) {
-	abuseHoldStore.Store(store)
+	abuseHoldApiStore.Store(store)
 	return func() {
-		abuseHoldStore.CompareAndSwap(store, nil)
+		abuseHoldApiStore.CompareAndSwap(store, nil)
 	}
 }
 
-// This process's writer, or ErrLegalHoldStoreUnavailable.
-func CurrentAbuseHoldStore() (*AbuseHoldStore, error) {
-	store := abuseHoldStore.Load()
-	if store == nil {
-		return nil, fmt.Errorf("%w: this process holds no first metadata cluster for hold/", ErrLegalHoldStoreUnavailable)
+// Installs taskworker's writer (taskworker's installEvsJobWriters) until the returned function removes it, the
+// removal taking out store alone. It is current whenever it is installed, beside api's or not.
+func InstallWorkerAbuseHoldStore(store *AbuseHoldStore) (remove func()) {
+	abuseHoldWorkerStore.Store(store)
+	return func() {
+		abuseHoldWorkerStore.CompareAndSwap(store, nil)
 	}
-	return store, nil
+}
+
+// This process's current writer, taskworker's where one is installed and else api's, or ErrLegalHoldStoreUnavailable.
+func CurrentAbuseHoldStore() (*AbuseHoldStore, error) {
+	if store := abuseHoldWorkerStore.Load(); store != nil {
+		return store, nil
+	}
+	if store := abuseHoldApiStore.Load(); store != nil {
+		return store, nil
+	}
+	return nil, fmt.Errorf("%w: this process holds no first metadata cluster for hold/", ErrLegalHoldStoreUnavailable)
 }
 
 // ----- the rows -----

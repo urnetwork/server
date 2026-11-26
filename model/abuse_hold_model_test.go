@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/sidecar"
+	"github.com/urnetwork/sidecar/evsservice"
 	"github.com/urnetwork/sidecar/sidecartest"
 
 	"github.com/urnetwork/server"
@@ -431,6 +432,57 @@ func TestRenewLegalHoldRewritesTheObjectOnce(t *testing.T) {
 		}
 		if _, err := RenewLegalHold(ctx, networkId, server.NewId(), testLegalHoldDay(80), nil); !errors.Is(err, ErrLegalHoldNotFound) {
 			t.Fatalf("no hold: %v", err)
+		}
+	})
+}
+
+// In all's process, with api's hold/ writer and taskworker's each on its own block's MinIO user (testClusterUser) and
+// installed in either order, a renewal, as api's renew_hold staff kind runs it, writes through the worker's writer,
+// the current one (QD-1420), If-Match the object it read: the object renews to day 180, the worker's budget spends
+// §11.13's overwrite row, and api's user is sent no hold/ PUT and spends nothing.
+func TestRenewLegalHoldBesideBothWritersGoesThroughTheWorkers(t *testing.T) {
+	requireLegalHoldTables(t)
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		blobs, _ := newTestLegalHoldStore(t)
+		first, err := blobs.FirstCluster()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, apiFirst := range []bool{true, false} {
+			// placed as taskworker's process places one, its writer alone
+			SetAbuseHoldStore(NewAbuseHoldStore(first))
+			networkId, caseId := newTestLegalHoldCase(t, ctx)
+			if _, _, err := PlaceLegalHold(ctx, &LegalHoldArgs{NetworkId: networkId, CaseId: caseId, Kind: sidecar.HoldKindPreserve2703f}, testLegalHoldDay0, nil); err != nil {
+				t.Fatal(err)
+			}
+			SetAbuseHoldStore(nil)
+
+			apiUser := newTestApiClusterUser(first)
+			api := NewAbuseHoldStore(apiUser)
+			apiBudget := sidecartest.NewFakeWriteBudget(nil)
+			api.SetWriteBudget(apiBudget, testApiBudgetPrices())
+			worker := NewAbuseHoldStore(newTestWorkerClusterUser(first))
+			workerBudget := sidecartest.NewFakeWriteBudget(nil)
+			worker.SetWriteBudget(workerBudget, testApiBudgetPrices())
+			removeBoth := testInstallBoth(apiFirst, func() func() { return InstallAbuseHoldStore(api) }, func() func() { return InstallWorkerAbuseHoldStore(worker) })
+
+			renewed, err := RenewLegalHold(ctx, networkId, caseId, testLegalHoldDay(80), nil)
+			if err != nil || !renewed.ExpireTime.Equal(testLegalHoldDay(180)) {
+				t.Fatalf("api first %t: the renewal: %+v, %v", apiFirst, renewed, err)
+			}
+			body := testLegalHoldObject(t, ctx, blobs, networkId, caseId)
+			record, err := sidecar.ParseHoldRecord(body)
+			if err != nil || !record.ExpireTime.Equal(testLegalHoldDay(180)) || !record.PlaceTime.Equal(testLegalHoldDay0) {
+				t.Fatalf("api first %t: the renewed object: %s, %v", apiFirst, body, err)
+			}
+			if got, want := testProcessStoreSpent(t, workerBudget, first, sidecar.WriteP0KindLifecycle), testApiBudgetPrice(evsservice.WriteOperationOverwrite, int64(len(body))); got != want {
+				t.Errorf("api first %t: the renewal spent %d of the worker's budget, and §11.13's overwrite row prices it at %d", apiFirst, got, want)
+			}
+			if got := testProcessStoreSpent(t, apiBudget, first, sidecar.WriteP0KindLifecycle); got != 0 || apiUser.putCount("hold/") != 0 {
+				t.Errorf("api first %t: the renewal went through api's writer, spending %d in %d PUTs", apiFirst, got, apiUser.putCount("hold/"))
+			}
+			removeBoth()
 		}
 	})
 }
