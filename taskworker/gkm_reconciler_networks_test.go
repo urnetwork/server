@@ -12,9 +12,13 @@ package taskworker
 //	restart  a quiet network's holder expiry gets its pending hint at its time, and its ended forwarding
 //	         Delegation's key object is deleted DelegationKeyRetention after the end, with no new entry
 //	evicted  a network the bounded cache evicted is asked for again at the reconciler's next wake for it, and read
+//	ended    the world's own end: a load its end cancels fails nothing, and its cleanup waits for a load held then
 //
 // The fake clock is the Net's; every wait on a goroutine is a monitor or the cache's OnLoad, with a real-time guard
 // only a broken cache or reconciler reaches. Nothing here blocks the reconciler: what it reports is kept in lists.
+// The test's end cancels the world's context, and so every load of a cache the world built, which fails nothing; each
+// such cache's cleanup waits for its loaders (AclGateCache.CloseAndWait), so none reports on a test that has
+// completed. A cleanup runs on the test itself, after every attempt TestEnv.Run makes.
 
 import (
 	"bytes"
@@ -306,14 +310,17 @@ func (self *gkmListingWorld) raiseHead(admission *sidecartest.AdmissionNet) {
 }
 
 // A gate cache over the Net's store, as gkmReconcilerStateFromHost builds one but on settings a test adjusts, hearing
-// no event and polling never, so it loads only what it is asked for. Each load is reported to loads.
-func (self *gkmListingWorld) cache(adjust func(settings *sidecar.AclGateSettings)) *sidecar.AclGateCache {
+// no event and polling never, so it loads only what it is asked for; over source instead when one is given. Each load
+// is reported to loads, and a load error fails the test while the world's context lives.
+func (self *gkmListingWorld) cache(adjust func(settings *sidecar.AclGateSettings), source sidecar.AclGateSource) *sidecar.AclGateCache {
 	host := self.net.Host()
 	settings := sidecar.DefaultAclGateSettings()
 	settings.Log = sidecar.NewNoopLogger()
 	settings.PollInterval = 0
 	settings.OnLoad = func(networkId sidecar.Id, pin *bridge.AuthPin, err error) {
-		if err != nil {
+		// the test's end cancels the world's context, the cache's parent, and so a load still running, which fails
+		// nothing; the cleanup below waits for every loader, so none reports once the test has completed
+		if err != nil && self.ctx.Err() == nil {
 			self.t.Errorf("the gate's load of %s: %v", networkId, err)
 		}
 		self.loads.add(networkId)
@@ -321,9 +328,52 @@ func (self *gkmListingWorld) cache(adjust func(settings *sidecar.AclGateSettings
 	if adjust != nil {
 		adjust(settings)
 	}
-	cache := sidecar.NewAclGateCache(self.ctx, sidecar.NewAclGateDirectSource(host.Redis, host.Blobs, settings), host.Clock, settings)
-	self.t.Cleanup(cache.Close)
+	if source == nil {
+		source = sidecar.NewAclGateDirectSource(host.Redis, host.Blobs, settings)
+	}
+	cache := sidecar.NewAclGateCache(self.ctx, source, host.Clock, settings)
+	// after the admission worlds' and the Net's cleanups are registered, so it runs before them
+	self.t.Cleanup(cache.CloseAndWait)
 	return cache
+}
+
+// A gate source whose cold starts a test holds: Genesis reports on started and answers only once its context ends, so
+// the load it serves ends as the cache's context does. It serves nothing else.
+type gkmListingHeldSource struct {
+	started chan struct{}
+}
+
+func newGkmListingHeldSource() *gkmListingHeldSource {
+	return &gkmListingHeldSource{started: make(chan struct{}, 1)}
+}
+
+var _ sidecar.AclGateSource = (*gkmListingHeldSource)(nil)
+
+func (self *gkmListingHeldSource) Genesis(ctx context.Context, networkId sidecar.Id) ([]byte, error) {
+	select {
+	case self.started <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (self *gkmListingHeldSource) Entries(ctx context.Context, networkId sidecar.Id, after *bridge.AuthPin) ([][]byte, error) {
+	return nil, errors.New("the held source serves no entries")
+}
+
+func (self *gkmListingHeldSource) Rows(ctx context.Context, networkId sidecar.Id, rowsSha256 []byte) ([]byte, error) {
+	return nil, errors.New("the held source serves no rows")
+}
+
+// Waits until a cold start is held.
+func (self *gkmListingHeldSource) awaitStarted(t testing.TB) {
+	t.Helper()
+	select {
+	case <-self.started:
+	case <-time.After(gkmListingGuardTimeout):
+		t.Fatal("no cold start reached the held source")
+	}
 }
 
 // sidecar.yml with the gkm gate on for networkIds alone.
@@ -366,7 +416,7 @@ func TestGkmReconcilerStartListsTheGkmNetworksAPageAnInterval(t *testing.T) {
 		closed := networkIds[1]
 		defer server.Testing_PushSidecarConfig(gkmListingConfig(networkIds[0], networkIds[2]))()
 
-		cache := world.cache(nil)
+		cache := world.cache(nil, nil)
 		recorder := newGkmListingRecorder(gkmservice.NewAclGkmReconcilerState(cache))
 		settings := gkmservice.DefaultGkmReconcilerSettings()
 		settings.NetworkPageCount = 1
@@ -704,7 +754,7 @@ func TestGkmReconcilerAsksForAnEvictedNetworkAtItsNextWake(t *testing.T) {
 		cache := world.cache(func(settings *sidecar.AclGateSettings) {
 			// below every network's bytes: a load evicts every other loaded network
 			settings.ByteBudget = 1
-		})
+		}, nil)
 		recorder := newGkmListingRecorder(gkmservice.NewAclGkmReconcilerState(cache))
 		settings := gkmservice.DefaultGkmReconcilerSettings()
 		step := min(settings.PendingHintInterval, settings.DroppedLeafHintInterval)
@@ -764,5 +814,57 @@ func TestGkmReconcilerAsksForAnEvictedNetworkAtItsNextWake(t *testing.T) {
 		if stats := cache.Stats(); stats.EvictionCount != 2 {
 			t.Errorf("evictions: %d", stats.EvictionCount)
 		}
+	})
+}
+
+// A load the test's end cancels fails nothing: a load held in its source as the world's context ends reaches OnLoad
+// with the cancel's error, and the world reports no failure for it. Before, OnLoad failed the test for any load error,
+// the cancel of the test's own end among them ("the gate's load of ...: context canceled"), here at every attempt.
+func TestGkmListingWorldFailsNothingForALoadItsEndCancels(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		world := newGkmListingWorld(t, ctx)
+		networkId := world.admission().NetworkId()
+		held := newGkmListingHeldSource()
+		cache := world.cache(nil, held)
+		cache.Changed(networkId)
+		held.awaitStarted(t)
+
+		// the test's end, before the test returns: the held load fails with the cancel, and its OnLoad runs
+		cancel()
+		loadCursor := 0
+		world.loads.await(t, &loadCursor, "the cancelled load's OnLoad", func(loaded sidecar.Id) bool {
+			return loaded == networkId
+		})
+		if _, status := cache.State(networkId); status == sidecar.AclGateLoaded {
+			t.Error("the cancelled load installed")
+		}
+	})
+}
+
+// A test that ends with its world's load held in the source: the end cancels the load, which fails nothing, and the
+// cache's cleanup waits for its loader, so the load's OnLoad has run by the cleanups registered ahead of the cache.
+// Before, the cleanup closed the cache without waiting, and the cancelled load's OnLoad failed the attempt from a
+// loader nothing waited for, or reported on a test that had completed.
+func TestGkmListingWorldEndsWithALoadHeld(t *testing.T) {
+	test := t
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		world := newGkmListingWorld(t, ctx)
+		networkId := world.admission().NetworkId()
+		// after the cache's cleanup, on the test itself, whose failures an attempt's cleanups would not carry; an attempt
+		// that failed before its load was held checks nothing
+		held := false
+		test.Cleanup(func() {
+			if held && !slices.Contains(world.loads.all(), networkId) {
+				test.Error("the held load's OnLoad had not run when the cache's cleanup returned")
+			}
+		})
+		source := newGkmListingHeldSource()
+		world.cache(nil, source).Changed(networkId)
+		source.awaitStarted(t)
+		held = true
 	})
 }
