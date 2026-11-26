@@ -144,8 +144,7 @@ const providerStatsContractsSQL = `
 
 // The network overview's settled transfer bytes per close day, summed over its
 // providers. Its providers' contracts are read as the provider list's are
-// (providerStatsProviderArraySql); each contract's report is found by its key,
-// in the one partition of contract_close that holds it.
+// (providerStatsProviderArraySql).
 const providerStatsOverviewTransferBytesSQL = `
 	SELECT to_char(contract.close_time, 'YYYY-MM-DD') AS day, COALESCE(SUM(cc.used_transfer_byte_count), 0)
 	FROM ` + providerStatsProviderArraySql + `
