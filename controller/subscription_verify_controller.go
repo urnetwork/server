@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/glog"
+	"github.com/urnetwork/sidecar"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
@@ -339,11 +340,18 @@ type VerifyAppleTransactionArgs struct {
 //
 // There is no apple pending: a client only holds a transaction JWS once the
 // purchase completed (an Ask to Buy in progress has no transaction to report).
+//
+// A compute.* product goes to compute's own path (compute_store_apple.go),
+// routed by product family before anything here reads the claims, so it never
+// grants Pro and Pro's products never credit compute.
 func VerifyAppleTransactionClaims(
 	transactionClaims map[string]any,
 	allowedProductIds []string,
 	clientSession *session.ClientSession,
 ) (*VerifyStorePurchaseResult, error) {
+	if productId, _ := appleControllerStringClaim(transactionClaims, "productId"); sidecar.ComputeStoreProductFamilyOf(productId) {
+		return computeAppleStoreProcess().VerifyTransaction(clientSession.Ctx, transactionClaims, clientSession.ByJwt.NetworkId)
+	}
 	// SignedDate here is only the "claims are being judged now" anchor for the
 	// purchase-date plausibility window; the JWS's own signedDate was already
 	// used by the handler for certificate-chain validity
