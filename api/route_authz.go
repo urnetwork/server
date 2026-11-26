@@ -484,6 +484,29 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /tls/custom-account":          routeAccessPublic,
 	"POST /tls/custom-challenge":        routeAccessPublic,
 	"GET /tls/custom-challenge/([^/]+)": routeAccessPublic,
+
+	// DESIGN-COMPUTE §14.3's model routes (CSRV-M11-01; CO-49): a local model file's chunk index and chunks, public
+	// files every platform's downloader takes with no token, each request limited by its address; read with no
+	// credential at all (credentialUnreadRoutes)
+	"GET /compute/models/([^/]+)/index":           routeAccessPublic,
+	"HEAD /compute/models/([^/]+)/index":          routeAccessPublic,
+	"GET /compute/models/([^/]+)/chunks/([^/]+)":  routeAccessPublic,
+	"HEAD /compute/models/([^/]+)/chunks/([^/]+)": routeAccessPublic,
+}
+
+// The routes that read no credential at all: public routes serving public bytes to every caller alike, in front of
+// which no gate reads a bearer, so a token sent there is never decoded, verified or counted, and the route learns an
+// address and never a member. The strict_exp, forwarding client and lag.dev guest gates, which every other public
+// route keeps, refuse a credential only after reading it, so these routes go without them; being public, they carry
+// no client token, role or intended network gate either. A sidecar's token, a forwarding client's, a guest's and none
+// are answered alike, and the route's handler reads none of them. TestCredentialUnreadRoutesArePublic holds each to
+// the public class. DESIGN-COMPUTE §14.3's model routes (CO-49): "no token, so the api learns a file and an address
+// but never a member" (§6.5).
+var credentialUnreadRoutes = map[string]bool{
+	"GET /compute/models/([^/]+)/index":           true,
+	"HEAD /compute/models/([^/]+)/index":          true,
+	"GET /compute/models/([^/]+)/chunks/([^/]+)":  true,
+	"HEAD /compute/models/([^/]+)/chunks/([^/]+)": true,
 }
 
 // The only routes a lag.dev guest's client token is accepted on
@@ -757,7 +780,9 @@ func strictExpProofHolds(r *http.Request, bearerToken string, byJwt *session.ByJ
 // bearer's network (AUTHZ1.md §10). The intended network gate runs first, so a
 // request meant for another network is refused before any other gate or the
 // handler looks at it. The strict_exp gate runs before the client token gate, so
-// a sidecar's token hears its own refusal on every route off its list. Outside
+// a sidecar's token hears its own refusal on every route off its list. A public
+// route of credentialUnreadRoutes takes none of the gates that read a bearer, the
+// strict_exp, forwarding client and lag.dev guest gates included. Outside
 // them all, every route but the status route answers 503 while sidecar.yml's
 // restore_hold holds it (restore_hold.go).
 func applyRouteAccess(routes []*router.Route) []*router.Route {
@@ -786,16 +811,20 @@ func applyRouteAccess(routes []*router.Route) []*router.Route {
 				return refuseClientAdmin(ctx, routeKey, byJwt)
 			})
 		}
-		if !strictExpRoutes[routeKey] {
+		// a public route that reads no credential has no gate that would read one; any other route keeps them all
+		credentialUnread := credentialUnreadRoutes[routeKey] && access == routeAccessPublic
+		switch {
+		case credentialUnread:
+		case !strictExpRoutes[routeKey]:
 			route = router.RefuseStrictExpCredentials(route, func(ctx context.Context, byJwt *session.ByJwt) bool {
 				return refuseP0Call(routeKey, p0RefusalStrictExp, byJwt)
 			})
-		} else if !forwardOnlyRoutes[routeKey] {
+		case !forwardOnlyRoutes[routeKey]:
 			route = router.RefuseForwardOnlyCredentials(route, func(ctx context.Context, byJwt *session.ByJwt) bool {
 				return refuseForwardOnly(ctx, routeKey, byJwt)
 			})
 		}
-		if !lagGuestRoutes[routeKey] {
+		if !lagGuestRoutes[routeKey] && !credentialUnread {
 			route = router.RefuseLagGuestCredentials(route)
 		}
 		if access != routeAccessPublic {

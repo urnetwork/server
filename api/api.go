@@ -605,6 +605,9 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 	// §5.15's sidecar_id to client lookup for the hint writers of hosts with no Postgres, on gkm's and mxedge's internal
 	// bearers (plan-KEYS-hint-addressing, QD-146)
 	routes = append(routes, internalGateIdentityClients.Routes()...)
+	// a local model file's chunk index and chunks from the api's mirror, public and read with no credential
+	// (DESIGN-COMPUTE §14.3, CO-49; compute_models_mount.go, CSRV-M11-01)
+	routes = append(routes, computeModelRoutes()...)
 	// §7.6's SCIM 2.0 for a team's IdP, on the team's SCIM bearer (TEAM-M6-07), checked against the SHA-256
 	// network_team keeps (QD-828): whatever serves this route set, api and alt alike, installs that source, which holds
 	// no state, so a SCIM request reads the column and answers 503 only while the binary does not link MG6

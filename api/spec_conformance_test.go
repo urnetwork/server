@@ -899,7 +899,7 @@ func unimplementedOperations(paths map[string]any, implKeys map[string]bool, oth
 	for path, methodsAny := range paths {
 		for method, operation := range asMap(methodsAny) {
 			switch method {
-			case "get", "post", "put", "delete", "patch":
+			case "get", "post", "put", "delete", "patch", "head":
 			default:
 				continue
 			}
@@ -1025,7 +1025,7 @@ func specOperationKeys(spec *specDoc) map[string]bool {
 	for path, methodsAny := range spec.paths {
 		for method := range asMap(methodsAny) {
 			switch method {
-			case "get", "post", "put", "delete", "patch":
+			case "get", "post", "put", "delete", "patch", "head":
 				keys[strings.ToUpper(method)+" "+normalizePath(path)] = true
 			}
 		}

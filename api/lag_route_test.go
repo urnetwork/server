@@ -31,7 +31,8 @@ func TestLagGuestTokenServesOnlyTheLagRoutes(t *testing.T) {
 	served := []string{}
 	for _, route := range Routes() {
 		key := routeAccessKey(route)
-		if route.RefusesLagGuestCredentials() == lagGuestRoutes[key] {
+		// a public route that reads no credential has no gate to read the guest's token with
+		if route.RefusesLagGuestCredentials() != (!lagGuestRoutes[key] && !credentialUnreadRoutes[key]) {
 			t.Fatalf("%s: lag guest gate = %t", key, route.RefusesLagGuestCredentials())
 		}
 		reached := false
@@ -47,6 +48,10 @@ func TestLagGuestTokenServesOnlyTheLagRoutes(t *testing.T) {
 				t.Fatalf("%s: the guest's token status = %d, handler ran = %t; want the handler", key, w.Code, reached)
 			}
 			served = append(served, key)
+		} else if credentialUnreadRoutes[key] {
+			if !reached || w.Code != http.StatusOK {
+				t.Fatalf("%s reads no credential: the guest's token status = %d, handler ran = %t; want the handler", key, w.Code, reached)
+			}
 		} else if reached || w.Code != http.StatusForbidden {
 			t.Fatalf("%s: the guest's token status = %d, handler ran = %t; want 403", key, w.Code, reached)
 		}

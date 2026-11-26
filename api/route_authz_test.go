@@ -664,6 +664,11 @@ func TestForwardOnlyTokenRoutes(t *testing.T) {
 				if after := childAdminCallCount(key, p0RefusalForwardOnly, p0ResultRefused); after != before+1 {
 					t.Errorf("%s: counted %v forwarding refusals", key, after-before)
 				}
+			case credentialUnreadRoutes[key]:
+				// a public route that reads no credential answers a forwarding client's token as none
+				if !reached || w.Code != http.StatusOK {
+					t.Errorf("%s: status = %d body = %q, handler ran = %t; want the handler", key, w.Code, w.Body.String(), reached)
+				}
 			default:
 				if reached || w.Code != http.StatusForbidden {
 					t.Errorf("%s: status = %d, handler ran = %t; want the sidecar refusal", key, w.Code, reached)

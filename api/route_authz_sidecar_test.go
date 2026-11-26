@@ -335,6 +335,17 @@ func TestSidecarTokenRoutes(t *testing.T) {
 		refusedCount := 0
 		for _, route := range routes {
 			key := routeAccessKey(route)
+			if credentialUnreadRoutes[key] {
+				// a public route that reads no credential has no gate and is on no list: a sidecar's token is
+				// answered there as none is (TestComputeModelRoutesArePublic)
+				if route.RefusesStrictExpCredentials() || strictExpRoutes[key] {
+					t.Errorf("%s reads no credential, and strict_exp gate = %t, on the allowlist = %t", key, route.RefusesStrictExpCredentials(), strictExpRoutes[key])
+				}
+				if w, reached := serveStubbed(route, authorization, nil); !reached || w.Code != http.StatusOK {
+					t.Errorf("%s: status = %d body = %q, handler ran = %t; want the handler", key, w.Code, w.Body.String(), reached)
+				}
+				continue
+			}
 			if route.RefusesStrictExpCredentials() == strictExpRoutes[key] {
 				t.Errorf("%s: strict_exp gate = %t, on the allowlist = %t", key, route.RefusesStrictExpCredentials(), strictExpRoutes[key])
 			}
@@ -360,7 +371,7 @@ func TestSidecarTokenRoutes(t *testing.T) {
 				t.Errorf("%s: status = %d body = %q, handler ran = %t; want the sidecar refusal", key, w.Code, w.Body.String(), reached)
 			}
 		}
-		if refusedCount != len(routes)-len(sidecarAllowlist) {
+		if refusedCount != len(routes)-len(sidecarAllowlist)-len(credentialUnreadRoutes) {
 			t.Fatalf("refused %d of %d routes", refusedCount, len(routes))
 		}
 
