@@ -195,6 +195,13 @@ func installEvsJobWriters(host *sidecar.ServiceHost, firstCluster sidecar.BlobCl
 	}
 }
 
+// installEvsJobWriters on host and firstCluster with evs's default settings, for a test outside this package that
+// runs taskworker's writers beside another service's parts in one process, as server/cli/all's do. Answers what
+// removes them.
+func Testing_InstallEvsJobWriters(host *sidecar.ServiceHost, firstCluster sidecar.BlobCluster) func() {
+	return installEvsJobWriters(host, firstCluster, nil)
+}
+
 // Installs host for evs's jobs until ctx ends, with evsSettings the engine settings its runs take, this code's
 // defaults when nil, then removes both and ends what closeHost ends, and starts each of jobs' chains through
 // host.Tasks. A chain that does not start is said, and its next start tries again.
