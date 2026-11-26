@@ -1062,15 +1062,25 @@ func TestFileClusterChecksAndProbesReachTheStorePastAFullCap(t *testing.T) {
 	}
 	host.shutdown()
 
+	// outside the cap a request keeps its deadline header, which the admin route never carries
 	adminCount, sentinelCount, listCount := 0, 0, 0
 	for _, request := range store.takeRequests() {
 		switch {
 		case request.path == fileClusterAdminInfoPath:
 			adminCount += 1
+			if request.deadline != "" {
+				t.Errorf("admin info carried a deadline header %s", request.deadline)
+			}
 		case request.method == http.MethodHead && strings.HasSuffix(request.path, "/"+fileClusterSentinelKey):
 			sentinelCount += 1
+			if request.deadline == "" {
+				t.Errorf("a sentinel HEAD outside the cap carried no deadline header")
+			}
 		case strings.Contains(request.query, "list-type=2"):
 			listCount += 1
+			if request.deadline == "" {
+				t.Errorf("a probe's LIST outside the cap carried no deadline header")
+			}
 		}
 	}
 	// a check of each of the two clusters, then the probe's HEAD and LIST; never the unmarked LIST
