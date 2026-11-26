@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -111,7 +112,7 @@ func TestSidecarLabelAllocatesOnFirstNeedAndThenAnswersIt(t *testing.T) {
 			if err != nil {
 				t.Fatalf("a later request drew: %v", err)
 			}
-			if *again != *first {
+			if !reflect.DeepEqual(again, first) {
 				t.Fatalf("a later request answered %+v, the first %+v", again, first)
 			}
 		}
@@ -176,7 +177,7 @@ func TestSidecarLabelTwoFirstRequestsAllocateOneLabel(t *testing.T) {
 		if first.err != nil || second.err != nil {
 			t.Fatalf("the requests: %v, %v", first.err, second.err)
 		}
-		if *first.label != *second.label || !testSidecarLabelPattern.MatchString(first.label.Label) {
+		if !reflect.DeepEqual(first.label, second.label) || !testSidecarLabelPattern.MatchString(first.label.Label) {
 			t.Fatalf("two first requests answered %+v and %+v", first.label, second.label)
 		}
 		if rows := testSidecarLabelRows(ctx, networkId, root); !slices.Equal(rows, []string{first.label.Label}) {
@@ -318,7 +319,7 @@ func TestSidecarLabelWhileRestoringRefusesAFirstDraw(t *testing.T) {
 			t.Fatalf("a refused draw left labels %v", rows)
 		}
 		again, err := GetSidecarLabel(testSidecarLabelClientSession(ctx, labeledNetwork))
-		if err != nil || *again != *labeled {
+		if err != nil || !reflect.DeepEqual(again, labeled) {
 			t.Fatalf("a labeled network while restoring: %+v, %v; before %+v", again, err, labeled)
 		}
 	})
