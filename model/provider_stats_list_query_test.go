@@ -52,7 +52,10 @@ type providerStatsListFixture struct {
 // destination reports, source reports only, both, none, zero bytes and
 // checkpoints; repeated and distinct sources; a foreign provider's contracts
 // and reports without a contract. Most contract ids lead with their creation
-// millisecond, so many share an id range; some are random.
+// millisecond, so many share an id range; some are random above every
+// minted id. A contract id never leads with a time more than
+// ContractIdCreateTimeMargin before its creation, which the contract counts'
+// id bound relies on (providerStatsCreatedFromContractId).
 func seedProviderStatsListFixture(t testing.TB, ctx context.Context, conn server.PgConn, contractsPerProvider int) *providerStatsListFixture {
 	t.Helper()
 	fixture := &providerStatsListFixture{
@@ -73,7 +76,8 @@ func seedProviderStatsListFixture(t testing.TB, ctx context.Context, conn server
 		SELECT
 			-- most ids lead with their creation millisecond, as connect.NewId's
 			-- do, and group several to a key range; one in nine is random
-			CASE WHEN g % 9 = 0 THEN md5('provider-stats-list-' || g)::uuid
+			-- above every minted id
+			CASE WHEN g % 9 = 0 THEN ('f' || substr(md5('provider-stats-list-' || g), 2))::uuid
 				ELSE (lpad(to_hex((extract(epoch FROM created) * 1000)::bigint), 12, '0')
 					|| substr(md5('provider-stats-list-' || g), 1, 20))::uuid END,
 			md5('source-network-' || g % 3)::uuid,
@@ -143,10 +147,12 @@ type providerStatsListCounts struct {
 	clients   int
 }
 
+// The statement's arguments after the providers and the window start follow
+// them.
 func providerStatsListContracts(t testing.TB, ctx context.Context, q providerStatsListQuerier, sql string, ids []string, start time.Time, args ...any) map[server.Id]providerStatsListCounts {
 	t.Helper()
 	counts := map[server.Id]providerStatsListCounts{}
-	rows, err := q.Query(ctx, sql, append(args, ids, start)...)
+	rows, err := q.Query(ctx, sql, append([]any{ids, start}, args...)...)
 	server.WithPgResult(rows, err, func() {
 		for rows.Next() {
 			var id server.Id
@@ -210,7 +216,7 @@ func TestProviderStatsListQueriesMatchBeforeQueries(t *testing.T) {
 								t.Fatalf("%s: transfer bytes changed: got=%v want=%v", name, got, wantBytes)
 							}
 							wantCounts := providerStatsListContracts(t, ctx, tx, providerStatsContractsBeforeSQL, ids, start)
-							if got := providerStatsListContracts(t, ctx, tx, providerStatsContractsSQL, ids, start); !reflect.DeepEqual(got, wantCounts) {
+							if got := providerStatsListContracts(t, ctx, tx, providerStatsContractsSQL, ids, start, providerStatsCreatedFromContractId(start)); !reflect.DeepEqual(got, wantCounts) {
 								t.Fatalf("%s: contracts and clients changed: got=%v want=%v", name, got, wantCounts)
 							}
 							if selection.name == "network" && start.Equal(fixture.windowStart) {

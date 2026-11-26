@@ -73,7 +73,7 @@ func TestStatsQueryPlans(t *testing.T) {
 
 			assertStatsIndexPlan(t, ctx, conn, "02_transfer_list", providerStatsTransferBytesSQL, five, w24)
 
-			assertStatsIndexPlan(t, ctx, conn, "03_contracts_clients_list", providerStatsContractsSQL, five, w24)
+			assertStatsIndexPlan(t, ctx, conn, "03_contracts_clients_list", providerStatsContractsSQL, five, w24, providerStatsCreatedFromContractId(w24))
 
 			assertStatsIndexPlan(t, ctx, conn, "04_payout_list", providerPayoutStatsSql, networkId, w24, now)
 
@@ -109,10 +109,9 @@ func TestStatsQueryPlans(t *testing.T) {
 				FROM transfer_contract tc INNER JOIN contract_close cc ON cc.contract_id = tc.contract_id AND cc.party = 'destination'
 				WHERE tc.destination_id = $1 AND tc.close_time >= $2 GROUP BY tc.source_id, day`, providerId0, w72)
 
-			assertStatsIndexPlan(t, ctx, conn, "13_overview_transfer_day", `
-				SELECT to_char(tc.close_time, 'YYYY-MM-DD') AS day, COALESCE(SUM(cc.used_transfer_byte_count), 0)
-				FROM transfer_contract tc INNER JOIN contract_close cc ON cc.contract_id = tc.contract_id AND cc.party = 'destination'
-				WHERE tc.destination_id = ANY($1::uuid[]) AND tc.close_time >= $2 GROUP BY day`, all, w72)
+			assertStatsIndexPlan(t, ctx, conn, "13_overview_transfer_day", providerStatsOverviewTransferBytesSQL, all, w72)
+
+			assertStatsIndexPlan(t, ctx, conn, "13_overview_contracts_day", providerStatsOverviewContractsSQL, all, w72, providerStatsCreatedFromContractId(w72))
 
 			assertStatsIndexPlan(t, ctx, conn, "14_overview_connections", `
 				SELECT client_id, connect_time, disconnect_time, connected
