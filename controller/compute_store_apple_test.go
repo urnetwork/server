@@ -452,3 +452,80 @@ func TestAppleComputeNeverGrantsPro(t *testing.T) {
 		}
 	})
 }
+
+// The network's monthly plan, as GET api/compute/auto-renew shows it.
+func (self *testComputeStoreEnv) plan(networkId server.Id) *sidecarcontroller.ComputeMonthlyState {
+	self.t.Helper()
+	state, err := sidecarcontroller.ComputeAutoRenew(self.env, self.ctx, sidecarmodel.DefaultComputeLedgerSettings(), networkId)
+	if err != nil {
+		self.t.Fatal(err)
+	}
+	return state.Monthly
+}
+
+// A notification of kind about transaction, with its renewal info: auto-renew's switch and the plan that renews next.
+func testAppleRenewalNotification(kind string, subtype string, claims map[string]any, autoRenewStatus int, autoRenewProductId string) AppleNotificationDecodedPayload {
+	notification := testAppleNotification(kind, subtype, claims)
+	notification.RenewalInfo = map[string]any{
+		"originalTransactionId": claims["originalTransactionId"],
+		"autoRenewStatus":       float64(autoRenewStatus),
+		"autoRenewProductId":    autoRenewProductId,
+	}
+	return notification
+}
+
+// A subscription is the network's monthly plan as its notifications report it (BAL-M12-11): SUBSCRIBED records it by
+// its original transaction id, a downgrade's DID_CHANGE_RENEWAL_PREF shows the plan that renews next and credits
+// nothing, DID_CHANGE_RENEWAL_STATUS turns it off and on, EXPIRED ends it, and the app's report of a month credits
+// alone, the plan left as the notifications said.
+func TestApplePlanReportedToAutoRenew(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
+		store := newTestComputeStoreEnv(tb)
+		apple, _ := newTestComputeAppleStore(store)
+		networkId := store.network()
+		start := server.NowUtc().Add(-24 * time.Hour)
+		monthly25, monthly10 := sidecar.ComputeStoreProductId(true, 25), sidecar.ComputeStoreProductId(true, 10)
+		first := (&testAppleTransaction{transactionId: "6000000000000001", productId: monthly25, networkId: &networkId, purchase: start}).claims()
+		if _, err := apple.Notification(store.ctx, testAppleRenewalNotification("SUBSCRIBED", "INITIAL_BUY", first, 1, monthly25)); err != nil {
+			tb.Fatal(err)
+		}
+		if plan := store.plan(networkId); !plan.On || plan.Market != sidecarmodel.ComputeMarketAppStore || plan.Credits != 25 {
+			tb.Fatalf("subscribed: %+v", plan)
+		}
+		if _, err := apple.Notification(store.ctx, testAppleRenewalNotification("DID_CHANGE_RENEWAL_PREF", "DOWNGRADE", first, 1, monthly10)); err != nil {
+			tb.Fatal(err)
+		}
+		if plan := store.plan(networkId); !plan.On || plan.Credits != 10 || store.credited(networkId) != 25 {
+			tb.Fatalf("a downgrade: %+v, %v credited", plan, store.credited(networkId))
+		}
+		if _, err := apple.Notification(store.ctx, testAppleRenewalNotification("DID_CHANGE_RENEWAL_STATUS", "AUTO_RENEW_DISABLED", first, 0, monthly10)); err != nil {
+			tb.Fatal(err)
+		}
+		if plan := store.plan(networkId); plan.On {
+			tb.Fatalf("auto-renew turned off: %+v", plan)
+		}
+		if _, err := apple.Notification(store.ctx, testAppleRenewalNotification("DID_CHANGE_RENEWAL_STATUS", "AUTO_RENEW_ENABLED", first, 1, monthly10)); err != nil {
+			tb.Fatal(err)
+		}
+		if plan := store.plan(networkId); !plan.On {
+			tb.Fatalf("auto-renew turned on: %+v", plan)
+		}
+		if _, err := apple.Notification(store.ctx, testAppleRenewalNotification("EXPIRED", "VOLUNTARY", first, 1, monthly10)); err != nil {
+			tb.Fatal(err)
+		}
+		if plan := store.plan(networkId); plan.On {
+			tb.Fatalf("expired: %+v", plan)
+		}
+		renewal := (&testAppleTransaction{transactionId: "6000000000000002", originalId: "6000000000000001", productId: monthly25, networkId: &networkId, purchase: start.AddDate(0, 1, 0), reason: computeAppleReasonRenewal}).claims()
+		result, err := apple.VerifyTransaction(store.ctx, renewal, networkId)
+		if err != nil || result.Status != VerifyPurchaseStatusCredited {
+			tb.Fatalf("the app's report of a month: %+v %v", result, err)
+		}
+		if plan := store.plan(networkId); plan.On || store.credited(networkId) != 50 {
+			tb.Fatalf("after the app's report: %+v, %v credited", plan, store.credited(networkId))
+		}
+		if store.count(`SELECT count(*) FROM compute_auto_renew WHERE network_id = $1 AND store_ref = $2`, networkId, "6000000000000001") != 1 {
+			tb.Fatal("the plan is not kept by its original transaction id")
+		}
+	})
+}

@@ -14,6 +14,12 @@ package controller
 //	                     with UPGRADE (an upgrade taking effect at once), each credited once, whichever of it and the
 //	                     app's report comes first; REFUND and REVOKE reversing the transaction's lot; every other type
 //	                     acknowledged, since a downgrade takes effect at the next renewal, whose DID_RENEW grants it
+//	the plan             each grant of a subscription, and DID_CHANGE_RENEWAL_PREF's downgrade, DID_CHANGE_RENEWAL_STATUS,
+//	                     DID_FAIL_TO_RENEW, GRACE_PERIOD_EXPIRED and EXPIRED, reported to auto-renew by its original
+//	                     transaction id (sidecar/controller's ComputeMonthlyStoreReport): the plan that renews next and
+//	                     whether it renews, as the renewal info says, so GET api/compute/auto-renew shows it and a
+//	                     closure finds it (compute_store_close.go); the app's report credits alone, its notification
+//	                     carrying the renewal info
 //
 // The network is the one the transaction's appAccountToken names, which the app sets to the network id at purchase. A
 // purchase that names none, such as an offer code redeemed in the store, binds as Pro's offer codes bind
@@ -325,15 +331,21 @@ func (self *ComputeAppleStore) VerifyTransaction(ctx context.Context, claims map
 // A notification of a compute product (see the file header). processed is true only where this call credited.
 func (self *ComputeAppleStore) Notification(ctx context.Context, notification AppleNotificationDecodedPayload) (bool, error) {
 	credits := false
+	// a change of the plan or of its renewal alone, reported to auto-renew and crediting nothing
+	plan := false
 	switch notification.NotificationType {
 	case "ONE_TIME_CHARGE", "SUBSCRIBED", "DID_RENEW":
 		credits = true
 	case "DID_CHANGE_RENEWAL_PREF":
-		// an upgrade takes effect at once; a downgrade at the next renewal, whose DID_RENEW grants it
-		if notification.Subtype != computeAppleSubtypeUpgrade {
-			return false, nil
+		// an upgrade takes effect at once; a downgrade at the next renewal, whose DID_RENEW grants it, and is reported
+		// now as the plan that renews next
+		if notification.Subtype == computeAppleSubtypeUpgrade {
+			credits = true
+		} else {
+			plan = true
 		}
-		credits = true
+	case "DID_CHANGE_RENEWAL_STATUS", "DID_FAIL_TO_RENEW", "GRACE_PERIOD_EXPIRED", "EXPIRED":
+		plan = true
 	case "REFUND", "REVOKE":
 	default:
 		return false, nil
@@ -345,11 +357,14 @@ func (self *ComputeAppleStore) Notification(ctx context.Context, notification Ap
 	if err != nil {
 		return false, err
 	}
-	if !credits {
+	if !credits && !plan {
 		_, err := ComputeStoreReverse(self.deps.Env(), ctx, &self.deps, sidecarmodel.ComputeMarketAppStore, transaction.transactionId)
 		return false, err
 	}
 	if transaction.shared || transaction.revoked || (transaction.sandbox && !self.settings.SandboxCredit) {
+		return false, nil
+	}
+	if plan && !transaction.product.Monthly {
 		return false, nil
 	}
 	networkId := transaction.networkId
@@ -358,9 +373,16 @@ func (self *ComputeAppleStore) Notification(ctx context.Context, notification Ap
 			return false, err
 		}
 		if networkId == nil {
+			if plan {
+				// a plan no report has bound yet: its first grant reports it
+				return false, nil
+			}
 			// nothing names its network until the app's report binds it: Apple sends it again
 			return false, errAppleAccountTokenInvalid
 		}
+	}
+	if plan {
+		return false, self.reportPlan(ctx, transaction, *networkId, notification)
 	}
 	answer, err := self.credit(ctx, transaction, *networkId)
 	if err != nil {
@@ -370,7 +392,46 @@ func (self *ComputeAppleStore) Notification(ctx context.Context, notification Ap
 		computeStoreRecordUnowned(ctx, model.SubscriptionMarketApple, transaction.transactionId, "destination_deleted", networkId)
 		return false, nil
 	}
+	if transaction.product.Monthly {
+		// after the grant, so an error here has Apple send it again, the grant then credited already
+		if err := self.reportPlan(ctx, transaction, *networkId, notification); err != nil {
+			return false, err
+		}
+	}
 	return answer.Credited, nil
+}
+
+// Reports transaction's subscription to auto-renew as networkId's monthly plan (sidecar/controller's
+// ComputeMonthlyStoreReport): by its original transaction id, the plan that renews next, the renewal info's
+// autoRenewProductId where that names a compute subscription, and whether it renews, which the renewal info's
+// autoRenewStatus says, an expiry renewing nothing. Renewal info absent or silent leaves it renewing, a grant's plan
+// being one that just billed.
+func (self *ComputeAppleStore) reportPlan(ctx context.Context, transaction *computeAppleTransaction, networkId server.Id, notification AppleNotificationDecodedPayload) error {
+	credits := transaction.product.Credits
+	renews := true
+	if notification.RenewalInfo != nil {
+		if productId, _ := appleControllerStringClaim(notification.RenewalInfo, "autoRenewProductId"); productId != "" {
+			if product, ok := sidecar.ComputeStoreProductOf(self.deps.Products, productId); ok && product.Monthly {
+				credits = product.Credits
+			}
+		}
+		if status, ok := appleControllerInt64Claim(notification.RenewalInfo, "autoRenewStatus"); ok && status == 0 {
+			renews = false
+		}
+	}
+	if notification.NotificationType == "EXPIRED" {
+		renews = false
+	}
+	answer, err := sidecarcontroller.ComputeMonthlyStoreReport(self.deps.Env(), ctx, self.deps.Ledger, &sidecarcontroller.ComputeStoreSubscriptionReport{
+		NetworkId: networkId, Market: sidecarmodel.ComputeMarketAppStore, StoreRef: transaction.originalTransactionId, Credits: credits, Renews: renews,
+	})
+	if err != nil {
+		return fmt.Errorf("compute apple: the plan's report: %w", err)
+	}
+	if answer.Concurrent {
+		glog.Infof("[compute]apple: an App Store compute subscription of %s renews beside its other monthly plan\n", networkId)
+	}
+	return nil
 }
 
 // Whether a verified notification is of a compute product: its transaction's product, else its renewal's.

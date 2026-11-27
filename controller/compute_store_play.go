@@ -14,6 +14,11 @@ package controller
 //	                   subscriptionNotification (SUBSCRIPTION_PURCHASED, SUBSCRIPTION_RENEWED, SUBSCRIPTION_RECOVERED
 //	                   and SUBSCRIPTION_RESTARTED credit the period whose order they name; SUBSCRIPTION_REVOKED reverses
 //	                   it), and voidedPurchaseNotification, which reverses the lot of a compute order
+//	the plan           each period's credit, and every other subscription notification (cancelled, on hold, in grace,
+//	                   paused, expired, revoked), reported to auto-renew by its purchase token as subscriptionsv2 answers
+//	                   it (sidecar/controller's ComputeMonthlyStoreReport): its plan, whether Play bills it again and the
+//	                   token it replaced, so GET api/compute/auto-renew shows it and a deletion cancels it
+//	                   (compute_store_close.go)
 //
 // A subscription is credited by each period's order id, never its purchase token, which renewals share: a key on the
 // token would credit a subscription once ever. A replacement (its linkedPurchaseToken) grants the new plan's credits
@@ -39,6 +44,7 @@ import (
 	"github.com/urnetwork/glog"
 	operator "github.com/urnetwork/operator-core"
 	"github.com/urnetwork/sidecar"
+	sidecarcontroller "github.com/urnetwork/sidecar/controller"
 	sidecarmodel "github.com/urnetwork/sidecar/model"
 
 	"github.com/urnetwork/server"
@@ -458,14 +464,7 @@ func (self *ComputePlayStore) period(ctx context.Context, purchaseToken string, 
 	if orderId == "" {
 		return &computePlayOutcome{status: VerifyPurchaseStatusPending}, nil
 	}
-	obfuscated := ""
-	if sub.ExternalAccountIdentifiers != nil {
-		obfuscated = sub.ExternalAccountIdentifiers.ObfuscatedExternalAccountId
-		if sub.ExternalAccountIdentifiers.ExternalAccountId != "" {
-			obfuscated = sub.ExternalAccountIdentifiers.ExternalAccountId
-		}
-	}
-	networkId, err := self.networkOf(ctx, obfuscated, purchaseToken, sub.LinkedPurchaseToken, reporter)
+	networkId, err := self.networkOf(ctx, computePlayAccountIdOf(sub), purchaseToken, sub.LinkedPurchaseToken, reporter)
 	if err != nil {
 		return &computePlayOutcome{status: VerifyPurchaseStatusInvalid}, nil
 	}
@@ -495,10 +494,82 @@ func (self *ComputePlayStore) period(ctx context.Context, purchaseToken string, 
 	if err := self.acknowledge(ctx, product.ProductId, purchaseToken, sub); err != nil {
 		return nil, err
 	}
+	// after the grant, so an error here has the report or the RTDN come again, the grant then credited already
+	if err := self.reportPlan(ctx, *networkId, purchaseToken, sub, product); err != nil {
+		return nil, err
+	}
 	if answer.Credited {
 		return &computePlayOutcome{status: VerifyPurchaseStatusCredited, credited: true}, nil
 	}
 	return &computePlayOutcome{status: VerifyPurchaseStatusAlreadyCredited}, nil
+}
+
+// The account id a subscription's purchase names, the external one over the obfuscated one, as Pro's purchases read it;
+// "" for none.
+func computePlayAccountIdOf(sub *computePlaySubscription) string {
+	if sub.ExternalAccountIdentifiers == nil {
+		return ""
+	}
+	if sub.ExternalAccountIdentifiers.ExternalAccountId != "" {
+		return sub.ExternalAccountIdentifiers.ExternalAccountId
+	}
+	return sub.ExternalAccountIdentifiers.ObfuscatedExternalAccountId
+}
+
+// Reports sub, purchaseToken's subscription, to auto-renew as networkId's monthly plan (sidecar/controller's
+// ComputeMonthlyStoreReport): by its purchase token, with the plan its line item holds, whether Play bills it again
+// (playSubscriptionRenews, as the deletion's cancellation reads it) and the subscription it replaced, its linked token,
+// so a replacement moves the plan's row along its chain.
+func (self *ComputePlayStore) reportPlan(ctx context.Context, networkId server.Id, purchaseToken string, sub *computePlaySubscription, product *sidecar.ComputeStoreProduct) error {
+	answer, err := sidecarcontroller.ComputeMonthlyStoreReport(self.deps.Env(), ctx, self.deps.Ledger, &sidecarcontroller.ComputeStoreSubscriptionReport{
+		NetworkId: networkId, Market: sidecarmodel.ComputeMarketGooglePlay, StoreRef: purchaseToken, ReplacesStoreRef: sub.LinkedPurchaseToken,
+		Credits: product.Credits, Renews: playSubscriptionRenews(&sub.PlaySubscription),
+	})
+	if err != nil {
+		return fmt.Errorf("compute play: the plan's report: %w", err)
+	}
+	if answer.Concurrent && !answer.Recorded {
+		// a closure cannot cancel it: Play refunds and revokes its next renewal once the network is gone
+		glog.Infof("[compute]play: a Play compute subscription of %s renews beside its other monthly plan, unrecorded\n", networkId)
+	}
+	return nil
+}
+
+// A subscription's change of renewal (cancelled, on hold, in grace, paused, expired and the like), reported to
+// auto-renew as Play holds it; one gone from Play, of no compute plan, or naming no network is not recorded.
+func (self *ComputePlayStore) status(ctx context.Context, purchaseToken string) error {
+	if !self.deps.Active() {
+		return errComputeStoreInactive
+	}
+	sub, err := self.subscription(ctx, purchaseToken)
+	if computePlayGone(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return self.statusOf(ctx, purchaseToken, sub)
+}
+
+// status's report of sub, purchaseToken's subscription as just read.
+func (self *ComputePlayStore) statusOf(ctx context.Context, purchaseToken string, sub *computePlaySubscription) error {
+	if len(sub.LineItems) == 0 || sub.LineItems[0] == nil {
+		return nil
+	}
+	product, ok := sidecar.ComputeStoreProductOf(self.deps.Products, sub.LineItems[0].ProductId)
+	if !ok || !product.Monthly || (sub.TestPurchase != nil && !self.settings.TestCredit) {
+		return nil
+	}
+	networkId, err := self.networkOf(ctx, computePlayAccountIdOf(sub), purchaseToken, sub.LinkedPurchaseToken, nil)
+	if err != nil {
+		glog.Infof("[compute]play subscription status: %s\n", err)
+		return nil
+	}
+	if networkId == nil {
+		// no report has bound it: its first grant reports it
+		return nil
+	}
+	return self.reportPlan(ctx, *networkId, purchaseToken, sub, product)
 }
 
 // The app's report of a compute purchase (see the file header), from clientSession's network.
@@ -548,7 +619,7 @@ func (self *ComputePlayStore) Rtdn(ctx context.Context, message *PlayRtdnMessage
 		case computePlaySubscriptionRevoked:
 			return true, self.revoked(ctx, notification.PurchaseToken)
 		}
-		return true, nil
+		return true, self.status(ctx, notification.PurchaseToken)
 	case message.VoidedPurchaseNotification != nil:
 		notification := message.VoidedPurchaseNotification
 		if notification.OrderId == "" || !self.deps.Active() {
@@ -582,8 +653,11 @@ func (self *ComputePlayStore) revoked(ctx context.Context, purchaseToken string)
 	if orderId == "" {
 		return nil
 	}
-	_, err = ComputeStoreReverse(self.deps.Env(), ctx, &self.deps, sidecarmodel.ComputeMarketGooglePlay, orderId)
-	return err
+	if _, err := ComputeStoreReverse(self.deps.Env(), ctx, &self.deps, sidecarmodel.ComputeMarketGooglePlay, orderId); err != nil {
+		return err
+	}
+	// a revoked subscription renews nothing more
+	return self.statusOf(ctx, purchaseToken, sub)
 }
 
 // The ledger's Play lot of orderId, nil where none was credited.

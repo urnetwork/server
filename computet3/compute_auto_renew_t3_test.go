@@ -671,3 +671,90 @@ func TestTurningOffCancelsOnlyUnsentCharges(t *testing.T) {
 		}
 	})
 }
+
+// A store's compute subscription is the network's monthly plan as its store reports it (§9.5, §9.8): GET auto-renew
+// shows its store and plan; the person changes it in the store, not here; a Stripe plan subscribing over it is
+// cancelled at once, so no network holds two; a Play subscription over an App Store one takes the row and its
+// replacement moves it along its chain, the replaced token's end changing nothing; it turns off when it stops
+// renewing; and a closed account records nothing.
+func TestStoreSubscriptionIsTheNetworksPlan(t *testing.T) {
+	runComputeT3(t, func(t3 *computeT3) {
+		t := t3.t
+		renewing := newComputeT3Renewing(t3, computeT3Midday(time.Now().UTC()))
+		storeRef := func() string {
+			var ref *string
+			err := t3.db.Db(t3.ctx, func(conn operator.DbConn) error {
+				rows, err := conn.Query(t3.ctx, `SELECT store_ref FROM compute_auto_renew WHERE network_id = $1 AND mode = $2`, renewing.networkId, int16(model.ComputeAutoRenewModeMonthly))
+				if err != nil {
+					return err
+				}
+				defer rows.Close()
+				if rows.Next() {
+					return rows.Scan(&ref)
+				}
+				return rows.Err()
+			})
+			if err != nil || ref == nil {
+				t.Fatalf("the plan's store subscription: %v %v", ref, err)
+			}
+			return *ref
+		}
+		original := "2000000000000001"
+		if answer := renewing.storeReport(model.ComputeMarketAppStore, original, "", 25, true); !answer.Recorded || answer.Concurrent || answer.Closed {
+			t.Fatalf("an App Store plan: %+v", answer)
+		}
+		if state := renewing.state(); !state.Monthly.On || state.Monthly.Market != model.ComputeMarketAppStore || state.Monthly.Credits != 25 ||
+			state.Monthly.PayerMemberId != nil || storeRef() != original {
+			t.Fatalf("the App Store plan shown: %+v", state.Monthly)
+		}
+		changed, err := controller.ComputeSetAutoRenew(renewing.env, t3.ctx, renewing.settings, &controller.ComputeAutoRenewChange{
+			NetworkId: renewing.networkId, MemberId: &renewing.payerId, Mode: model.ComputeAutoRenewModeMonthly, On: false,
+		})
+		if err != nil || changed.Refusal != controller.ComputeAutoRenewRefusalStoreSubscription {
+			t.Fatalf("turning a store's plan off here: %+v %v", changed, err)
+		}
+		over := "sub_t3_over_store_" + renewing.networkId.String()
+		if err := controller.ComputeMonthlySubscribed(renewing.env, t3.ctx, renewing.settings, &controller.ComputeMonthlySubscription{
+			NetworkId: renewing.networkId, PayerMemberId: renewing.payerId, Credits: 10,
+			StripeCustomerId: "cus_t3_" + renewing.payerId.String(), StripeSubscriptionId: over,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if state := renewing.state(); !computeT3Renew.wasCancelled(over) || state.Monthly.Market != model.ComputeMarketAppStore || storeRef() != original {
+			t.Fatalf("a Stripe plan over the store's: cancelled %v, %+v", computeT3Renew.wasCancelled(over), state.Monthly)
+		}
+		tokenA, tokenB := "token-t3-a-"+renewing.networkId.String(), "token-t3-b-"+renewing.networkId.String()
+		if answer := renewing.storeReport(model.ComputeMarketGooglePlay, tokenA, "", 50, true); !answer.Recorded || !answer.Concurrent {
+			t.Fatalf("Play's over the App Store's: %+v", answer)
+		}
+		if answer := renewing.storeReport(model.ComputeMarketGooglePlay, tokenB, tokenA, 100, true); !answer.Recorded || answer.Concurrent {
+			t.Fatalf("a Play replacement: %+v", answer)
+		}
+		if answer := renewing.storeReport(model.ComputeMarketGooglePlay, tokenA, "", 50, false); answer.Recorded {
+			t.Fatalf("the replaced token's end: %+v", answer)
+		}
+		if state := renewing.state(); !state.Monthly.On || state.Monthly.Market != model.ComputeMarketGooglePlay || state.Monthly.Credits != 100 || storeRef() != tokenB {
+			t.Fatalf("after the replacement: %+v", state.Monthly)
+		}
+		if answer := renewing.storeReport(model.ComputeMarketGooglePlay, tokenB, "", 100, false); !answer.Recorded {
+			t.Fatalf("the plan stopping: %+v", answer)
+		}
+		if state := renewing.state(); state.Monthly.On || state.Monthly.Market != model.ComputeMarketGooglePlay || storeRef() != tokenB {
+			t.Fatalf("a stopped plan: %+v", state.Monthly)
+		}
+		t3.mustExec(`UPDATE compute_account SET state = $2 WHERE network_id = $1`, renewing.networkId, int16(model.ComputeAccountStateClosed))
+		if answer := renewing.storeReport(model.ComputeMarketGooglePlay, tokenB, "", 100, true); !answer.Closed || answer.Recorded {
+			t.Fatalf("a closed account's report: %+v", answer)
+		}
+		closedOver := "sub_t3_closed_" + renewing.networkId.String()
+		if err := controller.ComputeMonthlySubscribed(renewing.env, t3.ctx, renewing.settings, &controller.ComputeMonthlySubscription{
+			NetworkId: renewing.networkId, PayerMemberId: renewing.payerId, Credits: 10,
+			StripeCustomerId: "cus_t3_" + renewing.payerId.String(), StripeSubscriptionId: closedOver,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if state := renewing.state(); state.Monthly.On || !computeT3Renew.wasCancelled(closedOver) {
+			t.Fatalf("a Stripe plan for a closed account: cancelled %v, %+v", computeT3Renew.wasCancelled(closedOver), state.Monthly)
+		}
+	})
+}

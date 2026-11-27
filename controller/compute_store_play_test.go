@@ -414,3 +414,69 @@ func TestPlayPendingAnswersPending(t *testing.T) {
 		}
 	})
 }
+
+// Sets a subscription's state and whether its line item auto-renews.
+func (self *testComputePlayFake) renewal(token string, state string, autoRenew bool) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	sub := self.subscriptions[token]
+	sub["subscriptionState"] = state
+	sub["lineItems"].([]any)[0].(map[string]any)["autoRenewingPlan"] = map[string]any{"autoRenewEnabled": autoRenew}
+}
+
+// A subscription is the network's monthly plan as Play answers it (BAL-M12-11): a period's credit records it by its
+// purchase token, SUBSCRIPTION_CANCELED and SUBSCRIPTION_EXPIRED turn it off, SUBSCRIPTION_RESTARTED on again, and a
+// replacement, its linked token naming the plan's, moves the plan to the new token with its credits.
+func TestPlayPlanReportedToAutoRenew(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
+		store := newTestComputeStoreEnv(tb)
+		fake := newTestComputePlayFake(tb)
+		play := newTestComputePlayStore(store, fake)
+		networkId := store.network()
+		start := server.NowUtc()
+		monthly25, monthly50 := sidecar.ComputeStoreProductId(true, 25), sidecar.ComputeStoreProductId(true, 50)
+		rtdn := func(token string, productId string, kind int) {
+			tb.Helper()
+			if handled, err := play.Rtdn(store.ctx, &PlayRtdnMessage{PackageName: testComputePlayPackage, SubscriptionNotification: &PlaySubscriptionNotification{
+				NotificationType: kind, PurchaseToken: token, SubscriptionId: productId,
+			}}); !handled || err != nil {
+				tb.Fatalf("notification %d: %t %v", kind, handled, err)
+			}
+		}
+		const (
+			// RTDN's SUBSCRIPTION_CANCELED and SUBSCRIPTION_EXPIRED
+			canceled = 3
+			expired  = 13
+		)
+		fake.subscription("token_synthetic_plan_a", monthly25, "GPA.4444-4444-4444-44441", start, start.AddDate(0, 1, 0), networkId.String(), "")
+		fake.renewal("token_synthetic_plan_a", "SUBSCRIPTION_STATE_ACTIVE", true)
+		rtdn("token_synthetic_plan_a", monthly25, computePlaySubscriptionPurchased)
+		if plan := store.plan(networkId); !plan.On || plan.Market != sidecarmodel.ComputeMarketGooglePlay || plan.Credits != 25 {
+			tb.Fatalf("purchased: %+v", plan)
+		}
+		fake.renewal("token_synthetic_plan_a", "SUBSCRIPTION_STATE_CANCELED", false)
+		rtdn("token_synthetic_plan_a", monthly25, canceled)
+		if plan := store.plan(networkId); plan.On {
+			tb.Fatalf("cancelled: %+v", plan)
+		}
+		fake.renewal("token_synthetic_plan_a", "SUBSCRIPTION_STATE_ACTIVE", true)
+		rtdn("token_synthetic_plan_a", monthly25, computePlaySubscriptionRestarted)
+		if plan := store.plan(networkId); !plan.On || store.credited(networkId) != 25 {
+			tb.Fatalf("restarted: %+v, %v credited", plan, store.credited(networkId))
+		}
+		fake.subscription("token_synthetic_plan_b", monthly50, "GPA.4444-4444-4444-44442", start.Add(time.Minute), start.Add(time.Minute).AddDate(0, 1, 0), networkId.String(), "token_synthetic_plan_a")
+		fake.renewal("token_synthetic_plan_b", "SUBSCRIPTION_STATE_ACTIVE", true)
+		if result := testPlayReport(store.ctx, play, networkId, monthly50, "token_synthetic_plan_b"); result.Status != VerifyPurchaseStatusCredited {
+			tb.Fatalf("the replacement's report: %s", result.Status)
+		}
+		if plan := store.plan(networkId); !plan.On || plan.Credits != 50 ||
+			store.count(`SELECT count(*) FROM compute_auto_renew WHERE network_id = $1 AND store_ref = $2`, networkId, "token_synthetic_plan_b") != 1 {
+			tb.Fatalf("the replacement: %+v", plan)
+		}
+		fake.renewal("token_synthetic_plan_b", "SUBSCRIPTION_STATE_EXPIRED", false)
+		rtdn("token_synthetic_plan_b", monthly50, expired)
+		if plan := store.plan(networkId); plan.On {
+			tb.Fatalf("expired: %+v", plan)
+		}
+	})
+}
