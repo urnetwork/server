@@ -1004,3 +1004,15 @@ tables:
       network_id: compute-2
       terms_version: compute-2
       user_id: compute-2
+  # an operator's suspension of a network's compute (DESIGN-COMPUTE §17.2; CARCH-M12-01), CARCH's part of MG-C1, under
+  # compute-3 by the owner's answer QD-1438 (carch-m12-01-compute-hold-row)
+  compute_abuse_hold:
+    group: MG-C1
+    columns:
+      hold_staff_id: compute-3
+      hold_time: compute-3
+      network_id: compute-3
+      reason: compute-3
+      resume_staff_id: compute-3
+      resume_time: compute-3
+      version: compute-3

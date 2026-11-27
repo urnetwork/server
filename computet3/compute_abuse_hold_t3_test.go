@@ -3,10 +3,8 @@
 package computet3
 
 // §17.2's operator hold on the private stores (CARCH-M12-01; D-CABUSE-1, D-CABUSE-2): sidecar/controller's suspend and
-// resume over compute_abuse_hold in PostgreSQL and its projection in Redis, through server's own adapters, and the
-// staff route's kinds on the same env. Until question carch-m12-01-compute-hold-row's answer registers CARCH's part of
-// MG-C1, no migration creates compute_abuse_hold, so each test creates it in its own database from the part's own
-// statements, as the registered part will.
+// resume over compute_abuse_hold, CARCH's part of MG-C1, in PostgreSQL and its projection in Redis, through server's own
+// adapters.
 
 import (
 	"context"
@@ -18,14 +16,6 @@ import (
 	sidecarcontroller "github.com/urnetwork/sidecar/controller"
 	"github.com/urnetwork/sidecar/model"
 )
-
-// The part's statements, in the test's own database.
-func createComputeT3AbuseHold(t3 *computeT3) {
-	t3.t.Helper()
-	for _, step := range model.ComputeAbuseHoldMigrations() {
-		t3.mustExec(step.Sql)
-	}
-}
 
 // ENC's listener as the tests stand it in: each network's stops counted, and a network set failing fails.
 type computeT3AbuseHoldEnclaves struct {
@@ -97,7 +87,6 @@ func computeT3AbuseHoldProjection(t3 *computeT3, networkId operator.Id) string {
 // what the broker's store reads is the row.
 func TestComputeAbuseHoldSuspendAndResumeOnTheStores(t *testing.T) {
 	runComputeT3(t, func(t3 *computeT3) {
-		createComputeT3AbuseHold(t3)
 		registerComputeT3AbuseHoldListener()
 		networkId := operator.Id(sidecar.NewId())
 		staffId := operator.Id(sidecar.NewId())
@@ -175,7 +164,6 @@ func TestComputeAbuseHoldSuspendAndResumeOnTheStores(t *testing.T) {
 // retry asks it again.
 func TestComputeAbuseHoldEdgesOnTheStores(t *testing.T) {
 	runComputeT3(t, func(t3 *computeT3) {
-		createComputeT3AbuseHold(t3)
 		registerComputeT3AbuseHoldListener()
 		networkId := operator.Id(sidecar.NewId())
 		staffId := operator.Id(sidecar.NewId())

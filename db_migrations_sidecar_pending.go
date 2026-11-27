@@ -2165,8 +2165,7 @@ func sidecarMgC1LedgerMigrations() []any {
 }
 
 // MG-C1's §17.2 part, CARCH's: compute_abuse_hold, an operator's suspension of a network's compute, registered from
-// sidecar/model (C-30; CARCH-M12-01) once question carch-m12-01-compute-hold-row's answer gives compute-3 its words
-// (I-18); empty until then, so no database holds the table and every read of it refuses.
+// sidecar/model (C-30; CARCH-M12-01), under compute-3 (QD-1438).
 func sidecarMgC1AbuseHoldMigrations() []any {
 	return sidecarComputeMigrationValues(model.ComputeMigrationPart(model.ComputeMigrationGroupC1, model.ComputeMigrationOwnerCarch))
 }
