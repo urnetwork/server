@@ -38,7 +38,8 @@ import (
 )
 
 // server's platform for a BridgeNet: its clients as rows, and every control frame they send to server's controller,
-// which takes their provide modes and keys and signs every contract between them. Safe for concurrent use.
+// which takes their provide modes and keys and signs every contract between them. Control can be held at a barrier
+// (holdControl). Safe for concurrent use.
 type bridgeM4Platform struct {
 	t testing.TB
 	// the run's context, which carries the contract origin notifications every model call here needs
@@ -48,12 +49,29 @@ type bridgeM4Platform struct {
 	networks  map[server.Id]bool
 	// each client's subject, its own for a sidecar's client
 	subjects map[server.Id]server.Id
+	// open while control is held, and every control call that finds it waits for its close; nil while control runs
+	controlHold chan struct{}
+	// the control calls the latest hold kept waiting
+	heldControlCount int
+
+	// the control calls past the hold's check, which a new hold waits out
+	runningControlCount *connect.MonitorValue[int]
 }
 
 var _ sidecartest.BridgeNetPlatform = (*bridgeM4Platform)(nil)
 
+// A control call's context may carry a func() under this key, which Control calls each time a hold keeps the call
+// waiting.
+type bridgeM4ControlHeldKey struct{}
+
 func newBridgeM4Platform(t testing.TB, ctx context.Context) *bridgeM4Platform {
-	return &bridgeM4Platform{t: t, ctx: ctx, networks: map[server.Id]bool{}, subjects: map[server.Id]server.Id{}}
+	return &bridgeM4Platform{
+		t:                   t,
+		ctx:                 ctx,
+		networks:            map[server.Id]bool{},
+		subjects:            map[server.Id]server.Id{},
+		runningControlCount: connect.NewMonitorValue(0),
+	}
 }
 
 // A network under the bridge network's id the first time one is named, with a balance its contracts escrow from.
@@ -129,8 +147,108 @@ func (self *bridgeM4Platform) AddClient(ctx context.Context, args *sidecartest.B
 }
 
 // Every control frame to server's controller, as api's control route hands it: contracts, provide modes and keys.
+// While control is held, a call waits for the hold to end before the controller reads anything. A call counts itself
+// running before it looks for a hold, so a hold set after the look waits for the call to end.
 func (self *bridgeM4Platform) Control(ctx context.Context, clientId connect.Id, frames []*protocol.Frame) ([]*protocol.Frame, error) {
+	for {
+		self.runningControlCount.Update(func(count int) int { return count + 1 })
+		hold := func() chan struct{} {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			if self.controlHold != nil {
+				self.heldControlCount += 1
+			}
+			return self.controlHold
+		}()
+		if hold == nil {
+			break
+		}
+		self.runningControlCount.Update(func(count int) int { return count - 1 })
+		if onHeld, ok := ctx.Value(bridgeM4ControlHeldKey{}).(func()); ok {
+			onHeld()
+		}
+		select {
+		case <-hold:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	defer self.runningControlCount.Update(func(count int) int { return count - 1 })
 	return ConnectControlFrames(self.ctx, server.Id(clientId), frames, connect.DefaultContractManagerSettings())
+}
+
+// Holds every control call from now on, once each call already past the hold's check has ended, or fails t past
+// timeout. Then no control reads PostgreSQL until release, so a flow path tripwire armed between the two sees only the
+// flow path: connect asks a send sequence's successor contract as soon as the sequence takes a contract, on its own
+// time (ContractPrefetchLeadTime, eager for a same-network peer), and the controller's reads for it are control's, not
+// the flow's (CODESTYLE: hold independent setup or control I/O at a barrier to prove established delivery still
+// progresses). release answers how many calls the hold kept waiting; it is idempotent.
+func (self *bridgeM4Platform) holdControl(timeout time.Duration) (release func() int) {
+	self.t.Helper()
+	hold := make(chan struct{})
+	held := func() bool {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		if self.controlHold != nil {
+			return true
+		}
+		self.controlHold = hold
+		self.heldControlCount = 0
+		return false
+	}()
+	if held {
+		self.t.Fatal("control is held already")
+	}
+	var once sync.Once
+	release = func() int {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		once.Do(func() {
+			if self.controlHold == hold {
+				self.controlHold = nil
+			}
+			close(hold)
+		})
+		return self.heldControlCount
+	}
+	deadline := time.After(timeout)
+	for {
+		count, changed := self.runningControlCount.Get()
+		if count == 0 {
+			return release
+		}
+		select {
+		case <-changed:
+		case <-deadline:
+			release()
+			self.t.Fatalf("%d control calls still running after %s", count, timeout)
+		}
+	}
+}
+
+// clientId asks a contract to destinationId through Control, as connect asks a sequence's contract: an error unless
+// the controller answers with one frame.
+func (self *bridgeM4Platform) askContract(ctx context.Context, clientId connect.Id, destinationId connect.Id, byteCount uint64) error {
+	frame, err := connect.ToFrame(&protocol.CreateContract{
+		DestinationId:     destinationId.Bytes(),
+		TransferByteCount: byteCount,
+	}, connect.DefaultProtocolVersion)
+	if err != nil {
+		return err
+	}
+	// Control borrows the frame; its answers are this caller's
+	defer connect.MessagePoolReturn(frame.MessageBytes)
+	answers, err := self.Control(ctx, clientId, []*protocol.Frame{frame})
+	for _, answer := range answers {
+		connect.MessagePoolReturn(answer.MessageBytes)
+	}
+	if err != nil {
+		return err
+	}
+	if len(answers) != 1 {
+		return fmt.Errorf("the controller answered %d frames", len(answers))
+	}
+	return nil
 }
 
 // server holds publicKey as clientId's key, as the controller does a ClientKey a client publishes in band over its
@@ -205,109 +323,138 @@ func TestScenarioS8OnT3(t *testing.T) {
 }
 
 // I-12 around the flow path: once a window's contracts exist, its TCP, UDP and ICMP flows through the host's hook and
-// NAT acquire no PostgreSQL connection, under server's process-wide tripwire. Each echo is sent again while its wait
-// has no answer (sidecartest's BridgeNetWindow.WaitEchoAnswered), since its path may lose it by design, so the second
-// round's copies ride the flow the first echo opened inside the tripwire (TestBridgeLostEchoAnsweredWhenSentAgainOnT3).
+// NAT acquire no PostgreSQL connection, under server's process-wide tripwire, with control held at a barrier
+// (bridgeM4FlowPathRounds).
 func TestBridgeFlowPathReadsNoPostgresOnT3(t *testing.T) {
 	testingAclRun(t, func(t testing.TB, ctx context.Context) {
-		net := sidecartest.NewNet(ctx, nil)
-		defer net.Close()
-		settings := sidecartest.DefaultBridgeNetSettings()
-		settings.Platform = newBridgeM4Platform(t, ctx)
-		world := sidecartest.NewBridgeNet(t, net, settings)
-		defer world.Close()
-		hostDevice := world.AddDevice("host")
-		subject := world.AddDevice("subject")
-		host := world.StartHost(hostDevice, &sidecartest.BridgeNetHostSettings{Address: netip.MustParseAddr("100.80.7.20")})
-		window := world.OpenWindow("window", subject, host, nil)
-		tcpAddress := netip.AddrPortFrom(host.Address, host.Upstream.TcpPort())
-		udpAddress := netip.AddrPortFrom(host.Address, host.Upstream.UdpPort())
-		// the first round makes the contracts, both ways: control, which reads Postgres
-		conn, err := window.DialTcp(tcpAddress)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer conn.Close()
-		if _, err := conn.Write([]byte("first")); err != nil {
-			t.Fatal(err)
-		}
-		udp, err := window.SendUdp(udpAddress, []byte("first"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer udp.Close()
-		udp.SetReadDeadline(time.Now().Add(settings.WaitTimeout))
-		buffer := make([]byte, 64)
-		if _, err := udp.Read(buffer); err != nil {
-			t.Fatal(err)
-		}
-		if err := window.SendEcho(host.Address, 1); err != nil || !window.WaitEchoAnswered(host.Address, 1, settings.WaitTimeout) {
-			t.Fatalf("the first echo: %v, sent again %d times", err, window.EchoResendCount())
-		}
-
-		attempts, stop := server.DenyPostgresForTest(t)
-		if _, err := conn.Write([]byte("second")); err != nil {
-			stop()
-			t.Fatal(err)
-		}
-		if _, err := udp.Write([]byte("second")); err != nil {
-			stop()
-			t.Fatal(err)
-		}
-		udp.SetReadDeadline(time.Now().Add(settings.WaitTimeout))
-		n, err := udp.Read(buffer)
-		echoed := window.SendEcho(host.Address, 2) == nil && window.WaitEchoAnswered(host.Address, 2, settings.WaitTimeout)
-		delivered := host.Upstream.WaitFor(settings.WaitTimeout, func(accepts []sidecartest.BridgeNetAccept, datagrams [][]byte) bool {
-			return 0 < len(accepts) && string(accepts[0].Bytes) == "firstsecond"
-		})
-		stop()
-		if err != nil || string(buffer[:n]) != "second" || !echoed || !delivered {
-			t.Fatalf("the second round: datagram %q %v, echo %t (sent again %d times), tcp %t", buffer[:n], err, echoed, window.EchoResendCount(), delivered)
-		}
-		if count := attempts(); count != 0 {
-			t.Fatalf("the flow path acquired PostgreSQL %d times", count)
-		}
+		bridgeM4FlowPathRounds(t, ctx, sidecartest.DefaultBridgeNetSettings(), false)
 	})
 }
 
-// The flow path's echo lost on T3: an echo's path may lose it by design with nothing wrong on the bridge (the host's NAT
-// drops a reply its session to a new window cannot seal yet, and darwin's kernel drops one at a full datagram ICMP
-// socket; sidecartest's BridgeNetSettings.EchoResendInterval), and a wait that sent it once waited out its bound. Here
-// the second echo is lost outright, never sent: the wait that sends nothing sees no answer, and the wait that sends it
-// again is answered, its copies riding the flow the first echo opened under the contracts server's controller signed,
-// and acquiring no PostgreSQL connection inside the tripwire, as the flow path's second round needs of them.
-func TestBridgeLostEchoAnsweredWhenSentAgainOnT3(t *testing.T) {
+// The flow path's second round with its echo lost: an echo's path may lose it by design with nothing wrong on the bridge
+// (the host's NAT drops a reply its session to a new window cannot seal yet, and darwin's kernel drops one at a full
+// datagram ICMP socket; sidecartest's BridgeNetSettings.EchoResendInterval), and the round's wait, which sent the echo
+// once, waited out its bound for an answer. Here the echo is lost outright, never sent: the wait that sends nothing sees
+// no answer, and the round's wait sends it again and is answered, on the flow the first round's echo opened, its copies
+// acquiring no PostgreSQL connection inside the tripwire.
+func TestBridgeFlowPathLostEchoSentAgainOnT3(t *testing.T) {
 	testingAclRun(t, func(t testing.TB, ctx context.Context) {
-		net := sidecartest.NewNet(ctx, nil)
-		defer net.Close()
 		settings := sidecartest.DefaultBridgeNetSettings()
-		settings.Platform = newBridgeM4Platform(t, ctx)
 		// each lost echo costs the wait one interval
 		settings.EchoResendInterval = 20 * time.Millisecond
-		world := sidecartest.NewBridgeNet(t, net, settings)
-		defer world.Close()
-		hostDevice := world.AddDevice("host")
-		subject := world.AddDevice("subject")
-		host := world.StartHost(hostDevice, &sidecartest.BridgeNetHostSettings{Address: netip.MustParseAddr("100.80.7.20")})
-		window := world.OpenWindow("window", subject, host, nil)
-		// the first echo opens the flow and makes the contracts, both ways: control, which reads Postgres
-		if err := window.SendEcho(host.Address, 1); err != nil || !window.WaitEchoAnswered(host.Address, 1, settings.WaitTimeout) {
-			t.Fatalf("the first echo: %v, sent again %d times", err, window.EchoResendCount())
-		}
-		firstResendCount := window.EchoResendCount()
+		bridgeM4FlowPathRounds(t, ctx, settings, true)
+	})
+}
 
-		// the second echo is lost: no copy of it exists, so the wait that sends nothing sees none answered in twice the
-		// time the other wait takes to send it again, as it would in any time
-		if window.WaitEchoReply(2, 2*settings.EchoResendInterval) {
-			t.Fatal("an echo never sent was answered: the test proves nothing")
-		}
-		attempts, stop := server.DenyPostgresForTest(t)
-		answered := window.WaitEchoAnswered(host.Address, 2, settings.WaitTimeout)
+// A window's two rounds of TCP, UDP and ICMP to a host, on a BridgeNet of server's platform built from settings, failing
+// t: the first makes the contracts, both ways, through server's controller, which reads Postgres; the second runs on the
+// flows the first opened under server's process-wide tripwire and acquires no PostgreSQL connection.
+//
+// Control waits at the platform's barrier while the tripwire is armed (bridgeM4Platform.holdControl), and the second
+// round must finish on the contracts the first made. Without it the tripwire counted the controller's reads for a
+// successor contract connect asks on its own time once the first round's last reply takes a contract, whenever those
+// reads came after it was armed. So a contract the host asks the window for inside the tripwire, as connect asks a
+// successor, must wait at the barrier, and be answered once released.
+//
+// Each echo is sent again while its wait has no answer (sidecartest's BridgeNetWindow.WaitEchoAnswered), since its
+// path may lose it by design, so the second round's copies ride the flow the first round's echo opened inside the
+// tripwire. loseSecondEcho loses the second round's echo outright, never sending it, so only a copy its wait sends can
+// be answered.
+func bridgeM4FlowPathRounds(t testing.TB, ctx context.Context, settings *sidecartest.BridgeNetSettings, loseSecondEcho bool) {
+	t.Helper()
+	net := sidecartest.NewNet(ctx, nil)
+	defer net.Close()
+	platform := newBridgeM4Platform(t, ctx)
+	settings.Platform = platform
+	world := sidecartest.NewBridgeNet(t, net, settings)
+	defer world.Close()
+	hostDevice := world.AddDevice("host")
+	subject := world.AddDevice("subject")
+	host := world.StartHost(hostDevice, &sidecartest.BridgeNetHostSettings{Address: netip.MustParseAddr("100.80.7.20")})
+	window := world.OpenWindow("window", subject, host, nil)
+	tcpAddress := netip.AddrPortFrom(host.Address, host.Upstream.TcpPort())
+	udpAddress := netip.AddrPortFrom(host.Address, host.Upstream.UdpPort())
+	// the first round makes the contracts, both ways: control, which reads Postgres
+	conn, err := window.DialTcp(tcpAddress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("first")); err != nil {
+		t.Fatal(err)
+	}
+	udp, err := window.SendUdp(udpAddress, []byte("first"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer udp.Close()
+	udp.SetReadDeadline(time.Now().Add(settings.WaitTimeout))
+	buffer := make([]byte, settings.ReadByteCount)
+	if _, err := udp.Read(buffer); err != nil {
+		t.Fatal(err)
+	}
+	if err := window.SendEcho(host.Address, 1); err != nil || !window.WaitEchoAnswered(host.Address, 1, settings.WaitTimeout) {
+		t.Fatalf("the first echo: %v, sent again %d times", err, window.EchoResendCount())
+	}
+	firstResendCount := window.EchoResendCount()
+
+	// released after the tripwire stops, and before the world closes, which waits for every control call
+	release := platform.holdControl(settings.WaitTimeout)
+	defer release()
+	attempts, stop := server.DenyPostgresForTest(t)
+	// the host asks the window a contract inside the tripwire, as connect asks a sequence's successor on its own time:
+	// the hold keeps it waiting, so it reads nothing until release, while the round runs on the first round's contracts
+	askHeld := make(chan struct{})
+	var askHeldOnce sync.Once
+	askCtx := context.WithValue(ctx, bridgeM4ControlHeldKey{}, func() {
+		askHeldOnce.Do(func() { close(askHeld) })
+	})
+	asked := make(chan error, 1)
+	go func() {
+		asked <- platform.askContract(askCtx, host.Client.ClientId, window.Client.ClientId, settings.ContractByteCount)
+	}()
+	select {
+	case <-askHeld:
+	case <-time.After(settings.WaitTimeout):
 		stop()
-		resendCount := window.EchoResendCount() - firstResendCount
-		if !answered {
-			t.Fatalf("the lost echo, sent again %d times, was never answered", resendCount)
+		t.Fatal("the contract asked inside the tripwire never waited at the hold")
+	}
+	if _, err := conn.Write([]byte("second")); err != nil {
+		stop()
+		t.Fatal(err)
+	}
+	if _, err := udp.Write([]byte("second")); err != nil {
+		stop()
+		t.Fatal(err)
+	}
+	udp.SetReadDeadline(time.Now().Add(settings.WaitTimeout))
+	n, err := udp.Read(buffer)
+	// a lost echo has no copy, so the wait that sends nothing sees none answered in twice the time the round's wait
+	// takes to send it again, as it would in any time
+	if loseSecondEcho && window.WaitEchoReply(2, 2*settings.EchoResendInterval) {
+		stop()
+		t.Fatal("an echo never sent was answered: the test proves nothing")
+	}
+	echoed := (loseSecondEcho || window.SendEcho(host.Address, 2) == nil) && window.WaitEchoAnswered(host.Address, 2, settings.WaitTimeout)
+	delivered := host.Upstream.WaitFor(settings.WaitTimeout, func(accepts []sidecartest.BridgeNetAccept, datagrams [][]byte) bool {
+		return 0 < len(accepts) && string(accepts[0].Bytes) == "firstsecond"
+	})
+	stop()
+	heldControlCount := release()
+	select {
+	case err := <-asked:
+		if err != nil {
+			t.Fatalf("the contract asked inside the tripwire, once released: %v", err)
 		}
+	case <-time.After(settings.WaitTimeout):
+		t.Fatal("the contract asked inside the tripwire was never answered once released")
+	}
+	resendCount := window.EchoResendCount() - firstResendCount
+	t.Logf("the second round: its echo sent again %d times, control held %d calls", resendCount, heldControlCount)
+	if err != nil || string(buffer[:n]) != "second" || !echoed || !delivered {
+		t.Fatalf("the second round: datagram %q %v, echo %t (sent again %d times), tcp %t, control held %d calls", buffer[:n], err, echoed, resendCount, delivered, heldControlCount)
+	}
+	if loseSecondEcho {
 		if resendCount == 0 {
 			t.Fatal("the lost echo was answered with no copy sent again: the test proves nothing")
 		}
@@ -315,10 +462,10 @@ func TestBridgeLostEchoAnsweredWhenSentAgainOnT3(t *testing.T) {
 			return decision.Protocol != connect.IpProtocolIcmp
 		})
 		if len(echoDecisions) != 1 || !echoDecisions[0].Opens() {
-			t.Fatalf("the copies did not ride the flow the first echo opened: the host decided %d echo flows of the window", len(echoDecisions))
+			t.Fatalf("the lost echo's copies did not ride the flow the first echo opened: the host decided %d echo flows of the window", len(echoDecisions))
 		}
-		if count := attempts(); count != 0 {
-			t.Fatalf("the lost echo's %d copies acquired PostgreSQL %d times", resendCount, count)
-		}
-	})
+	}
+	if count := attempts(); count != 0 {
+		t.Fatalf("the flow path acquired PostgreSQL %d times, its second echo sent again %d times", count, resendCount)
+	}
 }
