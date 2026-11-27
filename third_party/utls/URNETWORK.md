@@ -4,10 +4,17 @@ This directory is the unmodified source distribution of
 `github.com/refraction-networking/utls v1.8.2` (module zip
 `h1:j4Q1gJj0xngdeH+Ox/qND11aEfhpgoEvV+S9iJ2IdQo=`), except for the narrowly
 scoped change in `u_conn.go`, the added `urnetwork_uconn_write_test.go`, the
-removed upstream `.github/` directory and `.travis.yml` (upstream's CI), and
+standalone dependency updates in `go.mod` and `go.sum`, the test directive
+in `handshake_test.go`, the removed upstream `.github/` directory and
+`.travis.yml` (upstream's CI), and
 gofmt's formatting of doc comments in `testenv/testenv.go` and
 `u_roller.go` (the repository's pre-commit hook formats every added Go file).
 The upstream BSD license and source headers are preserved.
+
+The standalone module uses the server's versions of Brotli, compress, and
+`golang.org/x/crypto`. Those dependencies require Go 1.26 or later.
+The handshake test executable opts into the deterministic readers used to
+record its TLS transcripts.
 
 ## The change
 

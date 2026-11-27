@@ -2,6 +2,11 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
+// The recorded TLS handshakes depend on the deterministic random readers
+// supplied by the tests. Go 1.26 made crypto/ecdh ignore those readers by default.
+//
+//go:debug cryptocustomrand=1
+
 package tls
 
 import (
