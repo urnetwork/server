@@ -34,6 +34,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/urfoundation/sn/protocol"
+
 	"github.com/urnetwork/server"
 )
 
@@ -93,12 +95,34 @@ type SnFleetBindingVersion struct {
 	CleanedAtEpoch uint64
 	BoundBlock     uint64
 	BoundLogIndex  int
+	// Epoch8Window: signed from epoch 9 and bound in blocks 9,600,028 through
+	// 9,615,060 of the SN25 mainnet coordinator, so it also counts for epoch
+	// 8 (sn protocol/fleet_late_binding_epoch8.go). GetSnFleetBindingVersions
+	// sets it from the deployment.
+	Epoch8Window bool
 }
 
 // bindingAt's window test without its live UID test: active at epoch when
 // the epoch is within the validity and before any cleanup.
 func (self *SnFleetBindingVersion) activeAt(epoch uint64) bool {
 	return self.ValidFromEpoch <= epoch && epoch <= self.ValidToEpoch && (!self.Cleaned || epoch < self.CleanedAtEpoch)
+}
+
+// FirstEpoch is the first settlement epoch the version counts for: its signed
+// ValidFromEpoch, or epoch 8 for a version in the epoch 8 late-binding window.
+func (self *SnFleetBindingVersion) FirstEpoch() uint64 {
+	if self.Epoch8Window {
+		return protocol.Epoch8LateBindingEpoch
+	}
+	return self.ValidFromEpoch
+}
+
+// activeAtEpoch8 is activeAt(8) for a version in the epoch 8 late-binding
+// window, counted from epoch 8. A revocation ends a version no earlier than
+// the epoch after the one it is made in, so it keeps the version for epoch 8.
+func (self *SnFleetBindingVersion) activeAtEpoch8() bool {
+	epoch := protocol.Epoch8LateBindingEpoch
+	return self.Epoch8Window && epoch <= self.ValidToEpoch && (!self.Cleaned || epoch < self.CleanedAtEpoch)
 }
 
 // One parsed binding event.
@@ -444,6 +468,7 @@ func getSnFleetBindingVersionsInTx(ctx context.Context, tx server.PgTx, key stri
 // the coordinator caps per fleet and the head caps at 200 fleets.
 func GetSnFleetBindingVersions(ctx context.Context, deploymentKey StDeploymentKey) []*SnFleetBindingVersion {
 	key := requireStDeploymentKey(deploymentKey)
+	chainId, coordinator, _ := stDeploymentIdentity(deploymentKey)
 	versions := []*SnFleetBindingVersion{}
 	server.Db(ctx, func(conn server.PgConn) {
 		rows, err := conn.Query(
@@ -453,7 +478,9 @@ func GetSnFleetBindingVersions(ctx context.Context, deploymentKey StDeploymentKe
 		)
 		server.WithPgResult(rows, err, func() {
 			for rows.Next() {
-				versions = append(versions, scanSnFleetBindingVersion(rows))
+				version := scanSnFleetBindingVersion(rows)
+				version.Epoch8Window = protocol.Epoch8LateBindingLanded(chainId, coordinator, version.ValidFromEpoch, version.BoundBlock)
+				versions = append(versions, version)
 			}
 		})
 	})
@@ -462,7 +489,10 @@ func GetSnFleetBindingVersions(ctx context.Context, deploymentKey StDeploymentKe
 
 // SnFleetBindingsAt is bindingAt for every client without the live UID test:
 // each client's latest version already valid at epoch, kept when it is active
-// there. versions is any order; the result is by client id.
+// there. For epoch 8, a client with no version active there has its newest
+// version in the epoch 8 late-binding window instead, when that is active
+// from epoch 8: the window never displaces a binding made before epoch 8.
+// versions is any order; the result is by client id.
 func SnFleetBindingsAt(versions []*SnFleetBindingVersion, epoch uint64) []*SnFleetBindingVersion {
 	byClient := map[server.Id][]*SnFleetBindingVersion{}
 	for _, version := range versions {
@@ -479,15 +509,29 @@ func SnFleetBindingsAt(versions []*SnFleetBindingVersion, epoch uint64) []*SnFle
 			}
 			return a.BoundLogIndex - b.BoundLogIndex
 		})
+		var found *SnFleetBindingVersion
 		for i := len(clientVersions) - 1; 0 <= i; i-- {
 			version := clientVersions[i]
 			if epoch < version.ValidFromEpoch {
 				continue
 			}
 			if version.activeAt(epoch) {
-				active = append(active, version)
+				found = version
 			}
 			break
+		}
+		if found == nil && epoch == protocol.Epoch8LateBindingEpoch {
+			for i := len(clientVersions) - 1; 0 <= i; i-- {
+				if version := clientVersions[i]; version.Epoch8Window {
+					if version.activeAtEpoch8() {
+						found = version
+					}
+					break
+				}
+			}
+		}
+		if found != nil {
+			active = append(active, found)
 		}
 	}
 	slices.SortFunc(active, func(a *SnFleetBindingVersion, b *SnFleetBindingVersion) int {

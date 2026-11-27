@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/urfoundation/sn/protocol"
+
 	"github.com/urnetwork/server"
 )
 
@@ -55,12 +57,14 @@ func SetStFleetBoundNextBlock(ctx context.Context, deploymentKey StDeploymentKey
 }
 
 // The client ids of every mirrored FleetBound at or before closeBlock whose
-// signed validity covers epoch, ascending and unique. A revocation only
-// shortens a validity and a cleanup only ends one, so a client bound at either
-// of the epoch's boundary blocks is among them. A malformed row fails the
-// read: skipping it could pay a head-bound provider twice.
+// signed validity covers epoch, with the epoch 8 late-binding window applied
+// from the event's block, ascending and unique. A revocation only shortens a
+// validity and a cleanup only ends one, so a client bound at either of the
+// epoch's boundary blocks is among them. A malformed row fails the read:
+// skipping it could pay a head-bound provider twice.
 func GetStFleetBoundClientIds(ctx context.Context, deploymentKey StDeploymentKey, epoch uint64, closeBlock uint64) ([][16]byte, error) {
 	key := requireStDeploymentKey(deploymentKey)
+	chainId, coordinator, _ := stDeploymentIdentity(deploymentKey)
 	clientIds := [][16]byte{}
 	var parseErr error
 	server.Db(ctx, func(conn server.PgConn) {
@@ -77,7 +81,7 @@ func GetStFleetBoundClientIds(ctx context.Context, deploymentKey StDeploymentKey
 					parseErr = fmt.Errorf("FleetBound event %d:%d: %w", blockNumber, logIndex, err)
 					return
 				}
-				if validFrom <= epoch && epoch <= validTo {
+				if protocol.FleetBindingCoversEpoch(chainId, coordinator, validFrom, validTo, uint64(blockNumber), epoch) {
 					clientIds = append(clientIds, clientId)
 				}
 			}

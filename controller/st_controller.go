@@ -2608,6 +2608,9 @@ func (self *CoreStClient) BindingAt(ctx context.Context, clientId [16]byte, epoc
 		if err != nil {
 			return err
 		}
+		if bindings, err = self.stEpoch8BindingsAt(ctx, client, finalized.Number, [][16]byte{clientId}, epoch, bindings); err != nil {
+			return err
+		}
 		merged, err := stMergeBindingBoundaries(bindings, bindings, epoch)
 		if err != nil {
 			return err
@@ -2764,12 +2767,18 @@ func (self *CoreStClient) BindingsAt(ctx context.Context, clientIds [][16]byte, 
 		if err != nil {
 			return err
 		}
+		if startBindings, err = self.stEpoch8BindingsAt(ctx, client, startBlock, clientIds, epoch, startBindings); err != nil {
+			return err
+		}
 		if startBlock == closeBlock {
 			bindings, err = stMergeBindingBoundaries(startBindings, startBindings, epoch)
 			return err
 		}
 		closeBindings, err := stReadBindingsAt(ctx, client, self.coordinator, self.cfg.ContractAddress, closeBlock, clientIds, epoch)
 		if err != nil {
+			return err
+		}
+		if closeBindings, err = self.stEpoch8BindingsAt(ctx, client, closeBlock, clientIds, epoch, closeBindings); err != nil {
 			return err
 		}
 		bindings, err = stMergeBindingBoundaries(startBindings, closeBindings, epoch)
