@@ -457,10 +457,19 @@ var providerUsageArchiveSnFloorSql = fmt.Sprintf(`
 	) AS unrecorded
 `, int64(providerUsageArchiveSnFloorMargin/time.Second), providerUsageArchiveSnBlockSeconds)
 
-// The week's figures and its ledger row, in one snapshot. $1 the week's upper
-// bound, $2 the control's floor, $3 the leaf's name, $4 and $5 the week's
-// contract id bounds. The floor in force is the earliest of the control's,
-// MinCloseAge before now, and the SN epochs' floor.
+// The week's figures that read no more of the leaf than its close-time index,
+// in one snapshot: the retention, the floor in force, whether a row has no
+// close time and the latest close time, and whether the ledger holds an export
+// of the week not yet used, of any row count. $1 the week's upper bound, $2 the
+// control's floor, $3 the leaf's name, $4 and $5 the week's contract id
+// bounds. The floor in force is the earliest of the control's, MinCloseAge
+// before now, and the SN epochs' floor.
+//
+// The leaf's row count is read apart (providerUsageArchiveWeekExportSql), and
+// only for a week an export may hold. Until 2026-11-26 this statement counted
+// every leaf it read: on Main each 15-minute pass counted the seven retained
+// weeks, none exported, about 6.6M block reads and 193M buffer hits a pass,
+// only to print the counts in the blockers.
 func providerUsageArchiveWeekFiguresSql(leaf string) string {
 	quoted := "public." + quoteIdentifier(leaf)
 	return fmt.Sprintf(`
@@ -477,31 +486,52 @@ func providerUsageArchiveWeekFiguresSql(leaf string) string {
 				$1::timestamp <= clock.floor AS week_by_floor,
 				clock.floor::text AS floor,
 				EXISTS (SELECT 1 FROM %[1]s WHERE close_time IS NULL) AS null_close,
-				(SELECT max(close_time) FROM %[1]s) AS max_close,
-				(SELECT count(*) FROM %[1]s) AS row_count
+				(SELECT max(close_time) FROM %[1]s) AS max_close
 			FROM clock
 		)
 		SELECT
 			figures.retention_due, figures.week_by_floor, figures.floor, figures.null_close,
 			coalesce(figures.max_close::text, ''),
 			coalesce(figures.max_close < clock.floor, true),
-			figures.row_count,
-			coalesce(export.export_id::text, ''),
-			coalesce(export.row_digest::text, ''),
-			coalesce(export.file_name, ''),
+			EXISTS (
+				SELECT 1
+				FROM st_provider_usage_archive_export AS ledger
+				WHERE ledger.leaf_name = $3
+					AND ledger.lower_contract_id = $4::uuid AND ledger.upper_contract_id = $5::uuid
+					AND ledger.dropped_time IS NULL
+			),
 			coalesce(clock.floor = clock.sn_floor, false)
 		FROM figures
 		CROSS JOIN clock
+	`, quoted, int64(usagearchive.MinCloseAge/time.Second), int64(providerUsageArchiveRetention/time.Second), providerUsageArchiveSnFloorSql)
+}
+
+// The leaf's row count and the ledger's newest verified export of the week
+// that holds as many rows and is not yet used, in one snapshot. $1 the leaf's
+// name, $2 and $3 the week's contract id bounds. The count reads the whole
+// leaf.
+func providerUsageArchiveWeekExportSql(leaf string) string {
+	quoted := "public." + quoteIdentifier(leaf)
+	return fmt.Sprintf(`
+		WITH counted AS (
+			SELECT count(*) AS row_count FROM %[1]s
+		)
+		SELECT
+			counted.row_count,
+			coalesce(export.export_id::text, ''),
+			coalesce(export.row_digest::text, ''),
+			coalesce(export.file_name, '')
+		FROM counted
 		LEFT JOIN LATERAL (
 			SELECT export_id, row_digest, file_name
 			FROM st_provider_usage_archive_export AS ledger
-			WHERE ledger.leaf_name = $3 AND ledger.row_count = figures.row_count
-				AND ledger.lower_contract_id = $4::uuid AND ledger.upper_contract_id = $5::uuid
+			WHERE ledger.leaf_name = $1 AND ledger.row_count = counted.row_count
+				AND ledger.lower_contract_id = $2::uuid AND ledger.upper_contract_id = $3::uuid
 				AND ledger.dropped_time IS NULL
 			ORDER BY ledger.verified_time DESC, ledger.export_id
 			LIMIT 1
 		) AS export ON true
-	`, quoted, int64(usagearchive.MinCloseAge/time.Second), int64(providerUsageArchiveRetention/time.Second), providerUsageArchiveSnFloorSql)
+	`, quoted)
 }
 
 // The week's figures, as the precondition reads them.
@@ -512,12 +542,23 @@ type providerUsageArchiveWeekFigures struct {
 	nullClose    bool
 	maxClose     string
 	closedBefore bool
+	// the ledger holds an export of the week not yet used, of any row count
+	exported bool
+	// the leaf's rows and the export that holds as many, read only when the
+	// week may drop early and is exported (needsCount)
 	rows         int64
 	exportId     string
 	exportDigest string
 	exportFile   string
 	// the SN epochs' floor is the floor in force
 	snHolds bool
+}
+
+// Whether the precondition needs the leaf's rows: the week may drop early by
+// its close times, and the ledger holds an export that may hold its rows. Every
+// other week is decided without the count.
+func (self *providerUsageArchiveWeekFigures) needsCount() bool {
+	return !self.retentionDue && self.weekByFloor && !self.nullClose && self.closedBefore && self.exported
 }
 
 // Why the floor in force is where it is, for a blocker that names it.
@@ -528,8 +569,15 @@ func (self *providerUsageArchiveWeekFigures) floorText() string {
 	return self.floor
 }
 
+// The week's figures, and its rows and matching export when the precondition
+// needs them. Before the drop the two reads are two snapshots, as the digest
+// after them is a third: a row archived in between reaches the count and the
+// digest but not the close times. The drop's transaction reads both again
+// after the detach, when no row can reach the leaf, and that read decides.
 func readProviderUsageArchiveWeekFigures(ctx context.Context, conn PgQuerier, r PartitionRange, floor time.Time) (*providerUsageArchiveWeekFigures, error) {
 	leaf := usagearchive.LeafOfWeek(r.Lower)
+	lower := ContractIdFloor(r.Lower).String()
+	upper := ContractIdFloor(r.Upper).String()
 	figures := &providerUsageArchiveWeekFigures{}
 	err := conn.QueryRow(
 		ctx,
@@ -537,14 +585,26 @@ func readProviderUsageArchiveWeekFigures(ctx context.Context, conn PgQuerier, r 
 		r.Upper.UTC().Format(partitionTimestampLayout),
 		floor.UTC().Format(partitionTimestampLayout),
 		leaf,
-		ContractIdFloor(r.Lower).String(),
-		ContractIdFloor(r.Upper).String(),
+		lower,
+		upper,
 	).Scan(
 		&figures.retentionDue, &figures.weekByFloor, &figures.floor, &figures.nullClose,
-		&figures.maxClose, &figures.closedBefore, &figures.rows,
-		&figures.exportId, &figures.exportDigest, &figures.exportFile,
+		&figures.maxClose, &figures.closedBefore, &figures.exported,
 		&figures.snHolds,
 	)
+	if err != nil {
+		return nil, err
+	}
+	if !figures.needsCount() {
+		return figures, nil
+	}
+	err = conn.QueryRow(
+		ctx,
+		providerUsageArchiveWeekExportSql(leaf),
+		leaf,
+		lower,
+		upper,
+	).Scan(&figures.rows, &figures.exportId, &figures.exportDigest, &figures.exportFile)
 	if err != nil {
 		return nil, err
 	}
@@ -587,6 +647,9 @@ func providerUsageArchiveWeekBlocker(ctx context.Context, conn PgQuerier, r Part
 		return "a row has no close time"
 	case !figures.closedBefore:
 		return fmt.Sprintf("a row closed at %s, not before the close time floor %s", figures.maxClose, figures.floorText())
+	case !figures.exported:
+		// decided without counting the leaf (needsCount)
+		return "no verified export of the week is in the ledger"
 	case figures.exportId == "":
 		return fmt.Sprintf("no verified export holds the week's %d rows", figures.rows)
 	}

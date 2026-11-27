@@ -239,6 +239,10 @@ var deletedNetworkTables = []*deletedNetworkTable{
 	// the network as a referee; a link to it as the referrer stays with its
 	// referee (the referral grant skips a gone network)
 	{table: "network_referral", keyColumn: "network_id", keyColumns: []string{"network_id"}},
+	// the network as a referee: its first link, its qualification and its
+	// days of app use (network_referral_terms.go)
+	{table: "network_referral_referee", keyColumn: "network_id", keyColumns: []string{"network_id"}},
+	{table: "network_referral_app_day", keyColumn: "network_id", keyColumns: []string{"network_id", "day"}},
 	{table: "network_mail_context", keyColumn: "network_id", keyColumns: []string{"network_id"}},
 	{table: "network_onboarding", keyColumn: "network_id", keyColumns: []string{"network_id"}},
 	{table: "network_onboarding_email", keyColumn: "network_id", keyColumns: []string{"message_id"}},

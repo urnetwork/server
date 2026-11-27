@@ -11946,6 +11946,35 @@ var migrations = []any{
 	// before it reads the new body as 91 days and deletes less, so it applies
 	// before or after the deploy.
 	newSqlMigration(contractCloseReportEvidenceWindowGuardSql),
+
+	// The referral terms (network_referral_terms_schema.go): which links
+	// existed when a referral began to need app use and a limited period, the
+	// referred networks' first link and qualification, and their app use per
+	// day. A column with a constant default and two new tables; the running
+	// release writes network_referral without naming the column.
+	newSqlMigration(networkReferralTermsSchemaSql),
+
+	// The fleet's URL outcomes by bucket of measured time
+	// (db_provider_egress_url_fleet_bucket.go,
+	// model/provider_egress_url_overload.go): one new empty table, under a
+	// five-second lock bound, created only when absent. Nothing existing is
+	// locked or rewritten, and the running release never reads it. Apply
+	// before deploying: every URL window of a release with it reads it.
+	providerEgressUrlFleetBucketMigration,
+
+	// The settled earning wallets by coldkey within an epoch, smallest client
+	// first (db_network_wallet_mapping_consent.go): each v2 earnings read of a
+	// recorded amount probes its coldkey's smallest client instead of sorting
+	// every resolution of its epochs. Online, with a recovery drop of an
+	// interrupted build. Apply before deploying the reader that probes it.
+	stPayoutWalletResolutionColdkeyIndexMigration,
+
+	// A network's unreleased unique-exit assignments
+	// (db_proxy_unique_exit_schema.go): the allocator's read of a network's
+	// live exits probes it instead of walking every unreleased assignment.
+	// Online, with a recovery drop of an interrupted build, over a table of
+	// about 48 MB. Apply before or after the deploy.
+	proxyExitAssignmentNetworkLiveIndexMigration,
 }
 
 // The deleted_network backfill (the migration above): every network an App

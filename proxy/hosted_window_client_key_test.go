@@ -19,7 +19,7 @@ import (
 func TestProxyDeviceKeepsWindowClientKeysLocal(t *testing.T) {
 	settings := DefaultProxyDeviceSettings()
 	settings.DisableWindowIdentityPersistence = true
-	local := newProxyDeviceLocalSettings(context.Background(), &model.ProxyDeviceConfig{}, settings)
+	local := newProxyDeviceLocalSettings(context.Background(), &model.ProxyDeviceConfig{}, settings, false)
 	if !local.KeepWindowClientKeysLocal {
 		t.Fatal("a hosted device's window clients publish keys nothing reads")
 	}

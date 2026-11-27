@@ -150,7 +150,7 @@ func Prewarm(
 					return
 				case <-time.After(time.Duration(rand.Int64N(int64(100 * time.Millisecond)))):
 				}
-				pd, err := proxyDeviceManager.OpenProxyDevice(proxyId)
+				pd, err := proxyDeviceManager.openProxyDeviceFor(proxyDeviceCaller{path: proxyDevicePathActivity}, proxyId)
 				if err != nil {
 					glog.Infof("[proxy][%s]prewarm open err=%s\n", proxyId, err)
 					continue

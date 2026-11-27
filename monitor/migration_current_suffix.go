@@ -1113,6 +1113,18 @@ var migrationCurrentSuffixContracts = migrationCurrentSuffixContractsInVersionOr
 	// (owner, 2026-11-23), versioned by its position
 	[]snMainnetMigrationContract{migrationCurrentSuffix(contractCloseEvidenceWindowGuardMigrationVersion, "close evidence custody with retention at its own window",
 		contractCloseEvidenceWindowArtifactQuery)},
+	// the referral terms: the existing-link flag, the referred networks and
+	// their app use per day, versioned by its position
+	[]snMainnetMigrationContract{networkReferralTermsMigrationContract},
+	// the fleet's URL outcomes by bucket of measured time and their overload
+	// discount, versioned by its position
+	[]snMainnetMigrationContract{providerEgressUrlFleetBucketMigrationContract},
+	// the settled earning wallets by coldkey within an epoch, the v2 earnings
+	// readers' attribution index, versioned by its position
+	[]snMainnetMigrationContract{stPayoutWalletResolutionColdkeyIndexMigrationContract},
+	// a network's unreleased unique-exit assignments, built online, versioned
+	// by its position
+	[]snMainnetMigrationContract{proxyExitAssignmentNetworkLiveIndexMigrationContract},
 ))
 
 // Free space a table keeps on every page it writes, so an update of an

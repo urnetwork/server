@@ -193,7 +193,9 @@ func testProviderStatsPayoutConnection(t *testing.T, mode string, wantErr error)
 		f := newPayoutTransitionCohort(t, ctx)
 		statsInsertProvideKey(ctx, f.client, ProvideModePublic)
 		closed := payoutTestCutoff.Add(-time.Minute)
-		f.insert(t, ctx, closed.Add(-time.Hour), &closed, server.NowUtc().Add(-time.Hour), 1024, UsdToNanoCents(1))
+		// minted at its creation, as every contract id is: the policy read
+		// bounds sweeps by the cutoff's contract id
+		f.insertMinted(t, ctx, closed.Add(-time.Hour), &closed, server.NowUtc().Add(-time.Hour), 1024, UsdToNanoCents(1))
 		popPool := server.Config.PushSimpleResource(server.DefaultPgConfigResourceName, []byte("min_connections: 0\nmax_connections: 1\n"))
 		server.PgReset()
 		defer func() { popPool(); server.PgReset() }()

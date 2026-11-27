@@ -1,5 +1,5 @@
 // A scheduled close reads its grants while the payer's grant owner is held, so
-// that read must never pay for JIT compilation, whatever its estimated cost.
+// those reads must never pay for JIT compilation, whatever their estimated cost.
 package model
 
 import (
@@ -20,13 +20,21 @@ type deadlineJitStatement struct {
 	args []any
 }
 
-// Records the deadline balance read and the settings its transaction applied
-// before it, per connection, from the real close's statements.
+// A grant read of the close and the settings its transaction applied before
+// it.
+type deadlineJitRead struct {
+	deadlineJitStatement
+	settings []deadlineJitStatement
+}
+
+// Records the deadline grant reads, the escrow read and each grant's pending
+// sum, and the settings their transaction applied before them, per connection,
+// from the real close's statements.
 type deadlineJitCapture struct {
 	stateLock    sync.Mutex
 	connSettings map[*pgx.Conn][]deadlineJitStatement
-	read         *deadlineJitStatement
-	readSettings []deadlineJitStatement
+	escrowReads  []deadlineJitRead
+	pendingReads []deadlineJitRead
 }
 
 func (self *deadlineJitCapture) TraceQueryStart(ctx context.Context, conn *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
@@ -34,14 +42,18 @@ func (self *deadlineJitCapture) TraceQueryStart(ctx context.Context, conn *pgx.C
 	defer self.stateLock.Unlock()
 	sql := strings.ToLower(strings.TrimSpace(data.SQL))
 	statement := deadlineJitStatement{sql: data.SQL, args: append([]any(nil), data.Args...)}
+	read := func() deadlineJitRead {
+		return deadlineJitRead{deadlineJitStatement: statement, settings: append([]deadlineJitStatement(nil), self.connSettings[conn]...)}
+	}
 	switch {
 	case strings.HasPrefix(sql, "begin"):
 		self.connSettings[conn] = nil
 	case strings.HasPrefix(sql, "set ") || strings.Contains(sql, "set_config("):
 		self.connSettings[conn] = append(self.connSettings[conn], statement)
 	case data.SQL == deadlineEscrowRowsSql:
-		self.read = &statement
-		self.readSettings = append([]deadlineJitStatement(nil), self.connSettings[conn]...)
+		self.escrowReads = append(self.escrowReads, read())
+	case data.SQL == deadlinePendingDebitSql:
+		self.pendingReads = append(self.pendingReads, read())
 	}
 	return ctx
 }
@@ -49,11 +61,13 @@ func (self *deadlineJitCapture) TraceQueryStart(ctx context.Context, conn *pgx.C
 func (self *deadlineJitCapture) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {
 }
 
-// On Main the read's planner cost passed the JIT inline and optimize
+// On Main the escrow read's planner cost passed the JIT inline and optimize
 // thresholds: the row limit multiplies two debit journal probes per estimated
 // escrow row, and dead journal tuples made each probe a few hundred pages. Every
 // close then compiled the read, 5.7 of 66 database cores. A zero threshold
-// stands in for that cost here; the read must still run without JIT.
+// stands in for that cost here. The escrow read and each grant's pending sum,
+// which a close alone reads after it (readDeadlineEscrowRoomsInTx), must still
+// run without JIT.
 func TestDeadlineCloseBalanceReadRunsWithoutJit(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -81,30 +95,36 @@ func TestDeadlineCloseBalanceReadRunsWithoutJit(t *testing.T) {
 				t.Fatal("deadline did not close the open contract", result, err)
 			}
 		}()
-		if capture.read == nil {
-			t.Fatal("the deadline close did not send its balance read")
+		if len(capture.escrowReads) != 1 {
+			t.Fatalf("the deadline close sent %d escrow reads, want one", len(capture.escrowReads))
+		}
+		// the fixture's one grant has a positive balance, so its room is read
+		if len(capture.pendingReads) != 1 {
+			t.Fatalf("the deadline close sent %d pending sums for its one grant, want one", len(capture.pendingReads))
 		}
 
-		// Replay the read with the settings its transaction applied before it.
-		var jitAvailable bool
-		var jitSetting, planJson string
-		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `SET LOCAL jit_above_cost = 0`))
-			for _, statement := range capture.readSettings {
-				server.RaisePgResult(tx.Exec(ctx, statement.sql, statement.args...))
+		// Replay each read with the settings its transaction applied before it.
+		for _, read := range append(capture.escrowReads, capture.pendingReads...) {
+			var jitAvailable bool
+			var jitSetting, planJson string
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(ctx, `SET LOCAL jit_above_cost = 0`))
+				for _, statement := range read.settings {
+					server.RaisePgResult(tx.Exec(ctx, statement.sql, statement.args...))
+				}
+				server.Raise(tx.QueryRow(ctx, `SELECT pg_jit_available(), current_setting('jit')`).Scan(&jitAvailable, &jitSetting))
+				server.Raise(tx.QueryRow(ctx, "EXPLAIN (ANALYZE, FORMAT JSON) "+read.sql, read.args...).Scan(&planJson))
+			})
+			var plans []map[string]any
+			if err := json.Unmarshal([]byte(planJson), &plans); err != nil || len(plans) != 1 {
+				t.Fatalf("unreadable plan %q: %v", planJson, err)
 			}
-			server.Raise(tx.QueryRow(ctx, `SELECT pg_jit_available(), current_setting('jit')`).Scan(&jitAvailable, &jitSetting))
-			server.Raise(tx.QueryRow(ctx, "EXPLAIN (ANALYZE, FORMAT JSON) "+capture.read.sql, capture.read.args...).Scan(&planJson))
-		})
-		var plans []map[string]any
-		if err := json.Unmarshal([]byte(planJson), &plans); err != nil || len(plans) != 1 {
-			t.Fatalf("unreadable plan %q: %v", planJson, err)
-		}
-		if jit, compiled := plans[0]["JIT"]; compiled {
-			t.Fatalf("the deadline balance read compiled JIT functions inside the close: %v", jit)
-		}
-		if jitSetting != "off" {
-			t.Fatalf("the deadline balance read ran with jit=%s (jit available=%t)", jitSetting, jitAvailable)
+			if jit, compiled := plans[0]["JIT"]; compiled {
+				t.Fatalf("a deadline grant read compiled JIT functions inside the close: %v\n%s", jit, read.sql)
+			}
+			if jitSetting != "off" {
+				t.Fatalf("a deadline grant read ran with jit=%s (jit available=%t)\n%s", jitSetting, jitAvailable, read.sql)
+			}
 		}
 	})
 }

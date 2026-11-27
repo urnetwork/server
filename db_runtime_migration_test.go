@@ -24,13 +24,15 @@ func TestMinimumRuntimeMigrationVersionExactPayerTail(t *testing.T) {
 	}
 }
 
-// The real list: its last migration, 1009, is the close evidence window guard,
-// so its binaries run against head 1008. Pinned to this list: whoever appends
-// migration 1010 updates this test, and decides there whether binaries with it
-// run against a head without it.
+// The real list: its last migration, 1011, is the fleet's URL outcome buckets
+// (ProviderEgressUrlFleetBucketSql). Every URL window reads the table, in the
+// api, the taskworker and the other services that score providers, so their
+// binaries require the full head 1011. Pinned to this list: whoever appends
+// migration 1012 updates this test, and decides there whether binaries with
+// it run against a head without it.
 func TestMinimumRuntimeMigrationVersionCurrentList(t *testing.T) {
-	if count, required := MigrationCount(), MinimumRuntimeMigrationVersion(); count != 1009 || required != 1008 {
-		t.Fatalf("%d migrations require head %d, want 1009 requiring 1008", count, required)
+	if count, required := MigrationCount(), MinimumRuntimeMigrationVersion(); count != 1011 || required != 1011 {
+		t.Fatalf("%d migrations require head %d, want 1011 requiring 1011", count, required)
 	}
 }
 

@@ -64,7 +64,7 @@ func TestDeletedNetworkCleanupRemovesEverythingButFinancialRows(t *testing.T) {
 		keptBefore := Testing_CountDeletedNetworkFixtureKeptRows(ctx, fixture)
 		rowsBefore := Testing_CountDeletedNetworkFixtureRows(ctx, fixture)
 		// every kind of table holds a fixture row before the deletion
-		for _, table := range []string{"network_client", "device", "account_preferences", "account_api_key", "network_referral_code", "network_referral", "auth_code", "auth_code_role", "user_auth_reset", "network_client_connection", "network_client_location", "provide_key", "client_tls_certificate", "provider_egress_health", "search_provider_stats", "audit_device_state", "audit_device_event", "audit_provider_state", "lag_drift_test", "lag_drift_run", "lag_drift_network"} {
+		for _, table := range []string{"network_client", "device", "account_preferences", "account_api_key", "network_referral_code", "network_referral", "network_referral_referee", "network_referral_app_day", "auth_code", "auth_code_role", "user_auth_reset", "network_client_connection", "network_client_location", "provide_key", "client_tls_certificate", "provider_egress_health", "search_provider_stats", "audit_device_state", "audit_device_event", "audit_provider_state", "lag_drift_test", "lag_drift_run", "lag_drift_network"} {
 			if rowsBefore[table] == 0 {
 				t.Fatalf("the fixture has no %s row", table)
 			}
@@ -355,7 +355,8 @@ func TestReferralGrantSkipsDeletedNetworks(t *testing.T) {
 		}
 		referrerId := create("referrer")
 		refereeId := create("referee")
-		// gone: deleted networks, whose links remain
+		// gone: deleted networks, whose links remain. The links are from
+		// before the referral terms, which pay without app use.
 		deletedRefereeId := server.NewId()
 		deletedReferrerId := server.NewId()
 		orphanRefereeId := create("orphan-referee")
@@ -367,7 +368,7 @@ func TestReferralGrantSkipsDeletedNetworks(t *testing.T) {
 			} {
 				server.RaisePgResult(tx.Exec(
 					ctx,
-					`INSERT INTO network_referral (network_id, referral_network_id) VALUES ($1, $2)`,
+					`INSERT INTO network_referral (network_id, referral_network_id, existing_link) VALUES ($1, $2, true)`,
 					link[0],
 					link[1],
 				))

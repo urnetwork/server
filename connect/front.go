@@ -67,6 +67,8 @@ import (
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/glog"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/nginx"
 	"github.com/urnetwork/server/router"
@@ -120,12 +122,55 @@ type frontRequestIdentifier struct {
 	// verified-claims cache keyed by the token makes a client's repeated
 	// requests cheap to verify, or a test's
 	parseByJwt func(ctx context.Context, token string, audience string) (*session.ByJwt, error)
+	// verifies an SN25 validator rate class token for the bearer's client
+	validatorClass *session.ValidatorClassVerifier
+	now            func() time.Time
+}
+
+// The process's validator rate class verifier: at most 4096 verified and 1024
+// refused tokens remembered.
+var frontValidatorClassVerifier = session.NewValidatorClassVerifier(4096, 1024)
+
+func init() {
+	prometheus.MustRegister(&frontValidatorClassCollector{verifier: frontValidatorClassVerifier})
 }
 
 // The identifier of connect's front, over session.ParseByJwtForAudience.
 func newFrontRequestIdentifier() *frontRequestIdentifier {
 	return &frontRequestIdentifier{
-		parseByJwt: session.ParseByJwtForAudience,
+		parseByJwt:     session.ParseByJwtForAudience,
+		validatorClass: frontValidatorClassVerifier,
+		now:            time.Now,
+	}
+}
+
+// The verifier's decisions on class tokens, as a counter by result: refused
+// by the cheap checks, answered from a cache, and verified or not by HMAC.
+type frontValidatorClassCollector struct {
+	verifier *session.ValidatorClassVerifier
+}
+
+var frontValidatorClassTokensDesc = prometheus.NewDesc(
+	"urnetwork_front_validator_class_tokens_total",
+	"SN25 validator rate class tokens the lb_alt front checked beside a verified client bearer, by result: refused (the cheap checks of shape, audience, expiry and client failed, no HMAC), cached (answered from the verified or refused cache), verified and unverified (an HMAC verification that passed or failed)",
+	[]string{"result"}, nil,
+)
+
+// See prometheus.Collector.
+func (self *frontValidatorClassCollector) Describe(ch chan<- *prometheus.Desc) {
+	ch <- frontValidatorClassTokensDesc
+}
+
+// See prometheus.Collector.
+func (self *frontValidatorClassCollector) Collect(ch chan<- prometheus.Metric) {
+	stats := self.verifier.Stats()
+	for result, count := range map[string]uint64{
+		"refused":    stats.Refused,
+		"cached":     stats.Cached,
+		"verified":   stats.Verified,
+		"unverified": stats.Verifications - stats.Verified,
+	} {
+		ch <- prometheus.MustNewConstMetric(frontValidatorClassTokensDesc, prometheus.CounterValue, float64(count), result)
 	}
 }
 
@@ -156,9 +201,17 @@ func (self *frontRequestIdentifier) identify(r *http.Request, upstream nginx.Nam
 		return nginx.LimitIdentity{}, false
 	}
 	if byJwt.ClientId != nil {
-		return nginx.LimitIdentity{
+		identity := nginx.LimitIdentity{
 			Id: *byJwt.ClientId,
-		}, true
+		}
+		// an admitted SN25 validator's api requests carry a class token for
+		// this same client, which the api mints (POST /sn/validator-class)
+		if upstream == nginx.NameClassApi && self.validatorClass != nil {
+			if token := r.Header.Get(session.ValidatorClassHeader); token != "" {
+				_, identity.Validator = self.validatorClass.Verify(token, *byJwt.ClientId, self.now())
+			}
+		}
+		return identity, true
 	}
 	if byJwt.NetworkId != (server.Id{}) {
 		return nginx.LimitIdentity{

@@ -6,6 +6,7 @@ import (
 	"encoding/gob"
 	"encoding/hex"
 	"errors"
+	"io"
 	"math"
 	mathrand "math/rand/v2"
 	"reflect"
@@ -243,8 +244,17 @@ var networkClientResidentCapturedGobRecords = []struct {
 
 // A new reader reads an old writer's gob: the records captured from the
 // encoder before the typed format, and seeded records from the gob writer,
-// each as the old reader read it.
+// each as the old reader read it. The gob writer with the flag off writes what
+// the old writer writes, and the old reader reads it.
 func TestNetworkClientResidentReaderReadsGobRecords(t *testing.T) {
+	// gob numbers a process's types in the order they're first sent, so the
+	// captured bytes carry the type ids of the process that wrote them. Send
+	// another type first, as a full package run's earlier tests do, so that
+	// nothing below leans on the order.
+	type networkClientResidentTestEarlierGobType struct{ Value int }
+	if err := gob.NewEncoder(io.Discard).Encode(networkClientResidentTestEarlierGobType{Value: 1}); err != nil {
+		t.Fatal(err)
+	}
 	for _, captured := range networkClientResidentCapturedGobRecords {
 		record, err := hex.DecodeString(captured.gob)
 		if err != nil {
@@ -258,10 +268,17 @@ func TestNetworkClientResidentReaderReadsGobRecords(t *testing.T) {
 			t.Fatal(err)
 		}
 		assertNetworkClientResidentFieldsEqual(t, &captured.want, resident)
-		// the writer with the flag off still writes these exact bytes
-		if written := encodeNetworkClientResident(NetworkClientResidentFormatGob, &captured.want); !bytes.Equal(written, record) {
-			t.Fatalf("the gob writer's bytes changed:\n%x\n%x", record, written)
+		// the writer with the flag off writes the old writer's bytes, both in
+		// this process, and the old reader reads them
+		written := encodeNetworkClientResident(NetworkClientResidentFormatGob, &captured.want)
+		if old := networkClientResidentOldWriterEncode(t, &captured.want); !bytes.Equal(written, old) {
+			t.Fatalf("the gob writer's bytes differ from the old writer's:\n%x\n%x", old, written)
 		}
+		oldRead, err := networkClientResidentOldReaderDecode(written)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertNetworkClientResidentFieldsEqual(t, &captured.want, oldRead)
 	}
 	// deterministic for reproducible failures; never shapes traffic
 	r := mathrand.New(mathrand.NewPCG(12, 3))

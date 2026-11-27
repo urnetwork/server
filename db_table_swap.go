@@ -250,6 +250,8 @@ type TableSwapOptions struct {
 	// transaction, after the captured changes are applied and before the
 	// renames; tests interrupt the swap there.
 	afterCopy func(context.Context, PgConn)
+	// Optional fixture observation on that same backend, before either lock.
+	afterBeginSql string
 }
 
 // Tests only: callbacks between the steps of a run. AfterCapture runs once
@@ -404,11 +406,12 @@ func SwapTable(ctx context.Context, options TableSwapOptions) error {
 		return err
 	}
 	swap := &tableSwap{
-		profile:   profile,
-		settings:  settings,
-		dryRun:    options.DryRun,
-		logf:      options.Logf,
-		afterCopy: options.afterCopy,
+		profile:       profile,
+		settings:      settings,
+		dryRun:        options.DryRun,
+		logf:          options.Logf,
+		afterCopy:     options.afterCopy,
+		afterBeginSql: options.afterBeginSql,
 	}
 	if options.Hooks != nil {
 		swap.hooks = *options.Hooks
@@ -429,12 +432,13 @@ func SwapTable(ctx context.Context, options TableSwapOptions) error {
 }
 
 type tableSwap struct {
-	profile   *TableSwapProfile
-	settings  *TableSwapSettings
-	dryRun    bool
-	logf      func(string, ...any)
-	hooks     TableSwapHooks
-	afterCopy func(context.Context, PgConn)
+	profile       *TableSwapProfile
+	settings      *TableSwapSettings
+	dryRun        bool
+	logf          func(string, ...any)
+	hooks         TableSwapHooks
+	afterCopy     func(context.Context, PgConn)
+	afterBeginSql string
 }
 
 // One kept old table, read from the catalog.
@@ -817,6 +821,9 @@ func (self *tableSwap) lockedSql(script tableSwapLockedScript) (beforeHook []str
 	} else {
 		beforeHook = append(beforeHook, "BEGIN ISOLATION LEVEL READ COMMITTED")
 		beforeHook = append(beforeHook, self.boundsSql()...)
+		if self.afterBeginSql != "" {
+			beforeHook = append(beforeHook, self.afterBeginSql)
+		}
 		beforeHook = append(beforeHook,
 			// nothing but the swap uses the target: waiting for it blocks no
 			// writer, and the cut-off starts after it

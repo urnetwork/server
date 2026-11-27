@@ -52,6 +52,11 @@ type proReferralYaml struct {
 	ReferredBonus    string `yaml:"referred_bonus"`
 	Period           string `yaml:"period"`
 	MaxReferrals     int    `yaml:"max_referrals"`
+	// the referral terms (ReferralTermsSettings); an absent key keeps its
+	// default
+	ClaimWindow      string `yaml:"claim_window"`
+	AppUseDailyBytes string `yaml:"app_use_daily_bytes"`
+	AppUseDays       *int   `yaml:"app_use_days"`
 }
 
 type proSeekerYaml struct {
@@ -72,16 +77,24 @@ type proDataCodeYaml struct {
 	Skus     []proDataCodeSkuYaml `yaml:"skus"`
 }
 
+// the admitted SN25 validator data grant (ValidatorDataGrantSettings); an
+// absent key keeps its default
+type proValidatorGrantYaml struct {
+	Data     string `yaml:"data"`
+	Duration string `yaml:"duration"`
+}
+
 type proConfigYaml struct {
-	EnforceConcurrentClients bool            `yaml:"enforce_concurrent_clients"`
-	EnforceFeatures          bool            `yaml:"enforce_features"`
-	EnforceSessionCap        bool            `yaml:"enforce_session_cap"`
-	MaxSessions              int             `yaml:"max_sessions"`
-	Free                     proTierYaml     `yaml:"free"`
-	Pro                      proTierYaml     `yaml:"pro"`
-	Referral                 proReferralYaml `yaml:"referral"`
-	Seeker                   proSeekerYaml   `yaml:"seeker"`
-	DataCode                 proDataCodeYaml `yaml:"data_code"`
+	EnforceConcurrentClients bool                  `yaml:"enforce_concurrent_clients"`
+	EnforceFeatures          bool                  `yaml:"enforce_features"`
+	EnforceSessionCap        bool                  `yaml:"enforce_session_cap"`
+	MaxSessions              int                   `yaml:"max_sessions"`
+	Free                     proTierYaml           `yaml:"free"`
+	Pro                      proTierYaml           `yaml:"pro"`
+	Referral                 proReferralYaml       `yaml:"referral"`
+	Seeker                   proSeekerYaml         `yaml:"seeker"`
+	DataCode                 proDataCodeYaml       `yaml:"data_code"`
+	ValidatorGrant           proValidatorGrantYaml `yaml:"validator_grant"`
 }
 
 // ----- parsed forms -----
@@ -315,6 +328,9 @@ type ProConfig struct {
 	ReferredBonus  ByteCount
 	ReferralPeriod time.Duration
 	MaxReferrals   int
+	// when a new referral pays: once its referred network claims it by app use
+	// within the claim window (network_referral_terms.go)
+	ReferralTerms ReferralTermsSettings
 
 	// seekerDataMultiplier scales a Seeker/Saga holder's free + referral data grants;
 	// read it via SeekerDataMultiplier(), which defaults a missing/zero value to 1.
@@ -325,6 +341,12 @@ type ProConfig struct {
 	// rails (normalizeDataCodeSku). Read them through DataCodeSku and
 	// DataCodeSkusOn.
 	DataCodeSkus []ProDataCodeSku
+
+	// the data an admitted SN25 validator's network gets when the validator
+	// mints its rate class (pro.yml validator_grant,
+	// validator_data_grant_model.go). Zero when pro.yml is absent, which grants
+	// nothing.
+	ValidatorDataGrant ValidatorDataGrantSettings
 }
 
 func mustParseByteCount(s string) ByteCount {
@@ -467,9 +489,11 @@ var proConfig = sync.OnceValue(func() *ProConfig {
 		ReferredBonus:            parseByteCountOrZero(y.Referral.ReferredBonus),
 		ReferralPeriod:           mustParseDuration(y.Referral.Period),
 		MaxReferrals:             y.Referral.MaxReferrals,
+		ReferralTerms:            parseReferralTerms(y.Referral),
 		seekerDataMultiplier:     y.Seeker.DataMultiplier,
 		DataCodeDuration:         mustParseDuration(y.DataCode.Duration),
 		DataCodeSkus:             skus,
+		ValidatorDataGrant:       parseValidatorDataGrant(y.ValidatorGrant),
 	}
 })
 

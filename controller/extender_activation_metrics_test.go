@@ -64,9 +64,11 @@ func TestExtenderActivationMetricsAreFixedCardinality(t *testing.T) {
 	metrics := newExtenderActivationMetrics(registry)
 	// main's 37 and the webrtc stage's four outcomes (error, timeout,
 	// other_family, cap) by two families, and the webrtc step's three
-	// outcomes, the required path of connect/EXTENDER.md S8
-	connect.AssertEqual(t, testutil.CollectAndCount(metrics.activations), 45)
-	connect.AssertEqual(t, testutil.CollectAndCount(metrics.stepSeconds), 15)
+	// outcomes, the required path of connect/EXTENDER.md S8; and a caller that
+	// left (canceled) at each of the three probe stages by two families, and
+	// at each of the five steps
+	connect.AssertEqual(t, testutil.CollectAndCount(metrics.activations), 51)
+	connect.AssertEqual(t, testutil.CollectAndCount(metrics.stepSeconds), 20)
 	for stage, outcomes := range extenderActivationStageOutcomes {
 		for _, outcome := range outcomes {
 			for _, family := range []string{extenderActivationFamilyIpv4, extenderActivationFamilyIpv6} {
@@ -76,8 +78,16 @@ func TestExtenderActivationMetricsAreFixedCardinality(t *testing.T) {
 			}
 		}
 	}
+	for _, step := range extenderProbeStepNames {
+		for _, outcome := range extenderProbeStepOutcomes {
+			if histogram := testActivationStepHistogram(t, metrics, step, outcome); histogram.GetSampleCount() != 0 {
+				t.Fatalf("%s %s starts at %d", step, outcome, histogram.GetSampleCount())
+			}
+		}
+	}
 	// the cells above are the ones that already existed
-	connect.AssertEqual(t, testutil.CollectAndCount(metrics.activations), 45)
+	connect.AssertEqual(t, testutil.CollectAndCount(metrics.activations), 51)
+	connect.AssertEqual(t, testutil.CollectAndCount(metrics.stepSeconds), 20)
 }
 
 // One activation is counted once, where it ended, and each step it probed is
@@ -131,6 +141,9 @@ func TestExtenderActivationRefusalOutcomeByStage(t *testing.T) {
 		{stage: extenderActivationStageTcp, stageOutcome: extenderProbeStepOutcomeError, want: "error"},
 		{stage: extenderActivationStageTcp, stageOutcome: extenderProbeStepOutcomeTimeout, want: "timeout"},
 		{stage: extenderActivationStageForward, stageOutcome: extenderProbeRefusalOtherFamily, want: "other_family"},
+		{stage: extenderActivationStageTcp, stageOutcome: "canceled", want: "canceled"},
+		{stage: extenderActivationStageForward, stageOutcome: "canceled", want: "canceled"},
+		{stage: extenderActivationStageWebRtc, stageOutcome: "canceled", want: "canceled"},
 		{stage: extenderActivationStageStore, want: "error"},
 	} {
 		if got := extenderActivationRefusalOutcome(c.stage, c.stageOutcome); got != c.want {

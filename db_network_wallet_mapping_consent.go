@@ -51,3 +51,37 @@ CREATE TRIGGER st_payout_wallet_resolution_guard BEFORE UPDATE OR DELETE ON st_p
 CREATE TRIGGER st_payout_wallet_resolution_truncate_guard BEFORE TRUNCATE ON st_payout_wallet_resolution
  FOR EACH STATEMENT EXECUTE FUNCTION wallet_mapping_original_guard();
 `
+
+// The settled earning wallets by coldkey within an epoch, smallest client
+// first, with the client's network. The settlement v2 earnings readers
+// (model/st_ledger_v2_reader_model.go) give each recorded amount of an epoch
+// to the network of the smallest client whose resolution in that epoch
+// selected the amount's coldkey. With only the primary key (deployment_key,
+// epoch, no_id, client_id), each read sorted every resolution of its epochs
+// by (epoch, coldkey, client_id) to keep the first of each coldkey: on Main
+// (2026-11-26) GET /account/epochs read about 300 amounts by sorting about
+// 0.9M resolutions, 3.6 s and the whole table's 31k pages a call, 23 calls a
+// minute, and every new epoch adds about 0.25M more. With this index each
+// amount reads its coldkey's smallest client in one probe.
+//
+// The table is append-only and about 0.3 GB; the build reads it once.
+// Apply before deploying the reader that probes it: without the index each
+// probe walks its epoch's resolutions in client order until its coldkey.
+var stPayoutWalletResolutionColdkeyIndexMigration = newRestartableOnlineSqlMigration(
+	`DROP INDEX CONCURRENTLY IF EXISTS st_payout_wallet_resolution_coldkey`,
+	`CREATE INDEX CONCURRENTLY st_payout_wallet_resolution_coldkey
+		 ON st_payout_wallet_resolution (deployment_key, no_id, epoch, coldkey, client_id) INCLUDE (network_id)`,
+	`DROP INDEX IF EXISTS st_payout_wallet_resolution_coldkey;
+		 CREATE INDEX st_payout_wallet_resolution_coldkey
+		 ON st_payout_wallet_resolution (deployment_key, no_id, epoch, coldkey, client_id) INCLUDE (network_id)`,
+)
+
+// The index migration's version: its position in the list, from 1.
+func StPayoutWalletResolutionColdkeyIndexMigrationVersion() int {
+	for i, migration := range migrations {
+		if migration == stPayoutWalletResolutionColdkeyIndexMigration {
+			return i + 1
+		}
+	}
+	return 0
+}

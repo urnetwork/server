@@ -196,6 +196,9 @@ func (self *nativeDuplicateAckRecoveryState) start() error {
 func (self *nativeDuplicateAckRecoveryState) installNativeBridge(path *fullTunPath, mixedBroker *nativeMixedAckBroker) {
 	path.nativeIngressForTest = true
 	path.bridgeSends.observeAdmission = true
+	// Keep healthy downloads and the mixed loss repair open through their
+	// device completion prefix, before either application socket sends FIN.
+	path.joinDownloadCompletionBeforeClose = !self.loss || mixedBroker != nil
 	if mixedBroker != nil {
 		mixedBroker.bind(path)
 	}
@@ -558,13 +561,13 @@ func TestNativeDuplicateAckRecoveryAccountsReadyFeedback(t *testing.T) {
 	data := append(append([]byte(nil), ack...), 1)
 	data[3] = byte(len(data))
 	for _, mode := range []struct {
-		name        string
-		loss, mixed bool
+		name                  string
+		loss, mixed, wantJoin bool
 	}{
-		{name: "healthy"},
+		{name: "healthy", wantJoin: true},
 		{name: "loss", loss: true},
-		{name: "mixed healthy", mixed: true},
-		{name: "mixed loss", loss: true, mixed: true},
+		{name: "mixed healthy", mixed: true, wantJoin: true},
+		{name: "mixed loss", loss: true, mixed: true, wantJoin: true},
 	} {
 		state := &nativeDuplicateAckRecoveryState{loss: mode.loss}
 		path := &fullTunPath{bridgeSends: newFullTunBridgeSendTracker(), appTun: &clientconnect.Tun{}, providerLocalNat: nat}
@@ -573,6 +576,14 @@ func TestNativeDuplicateAckRecoveryAccountsReadyFeedback(t *testing.T) {
 			broker = newNativeMixedAckBroker(state, mode.loss)
 		}
 		state.installNativeBridge(path, broker)
+		if path.joinDownloadCompletionBeforeClose != mode.wantJoin {
+			t.Errorf("%s: unexpected download completion fence=%t", mode.name, path.joinDownloadCompletionBeforeClose)
+		}
+		if !mode.loss {
+			t.Run(mode.name+"/completion", func(t *testing.T) {
+				testNativeDownloadCompletionClose(t, path.joinDownloadCompletionBeforeClose, nil)
+			})
+		}
 		if broker != nil {
 			t.Cleanup(broker.natUnsubscribe)
 			t.Cleanup(broker.natBatchUnsubscribe)

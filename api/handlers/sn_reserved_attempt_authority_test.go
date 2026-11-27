@@ -54,6 +54,25 @@ type snReservedAttemptAuthority struct {
 	// in flight at its event scan, after the dial has succeeded.
 	refuseEventScan atomic.Bool
 	holdEventScan   atomic.Pointer[chan struct{}]
+	// The next event scans that fail as a node's query timeout does, and the
+	// scans that have reached the hold.
+	transientEventScans atomic.Int32
+	heldEventScans      atomic.Int32
+	// When set, the chain's time for later refreshes; now is the first's.
+	chainClock atomic.Pointer[time.Time]
+	// The permit census batch fails, or the current eligibility read's
+	// metagraph call does; the second counts the calls it refused.
+	refuseCensus          atomic.Bool
+	refuseMetagraph       atomic.Bool
+	refusedMetagraphCalls atomic.Int32
+}
+
+// The finalized heads' time: now, until a test moves the chain on.
+func (self *snReservedAttemptAuthority) chainNow() time.Time {
+	if at := self.chainClock.Load(); at != nil {
+		return *at
+	}
+	return self.now
 }
 
 // A native block's hash is the Blake2b-256 of its complete SCALE header, which
@@ -208,7 +227,10 @@ func (self *snReservedAttemptAuthority) startUnrefreshed(t testing.TB, replicaNo
 	config := &controller.StConfig{Enabled: true, Profile: "testnet", DeploymentId: "reserved-http-fixture", ChainId: 945, GenesisHash: self.record.Domain.GenesisHash, Netuid: 521, NoId: replicaNoID,
 		ContractAddress: common.Address(self.record.Domain.Coordinator), SettlementVault: common.Address(self.record.Domain.SettlementVault), RpcUrls: []string{self.endpoint.URL}}
 	config.ReservedAttemptUpload = &controller.StReservedAttemptUploadConfig{NativeRPCURLs: []string{self.endpoint.URL}, Budget: model.StReservedAttemptUploadBudget{RetryRequestsPerHour: 2, ObjectsPerHour: 3, BytesPerHour: 256},
-		Admission: validator.ValidatorUploadAdmissionConfig{Deployment: self.deployment, ReplicaNoID: replicaNoID, MaximumContextBytes: 65536, MaximumOwners: 2, BlocksPerRange: 200, MaximumRanges: 1, MaximumEventsPerRange: 4,
+		// The one discovery range [1001, 1201] stays open at the finalized head
+		// 1200, so every refresh reads it, as these tests expect. sn keeps a
+		// closed range per process and tests that itself.
+		Admission: validator.ValidatorUploadAdmissionConfig{Deployment: self.deployment, ReplicaNoID: replicaNoID, MaximumContextBytes: 65536, MaximumOwners: 2, BlocksPerRange: 201, MaximumRanges: 1, MaximumEventsPerRange: 4,
 			RefreshSeconds: 10, MaximumRefreshSeconds: 20, MaximumHeadAgeSeconds: 60, MaximumIntentSeconds: 25, FreshActivePerOwner: 1, RetryActivePerOwner: 1}}
 	owner, err := controller.NewStReservedAttemptUploadWithConfig(t.Context(), config)
 	if err != nil {
@@ -274,7 +296,7 @@ func (self *snReservedAttemptAuthority) result(method string, args []json.RawMes
 	}
 	knownNative := func(hash string) bool { _, known := self.headers[hash]; return known }
 	block := func(number uint64) map[string]any {
-		return map[string]any{"number": hexutil.EncodeUint64(number), "hash": common.BigToHash(new(big.Int).SetUint64(number)), "timestamp": hexutil.EncodeUint64(uint64(self.now.Unix()))}
+		return map[string]any{"number": hexutil.EncodeUint64(number), "hash": common.BigToHash(new(big.Int).SetUint64(number)), "timestamp": hexutil.EncodeUint64(uint64(self.chainNow().Unix()))}
 	}
 	switch method {
 	case "eth_chainId":
@@ -307,24 +329,43 @@ func (self *snReservedAttemptAuthority) result(method string, args []json.RawMes
 		}
 		return hexutil.Bytes{0x60, 0, 0}, nil
 	case "eth_getLogs":
+		for pending := self.transientEventScans.Load(); pending > 0; pending = self.transientEventScans.Load() {
+			if self.transientEventScans.CompareAndSwap(pending, pending-1) {
+				return nil, errors.New("query timeout of 10 seconds exceeded")
+			}
+		}
 		if hold := self.holdEventScan.Load(); hold != nil {
+			self.heldEventScans.Add(1)
 			<-*hold
 		}
 		if self.refuseEventScan.Load() {
 			return nil, errors.New("synthetic chain endpoint outage")
 		}
+		// Discovery asks for the permitted hotkeys' activations only: the
+		// event topic, any digest, then an OR-list of hotkeys, as a node
+		// filters them.
 		var filter struct {
-			Address common.Address `json:"address"`
-			From    string         `json:"fromBlock"`
-			To      string         `json:"toBlock"`
-			Topics  []common.Hash  `json:"topics"`
+			Address common.Address    `json:"address"`
+			From    string            `json:"fromBlock"`
+			To      string            `json:"toBlock"`
+			Topics  []json.RawMessage `json:"topics"`
 		}
-		if len(args) != 1 || json.Unmarshal(args[0], &filter) != nil || filter.Address != common.Address(self.deployment.Journal) || filter.From != "0x3e9" || filter.To != "0x4b0" || len(filter.Topics) != 1 || filter.Topics[0] != crypto.Keccak256Hash([]byte("ActivationPublished(bytes32,bytes32,uint64,uint64)")) {
+		topic := crypto.Keccak256Hash([]byte("ActivationPublished(bytes32,bytes32,uint64,uint64)"))
+		var first common.Hash
+		var hotkeys []common.Hash
+		if len(args) != 1 || json.Unmarshal(args[0], &filter) != nil || filter.Address != common.Address(self.deployment.Journal) || filter.From != "0x3e9" || filter.To != "0x4b0" ||
+			len(filter.Topics) != 3 || json.Unmarshal(filter.Topics[0], &first) != nil || first != topic || string(filter.Topics[1]) != "null" || json.Unmarshal(filter.Topics[2], &hotkeys) != nil {
 			break
 		}
-		epoch := common.BigToHash(big.NewInt(7))
-		return []map[string]any{{"address": filter.Address, "topics": []common.Hash{filter.Topics[0], common.Hash(self.digest), common.Hash(self.record.Hotkey), common.BigToHash(big.NewInt(1))},
-			"data": hexutil.Bytes(epoch[:]), "blockNumber": "0x3e9", "blockHash": common.BigToHash(big.NewInt(1001)), "logIndex": "0x0", "removed": false}}, nil
+		rows := []map[string]any{}
+		for _, hotkey := range hotkeys {
+			if hotkey == common.Hash(self.record.Hotkey) {
+				epoch := common.BigToHash(big.NewInt(7))
+				rows = append(rows, map[string]any{"address": filter.Address, "topics": []common.Hash{topic, common.Hash(self.digest), common.Hash(self.record.Hotkey), common.BigToHash(big.NewInt(1))},
+					"data": hexutil.Bytes(epoch[:]), "blockNumber": "0x3e9", "blockHash": common.BigToHash(big.NewInt(1001)), "logIndex": "0x0", "removed": false})
+			}
+		}
+		return rows, nil
 	case "eth_call":
 		return self.evmCall(args)
 	case "chain_getFinalizedHead":
@@ -377,10 +418,37 @@ func (self *snReservedAttemptAuthority) result(method string, args []json.RawMes
 			if argument(1) != self.finalized.Hex() {
 				break
 			}
-			return "0x" + hex.EncodeToString(binary.LittleEndian.AppendUint64(nil, uint64(self.now.UnixMilli()))), nil
+			return "0x" + hex.EncodeToString(binary.LittleEndian.AppendUint64(nil, uint64(self.chainNow().UnixMilli()))), nil
 		}
 		return value, nil
+	case "state_queryStorageAt":
+		if self.refuseCensus.Load() {
+			return nil, errors.New("synthetic census outage")
+		}
+		// As a node answers at one block: every key, valued as a single
+		// state_getStorage read of it answers.
+		var keys []string
+		if len(args) != 2 || json.Unmarshal(args[0], &keys) != nil || !knownNative(argument(1)) {
+			break
+		}
+		changes := make([][]any, 0, len(keys))
+		for _, key := range keys {
+			encoded, err := json.Marshal(key)
+			if err != nil {
+				return nil, err
+			}
+			value, err := self.result("state_getStorage", []json.RawMessage{encoded, args[1]})
+			if err != nil {
+				return nil, err
+			}
+			changes = append(changes, []any{key, value})
+		}
+		return []map[string]any{{"block": argument(1), "changes": changes}}, nil
 	case "state_call":
+		if self.refuseMetagraph.Load() {
+			self.refusedMetagraphCalls.Add(1)
+			return nil, errors.New("synthetic metagraph outage")
+		}
 		if len(args) == 3 && argument(0) == "SubnetInfoRuntimeApi_get_selective_metagraph" && argument(1) == "0x09021400001e00340039004500" && knownNative(argument(2)) {
 			return self.metagraph, nil
 		}

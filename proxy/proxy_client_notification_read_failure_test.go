@@ -203,11 +203,20 @@ func TestProxyClientNotificationReconcileRetriesRaisedChangeRead(t *testing.T) {
 
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
+		// The synthetic reader can take its initial snapshot after both registrations.
+		watchRegistered := make(chan struct{})
 		notification := newProxyClientNotification(
 			ctx,
 			settings,
 			newTestProxyChangeReadSubscriptionSource(),
-			reads.getProxyClientsSince,
+			func(ctx context.Context, host string, block string, changeId int64) (map[server.Id]*model.ProxyClient, int64, error) {
+				select {
+				case <-ctx.Done():
+					return nil, changeId, ctx.Err()
+				case <-watchRegistered:
+				}
+				return reads.getProxyClientsSince(ctx, host, block, changeId)
+			},
 		)
 		sub := notification.AddProxyClientsCallback(func(proxyClients []*model.ProxyClient) error {
 			return nil
@@ -221,6 +230,7 @@ func TestProxyClientNotificationReconcileRetriesRaisedChangeRead(t *testing.T) {
 			fullSyncProxyClientCounts = append(fullSyncProxyClientCounts, len(proxyClients))
 		})
 		defer fullSyncSub()
+		close(watchRegistered)
 		getFullSyncProxyClientCounts := func() []int {
 			fullSyncStateLock.Lock()
 			defer fullSyncStateLock.Unlock()

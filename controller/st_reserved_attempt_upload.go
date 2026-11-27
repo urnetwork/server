@@ -260,7 +260,7 @@ func (self *StReservedAttemptUpload) Begin(ctx context.Context, credential, head
 	lease, err := self.admission.Begin(ctx, header, sessionHash, objectKind, contentHash, size)
 	if err != nil {
 		// the admission's reason can carry chain endpoint errors; it is logged
-		if self.authorityNotCurrent(ctx) {
+		if errors.Is(err, validator.ErrValidatorUploadAuthorityNotCurrent) || self.authorityNotCurrent(ctx) {
 			return nil, router.PrivateCause(http.StatusServiceUnavailable, "Validator staging authority is not current on this instance.", err)
 		}
 		return nil, router.PrivateCause(http.StatusForbidden, "Validator staging authority refused.", err)
@@ -268,9 +268,33 @@ func (self *StReservedAttemptUpload) Begin(ctx context.Context, credential, head
 	return lease, nil
 }
 
+// The rate class a validator's class consent earns: its admitted activation's
+// owner and the admission's expiry, for the api to mint a class token. A
+// refusal maps as Begin's: 503 when this instance is not current, else 403.
+func (self *StReservedAttemptUpload) Class(ctx context.Context, credential, header string) (validator.ValidatorUploadClass, error) {
+	if self == nil || self.admission == nil {
+		return validator.ValidatorUploadClass{}, errors.New("503 Validator reserved upload is unavailable.")
+	}
+	sessionHash, err := protocol.ValidatorAttemptUploadSessionHash(credential)
+	if err != nil {
+		return validator.ValidatorUploadClass{}, fmt.Errorf("401 Invalid upload client session: %w", err)
+	}
+	class, err := self.admission.Class(ctx, header, sessionHash)
+	if err != nil {
+		if errors.Is(err, validator.ErrValidatorUploadAuthorityNotCurrent) || self.authorityNotCurrent(ctx) {
+			return validator.ValidatorUploadClass{}, router.PrivateCause(http.StatusServiceUnavailable, "Validator staging authority is not current on this instance.", err)
+		}
+		return validator.ValidatorUploadClass{}, router.PrivateCause(http.StatusForbidden, "Validator staging authority refused.", err)
+	}
+	return class, nil
+}
+
 // An admission whose first refresh has not finished, whose last one failed or
 // that is stopping refuses every upload, and that says nothing about the
-// validator: a sibling block's refresh, or this one's next, can admit it. Its
+// validator: a sibling block's refresh, or this one's next, can admit it. So
+// does a current admission's refusal that the admission marks not current:
+// an entry past its own expiry after a failed eligibility read, or an
+// activation it did not look for while its permit census was unavailable. Its
 // 403 counted against the validator as an authorization refusal, on a chain
 // endpoint this one instance could not reach or for about 15 seconds after each
 // process start. Answered 503, the lb tries a sibling and the validator retries.

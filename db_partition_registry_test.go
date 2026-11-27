@@ -445,6 +445,10 @@ func TestPartitionRegistryValidatesDeclarations(t *testing.T) {
 			family.Settings = DefaultPartitionFamilySettings()
 			family.Settings.DropLockTimeout = 0
 		}},
+		{"a negative open leaf analyze delay", func(family *PartitionFamily) {
+			family.Settings = DefaultPartitionFamilySettings()
+			family.Settings.OpenLeafAnalyzeDelay = -time.Minute
+		}},
 	} {
 		family := testPartitionDailyFamily()
 		test.modify(family)
@@ -543,5 +547,55 @@ func TestPartitionRegistryReindexExemption(t *testing.T) {
 	}
 	if family := PartitionFamilyOfTable("network_client"); family != nil {
 		t.Errorf("network_client belongs to %s", family.Name)
+	}
+}
+
+// A range's leaves are due their first analyze OpenLeafAnalyzeDelay into it:
+// a daily family's at the next 00:01 UTC, the current day's while its minute
+// has not come, a weekly family's at the next Monday 00:01 UTC, from any
+// zone; a family's own delay, and the default for a family's own settings
+// made before the field. Across the registry, the earliest of the families
+// its retention task analyzes.
+func TestPartitionNextOpenLeafAnalyzeTime(t *testing.T) {
+	daily := testPartitionDailyFamily()
+	weekly := testPartitionWeeklyFamily()
+	own := testPartitionDailyFamily()
+	own.Settings = DefaultPartitionFamilySettings()
+	own.Settings.OpenLeafAnalyzeDelay = 5 * time.Minute
+	older := testPartitionDailyFamily()
+	older.Settings = &PartitionFamilySettings{CreateLockTimeout: time.Second, DropLockTimeout: time.Second, DropStatementTimeout: time.Minute}
+	at := func(value string) time.Time {
+		parsed, err := time.Parse(time.RFC3339Nano, value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return parsed
+	}
+	if at("2026-11-30T00:00:00Z").Weekday() != time.Monday {
+		t.Fatal("fixture: 2026-11-30 is not a Monday")
+	}
+	for _, c := range []struct {
+		family *PartitionFamily
+		now    string
+		want   string
+	}{
+		{family: daily, now: "2026-11-25T23:55:00Z", want: "2026-11-26T00:01:00Z"},
+		{family: daily, now: "2026-11-26T00:00:30Z", want: "2026-11-26T00:01:00Z"},
+		{family: daily, now: "2026-11-26T00:00:59.999999Z", want: "2026-11-26T00:01:00Z"},
+		{family: daily, now: "2026-11-26T00:01:00Z", want: "2026-11-27T00:01:00Z"},
+		{family: daily, now: "2026-11-25T15:30:00-08:00", want: "2026-11-26T00:01:00Z"},
+		// a Wednesday, then the Monday's first minute
+		{family: weekly, now: "2026-11-25T12:00:00Z", want: "2026-11-30T00:01:00Z"},
+		{family: weekly, now: "2026-11-30T00:00:10Z", want: "2026-11-30T00:01:00Z"},
+		{family: own, now: "2026-11-26T00:02:00Z", want: "2026-11-26T00:05:00Z"},
+		{family: older, now: "2026-11-25T23:55:00Z", want: "2026-11-26T00:01:00Z"},
+	} {
+		if got := c.family.NextOpenLeafAnalyzeTime(at(c.now)); !got.Equal(at(c.want)) {
+			t.Errorf("%s at %s: due %s, want %s", c.family.Name, c.now, got, c.want)
+		}
+	}
+	// transfer_debit_journal, a daily family, is the registry's to analyze
+	if got := NextPartitionOpenLeafAnalyzeTime(at("2026-11-25T23:55:00Z")); !got.Equal(at("2026-11-26T00:01:00Z")) {
+		t.Errorf("the registry's retention task is due at %s, want 2026-11-26T00:01:00Z", got)
 	}
 }

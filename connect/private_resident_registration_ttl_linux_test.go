@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -30,9 +31,13 @@ func privateRegistrationRedis(t *testing.T) server.RedisClient {
 	if authority == "" {
 		t.Skip("requires the private resident-registration Redis runner")
 	}
-	host, _, err := net.SplitHostPort(authority)
+	host, portText, err := net.SplitHostPort(authority)
 	if err != nil || host != "127.0.0.1" || os.Getenv("WARP_ENV") != "local" {
 		t.Fatal("private Redis must have an exact local loopback endpoint")
+	}
+	// a production data tunnel forwards 6379-6427 to loopback
+	if port, err := strconv.ParseUint(portText, 10, 16); err != nil || server.Testing_LoopbackTunnelPort(uint16(port)) {
+		t.Fatalf("private Redis %s is on a production data tunnel port; use a disposable Redis on another port", authority)
 	}
 	server.RedisReset()
 	popVault := server.Vault.PushSimpleResource("redis.yml", []byte(fmt.Sprintf("authority: %q\npassword: \"\"\ndb: 0\ncluster: false\n", authority)))

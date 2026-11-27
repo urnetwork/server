@@ -197,8 +197,9 @@ func TestCompanionContractChainsToCompanionOrigin(t *testing.T) {
 
 		sourceNetworkId, sourceId, destinationNetworkId, destinationId := companionOriginTestSetup(ctx, t)
 
-		// fund the SOURCE network too: in the chained case each side pays for
-		// the companion whose destination it is
+		// fund the SOURCE network too: it pays the forward contract, the
+		// return companion that answers it and the reply carrier chained to
+		// that companion
 		// a unique purchase event id: the setup's code already used the
 		// empty-string event id, and purchase events are unique per event id
 		balanceCode, err := model.CreateBalanceCode(

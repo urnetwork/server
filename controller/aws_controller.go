@@ -408,7 +408,9 @@ var accountMessageSendFailures = newBoundedReport(accountMessageSendReportInterv
 // http client both stop there, so a hung endpoint fails the send instead of
 // holding the caller. Each call is counted (urnetwork_account_message_sends_total)
 // and failures are reported at most once per interval; a call that ran out of
-// time returns an error that is `context.DeadlineExceeded`.
+// time returns an error that is `context.DeadlineExceeded`. A text passes the
+// send caps (aws_sms_send_cap.go) before its call, and one they refuse is not
+// sent.
 // The zero value is the production sender. Safe for concurrent use.
 type AWSMessageSender struct {
 	// zero uses email.yml's send timeout
@@ -417,6 +419,9 @@ type AWSMessageSender struct {
 	endpoint string
 	// nil uses the default credential chain
 	credentials *credentials.Credentials
+	// nil uses the production send caps, kept in Redis; tests that send texts
+	// without Redis pass caps of their own
+	smsCaps smsSendCaps
 }
 
 // A `MessageSender`: an email address gets the email, a phone number the SMS.
@@ -661,7 +666,7 @@ func (self *AWSMessageSender) sendSmsTemplate(phoneNumber string, template Templ
 	if err != nil {
 		return err
 	}
-	return self.sendSms(phoneNumber, bodyText)
+	return self.sendSms(phoneNumber, template.Name(), bodyText)
 }
 
 // RenderSmsTemplate renders `<name>.sms.txt`, the short body a phone account
@@ -824,15 +829,23 @@ func (self *AWSMessageSender) sendEmail(emailAddress string, templateName string
 	return accountMessageSendResult(sendCtx, accountMessageChannelEmail, sendTimeout, err)
 }
 
-// One Pinpoint SMS SendTextMessage call, bounded by the send timeout.
+// One Pinpoint SMS SendTextMessage call, bounded by the send timeout, for a text
+// the send caps admit (aws_sms_send_cap.go). A text they refuse is not sent:
+// the refusal, a rate limit, is returned without contacting AWS.
 // https://docs.aws.amazon.com/sdk-for-go/api/service/pinpointsmsvoicev2/
 // https://docs.aws.amazon.com/pinpoint/latest/apireference_smsvoicev2/API_SendTextMessage.html
-func (self *AWSMessageSender) sendSms(phoneNumber string, bodyText string) error {
+func (self *AWSMessageSender) sendSms(phoneNumber string, templateName string, bodyText string) error {
 	awsRegion := "us-east-1"
 
 	sendTimeout := self.timeout()
 	sendCtx, sendCancel := context.WithTimeout(context.Background(), sendTimeout)
 	defer sendCancel()
+
+	// the caps count the text before AWS is asked to send it, so a burst of
+	// texts stops at the caps whatever numbers it goes to
+	if err := self.admitSms(sendCtx, phoneNumber, templateName); err != nil {
+		return err
+	}
 
 	awsSession, err := self.newSession(awsRegion, sendTimeout)
 	if err != nil {

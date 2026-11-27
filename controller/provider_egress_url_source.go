@@ -164,7 +164,7 @@ var providerEgressUrlOutcomesTotal = prometheus.NewCounterVec(prometheus.Counter
 	Namespace: "urnetwork",
 	Subsystem: "egress_url",
 	Name:      "outcomes_total",
-	Help:      "Measured URL outcomes the operator ingest stored, by the catalog their destination came from (source: general or country; unrecognized, in neither the storing host's country lists nor the pool, which fails closed on probation), how they counted (scoring: scored, in the eight-hour window; probation, a country site or a general site the refresh has not graduated, or an unrecognized destination, recorded and in the rolling quota but never scored; security_recheck, a recheck of a URL with an open TLS finding, out of both) and outcome (success or error)",
+	Help:      "Measured URL outcomes the operator ingest stored, by the catalog their destination came from (source: general or country; unrecognized, in neither the storing host's country lists nor the pool, which fails closed on probation), how they counted (scoring: scored, in the eight-hour window unless the overload judge later discounts their bucket, urnetwork_egress_url_discounted_outcomes_total; probation, a country site or a general site the refresh has not graduated, or an unrecognized destination, recorded and in the rolling quota but never scored; security_recheck, a recheck of a URL with an open TLS finding, out of both) and outcome (success or error)",
 }, []string{"source", "scoring", "outcome"})
 
 // Registers the outcome counter with every label set it can produce.

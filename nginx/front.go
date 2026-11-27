@@ -438,17 +438,17 @@ func (self *Front) unknownInterfaceHandler(interfaceName string) http.Handler {
 func (self *Front) AcquireQuicConnection(interfaceName string, addr netip.Addr, nameClass NameClass) (release func(), ok bool) {
 	frontInterface, ok := self.lookupInterface(interfaceName)
 	if !ok {
-		self.metrics.limitRefusals.WithLabelValues("interface", routeHttpNoLabel, nameClass.String()).Inc()
+		self.metrics.limitRefusals.WithLabelValues("interface", routeHttpNoLabel, nameClass.String(), limitRateClassDefault).Inc()
 		return nil, false
 	}
 	quicClass, ok := limitQuicClassOf(nameClass)
 	if !ok {
-		self.metrics.limitRefusals.WithLabelValues("class", routeHttpNoLabel, nameClass.String()).Inc()
+		self.metrics.limitRefusals.WithLabelValues("class", routeHttpNoLabel, nameClass.String(), limitRateClassDefault).Inc()
 		return nil, false
 	}
 	release, outcome := self.limits.acquireQuicConnection(frontInterface.limits, addr, quicClass)
 	if outcome != limitOutcomeAdmitted {
-		self.metrics.limitRefusals.WithLabelValues(outcome.String(), limitDefaultZone, nameClass.String()).Inc()
+		self.metrics.limitRefusals.WithLabelValues(outcome.String(), limitDefaultZone, nameClass.String(), limitRateClassDefault).Inc()
 		return nil, false
 	}
 	if quicClass == limitQuicClassConnect {

@@ -150,10 +150,14 @@ var legacyCompanionChainedOriginSql = `
                             WHERE ($4::uuid <> $5 OR (payer_network_id = $4 AND
                                 source_network_id = $6 AND destination_network_id = $5))
                         )) END AS prober_reservation_byte_count,
-                        CASE WHEN payer_network_id = $5 AND source_network_id = $6
-                            AND destination_network_id = $5
-                            AND EXISTS (SELECT 1 FROM prober_shard_run WHERE network_id = $5)
-                        THEN $5::uuid END AS inherited_private_payer
+                        -- between two networks a reply carrier inherits its
+                        -- exact reverse anchor's payer, this request's source;
+                        -- a zero escrow anchor's would-be payer is its
+                        -- destination
+                        CASE WHEN $5::uuid <> $6
+                            AND (payer_network_id IS NULL OR payer_network_id = $5)
+                            AND source_network_id = $6 AND destination_network_id = $5
+                        THEN $5::uuid END AS inherited_payer
                     FROM (
                         (
                             SELECT contract_id, create_time, transfer_byte_count,
@@ -254,11 +258,11 @@ var legacyZeroEscrowPlainOriginSql = `
 var legacyZeroEscrowChainedOriginSql = `
 	SELECT
 		contract_id,
-		CASE WHEN (payer_network_id IS NULL OR payer_network_id = $4) AND
+		CASE WHEN $4::uuid <> $5 AND
+			(payer_network_id IS NULL OR payer_network_id = $4) AND
 			source_network_id = $5 AND
-			destination_network_id = $4 AND
-			EXISTS (SELECT 1 FROM prober_shard_run WHERE network_id = $4)
-		THEN $4::uuid END AS inherited_private_payer
+			destination_network_id = $4
+		THEN $4::uuid END AS inherited_payer
 	FROM (
 		(
 			SELECT contract_id, create_time, payer_network_id, source_network_id, destination_network_id

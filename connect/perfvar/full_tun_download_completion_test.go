@@ -4,12 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	clientconnect "github.com/urnetwork/connect"
+	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
 )
 
@@ -32,6 +38,205 @@ func (self *fullTunPath) observeDownloadCompletionForTest(event fullTunDownloadC
 		event.At = time.Now()
 		self.downloadCompletionPhaseForTest(event)
 	}
+}
+
+// The origin can read the marker while its Transfer receipt is still in flight.
+// Started precedes admission, so the device tracker's prefix captured after
+// the read includes the marker and any earlier replay admitted before it. The
+// origin handler retains the sockets until this prefix is terminal.
+func (self *fullTunPath) readDownloadCompletion(ctx context.Context, connection io.Reader, deadline time.Time) error {
+	ack := make([]byte, 1)
+	readCount, readErr := io.ReadFull(connection, ack)
+	self.observeDownloadCompletionForTest(fullTunDownloadCompletionEvent{
+		Phase: "server-read", Count: int64(readCount), Value: ack[0], Err: readErr,
+	})
+	if readErr != nil || !self.joinDownloadCompletionBeforeClose {
+		return readErr
+	}
+	if ack[0] != 1 {
+		return fmt.Errorf("download completion marker=%d, want=1", ack[0])
+	}
+	if self.devicePackSends == nil {
+		return errors.New("download completion has no device Pack tracker")
+	}
+
+	ctx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+	boundary, ok := self.devicePackSends.workloadBoundary(ctx)
+	if ok {
+		boundary.entries = slices.DeleteFunc(boundary.entries, func(entry *sendPackLifecycleEntry) bool {
+			return !entry.ackRequired || entry.messageType != protocol.MessageType_IpIpPacketToProvider
+		})
+		ok = self.devicePackSends.waitThrough(ctx, boundary)
+	}
+	if !ok {
+		if cause := ctx.Err(); cause != nil {
+			return fmt.Errorf("join download completion Pack: %w", cause)
+		}
+		return errors.New("download completion Pack tracker rejected the join")
+	}
+	return nil
+}
+
+func TestNativeDownloadCompletionWaitsForStartedPackBeforeClose(t *testing.T) {
+	testNativeDownloadCompletionClose(t, true, nil)
+}
+
+func TestNativeDownloadCompletionLeavesFailedTerminalStrict(t *testing.T) {
+	testNativeDownloadCompletionClose(t, true, errors.New("forced download completion Pack terminal failure"))
+}
+
+func testNativeDownloadCompletionClose(t *testing.T, joinBeforeClose bool, terminalErr error) {
+	t.Helper()
+	synctest.Test(t, func(t *testing.T) {
+		tracker := newSendPackLifecycleTracker()
+		defer tracker.close()
+		observer := tracker.newObserver()
+		start := func(event clientconnect.SendPackLifecycleObservation) {
+			event.Phase = clientconnect.SendPackLifecyclePhaseStarted
+			observer(event)
+			event.Phase = clientconnect.SendPackLifecyclePhaseFirstRouteWrite
+			observer(event)
+		}
+		completion := clientconnect.SendPackLifecycleObservation{
+			ClientId: clientconnect.NewId(), DestinationId: clientconnect.NewId(),
+			Token: 2, AckRequired: true, MessageType: protocol.MessageType_IpIpPacketToProvider,
+		}
+		// A detached reliable feedback Pack can already be started when the marker arrives.
+		earlierReplay := completion
+		earlierReplay.Token = 1
+		start(earlierReplay)
+		start(completion)
+		datagram := completion
+		datagram.Token, datagram.AckRequired = 3, false
+		start(datagram)
+
+		read := make(chan fullTunDownloadCompletionEvent, 1)
+		path := &fullTunPath{
+			devicePackSends:                   tracker,
+			joinDownloadCompletionBeforeClose: joinBeforeClose,
+			activePackFailureFloor:            &perfvarPackFailureCounts{},
+			allowDeviceNativeAckPressure:      true,
+			downloadCompletionPhaseForTest: func(event fullTunDownloadCompletionEvent) {
+				read <- event
+			},
+		}
+		origin, peer := net.Pipe()
+		defer peer.Close()
+		ctx, cancel := context.WithCancel(t.Context())
+		closed, joined := make(chan error, 1), make(chan struct{})
+		go func() {
+			defer close(joined)
+			err := path.readDownloadCompletion(ctx, origin, time.Now().Add(time.Minute))
+			origin.Close()
+			closed <- err
+		}()
+		defer func() {
+			cancel()
+			origin.Close()
+			<-joined
+		}()
+
+		if _, err := peer.Write([]byte{1}); err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+		select {
+		case event := <-read:
+			if event.Phase != "server-read" || event.Count != 1 || event.Value != 1 || event.Err != nil {
+				t.Fatalf("origin completion read: %+v", event)
+			}
+		default:
+			t.Fatal("origin did not publish the actual completion read")
+		}
+		select {
+		case err := <-closed:
+			t.Fatalf("origin closed before the started completion Pack terminal: %v", err)
+		default:
+		}
+
+		// New work starts after the prefix was captured. Its terminal and the
+		// datagram terminal do not own completion of this reliable TCP marker.
+		later := completion
+		later.Token = 4
+		start(later)
+		completion.Phase = clientconnect.SendPackLifecyclePhaseTerminal
+		completion.Err = terminalErr
+		earlierReplay.Phase = clientconnect.SendPackLifecyclePhaseTerminal
+		first, last := completion, earlierReplay
+		if terminalErr != nil {
+			first, last = earlierReplay, completion
+		}
+		observer(first)
+		synctest.Wait()
+		select {
+		case err := <-closed:
+			t.Fatalf("origin closed with reliable prefix token %d still outstanding: %v", last.Token, err)
+		default:
+		}
+		observer(last)
+		synctest.Wait()
+		select {
+		case err := <-closed:
+			if err != nil {
+				t.Fatal(err)
+			}
+		default:
+			t.Fatal("origin did not close after the exact completion Pack terminal")
+		}
+		terminalFailures := tracker.workloadFailures.Load()
+		wantFailures := uint64(0)
+		if terminalErr != nil {
+			wantFailures = 1
+		}
+		if terminalFailures != wantFailures || tracker.workloadRecoveredAdmissionFailures.Load() != 0 ||
+			tracker.workloadNativeReadyPureAckRefusals.Load() != 0 || tracker.workloadNativeAckRetrySupersessions.Load() != 0 {
+			t.Fatalf("completion fence changed the strict failure category: failures=%d want=%d", terminalFailures, wantFailures)
+		}
+		failures := tracker.workloadFailureSnapshot()
+		if len(failures) != int(wantFailures) ||
+			terminalErr != nil && (failures[0].Token != completion.Token || !errors.Is(failures[0].Err, terminalErr)) {
+			t.Fatalf("unexpected completion terminal evidence: %+v", failures)
+		}
+		err := path.validateMeasuredPackFailures(perfvarCarrierBoundary{packFailures: snapshotPerfvarPackFailures(path)})
+		if (err != nil) != (terminalErr != nil) {
+			t.Fatalf("measured completion verdict=%v terminal failure=%v", err, terminalErr)
+		}
+		for _, event := range []clientconnect.SendPackLifecycleObservation{datagram, later} {
+			event.Phase = clientconnect.SendPackLifecyclePhaseTerminal
+			observer(event)
+		}
+		synctest.Wait()
+		if tracker.invalid.Load() {
+			t.Fatal("completion lifecycle tracker rejected an exact event")
+		}
+	})
+}
+
+func TestNativeDownloadCompletionCloseKeepsSocketDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		tracker := newSendPackLifecycleTracker()
+		defer tracker.close()
+		observer := tracker.newObserver()
+		event := clientconnect.SendPackLifecycleObservation{
+			ClientId: clientconnect.NewId(), DestinationId: clientconnect.NewId(),
+			Token: 1, AckRequired: true, MessageType: protocol.MessageType_IpIpPacketToProvider,
+		}
+		event.Phase = clientconnect.SendPackLifecyclePhaseStarted
+		observer(event)
+		event.Phase = clientconnect.SendPackLifecyclePhaseFirstRouteWrite
+		observer(event)
+
+		path := &fullTunPath{devicePackSends: tracker, joinDownloadCompletionBeforeClose: true}
+		deadline := time.Now().Add(time.Second)
+		err := path.readDownloadCompletion(t.Context(), strings.NewReader("\x01"), deadline)
+		if !errors.Is(err, context.DeadlineExceeded) || !time.Now().Equal(deadline) {
+			t.Fatalf("completion fence did not retain the socket deadline: time=%v deadline=%v error=%v", time.Now(), deadline, err)
+		}
+		event.Phase = clientconnect.SendPackLifecyclePhaseTerminal
+		observer(event)
+		synctest.Wait()
+	})
 }
 
 func TestFullTunDownloadBodyHashDoesNotCompleteBeforeServerByte(t *testing.T) {

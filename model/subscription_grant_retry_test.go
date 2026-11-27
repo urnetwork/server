@@ -26,6 +26,8 @@ func TestReferralGrantSerializationRetryReturnsOnlyCommittedAmounts(t *testing.T
 		if CreateNetworkReferral(ctx, refereeId, code.ReferralCode) == nil {
 			t.Fatal("synthetic referral rejected")
 		}
+		// a link made under the referral terms pays once its referee uses the app
+		Testing_QualifyReferralReferee(ctx, refereeId, server.NowUtc())
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `CREATE SEQUENCE synthetic_grant_attempt;
 				CREATE FUNCTION synthetic_retry_grant() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN

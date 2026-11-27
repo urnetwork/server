@@ -13,8 +13,9 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// The old waiting entry is canceled at its first acknowledged refusal. This
-// deterministic control needs no elapsed timeout to expose the lost fair pass.
+// A held owner is waited for in its queue only up to the flush's bound (here
+// a millisecond, while the owner stays held), then the fair pass skips it and
+// flushes the next grant.
 func TestAsyncDebitBusyAdmissionAdvancesFairCursor(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -41,18 +42,15 @@ func TestAsyncDebitBusyAdmissionAdvancesFairCursor(t *testing.T) {
 		ctx = server.Testing_WithTxRerunHook(ctx, func() { reruns.Add(1) })
 		release := holdTransferBalanceTestOwner(t, ctx, []server.Id{first.balanceId})
 		defer release()
-		attemptCtx, cancelAttempt := context.WithCancel(ctx)
-		defer cancelAttempt()
 		key := server.NewPgOwnershipKey("transfer_balance", first.balanceId)
 		waiting, refused, admitted := 0, 0, 0
-		observed := server.Testing_WithPgOwnershipObservation(attemptCtx, func(event server.PgOwnershipEvent) {
+		observed := server.Testing_WithPgOwnershipObservation(testingWithTransferDebitOwnerWait(ctx, time.Millisecond), func(event server.PgOwnershipEvent) {
 			if !slices.Contains(event.Keys, key) {
 				return
 			}
 			switch event.Kind {
 			case server.PgOwnershipWaiting:
 				waiting++
-				cancelAttempt()
 			case server.PgOwnershipRefused:
 				refused++
 			case server.PgOwnershipAdmitted:
@@ -60,9 +58,9 @@ func TestAsyncDebitBusyAdmissionAdvancesFairCursor(t *testing.T) {
 			}
 		})
 		result, err := FlushTransferDebits(observed, transferDebitShard(first.balanceId), nil, 64)
-		if err != nil || waiting != 0 || refused != 1 || admitted != 0 || result.Balances != 2 ||
+		if err != nil || waiting != 1 || refused != 1 || admitted != 0 || result.Balances != 2 ||
 			result.Applied != 1 || result.Released != 1 || result.Busy != 1 || result.Failed != 0 || result.LastBalanceId != nil {
-			t.Fatal("known busy admission waited, entered financial SQL or prevented independent progress", result, err, waiting, refused, admitted)
+			t.Fatal("held admission waited past its bound, entered financial SQL or prevented independent progress", result, err, waiting, refused, admitted)
 		}
 		credit, pending, applied := asyncDebitTestState(t, ctx, first.balanceId)
 		if credit != 1000 || pending != 1 || applied != 0 || Testing_NetEscrowByteCount(ctx, first.balanceId) != 300 {
@@ -87,7 +85,8 @@ func TestAsyncDebitBusyAdmissionAdvancesFairCursor(t *testing.T) {
 }
 
 // Hold the balance only after the first owner has committed and released its
-// checkout. A refused deletion keeps applied debt after real Redis release.
+// checkout. A deletion refused after its bounded wait keeps applied debt after
+// real Redis release.
 func TestAsyncDebitBusyCleanupPreservesAppliedJournal(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -108,7 +107,7 @@ func TestAsyncDebitBusyCleanupPreservesAppliedJournal(t *testing.T) {
 		resume := func() { continueOnce.Do(func() { close(continueRelease) }) }
 		var paused atomic.Bool
 		var waiting, refused, admitted atomic.Int32
-		observed := server.Testing_WithPgOwnershipObservation(attemptCtx, func(event server.PgOwnershipEvent) {
+		observed := server.Testing_WithPgOwnershipObservation(testingWithTransferDebitOwnerWait(attemptCtx, time.Millisecond), func(event server.PgOwnershipEvent) {
 			if !slices.Contains(event.Keys, key) {
 				return
 			}
@@ -125,7 +124,6 @@ func TestAsyncDebitBusyCleanupPreservesAppliedJournal(t *testing.T) {
 				}
 			case server.PgOwnershipWaiting:
 				waiting.Add(1)
-				cancelAttempt()
 			case server.PgOwnershipRefused:
 				refused.Add(1)
 			}
@@ -172,8 +170,8 @@ func TestAsyncDebitBusyCleanupPreservesAppliedJournal(t *testing.T) {
 			t.Fatal("refused cleanup did not return", ctx.Err())
 		}
 		if result.err != nil || result.applied != 1 || result.released != 0 || !result.busy ||
-			waiting.Load() != 0 || refused.Load() != 1 || admitted.Load() != 1 {
-			t.Fatal("known busy cleanup waited, entered deletion SQL or forgot the committed debit", result, waiting.Load(), refused.Load(), admitted.Load())
+			waiting.Load() != 1 || refused.Load() != 1 || admitted.Load() != 1 {
+			t.Fatal("held cleanup waited past its bound, entered deletion SQL or forgot the committed debit", result, waiting.Load(), refused.Load(), admitted.Load())
 		}
 		credit, pending, applied := asyncDebitTestState(t, ctx, fixture.balanceId)
 		if credit != 989 || pending != 0 || applied != 1 || Testing_NetEscrowByteCount(ctx, fixture.balanceId) != 200 {

@@ -25,6 +25,21 @@ import (
 // shared lock, just as daemon-created immutable IDs do in production.
 const releaseGateDockerFixture = `#!/usr/bin/env bash
 set -euo pipefail
+publish_fixture_metadata() (
+  destination="$1" hold_service="$2"
+  shift 2
+  pending="$(mktemp "$destination.XXXXXXXX")"
+  trap 'rm -f -- "$pending"' EXIT
+  {
+    if [[ "$hold_service" == "$3" ]]; then
+      printf 'opened\n' >&5
+      IFS= read -r release <&6
+      [[ "$release" == release ]]
+    fi
+    printf '%s %s %s %s %s\n' "$@"
+  } > "$pending"
+  mv -- "$pending" "$destination"
+)
 case "$1" in
   info) exit 0 ;;
   create)
@@ -45,7 +60,8 @@ case "$1" in
     [[ "$owner" =~ ^[0-9a-f]{32}$ && "$name" == "urnetwork-gate-$owner-$service" && "$restart" == no ]] || exit 1
     id="$(printf '%s' "$name" | "$FIXTURE_SHA256SUM")"; id="${id%% *}"
     if [[ "$service" == postgres ]]; then port="$FAKE_PG_PORT"; else port="$FAKE_REDIS_PORT"; fi
-    printf '%s %s %s %s 127.0.0.1:%s\n' "$name" "$owner" "$service" "$restart" "$port" > "$FAKE_STATE/$id.meta"
+    publish_fixture_metadata "$FAKE_STATE/$id.meta" "${FAKE_HOLD_META_SERVICE:-}" \
+      "$name" "$owner" "$service" "$restart" "127.0.0.1:$port"
     printf '%s\n' "$@" > "$FAKE_STATE/$id.args"
     [[ "${FAKE_FAIL_CREATE:-}" != "$service" ]] || exit 29
     printf '%s\n' "$id" ;;
@@ -58,7 +74,8 @@ case "$1" in
       if [[ "${FAKE_STOPPED_SERVICE:-}" == "$service" ]]; then
         printf 'exited false 1\n'
         if [[ "${FAKE_CHANGE_OWNER_ON_STATE:-}" == 1 ]]; then
-          printf '%s %s %s %s %s\n' "$name" 00000000000000000000000000000000 "$service" "$restart" "$binding" > "$FAKE_STATE/$id.meta"
+          publish_fixture_metadata "$FAKE_STATE/$id.meta" "" \
+            "$name" 00000000000000000000000000000000 "$service" "$restart" "$binding"
         fi
       else printf 'running true 0\n'; fi
     elif [[ "$*" == *'json .State'* ]]; then
@@ -69,7 +86,11 @@ case "$1" in
     filter="${!#}"
     for file in "$FAKE_STATE"/*.meta; do
       [[ -f "$file" ]] || continue
-      read -r name owner service restart binding < "$file"
+      if ! { read -r name owner service restart binding < "$file"; } 2>/dev/null; then
+        [[ ! -e "$file" && ! -L "$file" ]] && continue
+        printf 'release gate fixture: unreadable published container metadata\n' >&2
+        exit 1
+      fi
       id="${file##*/}"; id="${id%.meta}"
       if [[ "$filter" == "name=^/${name}$" || "$filter" == "id=$id" ]]; then printf '%s\n' "$id"; fi
     done ;;
@@ -219,7 +240,7 @@ release_gate_service_fixture() { shift 2; "$FIXTURE_GENERATOR" "$@"; }
 		"GATE_ROOT": self.root, "FIXTURE_WORKSPACE": self.workspace, "FIXTURE_LOCK": self.lock,
 		"FAKE_PG_PORT": "35431", "FAKE_REDIS_PORT": "36371",
 		"APEX_CONTAINER_EVALUATION": "", "FAKE_FAIL_CREATE": "",
-		"FAKE_STOPPED_SERVICE": "", "FAKE_CHANGE_OWNER_ON_STATE": "", "FAKE_LARGE_LOG": "",
+		"FAKE_STOPPED_SERVICE": "", "FAKE_CHANGE_OWNER_ON_STATE": "", "FAKE_LARGE_LOG": "", "FAKE_HOLD_META_SERVICE": "",
 		"PRIVATE_PROBE": self.probe, "WARP_ENV": "local",
 	})
 	return command.CombinedOutput()
@@ -813,29 +834,48 @@ join_fixture_owners() {
   if [[ -n "$b_pid" ]]; then wait "$b_pid" || :; fi
 }
 trap join_fixture_owners EXIT
+owner_exit() {
+  if [[ "$owner_announced" == no ]]; then
+    printf 'failed:%s:%s\n' "$owner_name" "$1" >&7
+  fi
+  release_gate_services_cleanup
+}
 owner_a() (
-  trap 'release_gate_services_cleanup' EXIT
+  owner_name=a owner_announced=no
+  trap 'owner_exit "$?"' EXIT
   export FAKE_PG_PORT=45431 FAKE_REDIS_PORT=46371
   release_gate_services_start "$GATE_ROOT/a" "$FIXTURE_WORKSPACE" "$FIXTURE_LOCK"
   printf 'a\n' >&7
+  owner_announced=yes
   read -r release < "$GATE_ROOT/release-a"
   exit 23
 )
 owner_b() (
-  trap 'release_gate_services_cleanup' EXIT
+  owner_name=b owner_announced=no
+  trap 'owner_exit "$?"' EXIT
   export FAKE_PG_PORT=55431 FAKE_REDIS_PORT=56371
   release_gate_services_start "$GATE_ROOT/b" "$FIXTURE_WORKSPACE" "$FIXTURE_LOCK"
   printf 'b\n' >&7
+  owner_announced=yes
   read -r release < "$GATE_ROOT/release-b"
   release_gate_service_find postgres
   [[ -n "$RELEASE_GATE_SERVICE_ID" ]] || exit 1
   release_gate_service_find redis
   [[ -n "$RELEASE_GATE_SERVICE_ID" ]] || exit 1
 )
+read_fixture_owner() {
+  IFS= read -r fixture_owner <&7 || return 1
+  if [[ "$fixture_owner" != a && "$fixture_owner" != b ]]; then
+    printf 'concurrent service owner failed to become ready: %s\n' "$fixture_owner" >&2
+    return 1
+  fi
+}
 owner_a & a_pid=$!
 owner_b & b_pid=$!
-read -r first <&7
-read -r second <&7
+read_fixture_owner
+first="$fixture_owner"
+read_fixture_owner
+second="$fixture_owner"
 [[ "$first:$second" == a:b || "$first:$second" == b:a ]] || exit 1
 [[ "$(< "$GATE_ROOT/a/services/owner")" != "$(< "$GATE_ROOT/b/services/owner")" ]] || exit 1
 printf 'release\n' >&8
@@ -856,6 +896,75 @@ wait "$b_pid"
 	removed, err := os.ReadFile(filepath.Join(self.state, "removed"))
 	if err != nil || len(strings.Fields(string(removed))) != 4 {
 		t.Fatalf("concurrent cleanup removed %q: %v", removed, err)
+	}
+}
+
+// A real name fallback must remain available while an unrelated create has
+// opened an output file and has yet to publish its complete container record.
+func TestReleaseGateServicesFindWhileSiblingPublishes(t *testing.T) {
+	self := newReleaseGateServicesFixture(t)
+	output, err := self.run(t, `
+mkdir -m 700 "$GATE_ROOT/lookup"
+release_gate_service_root="$GATE_ROOT/lookup"
+release_gate_service_root_identity="$(stat -c '%d:%i:%a:%u' "$release_gate_service_root")"
+release_gate_service_owner=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+printf '%s\n' "$release_gate_service_owner" > "$release_gate_service_root/owner"
+create_fixture_postgres() {
+  local owner="$1"
+  release_gate_service_docker create --name "urnetwork-gate-$owner-postgres" --restart=no \
+    --label "urnetwork.release-gate.owner=$owner" --label urnetwork.release-gate.service=postgres
+}
+expected="$(create_fixture_postgres "$release_gate_service_owner")"
+release_gate_service_id "$expected"
+mkfifo "$GATE_ROOT/meta-opened" "$GATE_ROOT/meta-release"
+exec 5<>"$GATE_ROOT/meta-opened"
+exec 6<>"$GATE_ROOT/meta-release"
+sibling_pid=''
+join_fixture_publisher() {
+  local result=0
+  if [[ -n "$sibling_pid" ]]; then
+    printf 'release\n' >&6
+    wait "$sibling_pid" || result=1
+  fi
+  if [[ -s "$GATE_ROOT/sibling.cid" ]]; then
+    release_gate_service_docker rm --force --volumes "$(< "$GATE_ROOT/sibling.cid")" || result=1
+  fi
+  release_gate_services_cleanup || result=1
+  return "$result"
+}
+trap join_fixture_publisher EXIT
+(
+  export FAKE_HOLD_META_SERVICE=postgres
+  create_fixture_postgres bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb > "$GATE_ROOT/sibling.cid" || {
+    status=$?
+    printf 'failed\n' >&5
+    exit "$status"
+  }
+) & sibling_pid=$!
+IFS= read -r phase <&5
+[[ "$phase" == opened && ! -s "$GATE_ROOT/sibling.cid" ]] || exit 90
+if ! release_gate_service_find postgres || [[ "$RELEASE_GATE_SERVICE_ID" != "$expected" ]]; then
+  printf 'RELEASE_GATE_FIXTURE_METADATA_PUBLICATION failed exact name lookup\n' >&2
+  exit 91
+fi
+printf 'release\n' >&6
+wait "$sibling_pid"
+sibling_pid=''
+sibling="$(< "$GATE_ROOT/sibling.cid")"
+release_gate_service_id "$sibling"
+[[ "$sibling" != "$expected" && -s "$FAKE_STATE/$sibling.meta" ]] || exit 92
+release_gate_service_find postgres
+[[ "$RELEASE_GATE_SERVICE_ID" == "$expected" ]] || exit 92
+
+# A genuinely incomplete record in the published namespace remains an error.
+corrupt="$FAKE_STATE/$(printf '%064d' 1).meta"
+: > "$corrupt"
+status=0; release_gate_service_find postgres || status=$?
+rm -- "$corrupt"
+[[ "$status" == 1 ]] || exit 93
+`)
+	if err != nil || !strings.Contains(string(output), "unreadable published container metadata") {
+		t.Fatalf("find during fixture metadata publication: %v\n%s", err, output)
 	}
 }
 

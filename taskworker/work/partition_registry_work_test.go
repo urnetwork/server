@@ -65,3 +65,30 @@ func TestPartitionRegistryPostsRearmTheChains(t *testing.T) {
 		connect.AssertEqual(t, args.State.Families["synthetic"], state.Families["synthetic"])
 	})
 }
+
+// The retention chain reaches each range's new leaves a minute after the
+// range opens: at the cadence's time unless the open-leaf analyze comes
+// first, at once when that passed while the run ran, and on the cadence alone
+// for a result from a build without it.
+func TestMaintainPartitionRetentionNextRunAtMeetsTheOpenedRange(t *testing.T) {
+	settings := DefaultPartitionRegistryTaskSettings()
+	before := time.Date(2026, 11, 25, 23, 55, 0, 0, time.UTC)
+	opened := time.Date(2026, 11, 26, 0, 1, 0, 0, time.UTC)
+	for _, c := range []struct {
+		result MaintainPartitionRetentionResult
+		now    time.Time
+		want   time.Time
+	}{
+		// the cadence alone runs at 00:10
+		{result: MaintainPartitionRetentionResult{OpenLeafAnalyzeAt: opened}, now: before, want: opened},
+		{result: MaintainPartitionRetentionResult{More: true, OpenLeafAnalyzeAt: opened}, now: before, want: before.Add(settings.RetentionRetryInterval)},
+		{result: MaintainPartitionRetentionResult{OpenLeafAnalyzeAt: opened}, now: before.Add(-time.Hour), want: before.Add(-time.Hour).Add(settings.RetentionInterval)},
+		// a run that started before 00:01 and ended after it
+		{result: MaintainPartitionRetentionResult{OpenLeafAnalyzeAt: opened}, now: opened.Add(4 * time.Minute), want: opened.Add(4 * time.Minute)},
+		{result: MaintainPartitionRetentionResult{}, now: before, want: before.Add(settings.RetentionInterval)},
+	} {
+		if got := maintainPartitionRetentionNextRunAt(settings, &c.result, c.now); !got.Equal(c.want) {
+			t.Errorf("result %+v at %s: next run %s, want %s", c.result, c.now, got, c.want)
+		}
+	}
+}

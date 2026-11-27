@@ -1320,6 +1320,44 @@ func TestProviderLivenessCoverageKeepsItsVerdictThroughFailedReads(t *testing.T)
 	})
 }
 
+// Whether address can be a disposable local cluster's node: a loopback host on
+// a port no production data tunnel forwards (server.Testing_LoopbackTunnelPort).
+func livenessTestDisposableClusterNode(address string) error {
+	host, portText, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("refusing cluster node %q: %w", address, err)
+	}
+	if ip := net.ParseIP(host); host != "localhost" && (ip == nil || !ip.IsLoopback()) {
+		return fmt.Errorf("refusing cluster node %s: not a loopback host", address)
+	}
+	if port, err := strconv.ParseUint(portText, 10, 16); err != nil || server.Testing_LoopbackTunnelPort(uint16(port)) {
+		return fmt.Errorf("refusing cluster node %s: a production data tunnel port", address)
+	}
+	return nil
+}
+
+// The cluster diagnostic dials and keeps only nodes on a loopback host and off
+// the production data tunnel's ports.
+func TestLivenessTestDisposableClusterNodeRefusesTunnelPortsAndOtherHosts(t *testing.T) {
+	for address, allowed := range map[string]bool{
+		"127.0.0.1:30001":   true,
+		"localhost:30002":   true,
+		"[::1]:30003":       true,
+		"127.0.0.1:6379":    false,
+		"127.0.0.1:6427":    false,
+		"127.0.0.1:5432":    false,
+		"127.0.0.1:6432":    false,
+		"192.0.2.10:30001":  false,
+		"198.51.100.7:6415": false,
+		":30001":            false,
+		"127.0.0.1":         false,
+	} {
+		if err := livenessTestDisposableClusterNode(address); (err == nil) != allowed {
+			t.Errorf("cluster node %q: err %v, want allowed %t", address, err, allowed)
+		}
+	}
+}
+
 // One read pipelined across every shard of a real Redis cluster: each shard is
 // one slot on whichever node holds it, and a missing, current or lapsed lease
 // is judged as on one node. It runs only against a disposable local cluster
@@ -1342,10 +1380,16 @@ func TestProviderLivenessExclusionsPipelineAcrossClusterShards(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	// The seed and every node the cluster names dial through the process
-	// guard, as server's TestRedisShardSubscriptionFollowsSlotMigration does.
+	// guard, as server's TestRedisShardSubscriptionFollowsSlotMigration does,
+	// and only on a loopback host off the production data tunnel's ports: only
+	// the seed comes from the environment, and a production cluster names its
+	// own hosts.
 	clusterClient := redis.NewClusterClient(&redis.ClusterOptions{
 		Addrs: []string{authority},
 		Dialer: func(ctx context.Context, network string, address string) (net.Conn, error) {
+			if err := livenessTestDisposableClusterNode(address); err != nil {
+				return nil, err
+			}
 			return server.Testing_DialTestEnv(ctx, "redis", network, address)
 		},
 	})
@@ -1365,6 +1409,15 @@ func TestProviderLivenessExclusionsPipelineAcrossClusterShards(t *testing.T) {
 	slots, err := clusterClient.ClusterSlots(ctx).Result()
 	if err != nil {
 		t.Fatalf("cluster slots: %v", err)
+	}
+	// every node the slots name, replicas too, before any write or the process
+	// pool, whose own dials take the cluster's names as they are
+	for _, slot := range slots {
+		for _, node := range slot.Nodes {
+			if err := livenessTestDisposableClusterNode(node.Addr); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 	expectedMasterAddrs := map[string]bool{}
 	for _, slot := range slots {

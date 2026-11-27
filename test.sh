@@ -20,6 +20,62 @@ if ! "$network_test_gate" --verify-held run-all; then
     echo "server test suite inherited an invalid network-intensive lock" >&2
     exit 70
 fi
+
+# No test starts while a loopback Redis port is open outside Docker. Clients
+# that don't use the fixtures, the vendored suites' first, dial localhost's
+# default Redis ports directly, and on 2026-11-25 a developer machine forwarded
+# 6379-6427 through an ssh tunnel to the production cluster, where a vendored
+# suite's FLUSHALL landed. The fixtures dial only the endpoints test-env.sh
+# attests, Docker's on their own address. A listener on a loopback or wildcard
+# address in that range that isn't Docker's is refused, unless
+# URNETWORK_TEST_LOOPBACK_REDIS_OK=1 accepts it as a disposable local Redis.
+# lsof without root sees only this user's processes, as an ssh tunnel is.
+loopback_redis_first_port=6379
+loopback_redis_last_port=6427
+# Lines of "<command> <local address:port>" for each TCP listener.
+test_tcp_listeners() {
+    if command -v lsof >/dev/null 2>&1; then
+        # lsof exits 1 when it lists nothing; its header line is dropped
+        { lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null || true; } | awk 'NR > 1 { print $1, $9 }'
+    elif command -v ss >/dev/null 2>&1; then
+        { ss -Hltnp 2>/dev/null || true; } |
+            awk '{ name = $6; sub(/^users:\(\("/, "", name); sub(/".*$/, "", name); if (name == "") name = "?"; print name, $4 }'
+    else
+        return 127
+    fi
+}
+test_loopback_redis_guard() {
+    [[ "${URNETWORK_TEST_LOOPBACK_REDIS_OK:-}" == 1 ]] && return 0
+    local listeners listener_command address host port
+    local -a refused=()
+    if ! listeners="$(test_tcp_listeners)"; then
+        echo "test.sh: neither lsof nor ss can list TCP listeners, so loopback Redis ports $loopback_redis_first_port-$loopback_redis_last_port can't be checked; URNETWORK_TEST_LOOPBACK_REDIS_OK=1 runs anyway where none forwards elsewhere" >&2
+        return 69
+    fi
+    while read -r listener_command address; do
+        [[ -n "$address" ]] || continue
+        port="${address##*:}"
+        host="${address%:*}"
+        [[ "$port" =~ ^[0-9]+$ ]] || continue
+        (( port >= loopback_redis_first_port && port <= loopback_redis_last_port )) || continue
+        case "$host" in
+            127.*|localhost|'*'|0.0.0.0|'[::1]'|'[::]'|'::1'|'::'|'[::ffff:127.'*) ;;
+            *) continue ;;
+        esac
+        case "$listener_command" in
+            com.docke*|docker-proxy*|vpnkit*) continue ;;
+        esac
+        refused+=("$listener_command on $address")
+    done <<< "$listeners"
+    if [[ "${#refused[@]}" -gt 0 ]]; then
+        local joined
+        joined="$(printf '%s; ' "${refused[@]}")"
+        echo "test.sh: refusing to start: a loopback Redis port is open outside Docker (${joined%; }). Tests dial localhost's default Redis ports, so a FLUSHALL would land wherever it leads. Close it, or set URNETWORK_TEST_LOOPBACK_REDIS_OK=1 for a disposable local Redis." >&2
+        return 75
+    fi
+}
+test_loopback_redis_guard || exit $?
+
 source "$script_dir/test-env.sh" || exit $?
 
 # Dashboard expressions use the official evaluator against synthetic series.
@@ -149,7 +205,7 @@ if [[ "$(uname -s)" != Linux &&
     echo "test.sh: the six public native-fee roots are left out of ./model and ./controller: their sn verifier runs only on Linux, and this host is $(uname -s)" >&2
 fi
 
-test_directories="$(./test-dirs.sh)" || exit $?
+test_directories="$(./test-dirs.sh -race "$@")" || exit $?
 while IFS= read -r d; do
     [[ -n "$d" ]] || continue
     if [[ $d == $proxy_dir || $d == $perfvar_dir ]]; then

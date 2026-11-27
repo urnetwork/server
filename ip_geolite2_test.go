@@ -628,9 +628,10 @@ func TestIpInfoDecodeGeoLite2CityIntegerWidths(t *testing.T) {
 	connect.AssertEqual(t, ipInfo.Regions, []string{""})
 }
 
-// A record whose values have the wrong type is an error, not an IpInfo. The
-// one gap is a place map that is not a map, see
-// TestIpInfoDecodeGeoLite2CityNonMapPlaceIsNotRejected.
+// A record whose values have the wrong type is an error, not an IpInfo,
+// including a place (or `names`) that is not a map: maxminddb-golang v2.4.1
+// retried such a field from data section offset 0 and could decode it with no
+// error; v2.5.0 and later reject it.
 func TestIpInfoDecodeGeoLite2CityRejectsMalformedRecords(t *testing.T) {
 	for name, record := range map[string]any{
 		"record not a map":         []any{"GB"},
@@ -639,6 +640,7 @@ func TestIpInfoDecodeGeoLite2CityRejectsMalformedRecords(t *testing.T) {
 		"radius over 16 bits":      mmdbTestMap{{key: "location", value: mmdbTestMap{{key: "accuracy_radius", value: uint32(65536)}}}},
 		"latitude not a double":    mmdbTestMap{{key: "location", value: mmdbTestMap{{key: "latitude", value: uint32(51)}}}},
 		"subdivisions not a slice": mmdbTestMap{{key: "subdivisions", value: mmdbTestMap{}}},
+		"names not a map":          mmdbTestMap{{key: "country", value: mmdbTestMap{{key: "names", value: "United Kingdom"}}}},
 	} {
 		data := &mmdbTestData{}
 		if _, err := decodeGeoLite2TestRecord(data, record); err == nil {
@@ -655,26 +657,6 @@ func TestIpInfoDecodeGeoLite2CityRejectsMalformedRecords(t *testing.T) {
 	ipInfo, err := lookupIpInfo(db, schemaType("GeoLite2-Country"), netip.MustParseAddr(geoLite2TestRecordIp))
 	connect.AssertNotEqual(t, err, nil)
 	connect.AssertEqual(t, ipInfo == nil, true)
-}
-
-// maxminddb-golang v2.4.1 does not reject a struct-typed field (a `names` map,
-// or city, continent, country, location) whose value is not a map: its struct
-// decoder retries such a field from data section offset 0 instead of from the
-// field. Usually the keys after it are then read out of step and the lookup
-// fails, but a place that is the last key decodes from whatever is at offset
-// 0 with no error, as here, where offset 0 is this record and has no `en`.
-// MaxMind's GeoLite2 City writes every one of these as a map (all 338,904
-// records of the 2026-09-22 build), and openIpDb loads no other type, so this
-// is reachable only through a corrupt file. If this test starts failing
-// because the decode errors, the library has fixed the retry: move this case
-// into TestIpInfoDecodeGeoLite2CityRejectsMalformedRecords.
-func TestIpInfoDecodeGeoLite2CityNonMapPlaceIsNotRejected(t *testing.T) {
-	data := &mmdbTestData{}
-	ipInfo, err := decodeGeoLite2TestRecord(data, mmdbTestMap{
-		{key: "country", value: mmdbTestMap{{key: "names", value: "United Kingdom"}}},
-	})
-	connect.AssertEqual(t, err, nil)
-	connect.AssertEqual(t, ipInfo, IpInfo{})
 }
 
 // Every database type but GeoLite2 City panics at open, naming the type.

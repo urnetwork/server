@@ -20,6 +20,17 @@ const (
 	proxyExitAssignmentReleasedState = "((state)::text = 'released'::text)"
 )
 
+// A network's unreleased assignments (server
+// proxyExitAssignmentNetworkLiveIndexMigration), versioned by its position
+// wherever a merge places it. The migration builds the index concurrently, so
+// the contract reads it as the index catalog does: present only once valid
+// and ready, with its complete definition and predicate.
+var proxyExitAssignmentNetworkLiveIndexMigrationContract = migrationCurrentSuffix(
+	server.ProxyExitAssignmentNetworkLiveIndexMigrationVersion(),
+	"unreleased unique-exit assignments by network",
+	migrationFp2Index("proxy_exit_assignment", "proxy_exit_assignment_network_id_live",
+		"network_id", proxyExitAssignmentUnreleasedStates, false))
+
 // A unique partial index is pinned by its complete definition: uniqueness
 // over a different predicate would hold different rows apart.
 func proxyUniqueExitUniquePartialIndex(table, name, columns, predicate string) string {

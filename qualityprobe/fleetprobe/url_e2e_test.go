@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -109,8 +110,9 @@ func TestUrlProbeE2eObservationRejectsRekeyDuringRequestWrite(t *testing.T) {
 // before the IPv4 HTTPS leg's request with that leg passed, on one tunnel and
 // client; negative for a classical group, a post-quantum session unsealed
 // past its grace, or a ClientHello unanswered for a whole establishment
-// window while the provider acknowledged; unmeasured otherwise. Each result
-// is evidence the ingest accepts.
+// window while the provider acknowledged; unmeasured otherwise, and sealed
+// only for a post-quantum session sealed on one tunnel and client whose IPv4
+// HTTPS leg wrote no request. Each result is evidence the ingest accepts.
 func TestReadUrlProbeE2eCases(t *testing.T) {
 	settings := DefaultUrlProbePostQuantumSettings()
 	attempt := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
@@ -130,11 +132,16 @@ func TestReadUrlProbeE2eCases(t *testing.T) {
 		observation     connect.PeerCapabilityObservation
 		now             time.Time
 		sealedAtRequest bool
-		httpsPassed     bool
-		unmeasurable    bool
-		pq              string
-		window          string
-		sealed          bool
+		// the IPv4 HTTPS leg wrote no request; every turn below that leaves it
+		// false wrote one
+		noRequest    bool
+		httpsPassed  bool
+		unmeasurable bool
+		pq           string
+		window       string
+		sealed       bool
+		// sealed without a request (UrlProbeE2eEvidence.Sealed)
+		sealedNoRequest bool
 	}{
 		{name: "post-quantum sealed before the request", observation: pqSealed, now: early, sealedAtRequest: true, httpsPassed: true,
 			pq: egresshealth.UrlProbePqPositive, window: egresshealth.UrlProbeWindowResizable, sealed: true},
@@ -162,13 +169,30 @@ func TestReadUrlProbeE2eCases(t *testing.T) {
 			pq: egresshealth.UrlProbePqUnmeasured, window: egresshealth.UrlProbeWindowFixed},
 		{name: "unanswered and unacknowledged", observation: unacknowledged, now: afterWindow,
 			pq: egresshealth.UrlProbePqUnmeasured, window: egresshealth.UrlProbeWindowNotTested},
+		// the IPv4 HTTPS leg failed before it wrote a request, at its DNS
+		// lookup through the provider
+		{name: "post-quantum sealed, no request", observation: pqSealed, now: early, noRequest: true,
+			pq: egresshealth.UrlProbePqUnmeasured, window: egresshealth.UrlProbeWindowResizable, sealedNoRequest: true},
+		{name: "post-quantum sealed, no request, past the grace", observation: pqSealed, now: afterWindow, noRequest: true,
+			pq: egresshealth.UrlProbePqUnmeasured, window: egresshealth.UrlProbeWindowResizable, sealedNoRequest: true},
+		{name: "post-quantum sealed, no request, on a replaced client", observation: pqSealed, now: early, noRequest: true, unmeasurable: true,
+			pq: egresshealth.UrlProbePqUnmeasured, window: egresshealth.UrlProbeWindowResizable},
+		{name: "post-quantum unsealed within its grace, no request", observation: pqUnsealed, now: early, noRequest: true,
+			pq: egresshealth.UrlProbePqUnmeasured, window: egresshealth.UrlProbeWindowResizable},
+		{name: "post-quantum unsealed past its grace, no request", observation: pqUnsealed, now: afterGrace, noRequest: true,
+			pq: egresshealth.UrlProbePqNegative, window: egresshealth.UrlProbeWindowResizable},
+		{name: "classical sealed, no request", observation: classical, now: early, noRequest: true,
+			pq: egresshealth.UrlProbePqNegative, window: egresshealth.UrlProbeWindowFixed},
+		{name: "unanswered, no request", observation: unanswered, now: early, noRequest: true,
+			pq: egresshealth.UrlProbePqUnmeasured, window: egresshealth.UrlProbeWindowFixed},
 	} {
-		e2e := readUrlProbeE2e(c.observation, true, c.now, c.sealedAtRequest, c.httpsPassed, c.unmeasurable, settings)
+		e2e := readUrlProbeE2e(c.observation, true, c.now, c.sealedAtRequest, !c.noRequest, c.httpsPassed, c.unmeasurable, settings)
 		if e2e == nil {
 			t.Fatalf("%s: no evidence", c.name)
 		}
-		if e2e.Pq != c.pq || e2e.Window != c.window || e2e.SealedBeforeRequest != c.sealed {
-			t.Errorf("%s: read %+v, want pq %s window %s sealed %t", c.name, e2e, c.pq, c.window, c.sealed)
+		if e2e.Pq != c.pq || e2e.Window != c.window || e2e.SealedBeforeRequest != c.sealed || e2e.Sealed != c.sealedNoRequest {
+			t.Errorf("%s: read %+v, want pq %s window %s sealed before the request %t sealed without one %t",
+				c.name, e2e, c.pq, c.window, c.sealed, c.sealedNoRequest)
 		}
 		if negotiated := c.observation.E2eNegotiated; (e2e.KeyExchange != "") != negotiated {
 			t.Errorf("%s: key exchange %q for a session negotiated %t", c.name, e2e.KeyExchange, negotiated)
@@ -177,17 +201,96 @@ func TestReadUrlProbeE2eCases(t *testing.T) {
 		evidence := urlE2eTestEvidence(t)
 		evidence.E2e = e2e
 		ok := 0
-		if c.httpsPassed {
+		switch {
+		case c.httpsPassed:
 			ok = 1
-		} else {
+		case c.noRequest:
+			urlE2eTestNoRequest(evidence)
+		default:
 			evidence.ContentClassification, evidence.PerformanceClassification, evidence.FailureStage = "captcha", "", "response_content"
 		}
 		if err := evidence.ValidateOutcome(ok, 1, false); err != nil {
 			t.Errorf("%s: the ingest refuses the turn's evidence: %v", c.name, err)
 		}
+		// the strict window's pq_outcome counts only a concluded outcome
+		if e2e.Sealed && evidence.PqOutcome(1) != egresshealth.UrlProbePqOutcomeUnmeasured {
+			t.Errorf("%s: a seal without a request stores pq_outcome %d", c.name, evidence.PqOutcome(1))
+		}
 	}
-	if e2e := readUrlProbeE2e(connect.PeerCapabilityObservation{}, false, early, false, true, false, settings); e2e != nil {
+	if e2e := readUrlProbeE2e(connect.PeerCapabilityObservation{}, false, early, false, true, true, false, settings); e2e != nil {
 		t.Fatalf("a recorder that holds nothing reads %+v", e2e)
+	}
+}
+
+// Turns evidence into an outcome whose IPv4 HTTPS leg failed before it wrote
+// a request: at its DNS lookup through the provider, with nothing answered.
+func urlE2eTestNoRequest(evidence *egresshealth.UrlProbeEvidence) {
+	evidence.Security = nil
+	evidence.ContentClassification, evidence.PerformanceClassification, evidence.FailureStage = "", "", "dial_dns"
+	evidence.StatusCode, evidence.ByteCount, evidence.WireByteCount, evidence.WireSampleByteCount = 0, 0, 0, 0
+	evidence.BodyComplete, evidence.RequestWritten, evidence.FirstByteReceived = false, false, false
+	evidence.TtfbMillis, evidence.BodyMillis, evidence.BodyBitsPerSecond = 0, 0, 0
+}
+
+// A post-quantum session that sealed on the turn's one tunnel and client
+// while the IPv4 HTTPS leg failed before its first request, at its DNS lookup
+// or dial, says so on the wire, and its outcome stays unmeasured; a turn that
+// wrote its request, one on a replaced client, a classical or an unsealed
+// session, and a positive turn send no seal (owner, 2026-11-24). The
+// observation's own request hooks decide, as the run calls them.
+func TestUrlProbeE2eObservationReportsASealWithoutARequest(t *testing.T) {
+	sealed := connect.PeerCapabilityObservation{
+		E2eAttempted: true, E2eFirstAttemptTime: time.Now(), E2eNegotiated: true, E2eSealed: true,
+		KeyExchange: "X25519MLKEM768", PostQuantum: true, AckObserved: true, WindowAdvertised: true,
+		Session: connect.PeerCapabilitySession{ClientId: connect.NewId(), EpochId: connect.NewId(), KeyExchange: "X25519MLKEM768", PostQuantum: true},
+	}
+	classical := sealed
+	classical.KeyExchange, classical.PostQuantum = "X25519", false
+	classical.Session.KeyExchange, classical.Session.PostQuantum = "X25519", false
+	unsealed := sealed
+	unsealed.E2eSealed = false
+	unsealed.Session = connect.PeerCapabilitySession{}
+	for _, c := range []struct {
+		name         string
+		observation  connect.PeerCapabilityObservation
+		request      bool
+		httpsPassed  bool
+		unmeasurable bool
+		pq           string
+		seal         bool
+	}{
+		{name: "sealed, no request", observation: sealed, pq: egresshealth.UrlProbePqUnmeasured, seal: true},
+		{name: "sealed, request written, leg failed", observation: sealed, request: true, pq: egresshealth.UrlProbePqUnmeasured},
+		{name: "sealed, no request, replaced client", observation: sealed, unmeasurable: true, pq: egresshealth.UrlProbePqUnmeasured},
+		{name: "classical, no request", observation: classical, pq: egresshealth.UrlProbePqNegative},
+		{name: "unsealed, no request", observation: unsealed, pq: egresshealth.UrlProbePqUnmeasured},
+		{name: "positive", observation: sealed, request: true, httpsPassed: true, pq: egresshealth.UrlProbePqPositive},
+	} {
+		observation := c.observation
+		observer := &urlProbeE2eObservation{
+			read:         func() (connect.PeerCapabilityObservation, bool) { return observation, true },
+			settings:     DefaultUrlProbePostQuantumSettings(),
+			unmeasurable: func() bool { return c.unmeasurable },
+			now:          time.Now,
+		}
+		if c.request {
+			observer.RequestStarted()
+			observer.RequestWritten()
+		}
+		e2e := observer.Evidence(c.httpsPassed)
+		if e2e == nil || e2e.Pq != c.pq {
+			t.Fatalf("%s: read %+v, want pq %s", c.name, e2e, c.pq)
+		}
+		encoded, err := json.Marshal(e2e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(encoded), `"sealed":true`) != c.seal {
+			t.Errorf("%s: sends %s, want a seal without a request %t", c.name, encoded, c.seal)
+		}
+		if !c.seal && strings.Contains(string(encoded), `"sealed"`) {
+			t.Errorf("%s: sends the seal field when false: %s", c.name, encoded)
+		}
 	}
 }
 

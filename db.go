@@ -386,9 +386,13 @@ func (self *safePgPool) open() *pgxpool.Pool {
 // Pins a local process's connection to its launcher attestation: lookups may
 // return only attested addresses and every socket, cancel requests included,
 // goes to an attested endpoint (test_env_dial_guard.go). Every other process
-// has a nil guard and keeps the configuration untouched.
+// has a nil guard: a service keeps the configuration untouched, and a test
+// binary's dial refuses loopback tunnel ports.
 func configurePgTestEnvDial(guard *testEnvDialGuard, config *pgx.ConnConfig) {
 	if guard == nil {
+		if testEnvGuardlessDialRefusesTunnelPorts.Load() {
+			config.DialFunc = testEnvGuardlessTestDial(config.DialFunc, net.DefaultResolver.LookupNetIP)
+		}
 		return
 	}
 	config.LookupFunc = guard.lookupFunc("postgres", config.LookupFunc)

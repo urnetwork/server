@@ -542,6 +542,10 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 			sql: `ALTER TABLE provider_egress_health_history ALTER COLUMN pq_outcome SET DEFAULT 1`},
 		{name: "failed later legs nullable", version: server.ProviderEgressFp2EvidenceMigrationVersion(),
 			sql: `ALTER TABLE provider_egress_health_history ALTER COLUMN failed_later_legs DROP NOT NULL`},
+		{name: "missing network live exit index", version: server.ProxyExitAssignmentNetworkLiveIndexMigrationVersion(),
+			sql: `DROP INDEX proxy_exit_assignment_network_id_live`},
+		{name: "network live exit index includes released assignments", version: server.ProxyExitAssignmentNetworkLiveIndexMigrationVersion(),
+			sql: `DROP INDEX proxy_exit_assignment_network_id_live; CREATE INDEX proxy_exit_assignment_network_id_live ON proxy_exit_assignment (network_id)`},
 	}
 	// Current-head fault expectations must name a custodian still active at
 	// that head; inherited guards transfer with the published contract.
@@ -608,6 +612,8 @@ func TestMigrationsCurrentSuffixConcurrentIndexReadiness(t *testing.T) {
 				{server.WritePathMigrationVersion(server.WritePathConnectionOpenAddressIndex), "network_client_connection", "network_client_connection_connected_client_address_hash"},
 				{server.WritePathMigrationVersion(server.WritePathConnectionClosedDisconnectIndex), "network_client_connection", "network_client_connection_closed_disconnect_time"},
 				{server.SnTopReplicaSchemaMigrationVersion(), "sn_head_summary", "sn_head_summary_replica_genesis"},
+				{server.StPayoutWalletResolutionColdkeyIndexMigrationVersion(), "st_payout_wallet_resolution", "st_payout_wallet_resolution_coldkey"},
+				{server.ProxyExitAssignmentNetworkLiveIndexMigrationVersion(), "proxy_exit_assignment", "proxy_exit_assignment_network_id_live"},
 			} {
 				// read as the signal's index catalog reads it, so a partitioned
 				// contract table's parent index compares without ONLY

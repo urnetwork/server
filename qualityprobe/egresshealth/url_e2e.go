@@ -52,7 +52,9 @@ const (
 	UrlProbePqNegative = "negative"
 	// anything else: a handshake still pending at the run's end, a lost or
 	// replaced tunnel client, a session that sealed only after the request,
-	// or a run whose IPv4 HTTPS leg failed or was not measured
+	// or a run whose IPv4 HTTPS leg failed or was not measured. A
+	// post-quantum session that sealed on the turn's one tunnel and client
+	// while that leg wrote no request says so (UrlProbeE2eEvidence.Sealed)
 	UrlProbePqUnmeasured = "unmeasured"
 )
 
@@ -119,6 +121,18 @@ type UrlProbeE2eEvidence struct {
 	SealedBeforeRequest bool `json:"sealed_before_request"`
 	// UrlProbeWindow*
 	Window string `json:"window"`
+	// The session negotiated a post-quantum group and sealed on the turn's
+	// one tunnel and client, but the IPv4 HTTPS leg failed before it wrote a
+	// request, so no request rode the seal and the outcome stays unmeasured
+	// (owner, 2026-11-24). Set only on such an unmeasured outcome. The
+	// server records it as post-quantum evidence only for a provider of a
+	// country the URL-success guard exempts, where the probe's general
+	// catalog fails before any request for most providers (model
+	// provider_egress_post_quantum_ready.go). Omitted when false, so every
+	// other document is the one a server that predates it knows. That
+	// server's ingest refuses unknown fields, so a prober that sends it
+	// rolls only after every api that ingests its runs knows it.
+	Sealed bool `json:"sealed,omitempty"`
 }
 
 // Every invariant of the record alone; ValidateOutcome adds those that need
@@ -141,6 +155,12 @@ func (self *UrlProbeE2eEvidence) validate() error {
 		return fmt.Errorf("URL end-to-end evidence sealed a session that negotiated no group")
 	}
 	postQuantum := UrlProbeKeyExchangePostQuantum(self.KeyExchange)
+	// a seal without a request is the unmeasured reading of a post-quantum
+	// session: a turn that concluded carries its seal in its outcome, and a
+	// session sealed before the request had a request
+	if self.Sealed && (self.Pq != UrlProbePqUnmeasured || !postQuantum || self.SealedBeforeRequest) {
+		return fmt.Errorf("URL end-to-end evidence is sealed without a request only for an unmeasured post-quantum session")
+	}
 	switch self.Pq {
 	case UrlProbePqPositive:
 		// a prober cannot claim positive without a post-quantum key exchange
