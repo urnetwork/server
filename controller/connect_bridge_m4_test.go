@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -204,7 +205,9 @@ func TestScenarioS8OnT3(t *testing.T) {
 }
 
 // I-12 around the flow path: once a window's contracts exist, its TCP, UDP and ICMP flows through the host's hook and
-// NAT acquire no PostgreSQL connection, under server's process-wide tripwire.
+// NAT acquire no PostgreSQL connection, under server's process-wide tripwire. Each echo is sent again while its wait
+// has no answer (sidecartest's BridgeNetWindow.WaitEchoAnswered), since its path may lose it by design, so the second
+// round's copies ride the flow the first echo opened inside the tripwire (TestBridgeLostEchoAnsweredWhenSentAgainOnT3).
 func TestBridgeFlowPathReadsNoPostgresOnT3(t *testing.T) {
 	testingAclRun(t, func(t testing.TB, ctx context.Context) {
 		net := sidecartest.NewNet(ctx, nil)
@@ -238,8 +241,8 @@ func TestBridgeFlowPathReadsNoPostgresOnT3(t *testing.T) {
 		if _, err := udp.Read(buffer); err != nil {
 			t.Fatal(err)
 		}
-		if err := window.SendEcho(host.Address, 1); err != nil || !window.WaitEchoReply(1, settings.WaitTimeout) {
-			t.Fatalf("the first echo: %v", err)
+		if err := window.SendEcho(host.Address, 1); err != nil || !window.WaitEchoAnswered(host.Address, 1, settings.WaitTimeout) {
+			t.Fatalf("the first echo: %v, sent again %d times", err, window.EchoResendCount())
 		}
 
 		attempts, stop := server.DenyPostgresForTest(t)
@@ -253,16 +256,69 @@ func TestBridgeFlowPathReadsNoPostgresOnT3(t *testing.T) {
 		}
 		udp.SetReadDeadline(time.Now().Add(settings.WaitTimeout))
 		n, err := udp.Read(buffer)
-		echoed := window.SendEcho(host.Address, 2) == nil && window.WaitEchoReply(2, settings.WaitTimeout)
+		echoed := window.SendEcho(host.Address, 2) == nil && window.WaitEchoAnswered(host.Address, 2, settings.WaitTimeout)
 		delivered := host.Upstream.WaitFor(settings.WaitTimeout, func(accepts []sidecartest.BridgeNetAccept, datagrams [][]byte) bool {
 			return 0 < len(accepts) && string(accepts[0].Bytes) == "firstsecond"
 		})
 		stop()
 		if err != nil || string(buffer[:n]) != "second" || !echoed || !delivered {
-			t.Fatalf("the second round: datagram %q %v, echo %t, tcp %t", buffer[:n], err, echoed, delivered)
+			t.Fatalf("the second round: datagram %q %v, echo %t (sent again %d times), tcp %t", buffer[:n], err, echoed, window.EchoResendCount(), delivered)
 		}
 		if count := attempts(); count != 0 {
 			t.Fatalf("the flow path acquired PostgreSQL %d times", count)
+		}
+	})
+}
+
+// The flow path's echo lost on T3: an echo's path may lose it by design with nothing wrong on the bridge (the host's NAT
+// drops a reply its session to a new window cannot seal yet, and darwin's kernel drops one at a full datagram ICMP
+// socket; sidecartest's BridgeNetSettings.EchoResendInterval), and a wait that sent it once waited out its bound. Here
+// the second echo is lost outright, never sent: the wait that sends nothing sees no answer, and the wait that sends it
+// again is answered, its copies riding the flow the first echo opened under the contracts server's controller signed,
+// and acquiring no PostgreSQL connection inside the tripwire, as the flow path's second round needs of them.
+func TestBridgeLostEchoAnsweredWhenSentAgainOnT3(t *testing.T) {
+	testingAclRun(t, func(t testing.TB, ctx context.Context) {
+		net := sidecartest.NewNet(ctx, nil)
+		defer net.Close()
+		settings := sidecartest.DefaultBridgeNetSettings()
+		settings.Platform = newBridgeM4Platform(t, ctx)
+		// each lost echo costs the wait one interval
+		settings.EchoResendInterval = 20 * time.Millisecond
+		world := sidecartest.NewBridgeNet(t, net, settings)
+		defer world.Close()
+		hostDevice := world.AddDevice("host")
+		subject := world.AddDevice("subject")
+		host := world.StartHost(hostDevice, &sidecartest.BridgeNetHostSettings{Address: netip.MustParseAddr("100.80.7.20")})
+		window := world.OpenWindow("window", subject, host, nil)
+		// the first echo opens the flow and makes the contracts, both ways: control, which reads Postgres
+		if err := window.SendEcho(host.Address, 1); err != nil || !window.WaitEchoAnswered(host.Address, 1, settings.WaitTimeout) {
+			t.Fatalf("the first echo: %v, sent again %d times", err, window.EchoResendCount())
+		}
+		firstResendCount := window.EchoResendCount()
+
+		// the second echo is lost: no copy of it exists, so the wait that sends nothing sees none answered in twice the
+		// time the other wait takes to send it again, as it would in any time
+		if window.WaitEchoReply(2, 2*settings.EchoResendInterval) {
+			t.Fatal("an echo never sent was answered: the test proves nothing")
+		}
+		attempts, stop := server.DenyPostgresForTest(t)
+		answered := window.WaitEchoAnswered(host.Address, 2, settings.WaitTimeout)
+		stop()
+		resendCount := window.EchoResendCount() - firstResendCount
+		if !answered {
+			t.Fatalf("the lost echo, sent again %d times, was never answered", resendCount)
+		}
+		if resendCount == 0 {
+			t.Fatal("the lost echo was answered with no copy sent again: the test proves nothing")
+		}
+		echoDecisions := slices.DeleteFunc(host.Decisions(window.Client.ClientId), func(decision *sidecartest.BridgeNetDecision) bool {
+			return decision.Protocol != connect.IpProtocolIcmp
+		})
+		if len(echoDecisions) != 1 || !echoDecisions[0].Opens() {
+			t.Fatalf("the copies did not ride the flow the first echo opened: the host decided %d echo flows of the window", len(echoDecisions))
+		}
+		if count := attempts(); count != 0 {
+			t.Fatalf("the lost echo's %d copies acquired PostgreSQL %d times", resendCount, count)
 		}
 	})
 }
