@@ -2144,13 +2144,14 @@ func sidecarMg9SmtpMigrations() []any {
 
 // MG-C1, DESIGN-COMPUTE §14.4's ledger (M12), after MG9: PostgreSQL 15's floor first, since its rollups use UNIQUE
 // NULLS NOT DISTINCT, so db migrate on an older database fails before anything of the group applies; then BAL's part,
-// every table of §14.4's MG-C1 row, compute_terms among them.
+// every table of §14.4's MG-C1 row, compute_terms among them; then CARCH's, §17.2's operator hold.
 func sidecarMgC1Migrations() []any {
 	return slices.Concat(
 		[]any{
 			computeRequirePostgres15(),
 		},
 		sidecarMgC1LedgerMigrations(),
+		sidecarMgC1AbuseHoldMigrations(),
 		[]any{
 			// the group's marker (SidecarMgC1Linked); it changes nothing
 			newCodeMigration(sidecarMgC1MigrationId, func(ctx context.Context) {}),
@@ -2161,6 +2162,13 @@ func sidecarMgC1Migrations() []any {
 // MG-C1's §9.4 part, BAL's: registered from sidecar/model's own files (CONTRACTS C-30), empty until BAL lands it.
 func sidecarMgC1LedgerMigrations() []any {
 	return sidecarComputeMigrationValues(model.ComputeMigrationPart(model.ComputeMigrationGroupC1, model.ComputeMigrationOwnerBal))
+}
+
+// MG-C1's §17.2 part, CARCH's: compute_abuse_hold, an operator's suspension of a network's compute, registered from
+// sidecar/model (C-30; CARCH-M12-01) once question carch-m12-01-compute-hold-row's answer gives compute-3 its words
+// (I-18); empty until then, so no database holds the table and every read of it refuses.
+func sidecarMgC1AbuseHoldMigrations() []any {
+	return sidecarComputeMigrationValues(model.ComputeMigrationPart(model.ComputeMigrationGroupC1, model.ComputeMigrationOwnerCarch))
 }
 
 // MG-C2, §14.4's providers (M12), after MG-C1.

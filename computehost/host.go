@@ -17,7 +17,10 @@
 //     providers' adapters (PROV), K_P's signer (GAMMA) and the mTLS client to searchsigner (SRCH), each by its name
 //     alone, none read until its area asks;
 //   - the engine's drain started at the block's SIGTERM, so a stream ends under the engine's own bound and not at the
-//     status server's close.
+//     status server's close;
+//   - §17.2's abuse controls (CARCH-M12-01): ServiceHost.Abuse, §21.7's standing in memory over the block's Postgres
+//     (model.NewAbuseGate), which every admission reads, and the region lookup, the process's GeoLite2 City reader, which
+//     answers every admission's address from memory and keeps nothing of it (hostRegionLookup).
 //
 // The second Redis instance §14.4 gives {cmpa}, persistence off and outside every backup, is HostDeps.AdmissionsRedis:
 // server's Redis pools read redis.yml alone, so a block builds none of its own yet, and every route that needs {cmpa}
@@ -33,6 +36,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"slices"
 	"strings"
 	"sync"
@@ -43,6 +47,7 @@ import (
 	"github.com/urnetwork/sidecar/computeservice"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/oauth"
 	"github.com/urnetwork/server/router"
 	"github.com/urnetwork/server/sidecarhost"
@@ -107,6 +112,9 @@ type HostDeps struct {
 	GroupLinked func(group computeservice.ComputeMigrationGroup) bool
 	// The service log. nil: through glog, one line a request.
 	ServiceLog computeservice.ComputeServiceLog
+	// Where an admission's address is (§17.2). nil: the process's GeoLite2 City reader, which refuses every admission
+	// where this process has no database (hostRegionLookup).
+	RegionLookup computeservice.ComputeRegionLookup
 
 	// RunHost's alone, each nil taking the block's own:
 	//
@@ -114,6 +122,8 @@ type HostDeps struct {
 	Clusters HostClusters
 	// The engine's clock: real time.
 	Clock sidecar.Clock
+	// §21.7's standing and network_verified from memory: model.NewAbuseGate over the block's Postgres.
+	Abuse sidecar.AbuseGate
 	// The svc- key set's public verifier, which the Authenticator and the rev/ reader verify under: vault's
 	// oauth-jwks-svc.json, read once by the process.
 	ServiceTokens *oauth.ServiceTokenVerifier
@@ -193,12 +203,17 @@ func NewHost(ctx context.Context, host *sidecar.ServiceHost, settings *HostSetti
 	if deps.ServiceLog != nil {
 		serviceLog = deps.ServiceLog
 	}
+	regionLookup := deps.RegionLookup
+	if regionLookup == nil {
+		regionLookup = hostRegionLookup{}
+	}
 	engine, err := computeservice.NewComputeEngine(ctx, host, hostComputeSettings(settings.Compute), &computeservice.ComputeEngineDeps{
 		AuthState:       deps.AuthState,
 		Env:             deps.Env,
 		AdmissionsRedis: deps.AdmissionsRedis,
 		GroupLinked:     groupLinked,
 		SecretFile:      secretFile,
+		RegionLookup:    regionLookup,
 		ServiceLog:      serviceLog,
 		Log:             hostLogger{},
 	})
@@ -360,11 +375,20 @@ func newBlockEngine(ctx context.Context, settings *HostSettings, deps *HostDeps)
 		clusters = fileClusters
 	}
 	closers = append(closers, clusters.Close)
+	abuse := deps.Abuse
+	if abuse == nil {
+		// §21.7's standing, loaded from the block's Postgres off every admission's path, which reads it from memory
+		// (CARCH-M12-01); a network not loaded yet answers 503 while the gate loads it
+		abuseGate := model.NewAbuseGate(hostCtx, nil, nil)
+		closers = append(closers, abuseGate.Close)
+		abuse = abuseGate
+	}
 	host := sidecarhost.NewServiceHost(hostCtx, &sidecarhost.ServiceHostOptions{
 		Postgres:      true,
 		Blobs:         clusters,
 		Clock:         deps.Clock,
 		ServiceTokens: deps.ServiceTokens,
+		Abuse:         abuse,
 	})
 	hostDeps := *deps
 	if hostDeps.AuthState == nil {
@@ -390,6 +414,29 @@ func newBlockEngine(ctx context.Context, settings *HostSettings, deps *HostDeps)
 		computeHost.closeAfter = append(computeHost.closeAfter, closers[i])
 	}
 	return computeHost
+}
+
+// The broker's region lookup (§17.2, CARCH-M12-01): the process's GeoLite2 City reader, the database every api lookup
+// answers from, read from memory. An address it places nowhere is a zero region. A process with no database, and a
+// lookup that fails, answer an error, by which the broker refuses every admission. Neither the region nor any error
+// here carries the address, and nothing here logs (I-13).
+type hostRegionLookup struct{}
+
+func (hostRegionLookup) Region(addr netip.Addr) (region *computeservice.ComputeRegion, returnErr error) {
+	if !server.IpInfoDatabaseDeployed() {
+		return nil, errors.New("this compute block has no GeoLite2 City database")
+	}
+	defer func() {
+		// a reader's panic text could quote what it was asked, so it is not kept
+		if recover() != nil {
+			region, returnErr = nil, errors.New("the geo database did not answer")
+		}
+	}()
+	info, err := server.GetIpInfo(addr)
+	if err != nil || info == nil {
+		return nil, errors.New("the geo database did not answer")
+	}
+	return &computeservice.ComputeRegion{CountryCode: info.CountryCode, SubdivisionGeonameId: info.RegionGeonameId}, nil
 }
 
 // glog as the engine's sidecar.Logger.
