@@ -29,8 +29,10 @@
 // rebuild waits for its table to clear without taking a place in the queue.
 //
 // The run's state (where it resumes, each table's last finished vacuum and
-// analyze, and the last index pass) travels in the task chain's arguments
-// (taskworker/work/maintenance_work.go), as DbMaintenance's done lists do.
+// analyze, the last index pass, and the invalid indexes it found with when each
+// was first found, db_maintenance_invalid_index.go) travels in the task
+// chain's arguments (taskworker/work/maintenance_work.go), as DbMaintenance's
+// done lists do.
 package server
 
 import (
@@ -149,6 +151,10 @@ type DbHotVacuumState struct {
 	Tables map[string]DbHotVacuumTableState `json:"tables,omitempty"`
 	// When the last index pass measured the indexes; zero before the first.
 	IndexPassTime time.Time `json:"index_pass_time"`
+	// Each index the last run found invalid, by its oid, with when a run
+	// first found it so (db_maintenance_invalid_index.go): pg_index records
+	// no time.
+	InvalidIndexes map[string]DbHotVacuumInvalidIndex `json:"invalid_indexes,omitempty"`
 }
 
 type DbHotVacuumTableState struct {
@@ -164,6 +170,7 @@ type DbHotVacuumTableState struct {
 func (self DbHotVacuumState) clone() DbHotVacuumState {
 	state := self
 	state.Tables = maps.Clone(self.Tables)
+	state.InvalidIndexes = maps.Clone(self.InvalidIndexes)
 	return state
 }
 
@@ -678,7 +685,8 @@ func newDbHotVacuumRun(settings *DbHotVacuumSettings, pool *safePgPool, now func
 }
 
 // Runs one run of the churn tables' maintenance (see the file comment) from
-// the state the previous run left, and returns the state for the next run.
+// the state the previous run left, lists the database's invalid indexes
+// (db_maintenance_invalid_index.go), and returns the state for the next run.
 // A VACUUM of a partitioned table vacuums its every leaf, and records an empty
 // one, such as a day ahead, analyzed empty, which a plan reads with a
 // sequential scan costed at zero: after the run, the empty leaves of each
@@ -687,6 +695,8 @@ func newDbHotVacuumRun(settings *DbHotVacuumSettings, pool *safePgPool, now func
 func VacuumHotTables(ctx context.Context, state DbHotVacuumState, settings *DbHotVacuumSettings) DbHotVacuumState {
 	run := newDbHotVacuumRun(settings, safeMaintenancePool, time.Now, state)
 	run.run(ctx)
+	// after the run's rebuilds, which drop their own debris
+	run.observeInvalidIndexes(ctx)
 	HandleError(func() {
 		families := map[string]bool{}
 		for _, tableName := range settings.Tables {
