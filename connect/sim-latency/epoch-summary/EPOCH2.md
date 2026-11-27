@@ -30,14 +30,28 @@ in bytes received is **not** a transfer-throughput measurement. Do not use
 either as a TTFB or Mbps headline. The comparison is against the epoch 2
 baseline, not the start-of-competition baseline.
 
+## Why the fastest submission was disqualified
+
+The submission ranked **first by measured performance**, but the integrity
+review disqualified it for two correctness problems in its default packet
+delivery path:
+
+1. **Premature success.** The new path could report success before confirming
+   delivery. A caller could therefore see success without the delivery
+   guarantee provided by the baseline.
+2. **Unclear responsibility during shutdown.** The new path did not preserve
+   which part of the system was responsible for pending packets during shutdown.
+   As a result, it did not preserve the baseline's reliable delivery guarantee
+   for work still in flight.
+
+Passing the scoring gates did not override these findings: a faster result
+must still preserve delivery behavior. The review did **not** find fabricated
+measurements or intentional workload suppression.
+
 ## Winner and source promotion
 
-The published winner is job `01a1e7b9-0b4e-cec4-3fad-526342ab01ac`, ranked
-second in the sealed performance table. The faster first-place entry was
-disqualified during integrity review because its default packet delivery path
-could report success before confirming delivery and did not preserve reliable
-delivery and shutdown ownership. The review did not find fabricated measurements
-or intentional workload suppression.
+The second-ranked entry in the sealed performance table, job
+`01a1e7b9-0b4e-cec4-3fad-526342ab01ac`, became the published winner.
 
 The official Astra 6.2 max review approved the winner: it improved benchmark
 performance while preserving delivery semantics. Its unchanged patch was
