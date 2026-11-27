@@ -6,8 +6,9 @@ package model
 // REPEATABLE READ write transaction, so one snapshot stayed open for the whole
 // scan (5 to 58 minutes for one day on Main). These tests observe every
 // statement the real code paths issue and require each statement that reads
-// both tables to run outside an explicit transaction and to read at most one
-// bounded chunk of contracts, however many contracts the window holds.
+// both tables to run outside an explicit transaction or in a READ COMMITTED
+// one, where its snapshot also ends with it, and to read at most one bounded
+// chunk of contracts, however many contracts the window holds.
 
 import (
 	"context"
@@ -31,13 +32,14 @@ const transferCloseStatementWindowCount = 5037
 
 type transferCloseStatementsKey struct{}
 
-// A statement issued under the observed context, with its arguments and the
+// A statement issued under the observed context, with its arguments, the
 // connection's transaction status ('I' idle, 'T' in a transaction) when it
-// started.
+// started and, in a transaction, the BEGIN that opened it.
 type transferCloseStatement struct {
 	sql      string
 	args     []any
 	txStatus byte
+	beginSql string
 }
 
 // Records the statements issued under its marked context, so other users of
@@ -45,6 +47,8 @@ type transferCloseStatement struct {
 type transferCloseStatements struct {
 	stateLock  sync.Mutex
 	statements []transferCloseStatement
+	// the BEGIN that opened each connection's current transaction
+	beginSql map[*pgx.Conn]string
 }
 
 func (self *transferCloseStatements) TraceQueryStart(ctx context.Context, conn *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
@@ -59,6 +63,15 @@ func (self *transferCloseStatements) TraceQueryStart(ctx context.Context, conn *
 	func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
+		if self.beginSql == nil {
+			self.beginSql = map[*pgx.Conn]string{}
+		}
+		if statement.txStatus == 'I' && strings.HasPrefix(strings.ToLower(strings.TrimSpace(data.SQL)), "begin") {
+			self.beginSql[conn] = data.SQL
+		}
+		if statement.txStatus != 'I' {
+			statement.beginSql = self.beginSql[conn]
+		}
 		self.statements = append(self.statements, statement)
 	}()
 	return ctx
@@ -220,7 +233,8 @@ func observeTransferCloseStatements(t testing.TB, ctx context.Context, body func
 	return reads
 }
 
-// Requires each statement to run outside an explicit transaction, so its
+// Requires each statement to run outside an explicit transaction or in a READ
+// COMMITTED one (the chunk read's own, which turns JIT off first), so its
 // snapshot ends with the statement, and to read at most one chunk of
 // transfer_contract rows by EXPLAIN ANALYZE of the recorded statement and
 // arguments.
@@ -230,8 +244,8 @@ func assertTransferCloseStatementsBounded(t testing.TB, ctx context.Context, rea
 		t.Fatal("observed no statement reading transfer_contract and contract_close")
 	}
 	for index, statement := range reads {
-		if statement.txStatus != 'I' {
-			t.Errorf("statement %d ran inside an explicit transaction (status %q), so its snapshot outlived the statement", index, statement.txStatus)
+		if statement.txStatus != 'I' && !strings.Contains(strings.ToLower(statement.beginSql), "isolation level read committed") {
+			t.Errorf("statement %d ran inside an explicit transaction (status %q) that is not READ COMMITTED (%q), so its snapshot outlived the statement", index, statement.txStatus, statement.beginSql)
 		}
 
 		var contractReads float64
