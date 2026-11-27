@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/urnetwork/connect"
 	connectgossip "github.com/urnetwork/connect/gossip"
 
@@ -252,11 +254,27 @@ func TestOperatorInboundMeshMembership(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := &controller.ExtenderConfig{NetworkHost: testNetworkHost, RootPublicKeysHex: []string{hex.EncodeToString(key)}, GossipIdentityKeyHex: hex.EncodeToString(make([]byte, ed25519.SeedSize))}
-	for _, list := range [][]string{nil, {}, {id.String()}, {"invalid peer id"}} {
-		cfg.GossipAllowedInboundPeerIds = list
+	for _, tc := range []struct {
+		document string
+		open     bool
+		members  int
+		invalid  bool
+	}{
+		{document: "{}", open: true},
+		{document: "gossip_allowed_inbound_peer_ids: []"},
+		{document: "gossip_allowed_inbound_peer_ids: [" + id.String() + "]", members: 1},
+		{document: "gossip_allowed_inbound_peer_ids: [invalid peer id]", invalid: true},
+	} {
+		cfg := &controller.ExtenderConfig{
+			NetworkHost:          testNetworkHost,
+			RootPublicKeysHex:    []string{hex.EncodeToString(key)},
+			GossipIdentityKeyHex: hex.EncodeToString(make([]byte, ed25519.SeedSize)),
+		}
+		if err := yaml.Unmarshal([]byte(tc.document), cfg); err != nil {
+			t.Fatal(err)
+		}
 		op, err := newOperatorConfig(cfg)
-		if len(list) > 0 && list[0] != id.String() {
+		if tc.invalid {
 			if err == nil {
 				t.Fatal("malformed membership accepted")
 			}
@@ -265,8 +283,9 @@ func TestOperatorInboundMeshMembership(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if (list == nil) != (op.allowedInboundPeers == nil) || len(list) != len(op.allowedInboundPeers) || len(list) > 0 && op.allowedInboundPeers[0] != id {
-			t.Fatal("membership lost in config")
+		if tc.open != (op.allowedInboundPeers == nil) || tc.members != len(op.allowedInboundPeers) ||
+			tc.members > 0 && op.allowedInboundPeers[0] != id {
+			t.Errorf("membership lost for %q", tc.document)
 		}
 	}
 }
