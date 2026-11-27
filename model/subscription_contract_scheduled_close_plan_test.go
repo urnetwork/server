@@ -72,7 +72,8 @@ func explainDeadlineEscrowRows(t testing.TB, ctx context.Context, sql string, co
 // Production statistics estimate tens of thousands of escrow rows per contract
 // id. The unbounded read then crosses the JIT cost threshold, and on the full
 // table also plans parallel workers, for a one-row probe held under the grant
-// owner. The bounded read does neither and returns the same rows in order.
+// owner. The bounded read does neither, and a close alone's read of the rows
+// and then their rooms returns the control's rows and rooms in order.
 func TestDeadlineEscrowReadStaysSmallUnderMisestimatedStatistics(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -106,14 +107,14 @@ func TestDeadlineEscrowReadStaysSmallUnderMisestimatedStatistics(t *testing.T) {
 		if bounded.jitFunctions != 0 || bounded.gathers != 0 || 100000 <= bounded.totalCost {
 			t.Fatalf("deadline escrow read compiled or planned workers: jit=%d gathers=%d cost=%.0f", bounded.jitFunctions, bounded.gathers, bounded.totalCost)
 		}
-		read := func(sql string) (rows string) {
-			server.Db(ctx, func(conn server.PgConn) {
-				server.Raise(conn.QueryRow(ctx, `SELECT array_to_string(array_agg(r::text),';') FROM (`+sql+`) AS r`, contractId).Scan(&rows))
-			})
-			return
-		}
-		if control, bounded := read(deadlineEscrowRowsUnboundedSql), read(deadlineEscrowRowsSql); control != bounded {
-			t.Fatal("bounded escrow read changed rows or funding order", control, bounded)
+		// a close alone reads the rows, then each grant's room
+		var controlRows, boundedRows string
+		server.Tx(ctx, func(tx server.PgTx) {
+			controlRows = deadlineEscrowsText(readDeadlineEscrowsBySqlInTx(ctx, tx, deadlineEscrowRowsUnboundedSql, contractId))
+			boundedRows = deadlineEscrowsText(readDeadlineEscrowsWithRoomsInTx(ctx, tx, contractId))
+		}, server.TxReadCommitted)
+		if controlRows == "" || controlRows != boundedRows {
+			t.Fatal("bounded escrow read changed rows, rooms or funding order", controlRows, boundedRows)
 		}
 	})
 }

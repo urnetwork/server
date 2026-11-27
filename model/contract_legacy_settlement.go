@@ -590,16 +590,11 @@ func readContractLegacySettlementInTx(ctx context.Context, tx server.PgTx, contr
 			input.grantEndTimes[balanceId] = endTime
 		}
 	})
+	// The deadline close's escrow rows in its funding order. The decision
+	// charges with the ordinary settlement's arithmetic, which no grant's room
+	// bounds, so it reads no grant's room or pending journal sum.
 	server.RaisePgResult(tx.Exec(ctx, deadlineEscrowRowsJitSql))
-	rows, err = tx.Query(ctx, deadlineEscrowRowsSql, contractId)
-	server.WithPgResult(rows, err, func() {
-		for rows.Next() {
-			var escrow contractDeadlineEscrow
-			server.Raise(rows.Scan(&escrow.balanceId, &escrow.amount, &escrow.start, &escrow.revenue, &escrow.networkId,
-				&escrow.available, &escrow.settled, &escrow.priorPayout, &escrow.redisReserved, &escrow.journal))
-			input.escrows = append(input.escrows, escrow)
-		}
-	})
+	input.escrows = append(input.escrows, readDeadlineEscrowRowsInTx(ctx, tx, contractId)...)
 	if deadlineEscrowRowLimit < len(input.escrows) {
 		server.Raise(fmt.Errorf("contract %s has more escrow rows than the deadline close reads", contractId))
 	}
