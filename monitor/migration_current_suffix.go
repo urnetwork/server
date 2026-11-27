@@ -1122,6 +1122,9 @@ var migrationCurrentSuffixContracts = migrationCurrentSuffixContractsInVersionOr
 	// the settled earning wallets by coldkey within an epoch, the v2 earnings
 	// readers' attribution index, versioned by its position
 	[]snMainnetMigrationContract{stPayoutWalletResolutionColdkeyIndexMigrationContract},
+	// a network's unreleased unique-exit assignments, built online, versioned
+	// by its position
+	[]snMainnetMigrationContract{proxyExitAssignmentNetworkLiveIndexMigrationContract},
 ))
 
 // Free space a table keeps on every page it writes, so an update of an

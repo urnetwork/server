@@ -115,6 +115,40 @@ const proxyExitAssignmentReleasedAtIndexSql = `
         WHERE state = 'released'
 `
 
+// A network's assignments that are not released: the exits the allocator
+// leaves out of the network's every candidate draw
+// (model/proxy_unique_exit_model.go networkLiveExitProviderIdsSql). The live
+// (network_id, egress_key) index covers only pending and active, so the read
+// walked proxy_exit_assignment_assigned_at_live, every unreleased assignment
+// of every network, filtering for its network: on Main (2026-11-26) 28k to 33k
+// buffer hits a call at 256 to 292 calls a minute.
+//
+// The table is about 48 MB. The build reads it once, online, after a recovery
+// drop of an interrupted build or a look-alike. Apply before or after the
+// deploy: the read is the same statement either way.
+var proxyExitAssignmentNetworkLiveIndexMigration = newRestartableOnlineSqlMigration(
+	`DROP INDEX CONCURRENTLY IF EXISTS proxy_exit_assignment_network_id_live`,
+	`CREATE INDEX CONCURRENTLY proxy_exit_assignment_network_id_live
+		 ON proxy_exit_assignment (network_id)
+		 WHERE state IN ('pending', 'active', 'replacing')`,
+	`DROP INDEX IF EXISTS proxy_exit_assignment_network_id_live;
+		 CREATE INDEX proxy_exit_assignment_network_id_live
+		 ON proxy_exit_assignment (network_id)
+		 WHERE state IN ('pending', 'active', 'replacing')`,
+)
+
+// The version of the network live index migration for the monitor's schema
+// contract: its position in the list, from 1, wherever a merge places it. Zero
+// when the list lacks it.
+func ProxyExitAssignmentNetworkLiveIndexMigrationVersion() int {
+	for index, migration := range migrations {
+		if migration == proxyExitAssignmentNetworkLiveIndexMigration {
+			return index + 1
+		}
+	}
+	return 0
+}
+
 // ProxyUniqueExitMigrationVersions are the versions of the unique-exit
 // migrations, each its migration's position in the list, for the monitor's
 // schema contracts (monitor/migration_proxy_unique_exit.go).
