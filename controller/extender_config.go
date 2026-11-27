@@ -110,8 +110,10 @@ type ExtenderConfig struct {
 	// the public api url a forward probe reaches through an extender
 	ApiUrl string `yaml:"api_url"`
 	// the ed25519 seed of the operator's gossip node identity (C6, C7)
-	GossipIdentityKeyHex string            `yaml:"gossip_identity_key_hex"`
-	Dns                  ExtenderDnsConfig `yaml:"dns"`
+	GossipIdentityKeyHex string `yaml:"gossip_identity_key_hex"`
+	// Omission permits the public mesh. An empty list closes inbound operator peering.
+	GossipAllowedInboundPeerIds []string          `yaml:"gossip_allowed_inbound_peer_ids"`
+	Dns                         ExtenderDnsConfig `yaml:"dns"`
 	// the tiers of the directory (connect/EXTENDER.md R1)
 	Directory ExtenderDirectoryConfig `yaml:"directory"`
 	// the lag.dev measurement certificates and names (lag.dev/PLAN.md C)

@@ -240,3 +240,33 @@ func TestGossipRunRefusesANilContext(t *testing.T) {
 		t.Fatal("a nil context was accepted")
 	}
 }
+
+// Operators can choose an explicit closed membership. A typo cannot open
+// the listener and the absent setting preserves the existing public mesh.
+func TestOperatorInboundMeshMembership(t *testing.T) {
+	key, err := connect.ExtenderPublicKeyFromSeed(make([]byte, ed25519.SeedSize))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := connectgossip.PeerIdForExtenderPublicKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &controller.ExtenderConfig{NetworkHost: testNetworkHost, RootPublicKeysHex: []string{hex.EncodeToString(key)}, GossipIdentityKeyHex: hex.EncodeToString(make([]byte, ed25519.SeedSize))}
+	for _, list := range [][]string{nil, {}, {id.String()}, {"invalid peer id"}} {
+		cfg.GossipAllowedInboundPeerIds = list
+		op, err := newOperatorConfig(cfg)
+		if len(list) > 0 && list[0] != id.String() {
+			if err == nil {
+				t.Fatal("malformed membership accepted")
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if (list == nil) != (op.allowedInboundPeers == nil) || len(list) != len(op.allowedInboundPeers) || len(list) > 0 && op.allowedInboundPeers[0] != id {
+			t.Fatal("membership lost in config")
+		}
+	}
+}

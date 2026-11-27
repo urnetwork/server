@@ -107,3 +107,56 @@ func TestTaggedStreamRequiresBothEndpointLeaseSupport(t *testing.T) {
 		}))
 	})
 }
+
+// Participant repairs extend the same immutable grant and its revocation
+// fence through their absolute horizon. Shorten only the synthetic keys to
+// model the end of the original eight hours without advancing Redis time.
+func TestStreamParticipantRenewalKeepsBindingAndRetirement(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.ApplyDbMigrations = false
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		for _, retired := range []bool{false, true} {
+			id := server.NewId()
+			key := newStreamKey(server.NewId(), server.NewId(), nil)
+			binding, fence := streamAuthorityKey(id, "b"), streamAuthorityKey(id, "r")
+			if err := server.RedisAuth(ctx, func(ctx context.Context, r server.RedisClient) error {
+				if err := r.Set(ctx, binding, "immutable generation", time.Minute).Err(); err != nil {
+					return err
+				}
+				if retired {
+					return r.Set(ctx, fence, 1, time.Minute).Err()
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			deadline := time.Now().Add(6 * time.Hour).UnixMilli()
+			if err := storeStreamParticipantsUntil(ctx, id, key, deadline); err != nil {
+				t.Fatal(err)
+			}
+			if err := server.RedisAuth(ctx, func(ctx context.Context, r server.RedisClient) error {
+				keys := []string{binding}
+				if retired {
+					keys = append(keys, fence)
+				}
+				for _, k := range keys {
+					date, err := r.Do(ctx, "PEXPIRETIME", k).Int64()
+					if err != nil {
+						return err
+					}
+					if date < deadline {
+						t.Errorf("retired=%v authority expires before renewed membership", retired)
+					}
+				}
+				got, err := r.Get(ctx, binding).Result()
+				if err == nil && got != "immutable generation" {
+					t.Error("publication replaced the binding")
+				}
+				return err
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+}
