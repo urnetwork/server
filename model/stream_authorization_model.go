@@ -36,14 +36,7 @@ type StreamAuthorization struct {
 // The stream's stable participant set is published before any StreamOpen. All
 // resident owners read the same immutable binding through migrations.
 func storeStreamParticipants(ctx context.Context, streamId server.Id, key streamKey) error {
-	ids := []server.Id{}
-	for id := range key.Edges() {
-		ids = append(ids, id)
-	}
-	encoded, _ := json.Marshal(ids)
-	return server.RedisAuth(ctx, func(ctx context.Context, r server.RedisClient) error {
-		return r.Set(ctx, streamAuthorityKey(streamId, "p"), encoded, 8*time.Hour).Err()
-	})
+	return storeStreamParticipantsUntil(ctx, streamId, key, server.NowUtc().Add(8*time.Hour).UnixMilli())
 }
 
 // A repair carries the membership's absolute Redis horizon across pool/slot
@@ -68,8 +61,15 @@ func storeStreamParticipantsUntil(ctx context.Context, streamId server.Id, key s
 			if remaining > 0 then deadline = math.max(deadline, now + remaining) end
 			redis.call('SET', KEYS[1], ARGV[1])
 			redis.call('PEXPIREAT', KEYS[1], deadline)
+			-- Membership, its original binding and an existing retirement fence share one slot.
+			for i = 2, 3 do
+				local ttl = redis.call('PTTL', KEYS[i])
+				if ttl >= 0 and now + ttl < deadline then
+					redis.call('PEXPIREAT', KEYS[i], deadline)
+				end
+			end
 			return 1
-		`, []string{streamAuthorityKey(streamId, "p")}, encoded, deadlineMillis).Int()
+		`, []string{streamAuthorityKey(streamId, "p"), streamAuthorityKey(streamId, "b"), streamAuthorityKey(streamId, "r")}, encoded, deadlineMillis).Int()
 		if err != nil {
 			return err
 		}
@@ -147,7 +147,13 @@ func AuthorizeStream(ctx context.Context, streamId server.Id, now time.Time) (re
 		encoded, _ := json.Marshal(binding)
 		err = server.RedisAuth(ctx, func(ctx context.Context, r server.RedisClient) error {
 			var err error
-			raw, err = r.Eval(ctx, `if redis.call('EXISTS',KEYS[3])==1 or redis.call('EXISTS',KEYS[2])==0 then return '' end;redis.call('SET',KEYS[1],ARGV[1],'NX','PX',28800000);return redis.call('GET',KEYS[1])`, []string{streamAuthorityKey(streamId, "b"), streamAuthorityKey(streamId, "p"), streamAuthorityKey(streamId, "r")}, string(encoded)).Text()
+			raw, err = r.Eval(ctx, `
+				if redis.call('EXISTS', KEYS[3]) == 1 then return '' end
+				local ttl = redis.call('PTTL', KEYS[2])
+				if ttl < 0 then return '' end
+				redis.call('SET', KEYS[1], ARGV[1], 'NX', 'PX', math.max(28800000, ttl))
+				return redis.call('GET', KEYS[1])
+			`, []string{streamAuthorityKey(streamId, "b"), streamAuthorityKey(streamId, "p"), streamAuthorityKey(streamId, "r")}, string(encoded)).Text()
 			return err
 		})
 		if err != nil || raw == "" {
@@ -185,7 +191,10 @@ func AuthorizeStream(ctx context.Context, streamId server.Id, now time.Time) (re
 func retireStreamAuthorization(ctx context.Context, streamId server.Id, result StreamAuthorization) (StreamAuthorization, error) {
 	result.Allowed = false
 	err := server.RedisAuth(ctx, func(ctx context.Context, r server.RedisClient) error {
-		return r.Set(ctx, streamAuthorityKey(streamId, "r"), 1, 8*time.Hour).Err()
+		return r.Eval(ctx, `
+			local ttl = math.max(28800000, redis.call('PTTL', KEYS[1]), redis.call('PTTL', KEYS[2]), redis.call('PTTL', KEYS[3]))
+			return redis.call('SET', KEYS[3], 1, 'PX', ttl)
+		`, []string{streamAuthorityKey(streamId, "b"), streamAuthorityKey(streamId, "p"), streamAuthorityKey(streamId, "r")}).Err()
 	})
 	return result, err
 }

@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/urnetwork/connect"
 	connectgossip "github.com/urnetwork/connect/gossip"
 
@@ -238,5 +240,52 @@ func TestGossipRunRefusesANilContext(t *testing.T) {
 		refuseStatsPusher(t),
 	); err == nil {
 		t.Fatal("a nil context was accepted")
+	}
+}
+
+// Operators can choose an explicit closed membership. A typo cannot open
+// the listener and the absent setting preserves the existing public mesh.
+func TestOperatorInboundMeshMembership(t *testing.T) {
+	key, err := connect.ExtenderPublicKeyFromSeed(make([]byte, ed25519.SeedSize))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := connectgossip.PeerIdForExtenderPublicKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		document string
+		open     bool
+		members  int
+		invalid  bool
+	}{
+		{document: "{}", open: true},
+		{document: "gossip_allowed_inbound_peer_ids: []"},
+		{document: "gossip_allowed_inbound_peer_ids: [" + id.String() + "]", members: 1},
+		{document: "gossip_allowed_inbound_peer_ids: [invalid peer id]", invalid: true},
+	} {
+		cfg := &controller.ExtenderConfig{
+			NetworkHost:          testNetworkHost,
+			RootPublicKeysHex:    []string{hex.EncodeToString(key)},
+			GossipIdentityKeyHex: hex.EncodeToString(make([]byte, ed25519.SeedSize)),
+		}
+		if err := yaml.Unmarshal([]byte(tc.document), cfg); err != nil {
+			t.Fatal(err)
+		}
+		op, err := newOperatorConfig(cfg)
+		if tc.invalid {
+			if err == nil {
+				t.Fatal("malformed membership accepted")
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tc.open != (op.allowedInboundPeers == nil) || tc.members != len(op.allowedInboundPeers) ||
+			tc.members > 0 && op.allowedInboundPeers[0] != id {
+			t.Errorf("membership lost for %q", tc.document)
+		}
 	}
 }

@@ -34,6 +34,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/libp2p/go-libp2p/core/peer"
 	ma "github.com/multiformats/go-multiaddr"
 
 	"github.com/urnetwork/connect"
@@ -72,10 +73,11 @@ func (self RunOptions) Validate() error {
 // so a fault is one error at the top rather than a node that comes up and then
 // cannot do anything.
 type operatorConfig struct {
-	networkHost     string
-	networkHosts    []string
-	identityKeySeed []byte
-	rootKeySet      *connect.ExtenderRootKeySet
+	allowedInboundPeers []peer.ID
+	networkHost         string
+	networkHosts        []string
+	identityKeySeed     []byte
+	rootKeySet          *connect.ExtenderRootKeySet
 }
 
 // The configuration errors name the missing key, since the whole remedy is to
@@ -112,11 +114,23 @@ func newOperatorConfig(config *controller.ExtenderConfig) (*operatorConfig, erro
 			networkHosts = append(networkHosts, otherNetworkHost)
 		}
 	}
+	var allowed []peer.ID
+	if config.GossipAllowedInboundPeerIds != nil {
+		allowed = make([]peer.ID, 0, len(config.GossipAllowedInboundPeerIds))
+		for _, value := range config.GossipAllowedInboundPeerIds {
+			id, err := peer.Decode(strings.TrimSpace(value))
+			if err != nil {
+				return nil, fmt.Errorf("gossip_allowed_inbound_peer_ids: %w", err)
+			}
+			allowed = append(allowed, id)
+		}
+	}
 	return &operatorConfig{
-		networkHost:     networkHost,
-		networkHosts:    networkHosts,
-		identityKeySeed: identityKeySeed,
-		rootKeySet:      rootKeySet,
+		allowedInboundPeers: allowed,
+		networkHost:         networkHost,
+		networkHosts:        networkHosts,
+		identityKeySeed:     identityKeySeed,
+		rootKeySet:          rootKeySet,
 	}, nil
 }
 
@@ -145,6 +159,7 @@ func newNode(
 	settings.NetworkHost = config.networkHost
 	settings.Directory = directory
 	settings.IdentityKeySeed = config.identityKeySeed
+	settings.AllowedInboundPeers = config.allowedInboundPeers
 	settings.ListenAddrs = listenAddrs
 	settings.PeerTarget = 0
 	settings.ConnManagerLowWater = connManagerLowWater
