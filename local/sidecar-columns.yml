@@ -930,6 +930,9 @@ tables:
       stripe_customer_id: compute-6
       stripe_payment_method_id: compute-6
       stripe_subscription_id: compute-6
+      # a store's monthly plan's own subscription, the App Store's original transaction id or Play's purchase token
+      # (BAL-M12-11, BAL-M12-14), a later step of BAL's part: an auto-renew setting, as the Stripe plan's subscription is
+      store_ref: compute-6
       top_up_day: compute-6
       top_up_day_count: compute-6
       top_up_month: compute-6

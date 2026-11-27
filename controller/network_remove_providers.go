@@ -23,6 +23,8 @@ import (
 	"net/url"
 
 	"github.com/urnetwork/glog"
+	sidecarcontroller "github.com/urnetwork/sidecar/controller"
+
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
@@ -40,8 +42,9 @@ const networkRemoveLastTeamOwnerCode = "last_team_owner"
 
 // networkRemoveSteps are the checks, store steps and storage step of an
 // account deletion. NetworkRemove runs them in this order: the last Owner
-// check, the store snapshot, the App Store check, Stripe cancellation, Google
-// Play cancellation, the compute balance's closure, then the network removal.
+// check, the store snapshot, the App Store check, compute's store read and its
+// App Store check, Stripe cancellation, Google Play cancellation (Pro's, then
+// compute's), the compute balance's closure, then the network removal.
 type networkRemoveSteps struct {
 	// the team the caller is the last Owner of, nil for none; it changes
 	// nothing, so its refusal leaves every store subscription as it was
@@ -55,10 +58,19 @@ type networkRemoveSteps struct {
 	unsubscribeStripe func(clientSession *session.ClientSession) error
 	// cancels the renewal of the Google Play subscriptions
 	cancelPlay func(clientSession *session.ClientSession, purchaseTokens []string) error
+	// reads the network's compute store subscriptions once, for compute's App
+	// Store check, its Google Play cancellation and its closure
+	// (compute_store_close.go); nil, as a test's steps leave it, reads none
+	computeStores func(clientSession *session.ClientSession) (*sidecarcontroller.ComputeStoreSubscriptions, error)
+	// reports whether any compute subscription the App Store holds for those
+	// transactions' customers may still renew; an error, or no such step,
+	// counts as renewing
+	computeAppleRenewing func(clientSession *session.ClientSession, transactionIds []string) (bool, error)
 	// closes the network's compute balance (DESIGN-COMPUTE §9.12; BAL-M12-14): its unspent Stripe credit refunded
 	// within 90 days of purchase, the rest forfeited with notice to its billing contacts, its compute plan cancelled
-	// (compute_stripe_refund.go); nil, as a test's steps leave it, closes nothing
-	closeCompute func(clientSession *session.ClientSession) error
+	// (compute_stripe_refund.go), refused where its network names a store subscription computeStores did not read; nil,
+	// as a test's steps leave it, closes nothing
+	closeCompute func(clientSession *session.ClientSession, computeStores *sidecarcontroller.ComputeStoreSubscriptions) error
 	// removes the network unless an App Store or Google Play renewal outside
 	// the snapshot is active, or the caller is the last Owner of a team; the
 	// removal names the removed user auths
@@ -74,10 +86,12 @@ var defaultNetworkRemoveSteps = networkRemoveSteps{
 	storeSnapshot: func(clientSession *session.ClientSession) *model.RemoveNetworkStoreSnapshot {
 		return model.GetRemoveNetworkStoreSnapshot(clientSession.Ctx, clientSession.ByJwt.NetworkId)
 	},
-	appleRenewing:     networkRemoveAppleRenewing,
-	unsubscribeStripe: UnsubscribeStripe,
-	cancelPlay:        networkRemoveCancelPlay,
-	closeCompute:      networkRemoveCloseCompute,
+	appleRenewing:        networkRemoveAppleRenewing,
+	unsubscribeStripe:    UnsubscribeStripe,
+	cancelPlay:           networkRemoveCancelPlay,
+	computeStores:        networkRemoveComputeStores,
+	computeAppleRenewing: networkRemoveComputeAppleRenewing,
+	closeCompute:         networkRemoveCloseCompute,
 	removeNetwork: func(clientSession *session.ClientSession, storeSnapshot *model.RemoveNetworkStoreSnapshot) *model.RemoveNetworkResult {
 		return model.RemoveNetworkWithStoreSnapshot(
 			clientSession.Ctx,
@@ -147,6 +161,30 @@ func networkRemoveWithSteps(
 		return networkRemoveError(networkRemoveAppleRenewingMessage), nil
 	}
 
+	// compute's store subscriptions, read once and checked beside Pro's before
+	// anything is cancelled (compute_store_close.go); the closure refuses one
+	// credited or reported after this read, and the customer retries
+	computeStores := &sidecarcontroller.ComputeStoreSubscriptions{}
+	if steps.computeStores != nil {
+		computeStores, err = steps.computeStores(clientSession)
+		if err != nil {
+			glog.Errorf("[network]remove could not read the compute store subscriptions: %v\n", err)
+			return networkRemoveError(networkRemoveComputeFailedMessage), nil
+		}
+		computeAppleRenewing := computeStores.Truncated
+		if !computeAppleRenewing && 0 < len(computeStores.AppStoreTransactionIds) {
+			if steps.computeAppleRenewing == nil {
+				computeAppleRenewing = true
+			} else if computeAppleRenewing, err = steps.computeAppleRenewing(clientSession, computeStores.AppStoreTransactionIds); err != nil {
+				glog.Errorf("[network]remove could not check the compute App Store subscriptions: %v\n", err)
+				computeAppleRenewing = true
+			}
+		}
+		if computeAppleRenewing {
+			return networkRemoveError(networkRemoveComputeAppleRenewingMessage), nil
+		}
+	}
+
 	if err := steps.unsubscribeStripe(clientSession); err != nil {
 		glog.Errorf("Failed to unsubscribe Stripe: %v", err)
 		return networkRemoveError(networkRemoveStripeFailedMessage), nil
@@ -156,11 +194,23 @@ func networkRemoveWithSteps(
 		glog.Errorf("[network]remove failed to cancel Google Play: %v\n", err)
 		return networkRemoveError(networkRemovePlayFailedMessage), nil
 	}
+	if 0 < len(computeStores.GooglePlayPurchaseTokens) {
+		if err := steps.cancelPlay(clientSession, computeStores.GooglePlayPurchaseTokens); err != nil {
+			glog.Errorf("[network]remove failed to cancel the compute Google Play subscription: %v\n", err)
+			return networkRemoveError(networkRemovePlayFailedMessage), nil
+		}
+	}
 
 	// the compute balance closed while its billing contacts still read, as the store steps run: a refusal of the
 	// removal after it leaves the account closed, which a deletion the caller asked for would have made anyway
 	if steps.closeCompute != nil {
-		if err := steps.closeCompute(clientSession); err != nil {
+		err := steps.closeCompute(clientSession, computeStores)
+		if errors.Is(err, sidecarcontroller.ErrComputeCloseStoresChanged) {
+			// a retry reads and checks the new store subscription
+			glog.Infof("[network]remove %s refused: a compute store subscription was credited during the deletion\n", clientSession.ByJwt.NetworkId)
+			return networkRemoveError(networkRemoveStoreRenewalChangedMessage), nil
+		}
+		if err != nil {
 			glog.Errorf("[network]remove could not close the compute balance: %v\n", err)
 			return networkRemoveError(networkRemoveComputeFailedMessage), nil
 		}

@@ -84,6 +84,18 @@ func (self *computeT3Renewing) lot(kind model.ComputeLotKind, market model.Compu
 	return self.credit(request).Lot
 }
 
+// Reports networkId's store subscription to auto-renew, as a store's path does.
+func (self *computeT3Renewing) storeReport(market model.ComputeMarket, storeRef string, replaces string, credits int64, renews bool) *controller.ComputeStoreSubscriptionAnswer {
+	self.t3.t.Helper()
+	answer, err := controller.ComputeMonthlyStoreReport(self.env, self.t3.ctx, self.settings, &controller.ComputeStoreSubscriptionReport{
+		NetworkId: self.networkId, Market: market, StoreRef: storeRef, ReplacesStoreRef: replaces, Credits: credits, Renews: renews,
+	})
+	if err != nil {
+		self.t3.t.Fatal(err)
+	}
+	return answer
+}
+
 // A charge of amount booked now: its id.
 func (self *computeT3Renewing) charge(amount int64) server.Id {
 	self.t3.t.Helper()
@@ -432,7 +444,7 @@ func TestClosureRefundsWithinNinetyDaysAndForfeitsTheRest(t *testing.T) {
 		}
 		// the projection stands, as for any network that has run a call, so the closure reaches it
 		refunding.rebuild()
-		answer, err := controller.ComputeCloseNetwork(refunding.env, t3.ctx, refunding.settings, refunding.networkId)
+		answer, err := controller.ComputeCloseNetwork(refunding.env, t3.ctx, refunding.settings, refunding.networkId, nil)
 		if err != nil || !answer.ClosedNow {
 			t.Fatalf("the closure: %+v %v", answer, err)
 		}
@@ -461,7 +473,7 @@ func TestClosureRefundsWithinNinetyDaysAndForfeitsTheRest(t *testing.T) {
 		}); !errors.Is(err, controller.ErrComputeAccountClosed) {
 			t.Fatalf("a credit after the closure: %v", err)
 		}
-		again, err := controller.ComputeCloseNetwork(refunding.env, t3.ctx, refunding.settings, refunding.networkId)
+		again, err := controller.ComputeCloseNetwork(refunding.env, t3.ctx, refunding.settings, refunding.networkId, nil)
 		if err != nil || again.ClosedNow || !again.Closed {
 			t.Fatalf("closed again: %+v %v", again, err)
 		}
@@ -479,6 +491,72 @@ func TestClosureRefundsWithinNinetyDaysAndForfeitsTheRest(t *testing.T) {
 		}
 		if !slices.Contains(computeT3Notifier.kinds(refunding.networkId), controller.ComputeNoticeClosed) {
 			t.Fatal("no closure notice")
+		}
+	})
+}
+
+// A closure is handed what the deletion's store steps read (§9.12): the monthly row's Play plan and each App Store
+// monthly grant of the window, a grant past it named nowhere. It refuses, closing nothing, where it finds a
+// subscription the read did not name, for no read at all or a grant credited since, and closes with a read taken
+// again; once closed, no store plan is recorded. A window with more grants than the closure may ask about reads as
+// truncated.
+func TestClosureWaitsOnStoreSubscriptionsItWasNotHanded(t *testing.T) {
+	runComputeT3(t, func(t3 *computeT3) {
+		t := t3.t
+		refunding := newComputeT3Refunding(t3)
+		grant := refunding.lot(model.ComputeLotKindSubscription, model.ComputeMarketAppStore, computeT3Usd(25))
+		old := refunding.lot(model.ComputeLotKindSubscription, model.ComputeMarketAppStore, computeT3Usd(10))
+		t3.mustExec(`UPDATE compute_lot SET create_time = create_time - interval '100 days' WHERE lot_id = $1`, old.LotId)
+		token := "token-t3-close-" + refunding.networkId.String()
+		if answer := refunding.storeReport(model.ComputeMarketGooglePlay, token, "", 25, true); !answer.Recorded {
+			t.Fatalf("the Play plan: %+v", answer)
+		}
+		read, err := controller.ComputeStoreSubscriptionsOf(refunding.env, t3.ctx, refunding.settings, refunding.networkId)
+		if err != nil || !slices.Equal(read.AppStoreTransactionIds, []string{grant.MarketRef}) || !slices.Equal(read.GooglePlayPurchaseTokens, []string{token}) || read.Truncated {
+			t.Fatalf("the read: %+v %v", read, err)
+		}
+		refunding.rebuild()
+		if _, err := controller.ComputeCloseNetwork(refunding.env, t3.ctx, refunding.settings, refunding.networkId, nil); !errors.Is(err, controller.ErrComputeCloseStoresChanged) {
+			t.Fatalf("a closure handed no read: %v", err)
+		}
+		// a minute on, so the late grant is the newest
+		refunding.clock.Advance(time.Minute)
+		late := refunding.lot(model.ComputeLotKindSubscription, model.ComputeMarketAppStore, computeT3Usd(10))
+		if _, err := controller.ComputeCloseNetwork(refunding.env, t3.ctx, refunding.settings, refunding.networkId, read); !errors.Is(err, controller.ErrComputeCloseStoresChanged) {
+			t.Fatalf("a grant since the read: %v", err)
+		}
+		if stored, projected := refunding.states(); stored == model.ComputeAccountStateClosed || projected == model.ComputeAccountStateClosed {
+			t.Fatalf("a refused closure closed the account: stored %s, projected %s", stored, projected)
+		}
+		if state := refunding.state(); !state.Monthly.On {
+			t.Fatalf("a refused closure turned the plan off: %+v", state.Monthly)
+		}
+		bounded := *refunding.settings
+		bounded.ClosureStoreGrantMaxCount = 1
+		if truncated, err := controller.ComputeStoreSubscriptionsOf(refunding.env, t3.ctx, &bounded, refunding.networkId); err != nil || !truncated.Truncated ||
+			!slices.Equal(truncated.AppStoreTransactionIds, []string{late.MarketRef}) {
+			t.Fatalf("past the count: %+v %v", truncated, err)
+		}
+		read, err = controller.ComputeStoreSubscriptionsOf(refunding.env, t3.ctx, refunding.settings, refunding.networkId)
+		if err != nil || len(read.AppStoreTransactionIds) != 2 || !slices.Contains(read.AppStoreTransactionIds, late.MarketRef) {
+			t.Fatalf("the read again: %+v %v", read, err)
+		}
+		answer, err := controller.ComputeCloseNetwork(refunding.env, t3.ctx, refunding.settings, refunding.networkId, read)
+		if err != nil || !answer.ClosedNow {
+			t.Fatalf("the closure with the read: %+v %v", answer, err)
+		}
+		if stored, _ := refunding.states(); stored != model.ComputeAccountStateClosed {
+			t.Fatalf("closed: %s", stored)
+		}
+		if state := refunding.state(); state.Monthly.On {
+			t.Fatalf("the plan after the closure: %+v", state.Monthly)
+		}
+		if answer := refunding.storeReport(model.ComputeMarketGooglePlay, token, "", 25, true); !answer.Closed || answer.Recorded {
+			t.Fatalf("a report after the closure: %+v", answer)
+		}
+		// a retry closes again with the same read
+		if again, err := controller.ComputeCloseNetwork(refunding.env, t3.ctx, refunding.settings, refunding.networkId, read); err != nil || again.ClosedNow || !again.Closed {
+			t.Fatalf("closed again: %+v %v", again, err)
 		}
 	})
 }

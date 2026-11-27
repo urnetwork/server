@@ -23,9 +23,11 @@ var computeT3LedgerIndexes = []string{
 	"compute_promo_redemption_network", "compute_lot_lapse", "compute_account_update", "compute_account_review",
 }
 
-// The steps that add a column to a table an earlier step made, each with its table and column (BAL-M12-12's state_time).
+// The steps that add a column to a table an earlier step made, each with its table and column (BAL-M12-12's state_time,
+// BAL-M12-11's store_ref).
 var computeT3LedgerColumns = map[string][2]string{
-	"compute_account_state_time": {"compute_account", "state_time"},
+	"compute_account_state_time":   {"compute_account", "state_time"},
+	"compute_auto_renew_store_ref": {"compute_auto_renew", "store_ref"},
 }
 
 // Every table, index and partition is made; a second lot with one (market, market_ref) is refused; the day and total

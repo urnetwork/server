@@ -74,7 +74,11 @@ func TestNetworkRemoveClosesTheComputeAccount(t *testing.T) {
 			tb.Fatal(err)
 		}
 		removing := &session.ClientSession{Ctx: ctx, ByJwt: &session.ByJwt{NetworkId: networkId}}
-		if err := networkRemoveCloseCompute(removing); err != nil {
+		stores, err := networkRemoveComputeStores(removing)
+		if err != nil || len(stores.AppStoreTransactionIds) != 0 || len(stores.GooglePlayPurchaseTokens) != 0 || stores.Truncated {
+			tb.Fatalf("the store read: %+v %v", stores, err)
+		}
+		if err := networkRemoveCloseCompute(removing, stores); err != nil {
 			tb.Fatal(err)
 		}
 		state, err := sidecarcontroller.ComputeAccountStateOf(env, ctx, networkId)
@@ -83,7 +87,10 @@ func TestNetworkRemoveClosesTheComputeAccount(t *testing.T) {
 		}
 		// a network with no account has nothing to close
 		elsewhere := &session.ClientSession{Ctx: ctx, ByJwt: &session.ByJwt{NetworkId: server.NewId()}}
-		if err := networkRemoveCloseCompute(elsewhere); err != nil {
+		if stores, err := networkRemoveComputeStores(elsewhere); err != nil || len(stores.AppStoreTransactionIds) != 0 || len(stores.GooglePlayPurchaseTokens) != 0 {
+			tb.Fatalf("the store read of a network with no compute state: %+v %v", stores, err)
+		}
+		if err := networkRemoveCloseCompute(elsewhere, nil); err != nil {
 			tb.Fatal(err)
 		}
 	})

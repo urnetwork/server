@@ -11,8 +11,9 @@ package controller
 //	networkRemoveCloseCompute   the closure step of network removal (network_remove_providers.go), before the network
 //	                            is removed while its billing contacts still read: a network with a compute account has
 //	                            it closed (sidecar/controller's ComputeCloseNetwork), its unspent Stripe credit within
-//	                            90 days of purchase refunded, the rest forfeited with notice, its plan cancelled; one
-//	                            with none, as every network before compute ships, has nothing to close
+//	                            90 days of purchase refunded, the rest forfeited with notice, its plan cancelled, once
+//	                            the store steps stopped its store subscriptions (compute_store_close.go), whose read it
+//	                            is handed; one with none, as every network before compute ships, has nothing to close
 //
 // InstallComputeRefunds registers the process's refunds with sidecar/controller once, for the api's compute routes and
 // network removal.
@@ -104,8 +105,9 @@ func computeNetworkHasAccount(ctx context.Context, networkId server.Id) (bool, e
 	return has, readErr
 }
 
-// The closure step of network removal (see the file header): an error refuses the removal, so the person retries.
-func networkRemoveCloseCompute(clientSession *session.ClientSession) error {
+// The closure step of network removal (see the file header), handed the store subscriptions the store steps checked: an
+// error refuses the removal, so the person retries.
+func networkRemoveCloseCompute(clientSession *session.ClientSession, computeStores *sidecarcontroller.ComputeStoreSubscriptions) error {
 	if !server.SidecarMgC1Linked() {
 		return nil
 	}
@@ -117,7 +119,7 @@ func networkRemoveCloseCompute(clientSession *session.ClientSession) error {
 	InstallComputeRefunds()
 	InstallComputeAutoRenew()
 	InstallComputeNotices()
-	_, err = sidecarcontroller.ComputeCloseNetwork(networkRemoveComputeEnv(), clientSession.Ctx, sidecarmodel.DefaultComputeLedgerSettings(), networkId)
+	_, err = sidecarcontroller.ComputeCloseNetwork(networkRemoveComputeEnv(), clientSession.Ctx, sidecarmodel.DefaultComputeLedgerSettings(), networkId, computeStores)
 	if errors.Is(err, sidecarcontroller.ErrComputeStripeRefundUnavailable) || errors.Is(err, sidecarcontroller.ErrComputeStripeRenewUnavailable) {
 		return fmt.Errorf("compute's Stripe is not on this host: %w", err)
 	}
