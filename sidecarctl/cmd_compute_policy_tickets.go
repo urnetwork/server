@@ -33,6 +33,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -292,8 +293,11 @@ func runComputePolicyTicketsReleaseWithSettings(args []string, settings *compute
 			deletedBatchCounts[batch.Id] += 1
 		}
 	}
-	for batchId, count := range deletedBatchCounts {
-		fmt.Fprintf(out, "deleted %d unreleased tickets of batch %s, which batch %s supersedes\n", count, batchId, newest.Id)
+	deletedBatchIds := slices.SortedFunc(maps.Keys(deletedBatchCounts), func(a sidecar.Id, b sidecar.Id) int {
+		return bytes.Compare(a.Bytes(), b.Bytes())
+	})
+	for _, batchId := range deletedBatchIds {
+		fmt.Fprintf(out, "deleted %d unreleased tickets of batch %s, which batch %s supersedes\n", deletedBatchCounts[batchId], batchId, newest.Id)
 	}
 
 	// the newest batch's tickets, in order of their starts: each released once started, then deleted from the store
