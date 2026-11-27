@@ -76,6 +76,43 @@ func TestLegacyWindowMintArgsAreOnlyDescriptionAndDeviceSpec(t *testing.T) {
 	}
 }
 
+// Synthetic specs in the old Android window's form, "<os version>
+// <fingerprint>": one device on two os builds, and another device. None is a
+// real device's.
+const (
+	legacyWindowMintTestAndroidSpec        = "14 examplebrand/exampleproduct_xx/exampledevice:14/AB1A.240101.001/X100XXU1AXA1:user/release-keys"
+	legacyWindowMintTestAndroidUpdatedSpec = "16 examplebrand/exampleproduct_xx/exampledevice:16/CD2A.260101.002/X100XXU9CZB2:user/release-keys"
+	legacyWindowMintTestOtherAndroidSpec   = "16 examplebrand/otherproduct_xx/otherdevice:16/CD2A.260101.002/Y200XXU9CZB2:user/release-keys"
+)
+
+func TestLegacyWindowDeviceSpecIsTheSameAndroidDeviceOnAnyOsBuild(t *testing.T) {
+	for _, c := range []struct {
+		name             string
+		deviceSpec       string
+		storedDeviceSpec string
+		want             bool
+	}{
+		{name: "the stored spec", deviceSpec: legacyWindowMintTestAndroidSpec, storedDeviceSpec: legacyWindowMintTestAndroidSpec, want: true},
+		{name: "a newer os build of the device", deviceSpec: legacyWindowMintTestAndroidUpdatedSpec, storedDeviceSpec: legacyWindowMintTestAndroidSpec, want: true},
+		{name: "an older os build of the device", deviceSpec: legacyWindowMintTestAndroidSpec, storedDeviceSpec: legacyWindowMintTestAndroidUpdatedSpec, want: true},
+		{name: "a security patch of the device", deviceSpec: "14 examplebrand/exampleproduct_xx/exampledevice:14/AB1A.240101.001/X100XXU2AXB1:user/release-keys", storedDeviceSpec: legacyWindowMintTestAndroidSpec, want: true},
+		{name: "another device", deviceSpec: legacyWindowMintTestOtherAndroidSpec, storedDeviceSpec: legacyWindowMintTestAndroidSpec, want: false},
+		{name: "another brand", deviceSpec: "16 otherbrand/exampleproduct_xx/exampledevice:16/CD2A.260101.002/X100XXU9CZB2:user/release-keys", storedDeviceSpec: legacyWindowMintTestAndroidSpec, want: false},
+		{name: "another build type", deviceSpec: "16 examplebrand/exampleproduct_xx/exampledevice:16/CD2A.260101.002/X100XXU9CZB2:userdebug/test-keys", storedDeviceSpec: legacyWindowMintTestAndroidSpec, want: false},
+		{name: "a stored spec in the current app's form", deviceSpec: legacyWindowMintTestAndroidUpdatedSpec, storedDeviceSpec: "16 Examplebrand Example Phone", want: false},
+		{name: "specs in another form", deviceSpec: "after", storedDeviceSpec: "before", want: false},
+		{name: "a fingerprint without an os version", deviceSpec: "examplebrand/exampleproduct_xx/exampledevice:16/CD2A.260101.002/X100XXU9CZB2:user/release-keys", storedDeviceSpec: legacyWindowMintTestAndroidSpec, want: false},
+		{name: "a fingerprint missing a part", deviceSpec: "16 examplebrand/exampledevice:16/CD2A.260101.002/X100XXU9CZB2:user/release-keys", storedDeviceSpec: "14 examplebrand/exampledevice:14/AB1A.240101.001/X100XXU1AXA1:user/release-keys", want: false},
+		{name: "a fingerprint with an empty part", deviceSpec: "16 examplebrand//exampledevice:16/CD2A.260101.002/X100XXU9CZB2:user/release-keys", storedDeviceSpec: "14 examplebrand//exampledevice:14/AB1A.240101.001/X100XXU1AXA1:user/release-keys", want: false},
+		{name: "text after the fingerprint", deviceSpec: legacyWindowMintTestAndroidUpdatedSpec + " synthetic", storedDeviceSpec: legacyWindowMintTestAndroidSpec, want: false},
+		{name: "no spec", deviceSpec: "", storedDeviceSpec: "", want: false},
+	} {
+		if got := isLegacyWindowDeviceSpecOfDevice(c.deviceSpec, c.storedDeviceSpec); got != c.want {
+			t.Errorf("%s: %t, want %t", c.name, got, c.want)
+		}
+	}
+}
+
 func TestClientTokenMintSourceTakesTheOldWindowRequestAsAChildOfTheCaller(t *testing.T) {
 	callerClientId := server.NewId()
 	networkId := server.NewId()
@@ -293,6 +330,98 @@ func TestAuthNetworkClientOldWindowRequestIsAChildOfTheCallersOwnClient(t *testi
 		connect.AssertEqual(t, removeResult.Error, nil)
 		connect.AssertEqual(t, clientTokenTestActive(ctx, clientId), false)
 		connect.AssertEqual(t, clientTokenTestActive(ctx, *result.ClientId), false)
+	})
+}
+
+// An old Android build whose os updated after its device row was written
+// sends its window's spec on the new os build, and was refused for good: its
+// only mints are its window's, refused before the row is refreshed (support
+// inbox 8183).
+func TestAuthNetworkClientOldWindowRequestAfterAnOsUpdateIsAChildOfTheCallersOwnClient(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId, userSession := authClientTestNetwork(ctx, "test")
+		created, err := AuthNetworkClient(
+			&AuthNetworkClientArgs{
+				Description: "synthetic phone",
+				DeviceSpec:  legacyWindowMintTestAndroidSpec,
+			},
+			userSession,
+		)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, created.Error, nil)
+		clientId := *created.ClientId
+		var deviceId server.Id
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(
+				ctx,
+				`SELECT device_id FROM network_client WHERE client_id = $1`,
+				clientId,
+			).Scan(&deviceId))
+		})
+		clientSession := clientTokenTestSession(ctx, userSession, clientId, deviceId)
+		deviceSpec := func() (deviceSpec string) {
+			server.Db(ctx, func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(ctx, `SELECT device_spec FROM device WHERE device_id = $1`, deviceId).Scan(&deviceSpec))
+			})
+			return
+		}
+
+		mintsBefore := testutil.ToFloat64(networkClientLegacyWindowMints)
+		refusalsBefore := testutil.ToFloat64(networkClientTopLevelMintRefusals)
+		clientCountBefore, deviceCountBefore, _ := authClientTestNetworkCounts(ctx, networkId)
+
+		result, err := AuthNetworkClient(
+			&AuthNetworkClientArgs{
+				Description: "synthetic phone",
+				DeviceSpec:  legacyWindowMintTestAndroidUpdatedSpec,
+			},
+			clientSession,
+		)
+		connect.AssertEqual(t, err, nil)
+		if result == nil || result.Error != nil || result.ClientId == nil || result.ByClientJwt == nil {
+			t.Fatalf("the old window's request on the updated os answered %+v, want a child", result)
+		}
+		childDeviceId, childSourceClientId, childNetworkId, childActive := legacyWindowMintTestChild(ctx, *result.ClientId)
+		connect.AssertEqual(t, childDeviceId, deviceId)
+		if childSourceClientId == nil || *childSourceClientId != clientId {
+			t.Fatalf("the child's source is %v, want the caller %s", childSourceClientId, clientId)
+		}
+		connect.AssertEqual(t, childNetworkId, networkId)
+		connect.AssertEqual(t, childActive, true)
+		clientCount, deviceCount, _ := authClientTestNetworkCounts(ctx, networkId)
+		connect.AssertEqual(t, clientCount, clientCountBefore+1)
+		connect.AssertEqual(t, deviceCount, deviceCountBefore)
+		connect.AssertEqual(t, testutil.ToFloat64(networkClientLegacyWindowMints), mintsBefore+1)
+		connect.AssertEqual(t, testutil.ToFloat64(networkClientTopLevelMintRefusals), refusalsBefore)
+		// the mint refreshed the device's spec, so the next window matches it as is
+		connect.AssertEqual(t, deviceSpec(), legacyWindowMintTestAndroidUpdatedSpec)
+
+		// another device's spec is still refused, writes nothing and counts
+		refusalsBefore = testutil.ToFloat64(networkClientTopLevelMintRefusals)
+		mintsBefore = testutil.ToFloat64(networkClientLegacyWindowMints)
+		clientCountBefore, deviceCountBefore, _ = authClientTestNetworkCounts(ctx, networkId)
+		result, err = AuthNetworkClient(
+			&AuthNetworkClientArgs{
+				Description: "synthetic phone",
+				DeviceSpec:  legacyWindowMintTestOtherAndroidSpec,
+			},
+			clientSession,
+		)
+		connect.AssertEqual(t, err, nil)
+		if result == nil || result.Error == nil || result.Error.Message != clientTokenTopLevelMintRefusalMessage {
+			t.Fatalf("another device's spec answered %+v, want the refusal %q", result, clientTokenTopLevelMintRefusalMessage)
+		}
+		if result.ClientId != nil || result.ByClientJwt != nil {
+			t.Fatal("the refusal returned credentials")
+		}
+		clientCount, deviceCount, _ = authClientTestNetworkCounts(ctx, networkId)
+		connect.AssertEqual(t, clientCount, clientCountBefore)
+		connect.AssertEqual(t, deviceCount, deviceCountBefore)
+		connect.AssertEqual(t, testutil.ToFloat64(networkClientTopLevelMintRefusals), refusalsBefore+1)
+		connect.AssertEqual(t, testutil.ToFloat64(networkClientLegacyWindowMints), mintsBefore)
+		connect.AssertEqual(t, deviceSpec(), legacyWindowMintTestAndroidUpdatedSpec)
 	})
 }
 
