@@ -308,6 +308,8 @@ func routeAccessAdminRequests(self *routeAccessDbFixture, victimClientId server.
 		"POST /sn/wallet/network-consent":         {path: "/sn/wallet/network-consent", body: map[string]any{"coldkey_ss58": "attacker"}},
 		"POST /sn/wallet/hotkey-consent":          {path: "/sn/wallet/hotkey-consent", body: map[string]any{"coldkey_ss58": "attacker"}},
 		"POST /sn/wallet/hotkey-delegation":       {path: "/sn/wallet/hotkey-delegation", body: map[string]any{"coldkey_ss58": "attacker"}},
+		"POST /sn/wallet/disconnect-code":         {path: "/sn/wallet/disconnect-code", body: map[string]any{}},
+		"POST /sn/wallet/disconnect":              {path: "/sn/wallet/disconnect", body: map[string]any{"code": "000000"}},
 		"GET /sn/fleet/claim":                     {path: "/sn/fleet/claim"},
 		"POST /sn/fleet/authorization":            {path: "/sn/fleet/authorization", body: map[string]any{"message": "attacker", "signature": "00"}},
 		"POST /sn/fleet/hotkey-signatures":        {path: "/sn/fleet/hotkey-signatures", body: map[string]any{"signatures": []any{}}},
