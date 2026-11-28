@@ -129,6 +129,8 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		router.NewRoute("POST", "/auth/apple/callback", handlers.AuthAppleOAuthCallback),
 		router.NewRoute("GET", "/auth/apple/callback", handlers.AuthAppleOAuthCallback),
 		router.NewRoute("GET", "/auth/google/callback", handlers.AuthGoogleOAuthCallback),
+		router.NewRoute("GET", "/auth/microsoft/start", handlers.AuthMicrosoftOAuthStart),
+		router.NewRoute("GET", "/auth/microsoft/callback", handlers.AuthMicrosoftOAuthCallback),
 		router.NewRoute("POST", "/auth/add-auth", handlers.AuthAdd),
 		router.NewRoute("POST", "/auth/remove-auth", handlers.AuthRemove),
 		router.NewRoute("POST", "/auth/regenerate-seedphrase", handlers.AuthRegenerateSeedphrase),
