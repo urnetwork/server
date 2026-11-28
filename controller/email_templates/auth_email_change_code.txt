@@ -1,0 +1,25 @@
+{{define "headline"}}CONFIRM THE EMAIL CHANGE{{end}}
+{{define "why"}}{{if .Current}}You received this because someone signed in to your URnetwork account
+asked to change its email from this address to {{.OtherEmail}}.{{else}}You received this because someone signed in to a URnetwork account asked
+to change its email from {{.OtherEmail}} to this address.{{end}}{{end}}
+{{define "content"}}
+{{if .Current -}}
+Someone signed in to your URnetwork account asked to change its email from
+this address to {{.OtherEmail}}. Enter this code in the app to confirm. It
+expires in {{.Minutes}} minutes.
+{{- else -}}
+Enter this code in the app to make this address the email of your URnetwork
+account. It expires in {{.Minutes}} minutes.
+{{- end}}
+
+    {{.Code}}
+
+{{if .Current -}}
+Didn't ask for this? Don't share the code: without it your email doesn't
+change. Someone may be signed in to your account: change your password, sign
+out your other devices at https://ur.io/app/account/sessions and contact
+security@ur.io.
+{{- else -}}
+Didn't ask for this? Ignore this email. Nothing happens without the code.
+{{- end}}
+{{end}}

@@ -105,6 +105,12 @@ func TestEmailTemplatesRender(t *testing.T) {
 		{securityApiKeyNoticeSample(model.SecurityApiKeyCreated, model.SecurityApiKeyDeleted), false},
 		// the payout wallet disconnect's confirmation code, email only
 		{&WalletDisconnectCodeTemplate{Code: "482917", Minutes: 15}, false},
+		// the email change's codes, email only: to the current address and to
+		// the new one, and the sign-in notices of the request and the change
+		{&AuthEmailChangeCodeTemplate{Code: "482917", Minutes: 30, Current: true, OtherEmail: "n…@example.com"}, false},
+		{&AuthEmailChangeCodeTemplate{Code: "482917", Minutes: 30, Current: false, OtherEmail: "j…@example.com"}, false},
+		{securitySignInNoticeSample(model.SecuritySignInChangeRequested), false},
+		{securitySignInNoticeSample(model.SecuritySignInChanged), false},
 		{&AuthPasswordSetTemplate{PasswordSetNotice: model.PasswordSetNotice{ChangeTime: &paymentFailedNextAttempt, Via: model.SecurityNoticeViaWeb}}, true},
 		// the service reminders (service_reminders_controller.go)
 		{&ProEndingTemplate{TermEndTime: server.NowUtc().Add(-16 * 24 * time.Hour), EndTime: server.NowUtc().Add(14 * 24 * time.Hour), Asset: model.SubscriptionMarketMonero}, true},

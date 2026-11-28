@@ -182,3 +182,25 @@ func AuthAdd(w http.ResponseWriter, r *http.Request) {
 func AuthRemove(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(controller.RemoveAuth, w, r)
 }
+
+// AuthEmailChange backs `POST /auth/email-change`: starts a verified email
+// change. Network credential only (route_authz.go); the controller refuses an
+// API key.
+func AuthEmailChange(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(controller.AuthEmailChange, w, r)
+}
+
+// AuthEmailChangeStatus backs `GET /auth/email-change`.
+func AuthEmailChangeStatus(w http.ResponseWriter, r *http.Request) {
+	router.WrapRequireAuth(controller.AuthEmailChangeStatus, w, r)
+}
+
+// AuthEmailChangeConfirm backs `POST /auth/email-change/confirm`.
+func AuthEmailChangeConfirm(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(controller.AuthEmailChangeConfirm, w, r)
+}
+
+// AuthEmailChangeCancel backs `POST /auth/email-change/cancel`.
+func AuthEmailChangeCancel(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(controller.AuthEmailChangeCancel, w, r)
+}

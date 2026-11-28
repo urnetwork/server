@@ -1,6 +1,6 @@
 {{define "headline"}}{{.TextHeadline}}{{end}}
 {{define "why"}}Sent to the sign-in email addresses of your URnetwork account
-whenever a way to sign in to it is added or removed.{{end}}
+whenever a way to sign in to it is added, removed or changed.{{end}}
 {{define "content"}}
 {{.Subject}}.
 {{range .Rows}}
