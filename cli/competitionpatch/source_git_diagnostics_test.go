@@ -20,6 +20,56 @@ import (
 // its standard descriptors, then restore them only inside the explicit role.
 const repositoryGitDiagnosticBootstrap = "exec 3>&1 4>&2\nexport COMPETITION_TEST_GIT_DIAGNOSTIC_FDS=3,4\nexec \"$@\" >/dev/null 2>&1\n"
 
+// Only the selected fault needs the diagnostic executable and its SDK startup.
+// The matcher shifts its own arguments, leaving native Git's argv intact.
+const repositoryGitDiagnosticShim = `#!/bin/sh
+set -e
+matches_target() {
+    while [ "$#" -ge 2 ]; do
+        case "$1" in
+            -C|-c) shift 2 ;;
+            *) break ;;
+        esac
+    done
+    case "$COMPETITION_TEST_GIT_DIAGNOSTIC_TARGET:${1:-}:${2:-}" in
+        head_identity:rev-parse:HEAD|protected_tree:rev-parse:HEAD:connect/sim-latency)
+            [ "$#" -eq 2 ] ;;
+        protected_helper_tree:--literal-pathspecs:ls-tree|patch_base_tree:--literal-pathspecs:ls-tree)
+            [ "$#" -ge 7 ] && [ "$3" = -z ] && [ "$4" = --full-tree ] && [ "$6" = -- ] || return 1
+            if [ "$COMPETITION_TEST_GIT_DIAGNOSTIC_TARGET" = protected_helper_tree ]; then
+                [ "$5" = HEAD ]
+            else
+                case "$5" in *[!0-9a-f]*) return 1 ;; esac
+                [ "${#5}" -eq 40 ]
+            fi ;;
+        protected_helper_index:--literal-pathspecs:ls-files)
+            [ "$#" -ge 6 ] && [ "$3" = --stage ] && [ "$4" = -z ] && [ "$5" = -- ] ;;
+        protected_helper_bytes:hash-object:--no-filters)
+            [ "$#" -ge 4 ] && [ "$3" = -- ] ;;
+        apply_check:apply:--check|apply_index:apply:--index)
+            [ "$#" -eq 4 ] && [ "$3" = --whitespace=error-all ] ;;
+        index_check:diff:--cached)
+            [ "$#" -eq 3 ] && [ "$3" = --check ] ;;
+        commit:commit:--quiet)
+            [ "$#" -eq 5 ] && [ "$3" = --no-gpg-sign ] && [ "$4" = -m ] ;;
+        *) return 1 ;;
+    esac
+}
+if ! matches_target "$@"; then
+    exec "$COMPETITION_TEST_REAL_GIT" "$@"
+fi
+set -- "$COMPETITION_TEST_GIT_EXECUTABLE" -test.run=^TestRepositorySourceGitDiagnosticHelper$ -- "$@"
+` + repositoryGitDiagnosticBootstrap
+
+func writeRepositoryGitDiagnosticShim(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "git")
+	if err := os.WriteFile(path, []byte(repositoryGitDiagnosticShim), 0700); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 // A real Git context mismatch in a pristine checkout is a submission rejection.
 func TestRepositoryGitRejectsNonapplyingPatch(t *testing.T) {
 	root := t.TempDir()
@@ -113,55 +163,11 @@ func TestRepositorySourceGitDiagnosticHelper(t *testing.T) {
 		_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
 		os.Exit(99)
 	case "git":
-	default:
-		t.Fatal("invalid synthetic diagnostic child mode")
-	}
-	args := os.Args
-	for len(args) > 0 && args[0] != "--" {
-		args = args[1:]
-	}
-	if len(args) == 0 {
-		t.Fatal("synthetic Git child lacks argument boundary")
-	}
-	args = args[1:]
-	joined := "\x00" + strings.Join(args, "\x00") + "\x00"
-	target := os.Getenv("COMPETITION_TEST_GIT_DIAGNOSTIC_TARGET")
-	match := false
-	switch target {
-	case "head_identity":
-		match = strings.HasSuffix(joined, "\x00rev-parse\x00HEAD\x00")
-	case "protected_tree":
-		match = strings.Contains(joined, "\x00rev-parse\x00HEAD:connect/sim-latency\x00")
-	case "patch_base_tree":
-		match = strings.Contains(joined, "\x00ls-tree\x00") && !strings.Contains(joined, "\x00HEAD\x00")
-	case "protected_helper_tree":
-		match = strings.Contains(joined, "\x00ls-tree\x00") && strings.Contains(joined, "\x00HEAD\x00")
-	case "protected_helper_index":
-		match = strings.Contains(joined, "\x00ls-files\x00")
-	case "protected_helper_bytes":
-		match = strings.Contains(joined, "\x00hash-object\x00")
-	case "apply_check":
-		match = strings.Contains(joined, "\x00apply\x00--check\x00")
-	case "apply_index":
-		match = strings.Contains(joined, "\x00apply\x00--index\x00")
-	case "index_check":
-		match = strings.Contains(joined, "\x00diff\x00--cached\x00--check\x00")
-	case "commit":
-		match = strings.Contains(joined, "\x00commit\x00")
-	default:
-		t.Fatal("invalid synthetic Git target")
-	}
-	if match {
 		_, _ = fmt.Fprint(os.Stdout, "SYNTHETIC_OPAQUE_STDOUT /synthetic/private-candidate-path.go")
 		_, _ = fmt.Fprint(os.Stderr, "SYNTHETIC_OPAQUE_STDERR argv=--synthetic-secret-argument")
 		os.Exit(47)
-	}
-	realGit := os.Getenv("COMPETITION_TEST_REAL_GIT")
-	if realGit == "" {
-		t.Fatal("synthetic Git child lacks native executable")
-	}
-	if err := syscall.Exec(realGit, append([]string{realGit}, args...), os.Environ()); err != nil {
-		t.Fatal("synthetic native Git exec failed")
+	default:
+		t.Fatal("invalid synthetic diagnostic child mode")
 	}
 }
 
@@ -209,11 +215,7 @@ func TestCompetitionPatchCliGitDiagnosticsPreserveOpaqueInfrastructureBoundary(t
 	}
 	for _, phase := range []string{"head_identity", "protected_tree", "protected_helper_tree", "protected_helper_index", "protected_helper_bytes", "patch_base_tree", "apply_check", "apply_index", "index_check", "commit"} {
 		fixture := repositoryWorkCoverageFixture(t)
-		bin := t.TempDir()
-		shim := "#!/bin/sh\nset -e\nset -- \"$COMPETITION_TEST_GIT_EXECUTABLE\" -test.run=^TestRepositorySourceGitDiagnosticHelper$ -- \"$@\"\n" + repositoryGitDiagnosticBootstrap
-		if err := os.WriteFile(filepath.Join(bin, "git"), []byte(shim), 0700); err != nil {
-			t.Fatal(err)
-		}
+		bin := filepath.Dir(writeRepositoryGitDiagnosticShim(t))
 		previousPath := os.Getenv("PATH")
 		t.Setenv("PATH", bin+string(os.PathListSeparator)+previousPath)
 		t.Setenv("COMPETITION_TEST_REAL_GIT", realGit)
@@ -244,6 +246,46 @@ func TestCompetitionPatchCliGitDiagnosticsPreserveOpaqueInfrastructureBoundary(t
 		if err := os.Unsetenv("COMPETITION_TEST_GIT_DIAGNOSTIC_MODE"); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// Ordinary Git commands remain usable without the synthetic diagnostic child.
+func TestRepositoryGitDiagnosticShimKeepsUnrelatedCommandsInNativeGit(t *testing.T) {
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(t.TempDir(), "source with spaces")
+	if err := os.Mkdir(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	repositoryApplyTestGit(t, root, "init", "--quiet", "--initial-branch=sim-latency")
+	repositoryApplyTestGit(t, root, "commit", "--quiet", "--no-gpg-sign", "--allow-empty", "-m", "synthetic native Git checkout")
+	head := repositoryApplyTestGit(t, root, "rev-parse", "HEAD")
+
+	shim := writeRepositoryGitDiagnosticShim(t)
+	t.Setenv("COMPETITION_TEST_REAL_GIT", realGit)
+	t.Setenv("COMPETITION_TEST_GIT_EXECUTABLE", filepath.Join(t.TempDir(), "absent-diagnostic-helper"))
+	t.Setenv("COMPETITION_TEST_GIT_DIAGNOSTIC_MODE", "git")
+	t.Setenv("COMPETITION_TEST_GIT_DIAGNOSTIC_TARGET", "protected_tree")
+	for _, fixture := range []struct {
+		args []string
+		want string
+	}{
+		{args: []string{"symbolic-ref", "--quiet", "--short", "HEAD"}, want: "sim-latency"},
+		{args: []string{"rev-parse", "HEAD"}, want: head},
+	} {
+		args := append([]string{"-C", root, "-c", "core.hooksPath=/dev/null"}, fixture.args...)
+		output, err := exec.CommandContext(t.Context(), shim, args...).CombinedOutput()
+		if err != nil || strings.TrimSpace(string(output)) != fixture.want {
+			t.Fatalf("unrelated command did not reach native Git: %s: %v: %q", fixture.args[0], err, output)
+		}
+	}
+	filter := exec.CommandContext(t.Context(), shim, "-C", root, "config", "--local", "--includes", "--name-only", "--get-regexp", `^filter\.`)
+	output, err := filter.CombinedOutput()
+	var native *exec.ExitError
+	if !errors.As(err, &native) || native.ExitCode() != 1 || len(output) != 0 {
+		t.Fatalf("native no-match filter result changed: %v: %q", err, output)
 	}
 }
 

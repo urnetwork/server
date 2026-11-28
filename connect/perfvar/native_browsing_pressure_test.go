@@ -170,6 +170,9 @@ type nativeBrowsingRequestProgress struct {
 	bodyCloseError         atomic.Bool
 	serverReceipt          *clientconnect.MonitorValue[nativeBrowsingServerReceipt]
 	connectionAcquisitions atomic.Int64
+	connectionCheckouts    atomic.Int64
+	responseStarts         atomic.Int64
+	reusedH1RetryResponded atomic.Bool
 	requestWrites          atomic.Int64
 	requestWriteErrors     atomic.Int64
 	responseStatus         atomic.Int64

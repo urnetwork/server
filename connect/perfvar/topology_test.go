@@ -202,6 +202,7 @@ type fullTunPath struct {
 	downloadCompletionPhaseForTest      func(fullTunDownloadCompletionEvent)
 	beforeDownloadCompletionForTest     func(context.Context) error
 	beforeDownloadCompletionReadForTest func(context.Context) error
+	joinDownloadCompletionBeforeClose   bool
 	readinessProbePayloadForTest        []byte
 	beforeReadinessClientWriteForTest   func()
 	readinessClientConnectionForTest    func(net.Conn)
@@ -7336,12 +7337,7 @@ func measureFullTunDownloadWithWarmupAndStartHook(
 					return err
 				}
 			}
-			ack := make([]byte, 1)
-			readCount, readErr := io.ReadFull(connection, ack)
-			path.observeDownloadCompletionForTest(fullTunDownloadCompletionEvent{
-				Phase: "server-read", Count: int64(readCount), Value: ack[0], Err: readErr,
-			})
-			return readErr
+			return path.readDownloadCompletion(ctx, connection, deadline)
 		},
 		path.workloadFlowServerSettingsForTest,
 	)

@@ -1,3 +1,5 @@
+//go:build linux
+
 // The real CLI must serialize the frozen alias accepted by the private proxy.
 package competitionagent
 
