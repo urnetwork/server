@@ -1,0 +1,392 @@
+// A provider request consumes each sampled cache page at most once. Its
+// remaining-page cursor permits bounded refill after actual request filters.
+package model
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/gob"
+	"errors"
+	"fmt"
+	"maps"
+	mathrand "math/rand/v2"
+	"slices"
+
+	"github.com/redis/go-redis/v9"
+	"github.com/urnetwork/server/v2026"
+)
+
+type clientScorePage struct {
+	key              string
+	expectedCount    int
+	nativeKey        string
+	nativeGeneration string
+	nativeChecksum   [sha256.Size]byte
+	// a union modern page of a partitioned target, whose bytes must match the
+	// partition's checksum (network_client_score_modern.go)
+	modernChecksum    [sha256.Size]byte
+	hasModernChecksum bool
+	// A partitioned union page omitted by modern-only traversal until one
+	// of the partition's expected modern pages proves the metadata stale.
+	modernRecovery bool
+	// The records of the page a selector-mode read keeps
+	// (FP2-PROTOCOL.md §6.4); nil keeps every record. A page's count and
+	// checksum proofs hold for the whole page before it filters. The filter
+	// reads the page's shared decoded record (mergeClientScorePage) and must
+	// not change it.
+	filter func(*ClientScore) bool
+}
+
+// A partitioned traversal (network_client_score_modern.go) reads its pages in
+// two phases: pages[:modernPageCount], the modern pages of every requested
+// facet, then the rest. A take never crosses from the modern phase into the
+// other, so a refill can count the modern phase's survivors apart.
+type clientScoreCursor struct {
+	pages            []clientScorePage
+	nextPage         int
+	readCount        int
+	missingPages     int
+	sourceIncomplete bool
+	nativeOnly       bool
+	observation      *findProviders2LoadObservation
+	modernPageCount  int
+	// the rows taken in the modern phase
+	modernReadCount int
+	// a modern page failed its partition checksum, and every unread page
+	// joined the modern phase so that no modern provider is passed over
+	modernStale bool
+	// Omitted partitioned pages retained without reading their payloads.
+	// Staleness activates them once within the existing row allowance.
+	modernRecoveryPages []clientScorePage
+}
+
+// Facet priority is unchanged. Within a facet, shuffle once for the whole
+// request so an added read cannot revisit already-rejected pages.
+func newClientScoreCursor(groups []map[string]int, observation *findProviders2LoadObservation) *clientScoreCursor {
+	cursor := &clientScoreCursor{observation: observation}
+	for _, counts := range groups {
+		keys := slices.Collect(maps.Keys(counts))
+		mathrand.Shuffle(len(keys), func(i, j int) { keys[i], keys[j] = keys[j], keys[i] })
+		for _, key := range keys {
+			if 0 < counts[key] {
+				cursor.pages = append(cursor.pages, clientScorePage{key: key, expectedCount: counts[key]})
+			}
+		}
+	}
+	return cursor
+}
+
+// A partitioned cursor: the modern groups' pages, then the other groups',
+// each group in draw order and shuffled once for the request.
+func newClientScorePhasedCursor(modernGroups []map[string]clientScorePage, otherGroups []map[string]clientScorePage, observation *findProviders2LoadObservation) *clientScoreCursor {
+	cursor := &clientScoreCursor{observation: observation}
+	appendGroups := func(groups []map[string]clientScorePage) {
+		for _, pages := range groups {
+			keys := slices.Collect(maps.Keys(pages))
+			mathrand.Shuffle(len(keys), func(i, j int) { keys[i], keys[j] = keys[j], keys[i] })
+			for _, key := range keys {
+				if 0 < pages[key].expectedCount {
+					cursor.pages = append(cursor.pages, pages[key])
+				}
+			}
+		}
+	}
+	appendGroups(modernGroups)
+	cursor.modernPageCount = len(cursor.pages)
+	appendGroups(otherGroups)
+	return cursor
+}
+
+func (self *clientScoreCursor) hasMore() bool {
+	return self != nil && self.nextPage < len(self.pages)
+}
+
+// Whether the next page is in the modern phase.
+func (self *clientScoreCursor) inModernPhase() bool {
+	return self != nil && self.nextPage < self.modernPageCount
+}
+
+// Whether pages remain past the modern phase.
+func (self *clientScoreCursor) hasOtherPhase() bool {
+	return self != nil && self.modernPageCount < len(self.pages)
+}
+
+// Leaves the modern phase's unread pages, for a union allowance that ended
+// inside it: the other phase fills the band instead.
+func (self *clientScoreCursor) skipModernPhase() {
+	if self.nextPage < self.modernPageCount {
+		self.nextPage = self.modernPageCount
+	}
+}
+
+// Moves every unread page into the modern phase, once, when a modern page's
+// bytes are not the ones its partition describes.
+func (self *clientScoreCursor) markModernStale() {
+	if self.modernStale {
+		return
+	}
+	self.modernStale = true
+	for _, page := range self.modernRecoveryPages {
+		if self.observation != nil {
+			self.observation.unreadNonModernRows -= page.expectedCount
+		}
+	}
+	self.pages = append(self.pages, self.modernRecoveryPages...)
+	self.modernRecoveryPages = nil
+	self.modernPageCount = len(self.pages)
+	findProviders2ModernPartitionTargets.WithLabelValues("union", clientScoreModernStale).Inc()
+}
+
+// Like the existing loader, the last whole page can exceed the requested row
+// budget. Published pages hold at most ClientScoreSampleCount rows, so this
+// rounding adds at most 199 rows; it does not reset on a refill. A take in the
+// modern phase ends at its boundary.
+func (self *clientScoreCursor) take(additionalRows int) []clientScorePage {
+	start, rows := self.nextPage, 0
+	end := len(self.pages)
+	if self.nextPage < self.modernPageCount {
+		end = self.modernPageCount
+	}
+	for rows < additionalRows && self.nextPage < end {
+		page := self.pages[self.nextPage]
+		rows += page.expectedCount
+		self.nextPage++
+	}
+	self.readCount += rows
+	if start < self.modernPageCount {
+		self.modernReadCount += rows
+	}
+	return self.pages[start:self.nextPage]
+}
+
+func (self *clientScoreCursor) read(ctx context.Context, additionalRows int) (scores map[server.Id]*ClientScore, returnErr error) {
+	server.Redis(ctx, func(r server.RedisClient) {
+		scores, returnErr = self.readWithClient(ctx, r, additionalRows)
+	})
+	return
+}
+
+func (self *clientScoreCursor) readWithClient(ctx context.Context, r server.RedisClient, additionalRows int) (map[server.Id]*ClientScore, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	pages := self.take(additionalRows)
+	pipe := r.Pipeline()
+	type pageRead struct {
+		page   clientScorePage
+		legacy *redis.StringCmd
+		native *redis.SliceCmd
+		// A native page whose manifest checksum this process holds decoded
+		// (clientScorePages) reads only its slot's generation, one read per
+		// slot key in the pipeline, and answers that decode while the
+		// generation is still the manifest's (network_client_score_page_cache.go).
+		generation *redis.SliceCmd
+		decoded    []*ClientScore
+	}
+	slotGenerations := map[string]*redis.SliceCmd{}
+	commands := make([]pageRead, 0, len(pages))
+	for _, page := range pages {
+		read := pageRead{page: page}
+		if page.nativeKey == "" {
+			read.legacy = pipe.Get(ctx, page.key)
+		} else if decoded, ok := clientScorePages.get(page.nativeChecksum); ok {
+			read.decoded = decoded
+			read.generation = slotGenerations[page.nativeKey]
+			if read.generation == nil {
+				read.generation = pipe.HMGet(ctx, page.nativeKey, "g")
+				slotGenerations[page.nativeKey] = read.generation
+			}
+		} else {
+			read.native = pipe.HMGet(ctx, page.nativeKey, "g", page.key)
+		}
+		commands = append(commands, read)
+	}
+	var sourceErr error
+	if err := execClientScoreReadPipeline(ctx, pipe); err != nil {
+		clientScoreReadMetrics.samples.Inc()
+		sourceErr = fmt.Errorf("read client score samples: %w", err)
+		if !self.nativeOnly || ctx.Err() != nil {
+			return nil, sourceErr
+		}
+		// Native pages carry their own generation, checksum and count proof.
+		// A failed sibling command cannot invalidate a successfully returned
+		// page's proof, but the overall source remains explicitly unavailable.
+	}
+	scores := map[server.Id]*ClientScore{}
+	for _, command := range commands {
+		// the page's decoded records, shared with every reader in the process:
+		// read here, and copied only for the records this read keeps
+		// (mergeClientScorePage)
+		var sample []*ClientScore
+		if command.generation != nil {
+			if command.generation.Err() != nil {
+				continue
+			}
+			values, _ := command.generation.Result()
+			if len(values) != 1 {
+				sourceErr = errors.Join(sourceErr, fmt.Errorf("%w: incomplete page response", errClientScoreNativeUnavailable))
+				continue
+			}
+			if generation, ok := values[0].(string); !ok || generation != command.page.nativeGeneration {
+				sourceErr = errors.Join(sourceErr, fmt.Errorf("%w: missing or changed page", errClientScoreNativeUnavailable))
+				continue
+			}
+			clientScorePageCacheHits.Inc()
+			sample = command.decoded
+		} else {
+			var data []byte
+			// the sha256 of the page bytes read, by which the decoded page is
+			// cached (decodeClientScorePage)
+			var checksum [sha256.Size]byte
+			if command.native == nil {
+				data, _ = command.legacy.Bytes()
+				if 0 < len(data) {
+					checksum = sha256.Sum256(data)
+				}
+				if command.page.hasModernChecksum && (len(data) == 0 || checksum != command.page.modernChecksum) {
+					self.markModernStale()
+				}
+			} else {
+				if command.native.Err() != nil {
+					continue
+				}
+				values, _ := command.native.Result()
+				if len(values) != 2 {
+					sourceErr = errors.Join(sourceErr, fmt.Errorf("%w: incomplete page response", errClientScoreNativeUnavailable))
+					continue
+				}
+				generation, generationOk := values[0].(string)
+				value, valueOk := values[1].(string)
+				if !generationOk || !valueOk || generation != command.page.nativeGeneration {
+					sourceErr = errors.Join(sourceErr, fmt.Errorf("%w: missing or changed page", errClientScoreNativeUnavailable))
+					continue
+				}
+				data = []byte(value)
+				if len(data) < sha256.Size || !bytes.Equal(data[:sha256.Size], command.page.nativeChecksum[:]) || sha256.Sum256(data[sha256.Size:]) != command.page.nativeChecksum {
+					sourceErr = errors.Join(sourceErr, fmt.Errorf("%w: page checksum mismatch", errClientScoreNativeUnavailable))
+					continue
+				}
+				checksum = command.page.nativeChecksum
+				data = data[sha256.Size:]
+			}
+			if len(data) == 0 {
+				self.missingPages++
+				if self.observation != nil {
+					self.observation.missingPages++
+				}
+				continue
+			}
+			var err error
+			sample, err = decodeClientScorePageShared(data, checksum)
+			if err != nil {
+				sourceErr = errors.Join(sourceErr, err)
+				continue
+			}
+		}
+		if command.page.nativeKey != "" && len(sample) != command.page.expectedCount {
+			sourceErr = errors.Join(sourceErr, fmt.Errorf("%w: page count mismatch", errClientScoreNativeUnavailable))
+			continue
+		}
+		mergeClientScorePage(scores, sample, command.page.filter)
+	}
+	if sourceErr != nil {
+		self.sourceIncomplete = true
+	}
+	return scores, sourceErr
+}
+
+// Reuse the existing finite exclusion allowance. Already-known explicit
+// exclusions and actually discarded/duplicate rows overlap, so take the max
+// rather than charging the same exclusion twice. The initial sample remains
+// unchanged; successful requests perform no refill.
+func findProviders2RefillLoadCount(count, explicitExclusions, discardedRows int) int {
+	return findProviders2LoadCount(count, max(explicitExclusions, discardedRows))
+}
+
+// Merges the records of one decoded page that a read keeps, as
+// mergeClientScoreSample merges a page of copies: a record the page's filter
+// refuses is dropped, and a later copy replaces an earlier one unless that
+// would trade a location-bearing copy for one without. Each record merged is
+// this reader's own copy (decodeClientScorePage), and records the filter or
+// the location rule drop are never copied. The page is shared with the
+// process cache: the filter and the location rule read its records and never
+// write them. A page's copies share one allocation, sized by the records its
+// filter keeps.
+func mergeClientScorePage(scores map[server.Id]*ClientScore, page []*ClientScore, filter func(*ClientScore) bool) {
+	keepCount := len(page)
+	if filter != nil {
+		keepCount = 0
+		for _, score := range page {
+			if filter(score) {
+				keepCount += 1
+			}
+		}
+	}
+	if keepCount == 0 {
+		return
+	}
+	// never grown past its capacity, so a merged copy's address is stable
+	copies := make([]ClientScore, 0, keepCount)
+	for _, score := range page {
+		if filter != nil && !filter(score) {
+			continue
+		}
+		if existing := scores[score.ClientId]; existing != nil && existing.CountryLocationId != nil && score.CountryLocationId == nil {
+			continue
+		}
+		copies = append(copies, *score)
+		scores[score.ClientId] = &copies[len(copies)-1]
+	}
+}
+
+// Copies from overlapping requested targets can share a provider. Retain a
+// location-bearing copy when the other came from a group cache.
+func mergeClientScoreSample(scores map[server.Id]*ClientScore, sample []*ClientScore) {
+	for _, score := range sample {
+		if existing := scores[score.ClientId]; existing != nil && existing.CountryLocationId != nil && score.CountryLocationId == nil {
+			continue
+		}
+		scores[score.ClientId] = score
+	}
+}
+
+// The scores of a page, typed or gob (network_client_score_page_codec.go).
+func decodeClientScoreSample(data []byte) ([]*ClientScore, error) {
+	sample, _, err := decodeClientScorePageBytes(data)
+	return sample, err
+}
+
+// The scores of a page, typed or gob, and the estimated heap they retain: a
+// typed decode's own estimate, or clientScorePageDecodedBytesPerByte of a gob
+// page's bytes.
+func decodeClientScorePageBytes(data []byte) (sample []*ClientScore, size int64, returnErr error) {
+	typed := isTypedClientScorePage(data)
+	defer func() {
+		clientScorePageDecodeCounter(typed, returnErr == nil).Inc()
+	}()
+	if typed {
+		sample, size, returnErr = decodeClientScorePageTyped(data)
+		if returnErr != nil {
+			return nil, 0, returnErr
+		}
+	} else {
+		if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&sample); err != nil {
+			return nil, 0, err
+		}
+		size = clientScorePageDecodedBytesPerByte * int64(len(data))
+	}
+	if err := validateClientScoreSample(sample); err != nil {
+		return nil, 0, err
+	}
+	return sample, size, nil
+}
+
+func validateClientScoreSample(sample []*ClientScore) error {
+	for _, score := range sample {
+		if score == nil {
+			return fmt.Errorf("client score sample contains a nil provider")
+		}
+	}
+	return nil
+}
