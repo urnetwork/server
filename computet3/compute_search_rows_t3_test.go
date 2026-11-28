@@ -142,6 +142,37 @@ func TestComputeSearchOutcomeHoursOnT3(t *testing.T) {
 	})
 }
 
+// The tables' own checks refuse what a write past sidecar/model's checks could leave: a payee not 20 bytes, a refused
+// payee naming a transaction, an out-of-band record's transaction not 32 bytes, a reason §21.5 does not name, a review's
+// time without its reference or its reference without its time, an outcome class §21.8 does not name and a negative
+// count.
+func TestComputeSearchRowChecksOnT3(t *testing.T) {
+	runComputeT3(t, func(t3 *computeT3) {
+		now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+		payee := bytes.Repeat([]byte{1}, 20)
+		for name, args := range map[string][]any{
+			"a 19-byte payee":                   {int16(1), payee[:19], nil, nil, nil},
+			"a refused payee's transaction":     {int16(1), payee, bytes.Repeat([]byte{2}, 32), nil, nil},
+			"an out-of-band's 31-byte one":      {int16(2), payee, bytes.Repeat([]byte{2}, 31), nil, nil},
+			"a reason of 3":                     {int16(3), payee, nil, nil, nil},
+			"a review's time alone":             {int16(1), payee, nil, now, nil},
+			"a review's reference without time": {int16(1), payee, nil, nil, "case-1"},
+		} {
+			err := t3.exec(`INSERT INTO compute_search_flag (flag_id, network_id, sidecar_id, reason, payee, transaction, flag_time, reviewed_time, review_reference)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, append([]any{sidecar.NewId(), sidecar.NewId(), sidecar.NewId()}, append(args[:3:3], now, args[3], args[4])...)...)
+			if !computeT3SqlState(err, "23514") {
+				t3.t.Errorf("%s answered %v, want a check's refusal", name, err)
+			}
+		}
+		for name, args := range map[string][]any{"a class of 5": {int16(5), int64(1)}, "a negative count": {int16(1), int64(-1)}} {
+			err := t3.exec(`INSERT INTO compute_search_outcome_hour (hour_time, outcome, count) VALUES ($1, $2, $3)`, append([]any{now}, args...)...)
+			if !computeT3SqlState(err, "23514") {
+				t3.t.Errorf("%s answered %v, want a check's refusal", name, err)
+			}
+		}
+	})
+}
+
 // The open search rows past a time, oldest first and of kind 6 alone, and a network's searches since a time, a void
 // one left out: what compute_search_tickets and {cmpr_<network_id>}'s rebuild read of BAL's compute_op.
 func TestComputeSearchOpsOnT3(t *testing.T) {
