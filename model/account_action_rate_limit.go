@@ -94,6 +94,7 @@ var actionDisplayNames = map[string]string{
 	AccountActionExtenderLatencyReport:           "reporting extender latency",
 	AccountActionExtenderBlockReport:             "reporting a blocked extender",
 	AccountActionStripePurchaseStart:             "starting a card purchase",
+	AccountActionWalletDisconnectCodeSend:        "sending payout wallet disconnect codes",
 }
 
 // The display name of an action, "this action" for one that has none.

@@ -259,6 +259,8 @@ func registry() []specEndpoint {
 		{"POST", "/sn/wallet/hotkey-delegation", rt(controller.SnHotkeyNetworkDelegationChallengeArgs{}), rt(controller.SnWalletMappingChallengeResult{})},
 		{"POST", "/sn/wallet/hotkey-delegation/history", rt(controller.SnHotkeyNetworkDelegationHistoryArgs{}), rt(controller.SnWalletMappingHistoryResult{})},
 		{"POST", "/sn/wallet/validate", rt(controller.SnValidateWalletArgs{}), rt(controller.SnValidateWalletResult{})},
+		{"POST", "/sn/wallet/disconnect-code", rt(controller.SnWalletDisconnectCodeArgs{}), rt(controller.SnWalletDisconnectCodeResult{})},
+		{"POST", "/sn/wallet/disconnect", rt(controller.SnWalletDisconnectArgs{}), rt(controller.SnWalletDisconnectResult{})},
 		{"GET", "/sn/head", nil, rt(controller.SnHeadResult{})},
 		{"GET", "/sn/ledger/account", nil, rt(controller.StLedgerV2AccountsResult{})},
 		{"GET", "/sn/claim-relay", nil, rt(controller.SnClaimRelayResult{})},

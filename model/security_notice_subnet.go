@@ -25,9 +25,10 @@ func subnetKeyWallet(key [32]byte) *securityWallet {
 	return &securityWallet{chain: TAO.String(), address: address}
 }
 
-// A stored public key, or nil when it is not 32 bytes.
+// A stored public key, or nil when it is not 32 bytes or is the zero key of
+// a disconnected provider (st_wallet_disconnect.go).
 func subnetStoredKeyWallet(pubkey []byte) *securityWallet {
-	if len(pubkey) != 32 {
+	if len(pubkey) != 32 || [32]byte(pubkey) == ([32]byte{}) {
 		return nil
 	}
 	return subnetKeyWallet([32]byte(pubkey))

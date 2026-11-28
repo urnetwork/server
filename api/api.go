@@ -406,6 +406,8 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		router.NewRoute("POST", "/sn/wallet/hotkey-delegation/history", handlers.SnHotkeyNetworkDelegationHistory),
 		router.NewRoute("GET", "/sn/wallet", handlers.SnGetWallet),
 		router.NewRoute("POST", "/sn/wallet/validate", handlers.SnValidateWallet),
+		router.NewRoute("POST", "/sn/wallet/disconnect-code", handlers.SnWalletDisconnectCode),
+		router.NewRoute("POST", "/sn/wallet/disconnect", handlers.SnWalletDisconnect),
 		router.NewRoute("GET", "/sn/head", handlers.SnHead),
 		// the SN Top board (LEADERTOP.md §7): public with optional auth, and
 		// the caller's detail

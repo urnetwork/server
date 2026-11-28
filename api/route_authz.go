@@ -287,6 +287,8 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /sn/wallet/hotkey-delegation/history":     routeAccessPublic,
 	"GET /sn/wallet":                                routeAccessOwnClientPayout, // wallet read
 	"POST /sn/wallet/validate":                      routeAccessPublic,
+	"POST /sn/wallet/disconnect-code":               routeAccessNetwork, // the network owner's payout wallet disconnect code (re-auth)
+	"POST /sn/wallet/disconnect":                    routeAccessNetwork, // disconnects the network's payout wallet
 	"GET /sn/head":                                  routeAccessClient,
 	"GET /sn/top":                                   routeAccessPublic, // the public board; a token only adds the caller's own row
 	"GET /sn/top/me":                                routeAccessClient,
