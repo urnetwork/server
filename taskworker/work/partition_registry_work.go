@@ -121,15 +121,19 @@ type MaintainPartitionRetentionResult struct {
 	// (server.PartitionRetentionReport.OpenLeafAnalyzeAt); zero from a build
 	// before it
 	OpenLeafAnalyzeAt time.Time `json:"open_leaf_analyze_at,omitzero"`
+	// the run left a family's opened leaf unanalyzed within its retry window
+	// (server.PartitionRetentionReport.OpenLeafRetry)
+	OpenLeafRetry bool `json:"open_leaf_retry,omitempty"`
 }
 
 // The next run's time, at now: the cadence's, or the next range's first
 // analyze of its leaves when that comes first, at once when it passed while
 // the run ran. On the cadence alone a new day's leaves waited up to an
-// interval past 00:00 UTC, or for autovacuum.
+// interval past 00:00 UTC, or for autovacuum. A run that left work behind, or
+// an opened leaf unanalyzed, runs again after the retry interval.
 func maintainPartitionRetentionNextRunAt(settings *PartitionRegistryTaskSettings, result *MaintainPartitionRetentionResult, now time.Time) time.Time {
 	runAt := now.Add(settings.RetentionInterval)
-	if result.More {
+	if result.More || result.OpenLeafRetry {
 		runAt = now.Add(settings.RetentionRetryInterval)
 	}
 	if !result.OpenLeafAnalyzeAt.IsZero() && result.OpenLeafAnalyzeAt.Before(runAt) {
@@ -192,6 +196,7 @@ func MaintainPartitionRetention(
 		State:             state,
 		More:              report.More,
 		OpenLeafAnalyzeAt: report.OpenLeafAnalyzeAt,
+		OpenLeafRetry:     report.OpenLeafRetry,
 	}, nil
 }
 

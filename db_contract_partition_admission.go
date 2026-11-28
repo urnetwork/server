@@ -13,6 +13,10 @@
 //   - Any transaction older than MaxTransactionAge that holds or awaits a lock
 //     the request conflicts with.
 //
+// A SHARE UPDATE EXCLUSIVE request (an ANALYZE, a constraint validation)
+// judges only the locks whose mode conflicts with it: a request never waits
+// for any other lock, held or awaited, whoever its session is.
+//
 // The scope includes every partition below the named relations: once the
 // tables are partitioned their vacuums run on the leaves, and a LOCK TABLE of
 // a parent waits for the locks of its leaves.
@@ -244,12 +248,28 @@ var contractShareUpdateExclusiveConflicts = map[string]bool{
 }
 
 // Whether a request should not queue behind lock: an autovacuum worker's lock,
-// whatever its age or mode; a prepared transaction's, which nothing ends; a
-// session this role cannot see, which it cannot judge; and the lock of a
-// transaction older than maxTransactionAge when its mode conflicts with the
-// request (every mode conflicts with ACCESS EXCLUSIVE).
+// whatever its age; a prepared transaction's, which nothing ends; a session
+// this role cannot see, which it cannot judge; and the lock of a transaction
+// older than maxTransactionAge when its mode conflicts with the request.
+//
+// A lock whose mode does not conflict with the request never blocks it,
+// whoever holds or awaits it: PostgreSQL grants the request at once beside it.
+// Every mode conflicts with ACCESS EXCLUSIVE; SHARE UPDATE EXCLUSIVE conflicts
+// with five (contractShareUpdateExclusiveConflicts). A lock of a process that
+// starts or exits between the read's pg_locks and pg_stat_activity has no
+// activity row, and reads as a session this role cannot see. On Main at
+// 2026-11-28 00:01Z, with about 40 processes starting a second (parallel
+// workers among them), three such locks (ACCESS SHARE and ROW EXCLUSIVE) held
+// the analyze of the new day's transfer_contract leaf and of two parents for a
+// later run. The leaf was read without statistics until autovacuum analyzed it
+// 12 minutes later: without them PostgreSQL estimates the unexpired contract
+// id bound (contract_id_bound.go) at 0.5% of the leaf, though it holds the
+// whole new day, and the hot reads of open contracts read the leaf's whole
+// primary key into a bitmap on every call.
 func contractScopeLockBlocks(request contractLockRequest, lock contractScopeLock, maxTransactionAge time.Duration) bool {
 	switch {
+	case request == contractLockShareUpdateExclusive && !contractShareUpdateExclusiveConflicts[lock.mode]:
+		return false
 	case lock.pid == 0 || lock.backendType == "":
 		return true
 	case lock.backendType == "autovacuum worker":

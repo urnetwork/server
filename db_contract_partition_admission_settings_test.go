@@ -8,7 +8,9 @@ import (
 	"time"
 )
 
-// The admission's judgement of each lock in a step's scope.
+// The admission's judgement of each lock in a step's scope. A SHARE UPDATE
+// EXCLUSIVE request (validate) is blocked only by a lock whose mode conflicts
+// with it.
 func TestContractScopeLockBlocks(t *testing.T) {
 	maxAge := 5 * time.Second
 	for _, test := range []struct {
@@ -30,14 +32,38 @@ func TestContractScopeLockBlocks(t *testing.T) {
 			validate:  true,
 		},
 		{
-			name:      "a prepared transaction",
+			name:      "a prepared transaction's write",
 			lock:      contractScopeLock{pid: 0, mode: "RowExclusiveLock", granted: true, transactionAge: -1},
+			exclusive: true,
+		},
+		{
+			name:      "a prepared transaction's share lock",
+			lock:      contractScopeLock{pid: 0, mode: "ShareLock", granted: true, transactionAge: -1},
 			exclusive: true,
 			validate:  true,
 		},
 		{
-			name:      "a session this role cannot see",
+			// a parallel worker that started or exited between the read's
+			// pg_locks and pg_stat_activity: the analyze of the day's new
+			// transfer_contract leaf at 2026-11-28 00:01Z
+			name:      "a read of a session this role cannot see",
 			lock:      contractScopeLock{pid: 12, mode: "AccessShareLock", granted: true, transactionAge: -1},
+			exclusive: true,
+		},
+		{
+			name:      "a write of a session this role cannot see",
+			lock:      contractScopeLock{pid: 19, mode: "RowExclusiveLock", granted: true, transactionAge: -1},
+			exclusive: true,
+		},
+		{
+			name:      "a vacuum or analyze of a session this role cannot see",
+			lock:      contractScopeLock{pid: 20, mode: "ShareUpdateExclusiveLock", granted: true, transactionAge: -1},
+			exclusive: true,
+			validate:  true,
+		},
+		{
+			name:      "a DDL wait of a session this role cannot see",
+			lock:      contractScopeLock{pid: 21, mode: "AccessExclusiveLock", granted: false, transactionAge: -1},
 			exclusive: true,
 			validate:  true,
 		},
