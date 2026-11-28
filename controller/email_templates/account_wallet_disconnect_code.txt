@@ -1,0 +1,16 @@
+{{define "headline"}}CONFIRM THE WALLET DISCONNECT{{end}}
+{{define "why"}}You received this because someone signed in to your URnetwork account
+asked to disconnect its payout wallet.{{end}}
+{{define "content"}}
+Enter this code in the app to disconnect your payout wallet. It expires in
+{{.Minutes}} minutes.
+
+    {{.Code}}
+
+With no payout wallet, your earnings can't be paid out until you connect one
+again. Earnings already paid stay claimable by the wallet they were paid to.
+
+Didn't ask for this? Don't share the code, and nothing changes. Someone may be
+signed in to your account: change your password, sign out your other devices
+at https://ur.io/app/account/sessions and contact security@ur.io.
+{{end}}

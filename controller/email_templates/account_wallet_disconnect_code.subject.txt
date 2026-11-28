@@ -1,0 +1,1 @@
+{{.Code}} is your code to disconnect your URnetwork payout wallet
