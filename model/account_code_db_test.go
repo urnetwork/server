@@ -165,23 +165,33 @@ func TestAccountCodeRequestExpires(t *testing.T) {
 	})
 }
 
-// The hmac binds every part: purpose, user, request, slot and code.
+// The hmac binds every part, each delimited: the key, purpose, user,
+// request, slot and code.
+// A pure test: it needs no vault, so it keys the hmac itself.
 func TestAccountCodeMacBindsEveryPart(t *testing.T) {
+	key := []byte("a synthetic pepper for the account code test")
 	userId := server.NewId()
 	requestId := server.NewId()
-	base := accountCodeMac("test", userId, requestId, 0, "123456")
+	mac := func(key []byte, purpose string, userId server.Id, requestId server.Id, slot int, code string) string {
+		return accountCodeMacWithKey(key, purpose, userId, requestId, slot, code)
+	}
+	base := mac(key, "test", userId, requestId, 0, "123456")
 	for name, other := range map[string]string{
-		"purpose": accountCodeMac("other", userId, requestId, 0, "123456"),
-		"user":    accountCodeMac("test", server.NewId(), requestId, 0, "123456"),
-		"request": accountCodeMac("test", userId, server.NewId(), 0, "123456"),
-		"slot":    accountCodeMac("test", userId, requestId, 1, "123456"),
-		"code":    accountCodeMac("test", userId, requestId, 0, "123457"),
+		"key":     mac([]byte("another pepper"), "test", userId, requestId, 0, "123456"),
+		"purpose": mac(key, "other", userId, requestId, 0, "123456"),
+		"user":    mac(key, "test", server.NewId(), requestId, 0, "123456"),
+		"request": mac(key, "test", userId, server.NewId(), 0, "123456"),
+		"slot":    mac(key, "test", userId, requestId, 1, "123456"),
+		"code":    mac(key, "test", userId, requestId, 0, "123457"),
+		// the parts are delimited, so moving a character between two parts
+		// is another hmac
+		"boundary": mac(key, "test1", userId, requestId, 0, "23456"),
 	} {
 		if other == base {
 			t.Errorf("another %s gives the same hmac", name)
 		}
 	}
-	if accountCodeMac("test", userId, requestId, 0, "123456") != base {
+	if mac(key, "test", userId, requestId, 0, "123456") != base {
 		t.Fatal("the hmac is not deterministic")
 	}
 }
