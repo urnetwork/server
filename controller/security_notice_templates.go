@@ -221,6 +221,8 @@ func securityNoticeSignInMethod(method string) string {
 		return "Apple"
 	case model.SecuritySignInMethodGoogle:
 		return "Google"
+	case model.SecuritySignInMethodMicrosoft:
+		return "Microsoft"
 	case model.SecuritySignInMethodSolana:
 		return "Solana wallet"
 	case model.SecuritySignInMethodBittensor:
