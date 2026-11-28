@@ -39,7 +39,7 @@ func stDisconnectTestNetwork(t testing.TB, ctx context.Context) (networkId serve
 	t.Helper()
 	networkId = server.NewId()
 	userId = server.NewId()
-	userAuth = Testing_CreateNetwork(ctx, networkId, "disconnect"+networkId.String()[:8], userId)
+	userAuth = Testing_CreateNetwork(ctx, networkId, "disconnect-"+networkId.String(), userId)
 	return
 }
 
