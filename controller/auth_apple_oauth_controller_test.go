@@ -41,7 +41,8 @@ func TestOAuthSchemeForState(t *testing.T) {
 		appleOAuthTestState("linux"):   "urnetwork",
 		appleOAuthTestState("macos"):   "urnetwork",
 		appleOAuthTestState("macOS"):   "urnetwork",
-		appleOAuthTestState("ios"):     "ur",
+		appleOAuthTestState("ios"):     "urnetwork",
+		appleOAuthTestState("tvos"):    "ur",
 		"opaque":                       "ur",
 	}
 	for state, scheme := range cases {
