@@ -74,6 +74,20 @@ func AuthGoogleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	controller.GoogleOAuthCallback(w, r)
 }
 
+// AuthMicrosoftOAuthStart sends the browser of an app or ur.io on to
+// Microsoft's authorize page with the server's own client. No auth, no body
+// wrapper: the request is a browser navigation, not an api call.
+func AuthMicrosoftOAuthStart(w http.ResponseWriter, r *http.Request) {
+	controller.MicrosoftOAuthStart(w, r)
+}
+
+// AuthMicrosoftOAuthCallback receives Microsoft's redirect (authorization
+// code), exchanges the code for the identity token and hands it back to the
+// app's scheme or ur.io's callback page. No auth, no body wrapper.
+func AuthMicrosoftOAuthCallback(w http.ResponseWriter, r *http.Request) {
+	controller.MicrosoftOAuthCallback(w, r)
+}
+
 func AuthConnect(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, controller.SsoRedirectUrl(), http.StatusSeeOther)
 }

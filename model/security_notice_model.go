@@ -162,6 +162,7 @@ const (
 	SecuritySignInMethodPhone      = "phone"
 	SecuritySignInMethodApple      = "apple"
 	SecuritySignInMethodGoogle     = "google"
+	SecuritySignInMethodMicrosoft  = "microsoft"
 	SecuritySignInMethodSolana     = "solana"
 	SecuritySignInMethodBittensor  = "bittensor"
 	SecuritySignInMethodSeedphrase = "seedphrase"

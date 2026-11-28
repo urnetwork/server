@@ -59,7 +59,7 @@ type userAuthHold struct {
 }
 
 func isSsoAuthType(authType string) bool {
-	return authType == AuthTypeApple || authType == AuthTypeGoogle
+	return authType == AuthTypeApple || authType == AuthTypeGoogle || authType == AuthTypeMicrosoft
 }
 
 // The account was created with the address by email or phone: the legacy

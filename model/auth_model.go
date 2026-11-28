@@ -37,6 +37,7 @@ const (
 	AuthTypePassword   AuthType = "password"
 	AuthTypeApple      AuthType = "apple"
 	AuthTypeGoogle     AuthType = "google"
+	AuthTypeMicrosoft  AuthType = "microsoft"
 	AuthTypeBringYour  AuthType = "bringyour"
 	AuthTypeGuest      AuthType = "guest"
 	AuthTypeSolana     AuthType = "solana"
@@ -119,8 +120,9 @@ type AuthLoginResultNetwork struct {
 type SsoAuthType = string
 
 const (
-	SsoAuthTypeApple  SsoAuthType = "apple"
-	SsoAuthTypeGoogle SsoAuthType = "google"
+	SsoAuthTypeApple     SsoAuthType = "apple"
+	SsoAuthTypeGoogle    SsoAuthType = "google"
+	SsoAuthTypeMicrosoft SsoAuthType = "microsoft"
 )
 
 func AuthLogin(
@@ -465,7 +467,7 @@ var parsedAuthJwtLoginDb = parsedAuthJwtLoginStore{
 			isPro,
 		)
 		kind, _ := ctx.Value(sessionSignInKindKey{}).(string)
-		if kind != "apple" && kind != "google" {
+		if kind != "apple" && kind != "google" && kind != "microsoft" {
 			kind = "sso"
 		}
 		signed, err := session.MintNetworkSession(ctx, credential, kind)

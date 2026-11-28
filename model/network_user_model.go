@@ -542,8 +542,11 @@ func addSsoAuth(
 
 		if returnErr == nil && watch != nil {
 			method := SecuritySignInMethodGoogle
-			if args.ParsedAuthJwt.AuthType == AuthTypeApple {
+			switch args.ParsedAuthJwt.AuthType {
+			case AuthTypeApple:
 				method = SecuritySignInMethodApple
+			case AuthTypeMicrosoft:
+				method = SecuritySignInMethodMicrosoft
 			}
 			watch.noticeInTx(ctx, tx, newSecuritySignInChange(ctx, SecuritySignInAdded, method, maskUserAuth(args.ParsedAuthJwt.UserAuth)))
 		}
@@ -1741,7 +1744,7 @@ func RemoveAuth(ctx context.Context, userId server.Id, authType string) error {
 				userId, authType,
 			))
 			removedChange = newSecuritySignInChange(ctx, SecuritySignInRemoved, authType, identity)
-		case "apple", "google":
+		case "apple", "google", "microsoft":
 			if !removeAuthMethodIsBound(
 				ctx, tx,
 				`SELECT 1 FROM network_user_auth_sso WHERE user_id = $1 AND auth_type = $2`,

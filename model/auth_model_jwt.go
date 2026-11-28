@@ -34,6 +34,16 @@ func ParseAuthJwt(authJwt string, authJwtType AuthType) (*AuthJwt, error) {
 			UserAuth: googleJwt.UserAuth,
 			UserName: googleJwt.UserName,
 		}, nil
+	case AuthTypeMicrosoft:
+		microsoftJwt, err := session.ParseMicrosoftJwt(authJwt)
+		if err != nil {
+			return nil, err
+		}
+		return &AuthJwt{
+			AuthType: AuthTypeMicrosoft,
+			UserAuth: microsoftJwt.UserAuth,
+			UserName: microsoftJwt.UserName,
+		}, nil
 	}
 	return nil, fmt.Errorf("Unknown auth type: %s", authJwtType)
 }
@@ -59,6 +69,16 @@ func ParseAuthJwtUnverified(authJwt string, authJwtType AuthType) (*AuthJwt, err
 			AuthType: AuthTypeGoogle,
 			UserAuth: googleJwt.UserAuth,
 			UserName: googleJwt.UserName,
+		}, nil
+	case AuthTypeMicrosoft:
+		microsoftJwt, err := session.ParseMicrosoftJwtUnverified(authJwt)
+		if err != nil {
+			return nil, err
+		}
+		return &AuthJwt{
+			AuthType: AuthTypeMicrosoft,
+			UserAuth: microsoftJwt.UserAuth,
+			UserName: microsoftJwt.UserName,
 		}, nil
 	}
 	return nil, fmt.Errorf("Unknown auth type: %s", authJwtType)

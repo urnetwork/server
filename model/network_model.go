@@ -238,7 +238,7 @@ func networkCreateAuthShapeError(networkCreate NetworkCreateArgs) *NetworkCreate
 			message = "Authentication type is required."
 		case strings.TrimSpace(*networkCreate.AuthJwt) == "":
 			message = "Authentication token is required."
-		case AuthType(*networkCreate.AuthJwtType) != AuthTypeApple && AuthType(*networkCreate.AuthJwtType) != AuthTypeGoogle:
+		case !isSsoAuthType(*networkCreate.AuthJwtType):
 			message = "Unsupported authentication type."
 		}
 	case networkCreate.WalletAuth != nil:

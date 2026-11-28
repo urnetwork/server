@@ -127,6 +127,8 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /auth/apple/callback":                     routeAccessPublic,
 	"GET /auth/apple/callback":                      routeAccessPublic,
 	"GET /auth/google/callback":                     routeAccessPublic,
+	"GET /auth/microsoft/start":                     routeAccessPublic,
+	"GET /auth/microsoft/callback":                  routeAccessPublic,
 	"POST /auth/add-auth":                           routeAccessAppAdmin,  // adds a sign-in method (takeover)
 	"POST /auth/remove-auth":                        routeAccessAppAdmin,  // removes a sign-in method (takeover)
 	"GET /auth/email-change":                        routeAccessNetwork,   // the account's waiting email change
