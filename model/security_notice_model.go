@@ -149,6 +149,11 @@ const (
 	SecuritySignInRemoved = "removed"
 	// replaced in place: a regenerated seedphrase
 	SecuritySignInReplaced = "replaced"
+	// an email change was asked for, from Identity to NewIdentity, and waits
+	// for the codes sent to both (auth_email_change.go)
+	SecuritySignInChangeRequested = "change_requested"
+	// the email sign-in changed from Identity to NewIdentity
+	SecuritySignInChanged = "changed"
 )
 
 // The sign-in methods, as auth_types in GET /network/user names them.
@@ -202,6 +207,8 @@ type SecuritySignInChange struct {
 	// the masked email address, phone number or wallet of the method; empty
 	// for a method without one (a seedphrase)
 	Identity string `json:"identity,omitempty"`
+	// for an email change, the masked address it changes to; empty otherwise
+	NewIdentity string `json:"new_identity,omitempty"`
 	// one of SecurityNoticeVia*, or "" when unknown
 	Via string `json:"via,omitempty"`
 }
