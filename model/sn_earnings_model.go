@@ -39,6 +39,11 @@ func GetStProviderWalletsForNetwork(ctx context.Context, networkId server.Id) []
 					&wallet.OriginalSignature,
 				))
 				copy(wallet.ColdkeyPubkey[:], pubkey)
+				// a disconnected provider (st_wallet_disconnect.go) has no
+				// wallet: its newest row is the zero key
+				if wallet.ColdkeyPubkey == ([32]byte{}) {
+					continue
+				}
 				wallets = append(wallets, wallet)
 			}
 		})
