@@ -367,6 +367,9 @@ type ProviderStatus struct {
 	EvaluateTime time.Time `json:"evaluate_time"`
 	// read fresh on every call, never cached with the rest
 	Appearances *ProviderAppearanceHistogram `json:"appearances,omitempty"`
+	// the data SN25 counted for the client in the newest settled epoch
+	// (provider_status_provided.go); absent while no epoch's rows are read
+	Provided *ProviderStatusProvided `json:"provided,omitempty"`
 }
 
 // A ProviderRankingNumber without its explanation. It gives a value, minimum
@@ -404,6 +407,7 @@ type ProviderStatusCompact struct {
 	Country      *ProviderStatusCountryCompact   `json:"country,omitempty"`
 	EvaluateTime time.Time                       `json:"evaluate_time"`
 	Appearances  *ProviderAppearanceHistogram    `json:"appearances,omitempty"`
+	Provided     *ProviderStatusProvided         `json:"provided,omitempty"`
 }
 
 // The compact form of status: the same facts, without the reason text and
@@ -417,6 +421,7 @@ func NewProviderStatusCompact(status *ProviderStatus) *ProviderStatusCompact {
 		Ranking:      make([]*ProviderRankingNumberCompact, 0, len(status.Ranking)),
 		EvaluateTime: status.EvaluateTime,
 		Appearances:  status.Appearances,
+		Provided:     status.Provided,
 	}
 	for _, number := range status.Ranking {
 		compactNumber := &ProviderRankingNumberCompact{
@@ -471,6 +476,9 @@ type ProviderStatusesResult struct {
 	// how many provider clients the network has, the ones Providers draws
 	// from, counted up to ProviderStatusMaxCountedClients
 	TotalClients int `json:"total_clients"`
+	// the network's data in the newest settled epoch, nil while the process
+	// has read none (provider_status_provided.go)
+	Provided *ProviderStatusNetworkProvided `json:"provided,omitempty"`
 }
 
 // The common SQL of providerCountFilterCommonSql scoped to the client ids in

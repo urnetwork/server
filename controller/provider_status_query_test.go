@@ -106,8 +106,10 @@ type providerStatusQueryTestClient struct {
 type providerStatusQueryTestReads struct {
 	clients map[server.Id]providerStatusQueryTestClient
 	// the network's answer, what GetProviderStatus returns
-	networkResult  *GetProviderStatusResult
-	networkReads   int
+	networkResult *GetProviderStatusResult
+	networkReads  int
+	// the settled epoch's rows the answers read, nil for none
+	providedIndex  *providerStatusProvidedIndex
 	clientReads    []server.Id
 	statusReads    []server.Id
 	histogramReads [][]server.Id
@@ -124,12 +126,18 @@ func newProviderStatusQueryTestReads(t *testing.T) *providerStatusQueryTestReads
 	savedClient := getProviderStatusClient
 	savedStatus := getCachedClientProviderStatus
 	savedHistograms := getProviderAppearanceHistograms
+	savedProvided := getProviderStatusProvidedIndex
 	t.Cleanup(func() {
 		getNetworkProviderStatus = savedNetwork
 		getProviderStatusClient = savedClient
 		getCachedClientProviderStatus = savedStatus
 		getProviderAppearanceHistograms = savedHistograms
+		getProviderStatusProvidedIndex = savedProvided
 	})
+	// no settled epoch read, unless a test installs one
+	getProviderStatusProvidedIndex = func() *providerStatusProvidedIndex {
+		return reads.providedIndex
+	}
 
 	getNetworkProviderStatus = func(clientSession *session.ClientSession) (*GetProviderStatusResult, error) {
 		reads.networkReads += 1

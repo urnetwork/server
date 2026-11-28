@@ -28,10 +28,11 @@ const providerStatusCacheTtl = 5 * time.Minute
 
 // The cache keys of the admission and ranking: the network's answer, the
 // caller's own client and one client. A key is renamed when what it holds
-// gains a field (v2: total_clients and reason_code), so an entry an older
-// build wrote is never read without them.
+// gains a field (v2: total_clients and reason_code; v3, the network's answer
+// only: the provided data), so an entry an older build wrote is never read
+// without them.
 const (
-	providerStatusNetworkCacheKey = "api_provider_status_v2"
+	providerStatusNetworkCacheKey = "api_provider_status_v3"
 	providerStatusCallerCacheKey  = "api_provider_status_caller_v2"
 	providerStatusClientCacheKey  = "api_provider_status_client_v2"
 )
@@ -83,6 +84,10 @@ type GetProviderStatusResult struct {
 	// a count there would change that client's answer whenever another
 	// client of the network starts or stops providing.
 	TotalClients *int `json:"total_clients,omitempty"`
+	// the network's data in the newest settled epoch, over all its top-level
+	// clients (provider_status_provided.go). Only the network's answer has
+	// it, for the reason TotalClients is; absent while no epoch is read
+	Provided *model.ProviderStatusNetworkProvided `json:"provided,omitempty"`
 	// a refused query, with no providers
 	Error *GetProviderStatusError `json:"error,omitempty"`
 }
@@ -90,10 +95,11 @@ type GetProviderStatusResult struct {
 // GetProviderStatusResult in the compact form (format=compact): the same
 // statuses in the same order, without their English texts.
 type GetProviderStatusCompactResult struct {
-	Providers    []*model.ProviderStatusCompact `json:"providers"`
-	Truncated    bool                           `json:"truncated,omitempty"`
-	TotalClients *int                           `json:"total_clients,omitempty"`
-	Error        *GetProviderStatusError        `json:"error,omitempty"`
+	Providers    []*model.ProviderStatusCompact       `json:"providers"`
+	Truncated    bool                                 `json:"truncated,omitempty"`
+	TotalClients *int                                 `json:"total_clients,omitempty"`
+	Provided     *model.ProviderStatusNetworkProvided `json:"provided,omitempty"`
+	Error        *GetProviderStatusError              `json:"error,omitempty"`
 }
 
 // The reads of an answer, replaced in the pure tests.
@@ -108,6 +114,8 @@ var (
 	getProviderAppearanceHistograms = model.GetProviderAppearanceHistograms
 	// the clock the appearance histograms are read at
 	providerStatusNow = server.NowUtc
+	// the network's clients the data totals read
+	getProviderStatusProvidedClientIds = model.ListProviderStatusProvidedClientIds
 )
 
 // Pins the clock the appearance histograms are read at, so the answers of one
@@ -145,7 +153,13 @@ func ProviderStatusEntityScope(args *GetProviderStatusArgs) string {
 func GetProviderStatus(clientSession *session.ClientSession) (*GetProviderStatusResult, error) {
 	networkStatuses, err := router.CacheWithNetworkAuth(
 		func(session *session.ClientSession) (*model.ProviderStatusesResult, error) {
-			return model.GetNetworkProviderStatuses(session.Ctx, session.ByJwt.NetworkId), nil
+			result := model.GetNetworkProviderStatuses(session.Ctx, session.ByJwt.NetworkId)
+			// cached with the answer: the epoch moves about weekly
+			if getProviderStatusProvidedIndex() != nil {
+				clientIds, truncated := getProviderStatusProvidedClientIds(session.Ctx, session.ByJwt.NetworkId, model.ProviderStatusProvidedMaxClients)
+				result.Provided = providerStatusNetworkProvided(clientIds, truncated)
+			}
+			return result, nil
 		},
 		providerStatusNetworkCacheKey,
 		providerStatusCacheTtl,
@@ -182,12 +196,14 @@ func GetProviderStatus(clientSession *session.ClientSession) (*GetProviderStatus
 	statuses = orderProviderStatuses(statuses, callerClientId)
 
 	attachProviderAppearances(clientSession.Ctx, statuses)
+	attachProviderStatusProvided(statuses)
 
 	totalClients := networkStatuses.TotalClients
 	return &GetProviderStatusResult{
 		Providers:    statuses,
 		Truncated:    networkStatuses.Truncated,
 		TotalClients: &totalClients,
+		Provided:     networkStatuses.Provided,
 	}, nil
 }
 
@@ -248,6 +264,7 @@ func getClientProviderStatus(clientSession *session.ClientSession, clientId serv
 	}
 
 	attachProviderAppearances(clientSession.Ctx, statuses)
+	attachProviderStatusProvided(statuses)
 
 	return &GetProviderStatusResult{
 		Providers: statuses,
@@ -302,6 +319,7 @@ func newGetProviderStatusCompactResult(result *GetProviderStatusResult) *GetProv
 		Providers:    providers,
 		Truncated:    result.Truncated,
 		TotalClients: result.TotalClients,
+		Provided:     result.Provided,
 		Error:        result.Error,
 	}
 }
