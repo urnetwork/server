@@ -21,7 +21,7 @@ func emailChangeTestNetwork(t testing.TB, ctx context.Context) (networkId server
 	t.Helper()
 	networkId = server.NewId()
 	userId = server.NewId()
-	userAuth = Testing_CreateNetwork(ctx, networkId, "emailchange"+networkId.String()[:8], userId)
+	userAuth = Testing_CreateNetwork(ctx, networkId, "emailchange-"+networkId.String(), userId)
 	return
 }
 
@@ -272,7 +272,7 @@ func TestEmailChangeCodesAreBounded(t *testing.T) {
 		}
 		takenNetworkId := server.NewId()
 		takenUserId := server.NewId()
-		Testing_CreateNetwork(ctx, takenNetworkId, "taken"+takenNetworkId.String()[:8], takenUserId)
+		Testing_CreateNetwork(ctx, takenNetworkId, "taken-"+takenNetworkId.String(), takenUserId)
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE network_user_auth_password SET user_auth = $2 WHERE user_id = $1`, takenUserId, taken))
 		})

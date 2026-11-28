@@ -18,7 +18,7 @@ func TestAuthEmailChangeSendsBothCodesAndSignsOutOthers(t *testing.T) {
 		ctx := context.Background()
 		networkId := server.NewId()
 		userId := server.NewId()
-		currentEmail := model.Testing_CreateNetwork(ctx, networkId, "emailroute"+networkId.String()[:8], userId)
+		currentEmail := model.Testing_CreateNetwork(ctx, networkId, "emailroute-"+networkId.String(), userId)
 		newEmail := "changed-" + server.NewId().String()[:8] + "@example.com"
 		clientSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{NetworkId: networkId, UserId: userId})
 		settings := model.DefaultEmailChangeSettings()
