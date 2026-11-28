@@ -58,9 +58,13 @@ func accountCodeKey(purpose string, userId server.Id) string {
 	return fmt.Sprintf("{account_code:%s:%s}request", purpose, userId)
 }
 
-// The hmac a slot keeps for its code.
+// The hmac a slot keeps for its code, keyed with the password pepper.
 func accountCodeMac(purpose string, userId server.Id, requestId server.Id, slot int, code string) string {
-	mac := hmac.New(sha256.New, passwordPepper())
+	return accountCodeMacWithKey(passwordPepper(), purpose, userId, requestId, slot, code)
+}
+
+func accountCodeMacWithKey(key []byte, purpose string, userId server.Id, requestId server.Id, slot int, code string) string {
+	mac := hmac.New(sha256.New, key)
 	for _, part := range []string{"account-code", purpose, userId.String(), requestId.String(), strconv.Itoa(slot), code} {
 		_, err := mac.Write([]byte(part))
 		server.Raise(err)
