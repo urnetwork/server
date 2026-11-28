@@ -59,6 +59,8 @@ func registerTools(mcpServer *mcpsdk.Server) {
 
 Use this to see what a site serves in a particular place: geo-targeted content, local pricing and availability, region-specific search results, or to check whether a site is reachable from somewhere.
 
+This tool runs on URnetwork's server, not on your machine. The server loads the page through an exit in the place you chose, so it reads your request, the page and its cookies. For a page URnetwork shouldn't read, use a proxy from the API with an https:// URL instead. This tool will be removed when URnetwork's Bot launches.
+
 Requires the mcp:fetch scope, because each new egress location opens a client billed to the network.
 
 State is threaded through you, the caller, and every result tells you exactly what to pass back:
