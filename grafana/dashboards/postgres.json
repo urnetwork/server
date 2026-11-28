@@ -476,6 +476,47 @@
       "fieldConfig": {"defaults": {"unit": "s", "min": 0, "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 0, "showPoints": "never", "spanNulls": false, "axisPlacement": "auto", "stacking": {"mode": "none", "group": "A"}}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 7200}]}}, "overrides": []},
       "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
       "targets": [{"refId": "A", "expr": "max by (env) (urnetwork_db_invalid_index_max_age_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"} and on (env, service, block, host, instance) topk by (env) (1, urnetwork_db_invalid_index_sample_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"}))", "legendFormat": "oldest invalid index", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+    },
+    {
+      "id": 38,
+      "title": "partition leaf statistics: the analyze of each range's opened leaves (db_partition_registry.go)",
+      "type": "row",
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 107},
+      "panels": []
+    },
+    {
+      "id": 39,
+      "title": "opened leaves holding rows without statistics, by family, at the newest pass",
+      "description": "Opened partition leaves (a range that has started, past its analyze delay of a minute, and has not ended) that hold rows without statistics taken since their analyze time, at each family's newest pass (AnalyzeOpenLeavesReport, db_partition_registry.go): the contract task passes over the contract family, the partition retention task over the others. A leaf a pass left (an admission's deferral, a failed ANALYZE such as a lock timeout, or the deadline) is retried a minute later through its range's first hour. Until it is analyzed PostgreSQL plans it without column statistics: on 2026-11-28 the new day's transfer_contract leaf went 12 minutes that way, and the hot reads of open contracts read its whole primary key on every call. Each taskworker process keeps its own last pass, so the panel reads the process with the newest pass of each family. The taskworker log names the leaves: grep for \"hold rows without statistics since their analyze was due\". 0: nothing pending.",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 108},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0, "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 0, "showPoints": "never", "spanNulls": false, "axisPlacement": "auto", "stacking": {"mode": "none", "group": "A"}}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"refId": "A", "expr": "max by (family) (urnetwork_db_partition_open_leaves_unanalyzed{env=\"$env\",service=\"taskworker\",instance!=\"\"} and on (env, service, block, host, instance, family) topk by (family) (1, urnetwork_db_partition_open_leaf_sample_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"}))", "legendFormat": "{{family}}", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+    },
+    {
+      "id": 40,
+      "title": "oldest pending leaf's wait past its analyze time, by family, at the newest pass",
+      "description": "How long past its analyze time (its range's start plus the open leaf delay: 00:01 UTC for a daily family) the oldest of those leaves had waited, at each family's newest pass. Red above 180 s: three one-minute retries have failed, and every plan made for the leaf meanwhile reads it without column statistics. ANALYZE the leaf the log names by hand. 0: nothing pending.",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 108},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "s", "min": 0, "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 0, "showPoints": "never", "spanNulls": false, "axisPlacement": "auto", "stacking": {"mode": "none", "group": "A"}}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 180}]}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"refId": "A", "expr": "max by (family) (urnetwork_db_partition_open_leaf_unanalyzed_wait_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"} and on (env, service, block, host, instance, family) topk by (family) (1, urnetwork_db_partition_open_leaf_sample_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"}))", "legendFormat": "{{family}}", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
+    },
+    {
+      "id": 41,
+      "title": "age of each family's newest pass over its opened leaves",
+      "description": "How long ago each family's newest pass over its opened leaves ran: now less the newest urnetwork_db_partition_open_leaf_sample_timestamp_seconds across taskworker processes. The contract task and the partition retention task each run every 15 minutes, a minute after each range opens, and every minute while one of a range's leaves is pending in its first hour, so this rises to about 15 minutes and drops; red past 30 minutes means the family's task has not run, and the other two panels show its last pass only.",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 108},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "s", "min": 0, "custom": {"drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 2, "fillOpacity": 0, "showPoints": "never", "spanNulls": false, "axisPlacement": "auto", "stacking": {"mode": "none", "group": "A"}}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1800}]}}, "overrides": []},
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull", "max"]}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"refId": "A", "expr": "time() - max by (family) (urnetwork_db_partition_open_leaf_sample_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"})", "legendFormat": "{{family}}", "range": true, "editorMode": "code", "datasource": {"type": "prometheus", "uid": "warp-mimir"}}]
     }
   ]
 }
