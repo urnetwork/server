@@ -232,8 +232,9 @@ func securityNoticeSignInMethod(method string) string {
 	}
 }
 
-// What happened to a sign-in method, as the notice says it.
-func securityNoticeSignInAction(action string) string {
+// What happened to a sign-in method, as the notice says it. An email change
+// names the address it changes to.
+func securityNoticeSignInAction(action string, newIdentity string) string {
 	switch action {
 	case model.SecuritySignInAdded:
 		return "Added"
@@ -241,6 +242,16 @@ func securityNoticeSignInAction(action string) string {
 		return "Removed"
 	case model.SecuritySignInReplaced:
 		return "Replaced"
+	case model.SecuritySignInChangeRequested:
+		if newIdentity != "" {
+			return "Change to " + newIdentity + " requested"
+		}
+		return "Change requested"
+	case model.SecuritySignInChanged:
+		if newIdentity != "" {
+			return "Changed to " + newIdentity
+		}
+		return "Changed"
 	default:
 		return "Changed"
 	}
@@ -260,7 +271,7 @@ func (self *SecuritySignInChangedTemplate) Rows() []*SecuritySignInChangeRow {
 		rows = append(rows, &SecuritySignInChangeRow{
 			When:   securityNoticeTime(change.ChangeTime),
 			Method: method,
-			Action: securityNoticeSignInAction(change.Action),
+			Action: securityNoticeSignInAction(change.Action, change.NewIdentity),
 			Via:    securityNoticeVia(change.Via),
 		})
 	}
@@ -296,6 +307,10 @@ func (self *SecuritySignInChangedTemplate) Subject() string {
 			return "Sign-in methods were removed from your URnetwork account"
 		}
 		return "A sign-in method was removed from your URnetwork account"
+	case model.SecuritySignInChangeRequested:
+		return "A change of your URnetwork account's email was requested"
+	case model.SecuritySignInChanged:
+		return "Your URnetwork account's email was changed"
 	default:
 		return "Your URnetwork sign-in methods were changed"
 	}
@@ -308,6 +323,10 @@ func (self *SecuritySignInChangedTemplate) Headline() string {
 		return "Sign-in method added"
 	case model.SecuritySignInRemoved:
 		return "Sign-in method removed"
+	case model.SecuritySignInChangeRequested:
+		return "Email change requested"
+	case model.SecuritySignInChanged:
+		return "Email changed"
 	default:
 		return "Sign-in methods changed"
 	}
