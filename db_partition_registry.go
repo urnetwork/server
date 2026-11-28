@@ -115,6 +115,7 @@ import (
 	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/urnetwork/glog"
 )
 
@@ -302,19 +303,29 @@ type PartitionFamilySettings struct {
 	// (NextOpenLeafAnalyzeTime). Zero, as in a family's own settings made
 	// before this field, uses the default's.
 	OpenLeafAnalyzeDelay time.Duration
+	// For this long after a range's leaves are due their analyze, a pass that
+	// leaves one of them unanalyzed (an admission's deferral, a lock timeout,
+	// another failure, the deadline) has the task that analyzes the family
+	// run again after its retry interval, a minute, rather than its cadence
+	// (PartitionOpenLeafReport.Retry); after it the cadence retries. Zero uses
+	// the default's.
+	OpenLeafRetryWindow time.Duration
 }
 
 // Seconds of lock wait, as the contract and log families have used, and a
 // minute for a drop's statements. A new leaf is analyzed a minute into its
 // range: a busy day's first minute writes thousands of rows, which an
 // ANALYZE of the leaf samples in well under a second, while autovacuum's
-// analyze of it can wait many minutes for a worker.
+// analyze of it can wait many minutes for a worker. A leaf left unanalyzed is
+// retried every minute for an hour: by then a busy leaf has had autovacuum's
+// analyze (a million changes on the contract leaves).
 func DefaultPartitionFamilySettings() *PartitionFamilySettings {
 	return &PartitionFamilySettings{
 		CreateLockTimeout:    5 * time.Second,
 		DropLockTimeout:      5 * time.Second,
 		DropStatementTimeout: 60 * time.Second,
 		OpenLeafAnalyzeDelay: time.Minute,
+		OpenLeafRetryWindow:  time.Hour,
 	}
 }
 
@@ -601,6 +612,14 @@ func (self *PartitionFamily) openLeafAnalyzeDelay() time.Duration {
 		return delay
 	}
 	return DefaultPartitionFamilySettings().OpenLeafAnalyzeDelay
+}
+
+// The family's OpenLeafRetryWindow, or the default's for zero.
+func (self *PartitionFamily) openLeafRetryWindow() time.Duration {
+	if window := self.settings().OpenLeafRetryWindow; 0 < window {
+		return window
+	}
+	return DefaultPartitionFamilySettings().OpenLeafRetryWindow
 }
 
 // The name of the legacy partition of table.
@@ -1269,9 +1288,10 @@ func (self *PartitionFamily) Retire(ctx context.Context, now time.Time, state Pa
 // A positive lockTimeout bounds its lock wait. With emptyLeaf set, the ANALYZE
 // runs only when that leaf has a page, read in the same transaction under the
 // same bound: an empty leaf's ANALYZE records it analyzed empty (see
-// ClearEmptyLeafStatistics). Returns whether the ANALYZE ran.
-func partitionRegistryAnalyze(ctx context.Context, statement string, lockTimeout time.Duration, emptyLeaf string) (analyzed bool) {
-	err := partitionRegistryTx(ctx, func(tx PgTx) {
+// ClearEmptyLeafStatistics). Returns whether the ANALYZE ran, and the error
+// of a transaction that failed (logged here): an empty leaf is no error.
+func partitionRegistryAnalyze(ctx context.Context, statement string, lockTimeout time.Duration, emptyLeaf string) (analyzed bool, err error) {
+	err = partitionRegistryTx(ctx, func(tx PgTx) {
 		if 0 < lockTimeout {
 			RaisePgResult(tx.Exec(ctx, fmt.Sprintf("SET LOCAL lock_timeout = '%dms'", max(int64(1), lockTimeout.Milliseconds()))))
 		}
@@ -1290,7 +1310,7 @@ func partitionRegistryAnalyze(ctx context.Context, statement string, lockTimeout
 	})
 	if err != nil {
 		glog.Errorf("[partitions]%s: %s\n", statement, err)
-		return false
+		return false, err
 	}
 	return
 }
@@ -1303,6 +1323,10 @@ type partitionLeafStatistics struct {
 	reltuples float64
 	// the later of the last manual and automatic ANALYZE, or nil for none
 	lastAnalyze *time.Time
+	// rows changed since its last ANALYZE (pg_stat_user_tables
+	// n_mod_since_analyze, read without a lock; each backend publishes its
+	// counts within seconds), so whether it holds rows no statistics saw
+	changed int64
 }
 
 // The statistics of each named public leaf that still exists, by name.
@@ -1320,7 +1344,8 @@ func readPartitionLeafStatistics(ctx context.Context, names []string) (statistic
 					leaf.name,
 					leaf_class.relpages::bigint,
 					leaf_class.reltuples::float8,
-					GREATEST(leaf_stats.last_analyze, leaf_stats.last_autoanalyze)
+					GREATEST(leaf_stats.last_analyze, leaf_stats.last_autoanalyze),
+					COALESCE(leaf_stats.n_mod_since_analyze, 0)
 				FROM unnest($1::text[]) AS leaf (name)
 				JOIN pg_class leaf_class ON leaf_class.oid = to_regclass('public.' || quote_ident(leaf.name))
 				LEFT JOIN pg_stat_user_tables leaf_stats ON leaf_stats.relid = leaf_class.oid
@@ -1331,7 +1356,7 @@ func readPartitionLeafStatistics(ctx context.Context, names []string) (statistic
 				for result.Next() {
 					var name string
 					var leafStatistics partitionLeafStatistics
-					Raise(result.Scan(&name, &leafStatistics.relpages, &leafStatistics.reltuples, &leafStatistics.lastAnalyze))
+					Raise(result.Scan(&name, &leafStatistics.relpages, &leafStatistics.reltuples, &leafStatistics.lastAnalyze, &leafStatistics.changed))
 					statistics[name] = leafStatistics
 				}
 			})
@@ -1373,16 +1398,79 @@ func (self *PartitionFamily) listLeavesWhere(ctx context.Context, table string, 
 // analyzed: it is retried on later runs until it holds a page. A leaf whose
 // statistics were taken while it held no page (relpages 0) is analyzed again
 // once it holds one. Each ANALYZE keeps the family's AnalyzeAdmission and
-// AnalyzeLockTimeout.
+// AnalyzeLockTimeout. AnalyzeOpenLeavesReport says which leaves it left.
 func (self *PartitionFamily) AnalyzeOpenLeaves(ctx context.Context, now time.Time, deadline time.Time) (analyzed []string) {
+	return self.AnalyzeOpenLeavesReport(ctx, now, deadline).Analyzed
+}
+
+// What one pass over a family's opened leaves did (AnalyzeOpenLeavesReport).
+type PartitionOpenLeafReport struct {
+	Family   string
+	Analyzed []string
+	// Opened leaves that hold rows and that the pass left without statistics
+	// taken since they were due their analyze: deferred by the family's
+	// AnalyzeAdmission, failed (a lock timeout or another error), or not
+	// reached by the deadline. Each plan made for one reads it without
+	// column statistics. A leaf that holds no row is not pending.
+	Pending []string
+	// How long past its analyze time (its range's start plus
+	// OpenLeafAnalyzeDelay) the oldest pending leaf has waited, zero for none.
+	PendingWait time.Duration
+	// A pending leaf is within OpenLeafRetryWindow of its analyze time, or the
+	// current range is and the pass could not see its leaves (a failed
+	// listing or statistics read, the deadline): the task that analyzes the
+	// family runs again after its retry interval, not its cadence.
+	Retry bool
+}
+
+// AnalyzeOpenLeaves, with the leaves it left and whether its task should run
+// again soon. Until 2026-11-28 a leaf the pass left waited for the task's next
+// run, 15 minutes on: that night the admission held the new day's
+// transfer_contract leaf at 00:01Z for a lock it never conflicts with, and the
+// leaf was read without statistics until autovacuum analyzed it at 00:12:51Z,
+// a million changes in. Every pass publishes the family's pending leaves
+// (urnetwork_db_partition_open_leaves_unanalyzed and its wait and sample time)
+// and logs them as an error.
+func (self *PartitionFamily) AnalyzeOpenLeavesReport(ctx context.Context, now time.Time, deadline time.Time) (report *PartitionOpenLeafReport) {
+	report = &PartitionOpenLeafReport{Family: self.Name}
 	delay := self.openLeafAnalyzeDelay()
-	for _, table := range self.Tables {
+	window := self.openLeafRetryWindow()
+	retryWithin := func(analyzeTime time.Time) {
+		if now.Sub(analyzeTime) < window {
+			report.Retry = true
+		}
+	}
+	pend := func(leaf PartitionLeaf) {
+		report.Pending = append(report.Pending, leaf.Name)
+		analyzeTime := leaf.Range.Lower.Add(delay)
+		report.PendingWait = max(report.PendingWait, now.Sub(analyzeTime))
+		retryWithin(analyzeTime)
+	}
+	// the current range's leaves went unseen
+	unseen := func() {
+		if self.OpenLeafRetryDue(now) {
+			report.Retry = true
+		}
+	}
+	defer func() {
+		publishPartitionOpenLeafReport(now, report)
+		if 0 < len(report.Pending) {
+			glog.Errorf(
+				"[partitions]%s: opened %v hold rows without statistics since their analyze was due (the oldest %s past it); the next run retries\n",
+				self.Name,
+				report.Pending,
+				report.PendingWait.Round(time.Second),
+			)
+		}
+	}()
+	for i, table := range self.Tables {
 		leaves, listErr := self.listLeavesWhere(ctx, table, func(leaf PartitionLeaf) bool {
 			return !leaf.Range.Lower.IsZero() && !now.Before(leaf.Range.Lower.Add(delay)) &&
 				(leaf.Range.Upper.IsZero() || now.Before(leaf.Range.Upper))
 		})
 		if listErr != nil {
 			glog.Errorf("[partitions]%s\n", listErr)
+			unseen()
 			continue
 		}
 		names := []string{}
@@ -1392,32 +1480,98 @@ func (self *PartitionFamily) AnalyzeOpenLeaves(ctx context.Context, now time.Tim
 		statistics, statisticsErr := readPartitionLeafStatistics(ctx, names)
 		if statisticsErr != nil {
 			glog.Errorf("[partitions]%s: %s\n", self.Name, statisticsErr)
+			unseen()
 			continue
 		}
-		for _, leaf := range leaves {
+		// an ANALYZE since its analyze time took statistics of its pages
+		analyzedSinceDue := func(leaf PartitionLeaf) bool {
+			leafStatistics := statistics[leaf.Name]
+			return 0 < leafStatistics.relpages && leafStatistics.lastAnalyze != nil && !leafStatistics.lastAnalyze.Before(leaf.Range.Lower.Add(delay))
+		}
+		// a leaf this pass leaves waits for the next run, unless no row
+		// changed since its last analyze: it holds none yet
+		leave := func(leaf PartitionLeaf) {
+			if 0 < statistics[leaf.Name].changed {
+				pend(leaf)
+			}
+		}
+		for j, leaf := range leaves {
+			if _, ok := statistics[leaf.Name]; !ok {
+				// dropped since it was listed
+				continue
+			}
+			if analyzedSinceDue(leaf) {
+				continue
+			}
 			if !time.Now().Before(deadline) {
+				for _, rest := range leaves[j:] {
+					if _, ok := statistics[rest.Name]; ok && !analyzedSinceDue(rest) {
+						leave(rest)
+					}
+				}
+				if i+1 < len(self.Tables) {
+					unseen()
+				}
 				return
-			}
-			leafStatistics, ok := statistics[leaf.Name]
-			if !ok {
-				continue
-			}
-			opened := leaf.Range.Lower.Add(delay)
-			if 0 < leafStatistics.relpages && leafStatistics.lastAnalyze != nil && !leafStatistics.lastAnalyze.Before(opened) {
-				continue
 			}
 			if self.AnalyzeAdmission != nil {
 				if reason := self.AnalyzeAdmission(ctx, leaf.Name, true); reason != "" {
 					glog.Infof("[partitions]%s: the analyze of opened %s waits for a later run: %s\n", self.Name, leaf.Name, reason)
+					leave(leaf)
 					continue
 				}
 			}
-			if partitionRegistryAnalyze(ctx, fmt.Sprintf("ANALYZE public.%s", quoteIdentifier(leaf.Name)), self.AnalyzeLockTimeout, leaf.Name) {
-				analyzed = append(analyzed, leaf.Name)
+			ran, analyzeErr := partitionRegistryAnalyze(ctx, fmt.Sprintf("ANALYZE public.%s", quoteIdentifier(leaf.Name)), self.AnalyzeLockTimeout, leaf.Name)
+			switch {
+			case ran:
+				report.Analyzed = append(report.Analyzed, leaf.Name)
+			case analyzeErr != nil:
+				leave(leaf)
 			}
 		}
 	}
 	return
+}
+
+// Whether now is within OpenLeafRetryWindow of the analyze time of the newest
+// range whose leaves are due by now: a pass that could not see them, or did
+// not run, has its task run again after the retry interval.
+func (self *PartitionFamily) OpenLeafRetryDue(now time.Time) bool {
+	delay := self.openLeafAnalyzeDelay()
+	return now.Sub(self.Granularity.RangeStart(now.Add(-delay)).Add(delay)) < self.openLeafRetryWindow()
+}
+
+var partitionOpenLeavesUnanalyzedGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	Namespace: "urnetwork",
+	Subsystem: "db",
+	Name:      "partition_open_leaves_unanalyzed",
+	Help:      "Opened partition leaves that hold rows without statistics taken since their analyze was due (range start plus the open leaf delay), at this process's last pass over the family's opened leaves",
+}, []string{"family"})
+
+var partitionOpenLeafUnanalyzedWaitGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	Namespace: "urnetwork",
+	Subsystem: "db",
+	Name:      "partition_open_leaf_unanalyzed_wait_seconds",
+	Help:      "How long past its analyze time the oldest of those leaves had waited, 0 when none, at this process's last pass over the family's opened leaves",
+}, []string{"family"})
+
+var partitionOpenLeafSampleTimeGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	Namespace: "urnetwork",
+	Subsystem: "db",
+	Name:      "partition_open_leaf_sample_timestamp_seconds",
+	Help:      "When this process last passed over the family's opened leaves",
+}, []string{"family"})
+
+func init() {
+	prometheus.MustRegister(partitionOpenLeavesUnanalyzedGauge, partitionOpenLeafUnanalyzedWaitGauge, partitionOpenLeafSampleTimeGauge)
+}
+
+// Publishes one pass's pending leaves. Each process keeps its own last pass,
+// so a reader takes the process with the newest sample time.
+func publishPartitionOpenLeafReport(now time.Time, report *PartitionOpenLeafReport) {
+	partitionOpenLeavesUnanalyzedGauge.WithLabelValues(report.Family).Set(float64(len(report.Pending)))
+	partitionOpenLeafUnanalyzedWaitGauge.WithLabelValues(report.Family).Set(max(0, report.PendingWait.Seconds()))
+	partitionOpenLeafSampleTimeGauge.WithLabelValues(report.Family).Set(float64(now.Unix()))
 }
 
 // The first time after now that a range of the family has been open for
@@ -1572,7 +1726,7 @@ func (self *PartitionFamily) AnalyzeParents(ctx context.Context, now time.Time, 
 				continue
 			}
 		}
-		if partitionRegistryAnalyze(ctx, fmt.Sprintf("ANALYZE ONLY public.%s", quoteIdentifier(table)), self.AnalyzeLockTimeout, "") {
+		if ran, _ := partitionRegistryAnalyze(ctx, fmt.Sprintf("ANALYZE ONLY public.%s", quoteIdentifier(table)), self.AnalyzeLockTimeout, ""); ran {
 			analyzed = append(analyzed, table)
 		} else {
 			parents = false
@@ -1630,7 +1784,7 @@ func (self *PartitionFamily) AnalyzeClosedLeaves(ctx context.Context, now time.T
 					continue
 				}
 			}
-			if partitionRegistryAnalyze(ctx, fmt.Sprintf("ANALYZE public.%s", quoteIdentifier(leaf.Name)), self.AnalyzeLockTimeout, "") {
+			if ran, _ := partitionRegistryAnalyze(ctx, fmt.Sprintf("ANALYZE public.%s", quoteIdentifier(leaf.Name)), self.AnalyzeLockTimeout, ""); ran {
 				analyzed = append(analyzed, leaf.Name)
 			}
 		}
@@ -1671,6 +1825,10 @@ type PartitionRetentionReport struct {
 	// when the next run is due for the next range's opened leaves
 	// (NextPartitionOpenLeafAnalyzeTime of the pass's now)
 	OpenLeafAnalyzeAt time.Time
+	// a family's opened leaf was left unanalyzed within its retry window
+	// (PartitionOpenLeafReport.Retry): the next run comes after the retry
+	// interval
+	OpenLeafRetry bool
 }
 
 // The retention task's pass, within budget: for every registered, partitioned
@@ -1709,12 +1867,19 @@ func MaintainPartitionRetention(ctx context.Context, now time.Time, state Partit
 			continue
 		}
 		err := partitionRegistryRun(func() {
-			if analyzed := family.AnalyzeOpenLeaves(ctx, now, deadline); 0 < len(analyzed) {
-				report.Analyzed[family.Name] = analyzed
+			openLeaves := family.AnalyzeOpenLeavesReport(ctx, now, deadline)
+			if 0 < len(openLeaves.Analyzed) {
+				report.Analyzed[family.Name] = openLeaves.Analyzed
+			}
+			if openLeaves.Retry {
+				report.OpenLeafRetry = true
 			}
 		})
 		if err != nil {
 			glog.Errorf("[partitions]%s analyze: %s\n", family.Name, err)
+			if family.OpenLeafRetryDue(now) {
+				report.OpenLeafRetry = true
+			}
 		}
 	}
 	for _, family := range families {

@@ -21,6 +21,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/urnetwork/connect"
 )
 
@@ -401,5 +403,183 @@ func TestPartitionRegistryAnalyzesOpenLeavesOnceTheyHoldRows(t *testing.T) {
 		connect.AssertEqual(t, admissions, []string{leaf(2)})
 		connect.AssertEqual(t, testLeafReltuples(t, ctx, leaf(2)), float64(-1))
 		connect.AssertEqual(t, family.AnalyzeOpenLeaves(ctx, third.Add(delay), deadline), []string{leaf(2)})
+	})
+}
+
+// Waits until the statistics counters show a change to relation since its last
+// ANALYZE: each backend publishes its counts within seconds of its commit.
+func testWaitLeafChanged(t testing.TB, ctx context.Context, relation string) {
+	t.Helper()
+	for deadline := time.Now().Add(30 * time.Second); ; {
+		changed := testRegistryScalar[int64](t, ctx, `SELECT COALESCE((SELECT n_mod_since_analyze FROM pg_stat_user_tables WHERE relid = to_regclass($1)), 0)`, "public."+quoteIdentifier(relation))
+		if 0 < changed {
+			return
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatalf("the statistics counters show no change to %s", relation)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// The day's analyze is never held by a lock it would not wait for. A process
+// that starts or exits between the admission's pg_locks and pg_stat_activity
+// has no activity row, and reads as a session the admission cannot see. On
+// Main at 2026-11-28 00:01Z one such session held ACCESS SHARE on the new
+// day's transfer_contract leaf (a read, which ANALYZE's SHARE UPDATE EXCLUSIVE
+// never waits for), and the admission held the analyze for a later run, 15
+// minutes on. The leaf was read without statistics until autovacuum analyzed
+// it at 00:12:51Z, and the hot reads of open contracts read its whole primary
+// key on every call. No test session can be a process without an activity
+// row, so the admission's read is shown one, as Main's read saw it. The test
+// uses only MaintainContractPartitions and the admission's observed locks,
+// which the code before the fix has too.
+func TestContractPartitionMaintenanceAnalyzesAnOpenedDayBesideAnUnseenReader(t *testing.T) {
+	env := DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		today := ContractPartitionDayStart(NowUtc())
+		Testing_PartitionContractsFrom(ctx, today.AddDate(0, 0, -3))
+		day := today.AddDate(0, 0, -2)
+		testInsertContractRows(t, ctx, testContractIdAt(day.Add(30*time.Second)), true)
+		leaf := ContractPartitionName("transfer_contract", day)
+		connect.AssertEqual(t, testLeafReltuples(t, ctx, leaf), float64(-1))
+
+		admissions := 0
+		contractScopeLocksObserved = func(scope *contractLockScope, locks []contractScopeLock) []contractScopeLock {
+			if slices.Contains(scope.relations, "public."+leaf) {
+				admissions += 1
+				locks = append(locks, contractScopeLock{pid: 4243, relation: leaf, mode: "AccessShareLock", granted: true, transactionAge: -1})
+			}
+			return locks
+		}
+		defer func() {
+			contractScopeLocksObserved = nil
+		}()
+
+		report, _ := MaintainContractPartitions(ctx, day.Add(time.Minute), ContractRetentionCursor{}, time.Minute)
+		connect.AssertEqual(t, 1 <= admissions, true)
+		if !slices.Contains(report.Analyzed, leaf) {
+			t.Fatalf("a minute into its day, %s was not analyzed beside a read of a session the admission cannot see: %v", leaf, report.Analyzed)
+		}
+		if reltuples := testLeafReltuples(t, ctx, leaf); reltuples <= 0 {
+			t.Errorf("%s holds a row but reads reltuples %v a minute into its day", leaf, reltuples)
+		}
+	})
+}
+
+// A lock the day's analyze would wait for (SHARE UPDATE EXCLUSIVE, as a
+// vacuum's) still holds it, and the run then reports the leaf: the task runs
+// again after its retry interval rather than its cadence, through the day's
+// first hour, and the family's published pending leaves and their wait say
+// so. Once the holder is gone the next run analyzes the leaf, and nothing is
+// pending.
+func TestContractPartitionMaintenanceRetriesAnOpenedDayLeftUnanalyzed(t *testing.T) {
+	env := DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		today := ContractPartitionDayStart(NowUtc())
+		Testing_PartitionContractsFrom(ctx, today.AddDate(0, 0, -3))
+		day := today.AddDate(0, 0, -2)
+		testInsertContractRows(t, ctx, testContractIdAt(day.Add(30*time.Second)), true)
+		leaf := ContractPartitionName("transfer_contract", day)
+		testWaitLeafChanged(t, ctx, leaf)
+
+		contractScopeLocksObserved = func(scope *contractLockScope, locks []contractScopeLock) []contractScopeLock {
+			if slices.Contains(scope.relations, "public."+leaf) {
+				locks = append(locks, contractScopeLock{pid: 4244, relation: leaf, mode: "ShareUpdateExclusiveLock", granted: true, transactionAge: -1})
+			}
+			return locks
+		}
+		defer func() {
+			contractScopeLocksObserved = nil
+		}()
+		family := contractPartitionFamily.Name
+		pending := func() float64 {
+			return testutil.ToFloat64(partitionOpenLeavesUnanalyzedGauge.WithLabelValues(family))
+		}
+		wait := func() float64 {
+			return testutil.ToFloat64(partitionOpenLeafUnanalyzedWaitGauge.WithLabelValues(family))
+		}
+
+		// 00:03, two minutes past the day's analyze time
+		at := day.Add(3 * time.Minute)
+		report, cursor := MaintainContractPartitions(ctx, at, ContractRetentionCursor{}, time.Minute)
+		connect.AssertEqual(t, slices.Contains(report.Analyzed, leaf), false)
+		connect.AssertEqual(t, testLeafReltuples(t, ctx, leaf), float64(-1))
+		connect.AssertEqual(t, report.OpenLeafRetry, true)
+		connect.AssertEqual(t, pending(), float64(1))
+		connect.AssertEqual(t, wait(), float64(120))
+		connect.AssertEqual(t, testutil.ToFloat64(partitionOpenLeafSampleTimeGauge.WithLabelValues(family)), float64(at.Unix()))
+
+		// past the retry window the cadence retries, and the leaf stays pending
+		late := day.Add(time.Minute + DefaultPartitionFamilySettings().OpenLeafRetryWindow)
+		report, cursor = MaintainContractPartitions(ctx, late, cursor, time.Minute)
+		connect.AssertEqual(t, slices.Contains(report.Analyzed, leaf), false)
+		connect.AssertEqual(t, report.OpenLeafRetry, false)
+		connect.AssertEqual(t, pending(), float64(1))
+		connect.AssertEqual(t, wait(), DefaultPartitionFamilySettings().OpenLeafRetryWindow.Seconds())
+
+		contractScopeLocksObserved = nil
+		report, _ = MaintainContractPartitions(ctx, day.Add(4*time.Minute), cursor, time.Minute)
+		if !slices.Contains(report.Analyzed, leaf) {
+			t.Fatalf("with its holder gone, %s was not analyzed: %v", leaf, report.Analyzed)
+		}
+		connect.AssertEqual(t, report.OpenLeafRetry, false)
+		connect.AssertEqual(t, pending(), float64(0))
+		connect.AssertEqual(t, wait(), float64(0))
+	})
+}
+
+// An opened leaf the pass leaves unanalyzed is pending once it holds rows: the
+// pass reports it with its wait past the range's analyze time, and asks for a
+// retry within the family's retry window only. An opened leaf that holds no
+// row is left without being pending, and an analyzed one is not pending.
+func TestPartitionRegistryReportsOpenedLeavesLeftUnanalyzed(t *testing.T) {
+	env := DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		family := testRegistryEventFamily(t, ctx)
+		family.LeafReloptions = []string{"autovacuum_enabled=false"}
+		day := PartitionGranularityDaily.RangeStart(NowUtc().AddDate(0, 0, -5))
+		connect.AssertEqual(t, len(family.EnsureRunway(ctx, day).Errors), 0)
+		leaf := func(days int) string {
+			return family.LeafName("synthetic_registry_event", family.RangeAt(day.AddDate(0, 0, days)))
+		}
+		deadline := time.Now().Add(time.Minute)
+		delay := DefaultPartitionFamilySettings().OpenLeafAnalyzeDelay
+		window := DefaultPartitionFamilySettings().OpenLeafRetryWindow
+		waiting := *family
+		waiting.AnalyzeAdmission = func(ctx context.Context, relation string, isLeaf bool) string {
+			return "a synthetic holder"
+		}
+
+		// the day opens without a row: nothing is pending
+		report := waiting.AnalyzeOpenLeavesReport(ctx, day.Add(delay), deadline)
+		connect.AssertEqual(t, len(report.Analyzed)+len(report.Pending), 0)
+		connect.AssertEqual(t, report.Retry, false)
+
+		testRegistryExec(t, ctx, `INSERT INTO synthetic_registry_event (event_id, observed_at) VALUES ($1, $2)`, NewId(), day.Add(10*time.Second))
+		testWaitLeafChanged(t, ctx, leaf(0))
+		report = waiting.AnalyzeOpenLeavesReport(ctx, day.Add(delay+90*time.Second), deadline)
+		connect.AssertEqual(t, len(report.Analyzed), 0)
+		connect.AssertEqual(t, report.Pending, []string{leaf(0)})
+		connect.AssertEqual(t, report.PendingWait, 90*time.Second)
+		connect.AssertEqual(t, report.Retry, true)
+		connect.AssertEqual(t, testutil.ToFloat64(partitionOpenLeavesUnanalyzedGauge.WithLabelValues(family.Name)), float64(1))
+
+		report = waiting.AnalyzeOpenLeavesReport(ctx, day.Add(delay+window), deadline)
+		connect.AssertEqual(t, report.Pending, []string{leaf(0)})
+		connect.AssertEqual(t, report.Retry, false)
+
+		report = family.AnalyzeOpenLeavesReport(ctx, day.Add(delay+window), deadline)
+		connect.AssertEqual(t, report.Analyzed, []string{leaf(0)})
+		connect.AssertEqual(t, len(report.Pending), 0)
+		connect.AssertEqual(t, report.Retry, false)
+		connect.AssertEqual(t, testutil.ToFloat64(partitionOpenLeavesUnanalyzedGauge.WithLabelValues(family.Name)), float64(0))
+		connect.AssertEqual(t, len(waiting.AnalyzeOpenLeavesReport(ctx, day.Add(delay+window+time.Minute), deadline).Pending), 0)
 	})
 }

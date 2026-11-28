@@ -92,3 +92,19 @@ func TestMaintainPartitionRetentionNextRunAtMeetsTheOpenedRange(t *testing.T) {
 		}
 	}
 }
+
+// A run that left a family's opened leaf unanalyzed runs again after the
+// retry interval, not the cadence.
+func TestMaintainPartitionRetentionNextRunAtRetriesALeftOpenedLeaf(t *testing.T) {
+	settings := DefaultPartitionRegistryTaskSettings()
+	ended := time.Date(2026, 11, 28, 0, 1, 30, 0, time.UTC)
+	tomorrow := time.Date(2026, 11, 29, 0, 1, 0, 0, time.UTC)
+	result := MaintainPartitionRetentionResult{OpenLeafRetry: true, OpenLeafAnalyzeAt: tomorrow}
+	if got, want := maintainPartitionRetentionNextRunAt(settings, &result, ended), ended.Add(settings.RetentionRetryInterval); !got.Equal(want) {
+		t.Errorf("a run that left an opened leaf: next run %s, want %s", got, want)
+	}
+	result.OpenLeafRetry = false
+	if got, want := maintainPartitionRetentionNextRunAt(settings, &result, ended), ended.Add(settings.RetentionInterval); !got.Equal(want) {
+		t.Errorf("a run that left nothing: next run %s, want %s", got, want)
+	}
+}

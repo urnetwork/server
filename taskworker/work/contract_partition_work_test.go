@@ -56,3 +56,35 @@ func TestMaintainContractPartitionsTaskSettingsAndResult(t *testing.T) {
 		t.Fatalf("an older result decoded to %+v: %v", older, err)
 	}
 }
+
+// A run that left a day's partition unanalyzed runs again after the retry
+// interval, not the cadence: on 2026-11-28 the 00:01Z run ended at 00:02:21Z
+// with the day's transfer_contract partition left, and the cadence's next run
+// came at 00:17:21Z, after autovacuum's analyze at 00:12:51Z. The flag
+// survives the task queue's JSON, and a result from a build without it
+// decodes to none.
+func TestMaintainContractPartitionsNextRunAtRetriesALeftOpenedDay(t *testing.T) {
+	settings := DefaultMaintainContractPartitionsTaskSettings()
+	ended := time.Date(2026, 11, 28, 0, 2, 21, 0, time.UTC)
+	tomorrow := time.Date(2026, 11, 29, 0, 1, 0, 0, time.UTC)
+	result := MaintainContractPartitionsResult{OpenLeafRetry: true, OpenLeafAnalyzeAt: tomorrow}
+	if got, want := maintainContractPartitionsNextRunAt(settings, &result, ended), ended.Add(settings.RetryInterval); !got.Equal(want) {
+		t.Errorf("a run that left a day's partition: next run %s, want %s", got, want)
+	}
+	result.OpenLeafRetry = false
+	if got, want := maintainContractPartitionsNextRunAt(settings, &result, ended), ended.Add(settings.Interval); !got.Equal(want) {
+		t.Errorf("a run that left nothing: next run %s, want %s", got, want)
+	}
+	encoded, err := json.Marshal(&MaintainContractPartitionsResult{OpenLeafRetry: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded MaintainContractPartitionsResult
+	if err := json.Unmarshal(encoded, &decoded); err != nil || !decoded.OpenLeafRetry {
+		t.Fatalf("decoded %+v from %s: %v", decoded, encoded, err)
+	}
+	var older MaintainContractPartitionsResult
+	if err := json.Unmarshal([]byte(`{"cursor":{},"more":false}`), &older); err != nil || older.OpenLeafRetry {
+		t.Fatalf("an older result decoded to %+v: %v", older, err)
+	}
+}

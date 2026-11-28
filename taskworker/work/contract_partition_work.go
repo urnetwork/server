@@ -34,6 +34,9 @@ type MaintainContractPartitionsResult struct {
 	// (server.ContractPartitionReport.OpenLeafAnalyzeAt); zero from a build
 	// before it, or before the cutover
 	OpenLeafAnalyzeAt time.Time `json:"open_leaf_analyze_at,omitzero"`
+	// the run left a current day's partition unanalyzed within its retry
+	// window (server.ContractPartitionReport.OpenLeafRetry)
+	OpenLeafRetry bool `json:"open_leaf_retry,omitempty"`
 }
 
 // The chain's cadence and budget.
@@ -83,10 +86,13 @@ func scheduleMaintainContractPartitions(clientSession *session.ClientSession, tx
 // of its partitions when that comes first, at once when it passed while the
 // run ran. On the cadence alone the day's partitions waited up to an interval
 // past 00:00 UTC, or for autovacuum, which took about 15 minutes on
-// 2026-11-25.
+// 2026-11-25. A run that left work behind, or a day's partition unanalyzed,
+// runs again after the retry interval: on 2026-11-28 a partition the 00:01Z
+// run left waited for the cadence's 00:17Z, and autovacuum analyzed it first,
+// at 00:12:51Z.
 func maintainContractPartitionsNextRunAt(settings *MaintainContractPartitionsTaskSettings, result *MaintainContractPartitionsResult, now time.Time) time.Time {
 	runAt := now.Add(settings.Interval)
-	if result.More {
+	if result.More || result.OpenLeafRetry {
 		runAt = now.Add(settings.RetryInterval)
 	}
 	if !result.OpenLeafAnalyzeAt.IsZero() && result.OpenLeafAnalyzeAt.Before(runAt) {
@@ -133,11 +139,12 @@ func MaintainContractPartitions(
 		Cursor:            cursor,
 		More:              report.More,
 		OpenLeafAnalyzeAt: report.OpenLeafAnalyzeAt,
+		OpenLeafRetry:     report.OpenLeafRetry,
 	}, nil
 }
 
-// A run that left work behind continues a minute later, and a run reaches
-// each day's partitions a minute into the day
+// A run that left work behind, or a day's partition unanalyzed, continues a
+// minute later, and a run reaches each day's partitions a minute into the day
 // (maintainContractPartitionsNextRunAt).
 func MaintainContractPartitionsPost(
 	maintainContractPartitions *MaintainContractPartitionsArgs,

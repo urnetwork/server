@@ -21,7 +21,8 @@ import (
 //     and once more a day after its day, and the parents once a day
 //     (autovacuum does not analyze a partitioned parent); an empty partition
 //     of a day that has not ended keeps reading never analyzed
-//     (ClearEmptyLeafStatistics);
+//     (ClearEmptyLeafStatistics); a day's partition left unanalyzed is retried
+//     a minute later, for the day's first hour (OpenLeafRetryWindow);
 //   - retire each day at the contract horizon reaper's horizon
 //     (db_contract_day_retirement.go): the reaper alone deletes contract rows,
 //     by its keep rules; retirement compacts a day's leaves down to the rows
@@ -103,6 +104,10 @@ type ContractPartitionReport struct {
 	// when the next run is due for the next day's partitions
 	// (NextOpenLeafAnalyzeTime of the run's now); zero before the cutover
 	OpenLeafAnalyzeAt time.Time
+	// an opened day's partition was left unanalyzed within its retry window
+	// (PartitionOpenLeafReport.Retry): the next run comes after the retry
+	// interval
+	OpenLeafRetry bool
 	// leaves of expired days rewritten down to the rows they still hold
 	Compacted []string
 	// expired days that hold only rows the reaper keeps, by their
@@ -151,7 +156,7 @@ func maintainContractPartitions(ctx context.Context, now time.Time, cursor Contr
 		if err != nil {
 			glog.Errorf("[cp]could not create the next contract partitions: %s\n", err)
 		}
-		report.Analyzed, next.AnalyzedDay = analyzeContractPartitions(ctx, now, cursor.AnalyzedDay, deadline)
+		report.Analyzed, next.AnalyzedDay, report.OpenLeafRetry = analyzeContractPartitions(ctx, now, cursor.AnalyzedDay, deadline)
 		cleared, locked, errs := contractPartitionFamily.ClearEmptyLeafStatistics(ctx, now)
 		logPartitionClearedLeafStatistics(contractPartitionFamily.Name, cleared, locked, errs)
 		report.OpenLeafAnalyzeAt = contractPartitionFamily.NextOpenLeafAnalyzeTime(now)
@@ -254,9 +259,11 @@ func contractAnalyzeAdmission(ctx context.Context, relation string, leaf bool) s
 // Analyzes the current day's partitions a minute into the day once they hold
 // rows, first, since until then a lookup may read them without statistics;
 // then each daily partition once its day has settled, and the parents once a
-// day, through the registry.
-func analyzeContractPartitions(ctx context.Context, now time.Time, analyzedDay string, deadline time.Time) (analyzed []string, nextAnalyzedDay string) {
-	analyzed = contractPartitionFamily.AnalyzeOpenLeaves(ctx, now, deadline)
+// day, through the registry. openLeafRetry: a current day's partition was
+// left unanalyzed, and the next run retries it after the retry interval.
+func analyzeContractPartitions(ctx context.Context, now time.Time, analyzedDay string, deadline time.Time) (analyzed []string, nextAnalyzedDay string, openLeafRetry bool) {
+	openLeaves := contractPartitionFamily.AnalyzeOpenLeavesReport(ctx, now, deadline)
+	analyzed, openLeafRetry = openLeaves.Analyzed, openLeaves.Retry
 	analyzed = append(analyzed, contractPartitionFamily.AnalyzeClosedLeaves(ctx, now, deadline)...)
 	parents, nextAnalyzedDay := contractPartitionFamily.AnalyzeParents(ctx, now, analyzedDay, deadline)
 	analyzed = append(analyzed, parents...)
