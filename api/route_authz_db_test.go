@@ -320,6 +320,10 @@ func routeAccessAdminRequests(self *routeAccessDbFixture, victimClientId server.
 		"POST /oauth/authorize":                   {path: "/oauth/authorize", body: oauthRequest},
 		"POST /oauth/consent":                     {path: "/oauth/consent", body: oauthRequest},
 		"POST /auth/network-refresh":              {path: "/auth/network-refresh"},
+		"GET /auth/email-change":                  {path: "/auth/email-change"},
+		"POST /auth/email-change":                 {path: "/auth/email-change", body: map[string]any{"new_email": "attacker@example.com"}},
+		"POST /auth/email-change/confirm":         {path: "/auth/email-change/confirm", body: map[string]any{"current_code": "000000", "new_code": "000000"}},
+		"POST /auth/email-change/cancel":          {path: "/auth/email-change/cancel", body: map[string]any{}},
 		// app admin
 		"POST /auth/network-delete":               {path: "/auth/network-delete"},
 		"POST /auth/code-create":                  {path: "/auth/code-create", body: map[string]any{"uses": 1, "duration_minutes": 60}},
