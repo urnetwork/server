@@ -94,6 +94,10 @@ func registry() []specEndpoint {
 		{"POST", "/auth/code-login", rt(model.AuthCodeLoginArgs{}), rt(model.AuthCodeLoginResult{})},
 		{"POST", "/auth/add-auth", rt(controller.AddAuthArgs{}), rt(controller.AddAuthResult{})},
 		{"POST", "/auth/remove-auth", rt(controller.RemoveAuthArgs{}), rt(controller.RemoveAuthResult{})},
+		{"GET", "/auth/email-change", nil, rt(controller.AuthEmailChangeStatusResult{})},
+		{"POST", "/auth/email-change", rt(controller.AuthEmailChangeArgs{}), rt(controller.AuthEmailChangeResult{})},
+		{"POST", "/auth/email-change/confirm", rt(controller.AuthEmailChangeConfirmArgs{}), rt(controller.AuthEmailChangeConfirmResult{})},
+		{"POST", "/auth/email-change/cancel", rt(controller.AuthEmailChangeCancelArgs{}), rt(controller.AuthEmailChangeCancelResult{})},
 		{"POST", "/auth/regenerate-seedphrase", rt(controller.RegenerateSeedphraseArgs{}), rt(controller.RegenerateSeedphraseResult{})},
 		{"POST", "/auth/generate-seedphrase", rt(controller.GenerateSeedphraseArgs{}), rt(controller.GenerateSeedphraseResult{})},
 

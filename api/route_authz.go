@@ -129,6 +129,10 @@ var routeAccessByRoute = map[string]routeAccess{
 	"GET /auth/google/callback":                     routeAccessPublic,
 	"POST /auth/add-auth":                           routeAccessAppAdmin,  // adds a sign-in method (takeover)
 	"POST /auth/remove-auth":                        routeAccessAppAdmin,  // removes a sign-in method (takeover)
+	"GET /auth/email-change":                        routeAccessNetwork,   // the account's waiting email change
+	"POST /auth/email-change":                       routeAccessNetwork,   // starts a verified email change (takeover)
+	"POST /auth/email-change/confirm":               routeAccessNetwork,   // completes it with both codes (takeover)
+	"POST /auth/email-change/cancel":                routeAccessNetwork,   // ends the waiting email change
 	"POST /auth/regenerate-seedphrase":              routeAccessAppAdmin,  // returns a sign-in seedphrase (escalation)
 	"POST /auth/generate-seedphrase":                routeAccessAppAdmin,  // returns a sign-in seedphrase (escalation)
 	"POST /network/auth-client":                     routeAccessOwnClient, // mint/reissue client tokens
