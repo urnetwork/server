@@ -782,6 +782,27 @@ tables:
       exposure_time: compute-7
       published_time: compute-7
       version: compute-7
+  # DESIGN-COMPUTE §14.4's MG-C2, SRCH's part (SRCH-M13-08), registered from sidecar/model's compute_search.go: the
+  # sanctions records under compute-10, the review's time and reference by the owner's answer QD-1374
+  # (compute-plan-search-suspension-clear), and the hourly outcome counts across all networks under compute-11
+  compute_search_flag:
+    group: MG-C2
+    columns:
+      flag_id: compute-10
+      flag_time: compute-10
+      network_id: compute-10
+      payee: compute-10
+      reason: compute-10
+      review_reference: compute-10
+      reviewed_time: compute-10
+      sidecar_id: compute-10
+      transaction: compute-10
+  compute_search_outcome_hour:
+    group: MG-C2
+    columns:
+      count: compute-11
+      hour_time: compute-11
+      outcome: compute-11
   # DESIGN-COMPUTE §14.4's MG-C1, BAL's part (BAL-M12-01), registered from sidecar/model's compute_schema.go: each
   # table under the compute row whose store names it, compute-1 the operations, charges and day rows, compute-2 the
   # lots, promotion codes, payers and terms, compute-3 the draws, totals, pruned sums and accounts, compute-6
