@@ -88,6 +88,10 @@ type subnetBindingVersion struct {
 	validTo    uint64
 	cleaned    bool
 	cleanedAt  uint64
+	// signed from epoch 9 and bound in the epoch 8 late-binding window of the
+	// SN25 mainnet coordinator, so it also counts for epoch 8 (sn
+	// protocol/fleet_late_binding_epoch8.go)
+	epoch8Window bool
 }
 
 // The committed binding census of every published frontier window.
@@ -132,9 +136,11 @@ func (self *subnetBindingCensus) clone() *subnetBindingCensus {
 	return copy
 }
 
-func (self *subnetBindingCensus) bind(event *stabi.STCoordinatorFleetBound) {
+// epoch8Window is whether the event is in the epoch 8 late-binding window.
+func (self *subnetBindingCensus) bind(event *stabi.STCoordinatorFleetBound, epoch8Window bool) {
 	self.versions[event.ClientId] = append(self.versions[event.ClientId], subnetBindingVersion{
 		fleetId: event.FleetId, hotkey: event.Hotkey, uid: event.Uid, generation: event.Generation, validFrom: event.ValidFromEpoch, validTo: event.ValidToEpoch,
+		epoch8Window: epoch8Window,
 	})
 }
 
@@ -160,8 +166,29 @@ func (self *subnetBindingCensus) clean(event *stabi.STCoordinatorFleetBindingCle
 	return true
 }
 
-// bindingAt without its live Uid test: the version and its validity.
+// bindingAt without its live Uid test: the version and its validity. For
+// epoch 8, a client with no version active there has its newest version in
+// the epoch 8 late-binding window instead, when that is active from epoch 8,
+// as the validator and the network operator count it.
 func (self *subnetBindingCensus) boundAt(client [16]byte, epoch uint64) (subnetBindingVersion, bool) {
+	version, active := self.signedBoundAt(client, epoch)
+	if active || epoch != protocol.Epoch8LateBindingEpoch {
+		return version, active
+	}
+	versions := self.versions[client]
+	for i := len(versions) - 1; 0 <= i; i-- {
+		if late := versions[i]; late.epoch8Window {
+			if epoch <= late.validTo && (!late.cleaned || epoch < late.cleanedAt) {
+				return late, true
+			}
+			break
+		}
+	}
+	return version, false
+}
+
+// bindingAt without its live Uid test, from the signed validities alone.
+func (self *subnetBindingCensus) signedBoundAt(client [16]byte, epoch uint64) (subnetBindingVersion, bool) {
 	versions := self.versions[client]
 	for i := len(versions) - 1; 0 <= i; i-- {
 		version := versions[i]
@@ -272,7 +299,7 @@ func (self *subnetHeadProbe) advanceBindings(ctx context.Context, run *subnetRun
 				consistent = false
 				continue
 			}
-			census.bind(event)
+			census.bind(event, protocol.Epoch8LateBindingLanded(run.settings.Deployment.ChainId, state.coordinator, event.ValidFromEpoch, log.BlockNumber))
 		case topics[1]:
 			event, err := coordinator.UnpackFleetBindingRevokedEvent(log)
 			consistent = consistent && err == nil && census.revoke(event)

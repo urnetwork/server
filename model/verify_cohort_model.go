@@ -50,9 +50,10 @@ package model
 // admission checks the member's identity, egress and provide mode but never
 // its outcomes, and each of its assignments ends a trail.
 //
-// Nothing here falls back to unbounded sampling: an unknown epoch, a refused
-// admission or no usable member yields no next hop, and a Redis error panics
-// like every other verify state read.
+// Nothing here falls back to unbounded sampling: an unknown epoch, or no usable
+// member that the caps admit, yields no next hop (a refused candidate only
+// moves the draw to members the caps admit), and a Redis error panics like
+// every other verify state read.
 //
 // The rolling census (sn VERIFY-COHORT-V2.md, verify_cohort_rolling.go) is the
 // second mode of the same admission script. From VERIFY-COHORT-V2.md on, the
@@ -140,6 +141,10 @@ type verifyCohortKeys struct {
 	census string
 	// set once the census holds every provider ever admitted
 	censusReady string
+	// set once the lifetime set holds the census members it keeps: absent
+	// after Redis loses the lifetime set, which has no other copy, so the
+	// next rotation rebuilds it from the census (RotateVerifyCohort)
+	lifetimeReady string
 	// the rolling census's state (verify_cohort_rolling.go): whether it is on,
 	// the validator's reported census, the headroom held for claimed members,
 	// and the admissions since the last two reports
@@ -152,14 +157,15 @@ type verifyCohortKeys struct {
 func newVerifyCohortKeys(deploymentKey StDeploymentKey, epoch uint64) verifyCohortKeys {
 	prefix := fmt.Sprintf("{verify_cohort:%s}", deploymentKey)
 	return verifyCohortKeys{
-		epoch:       fmt.Sprintf("%se%d", prefix, epoch),
-		draws:       fmt.Sprintf("%se%ddraws", prefix, epoch),
-		lifetime:    prefix + "lifetime",
-		priority:    prefix + "priority",
-		census:      prefix + "census",
-		censusReady: prefix + "censusready",
-		state:       prefix + "state",
-		ranked:      prefix + "ranked",
+		epoch:         fmt.Sprintf("%se%d", prefix, epoch),
+		draws:         fmt.Sprintf("%se%ddraws", prefix, epoch),
+		lifetime:      prefix + "lifetime",
+		priority:      prefix + "priority",
+		census:        prefix + "census",
+		censusReady:   prefix + "censusready",
+		lifetimeReady: prefix + "lifetimeready",
+		state:         prefix + "state",
+		ranked:        prefix + "ranked",
 	}
 }
 
@@ -584,12 +590,20 @@ const (
 //     still counted;
 //  4. while the cohort and its census have room and the growth gate is open
 //     (or the previous attempt found no usable member), a provider from the
-//     eligible set (the uniform sample);
+//     eligible set (the uniform sample). The census has room as the script
+//     counts a new unclaimed provider: in the legacy census against the
+//     census once it is ready, not at all while a durable census waits for
+//     its restore, and against the lifetime set before rotation's first run;
 //  5. otherwise an existing member of this epoch's cohort.
 //
 // Each source leaves out providers on dead-hop probation whose probe is not
 // due. The admission script then decides, in the mode it reads itself; a
-// refused candidate is excluded and the next attempt re-reads the cohort.
+// refused candidate is excluded and the next attempt re-reads the cohort. A
+// cap that refuses a new provider refuses the rest of its tier, and a claimed
+// member's caps are never tighter than another tier's, so once a cap refuses
+// one the remaining attempts skip the tiers it refuses: a SEED then gets a
+// carried member or one of this epoch's cohort, rather than no next hop after
+// every attempt went to a provider the script refuses.
 func sampleVerifyCohortNextHop(
 	ctx context.Context,
 	excludeClientIds []server.Id,
@@ -626,14 +640,18 @@ func sampleVerifyCohortNextHop(
 
 	server.Redis(ctx, func(r server.RedisClient) {
 		starved := false
+		// a cap refused a claimed member, which refuses every tier, or an
+		// unclaimed new provider, which refuses the ranked and sampled tiers
+		claimedCapped, unclaimedCapped := false, false
 		for attempt := 0; attempt < settings.SampleMaxAttempts; attempt += 1 {
-			var sizeCmd, lifetimeCmd, censusCmd *redis.IntCmd
+			var sizeCmd, lifetimeCmd, censusCmd, readyCmd *redis.IntCmd
 			var drawsCmd *redis.StringCmd
 			var stateCmd *redis.SliceCmd
 			_, err := r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
 				sizeCmd = pipe.SCard(ctx, keys.epoch)
 				lifetimeCmd = pipe.SCard(ctx, keys.lifetime)
 				censusCmd = pipe.SCard(ctx, keys.census)
+				readyCmd = pipe.Exists(ctx, keys.censusReady)
 				drawsCmd = pipe.Get(ctx, keys.draws)
 				stateCmd = pipe.HMGet(ctx, keys.state, "rolling", "headroom")
 				return nil
@@ -644,6 +662,7 @@ func sampleVerifyCohortNextHop(
 			size := int(sizeCmd.Val())
 			lifetime := int(lifetimeCmd.Val())
 			census := int(censusCmd.Val())
+			ready := readyCmd.Val() == 1
 			draws, _ := drawsCmd.Int64()
 			// the script reads the mode itself; this only picks the sources
 			rolling, headroom := verifyCohortRollingFields(stateCmd.Val())
@@ -653,7 +672,7 @@ func sampleVerifyCohortNextHop(
 			skipGrowthGate := false
 			priority := false
 			tier := ""
-			if size < settings.CohortSize {
+			if size < settings.CohortSize && !claimedCapped {
 				// a claimed fleet's member skips the growth gate, never a cap
 				candidate, probe = drawVerifyCohortCandidate(ctx, r, keys.priority, verifyCohortPriorityDrawCount, keys.epoch, excluded, settings)
 				skipGrowthGate, priority = candidate != "", candidate != ""
@@ -661,7 +680,7 @@ func sampleVerifyCohortNextHop(
 					tier = verifyCohortTierClaimed
 				}
 			}
-			if candidate == "" && size < settings.CohortSize && rolling {
+			if candidate == "" && size < settings.CohortSize && rolling && !unclaimedCapped {
 				// an unclaimed top-ranked network's representative skips the
 				// growth gate, never a cap
 				candidate, probe = drawVerifyCohortCandidate(ctx, r, keys.ranked, verifyCohortRankedDrawCount, keys.epoch, excluded, settings)
@@ -671,16 +690,26 @@ func sampleVerifyCohortNextHop(
 			}
 			if candidate == "" && size < settings.CohortSize {
 				carried := keys.lifetime
+				// room for a new unclaimed provider, as the script counts it
 				room := lifetime < settings.CohortLifetimeLimit
-				if rolling {
+				switch {
+				case rolling:
 					carried = keys.census
 					room = census < settings.CohortLifetimeLimit-headroom
+				case ready:
+					// the census holds every provider ever admitted, and a new
+					// unclaimed provider counts against it
+					room = room && census < settings.CohortLifetimeLimit
+				case censusRequired:
+					// Redis has not restored the durable census: the script
+					// admits no new provider
+					room = false
 				}
 				candidate, probe = drawVerifyCohortCandidate(ctx, r, carried, verifyCohortCarryDrawCount, keys.epoch, excluded, settings)
 				if candidate != "" {
 					tier = verifyCohortTierCarried
 				}
-				if candidate == "" && room &&
+				if candidate == "" && room && !unclaimedCapped &&
 					(starved || settings.ReliabilityAMin*int64(size) <= draws) {
 					candidate, probe = drawVerifyCohortCandidate(ctx, r, verifyEligibleKey, settings.SampleCandidateCount, keys.epoch, excluded, settings)
 					skipGrowthGate = starved
@@ -709,6 +738,12 @@ func sampleVerifyCohortNextHop(
 			if !admitted {
 				if label, counted := refusal.label(); counted {
 					verifyCohortAdmissionRefusals.WithLabelValues(label).Inc()
+					switch tier {
+					case verifyCohortTierClaimed:
+						claimedCapped, unclaimedCapped = true, true
+					case verifyCohortTierRanked, verifyCohortTierSample:
+						unclaimedCapped = true
+					}
 				}
 				excluded[candidate] = true
 				continue

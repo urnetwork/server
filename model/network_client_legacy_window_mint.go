@@ -19,10 +19,23 @@ package model
 // most once per client per interval. The refusal of a request that is not the
 // old window's does no database work; the old window's request is checked
 // against the caller's device inside the mint's own transaction.
+//
+// The old Android window's device_spec is "<os version> <Build.FINGERPRINT>"
+// (android v2025.6.30 MainApplication.kt deviceSpec), and every os update
+// changes it. The device row keeps the spec of the device's last accepted
+// mint, and an old build's only mints are its window's, which this check
+// gates before the row is refreshed (network_client_model.go). So an exact
+// comparison refused, for good, every old Android build whose os had updated
+// since its device row was written: of 21 callers refused on 2026-11-26, 18
+// had sent window specs of their own device on a newer os build. A spec of
+// the same Android device, its brand, product, device, type and tags, is the
+// caller's device's; its accepted mint then refreshes the row as every mint
+// does.
 
 import (
 	"context"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -186,8 +199,8 @@ func observeLegacyWindowMintResult(
 	}
 }
 
-// The old window sends its own device's spec, so a request whose spec differs
-// from the caller's device's is not the old window's. Read inside the mint's
+// The old window sends its own device's spec, so a request whose spec is not
+// the caller's device's is not the old window's. Read inside the mint's
 // transaction, on the device the source row just named.
 func legacyWindowMintDeviceSpecMatchesInTx(ctx context.Context, tx server.PgTx, deviceId server.Id, deviceSpec string) bool {
 	matches := false
@@ -204,8 +217,55 @@ func legacyWindowMintDeviceSpecMatchesInTx(ctx context.Context, tx server.PgTx, 
 		if result.Next() {
 			var storedDeviceSpec *string
 			server.Raise(result.Scan(&storedDeviceSpec))
-			matches = storedDeviceSpec != nil && *storedDeviceSpec == deviceSpec
+			matches = storedDeviceSpec != nil && isLegacyWindowDeviceSpecOfDevice(deviceSpec, *storedDeviceSpec)
 		}
 	})
 	return matches
+}
+
+// Whether the old window's spec is that of the device whose row holds
+// storedDeviceSpec: the same spec, or both the old Android form of one device
+// on another os build. Any other pair, including one side in another form, is
+// another device's.
+func isLegacyWindowDeviceSpecOfDevice(deviceSpec string, storedDeviceSpec string) bool {
+	if deviceSpec == "" {
+		return false
+	}
+	if deviceSpec == storedDeviceSpec {
+		return true
+	}
+	deviceIdentity, ok := legacyWindowAndroidDeviceIdentity(deviceSpec)
+	if !ok {
+		return false
+	}
+	storedDeviceIdentity, ok := legacyWindowAndroidDeviceIdentity(storedDeviceSpec)
+	return ok && deviceIdentity == storedDeviceIdentity
+}
+
+// The part of an old Android window's spec, "<os version> <fingerprint>", that
+// an os update leaves as it was. A fingerprint is
+// "<brand>/<product>/<device>:<release>/<build id>/<incremental>:<type>/<tags>"
+// and holds no whitespace (Android CDD 3.2.2), so the identity is
+// "<brand>/<product>/<device>:<type>/<tags>". False for any other form.
+func legacyWindowAndroidDeviceIdentity(deviceSpec string) (string, bool) {
+	osVersion, fingerprint, found := strings.Cut(deviceSpec, " ")
+	if !found || osVersion == "" || strings.ContainsAny(fingerprint, " \t\r\n") {
+		return "", false
+	}
+	sections := strings.Split(fingerprint, ":")
+	if len(sections) != 3 {
+		return "", false
+	}
+	for i, wantPartCount := range []int{3, 3, 2} {
+		parts := strings.Split(sections[i], "/")
+		if len(parts) != wantPartCount {
+			return "", false
+		}
+		for _, part := range parts {
+			if part == "" {
+				return "", false
+			}
+		}
+	}
+	return sections[0] + ":" + sections[2], true
 }

@@ -31,7 +31,9 @@ const mcpMaxRequestBodyBytes int64 = 2 * 1024 * 1024
 // rules are repeated at three levels -- here, in each tool description, and in
 // the next_step of every result -- because a caller that has to infer them
 // gets them wrong, and the cost of restating them is a few hundred tokens.
-const McpInstructions = `URnetwork lets you browse and fetch from anywhere on the network's provider footprint.
+const McpInstructions = `URnetwork lets you fetch pages from places across the network's provider footprint.
+
+fetch runs on URnetwork's server, not on your machine. The server loads each page through an exit in the place you choose, so it reads your request, the page and its cookies; the cookies carry the site session, logins included, from call to call. For a page URnetwork shouldn't read, use a proxy from the API with an https:// URL instead. The fetch tool will be removed when URnetwork's Bot launches; providerLocations stays.
 
 Authentication: this server is an OAuth 2.1 protected resource. An unauthenticated request is answered with 401 and a WWW-Authenticate challenge naming the protected resource metadata, which points at the authorization server. Complete the authorization code flow with PKCE and send the resulting access token as an Authorization: Bearer header on every request. Scopes: mcp:read for providerLocations, mcp:fetch for fetch. A tool that needs a scope you were not granted says so; re-authorize requesting that scope in addition to the ones you already hold.
 

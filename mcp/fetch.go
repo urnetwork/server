@@ -88,7 +88,7 @@ type FetchArgs struct {
 	Location string `json:"location,omitempty" jsonschema:"Where the request should egress from, as a place name such as 'Japan', 'Germany', or 'New York'. Ignored when signed_proxy_id is given and still valid. Keep passing the same location alongside signed_proxy_id so the egress can be re-established if it expires."`
 
 	SignedProxyId string `json:"signed_proxy_id,omitempty" jsonschema:"Pass back the signed_proxy_id from a previous fetch result to reuse the same egress location for follow-on loads. Omit on the first call."`
-	Cookies       string `json:"cookies,omitempty" jsonschema:"Pass back the cookies value from a previous fetch result to keep the session (logins, consent) across loads. Opaque; do not modify or interpret it."`
+	Cookies       string `json:"cookies,omitempty" jsonschema:"Pass back the cookies value from a previous fetch result to keep the session (logins, consent) across loads. Opaque; do not modify or interpret it. URnetwork's server holds the key that seals it and reads it on every call."`
 	Continuation  string `json:"continuation,omitempty" jsonschema:"Pass back the continuation value from a previous fetch result to collect the resources that did not fit in that call. When set, url is ignored."`
 
 	Headers map[string]string `json:"headers,omitempty" jsonschema:"Extra request headers to send."`
@@ -795,7 +795,7 @@ func fetchNextStep(out *FetchResult) string {
 		))
 	}
 	if out.Cookies != "" {
-		steps = append(steps, "Pass cookies back unchanged on the next call to keep the site session (logins, consent banners). It is opaque; do not edit it.")
+		steps = append(steps, "Pass cookies back unchanged on the next call to keep the site session (logins, consent banners). It is opaque; do not edit it. URnetwork's server reads it on every call.")
 	}
 	if out.Continuation != "" {
 		steps = append(steps, "Some referenced resources did not fit in this call. Call fetch again passing continuation to collect the rest; url is not needed.")
