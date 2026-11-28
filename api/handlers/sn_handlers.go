@@ -540,6 +540,19 @@ func SnValidateWallet(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputNoAuth(controller.SnValidateWallet, w, r)
 }
 
+// SnWalletDisconnectCode backs `POST /sn/wallet/disconnect-code`: emails the
+// network owner the code that confirms a payout wallet disconnect. Network
+// credential only (route_authz.go); the controller refuses an API key.
+func SnWalletDisconnectCode(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(controller.SnWalletDisconnectCode, w, r)
+}
+
+// SnWalletDisconnect backs `POST /sn/wallet/disconnect`: with the emailed
+// code, removes the network's payout wallet connected without a consent.
+func SnWalletDisconnect(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(controller.SnWalletDisconnect, w, r)
+}
+
 // SnHead backs `GET /sn/head`: the caller network's Top 200 head-tier
 // standing (server estimate + binding status).
 func SnHead(w http.ResponseWriter, r *http.Request) {
