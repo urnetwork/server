@@ -21,11 +21,17 @@ package model
 //   - Every new census member is written through to Postgres. A Redis that
 //     loses its census refuses every new provider until this task restores
 //     the census from Postgres, so a data loss can never re-admit a census.
+//   - The lifetime set has no copy outside Redis, and a Redis that loses the
+//     census loses it too (one cluster slot). This task rebuilds it from the
+//     census: the members rotation keeps, at most the lifetime limit. Without
+//     that the sampler finds no carried member, and every new provider it
+//     draws instead is refused by a census already at its limit.
 
 import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -150,6 +156,9 @@ type VerifyCohortRotation struct {
 	// lifetime limit less the active set before rotation), at most 64
 	Rotated  int
 	Restored bool
+	// census members put back in the lifetime set after Redis lost it,
+	// before rotation
+	Rebuilt int
 }
 
 // RotateVerifyCohort makes the census ready and durable, then rotates stale
@@ -246,6 +255,81 @@ func RotateVerifyCohort(ctx context.Context, settings *VerifySettings) *VerifyCo
 	server.Redis(ctx, func(r server.RedisClient) {
 		server.Raise(r.Set(ctx, keys.censusReady, "1", 0).Err())
 
+		// Redis lost the lifetime set when its marker is gone or the set is
+		// empty. It gets back the census members rotation keeps, at most the
+		// lifetime limit: claimed members, then members drawn this or the
+		// previous epoch, then eligible ones, then the rest in descending
+		// client id, since rotation takes stale members in ascending client
+		// id. Members still in the set stay, and the census never changes.
+		var lifetimeReady, lifetimeCount *redis.IntCmd
+		if _, err := r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+			lifetimeReady = pipe.Exists(ctx, keys.lifetimeReady)
+			lifetimeCount = pipe.SCard(ctx, keys.lifetime)
+			return nil
+		}); err != nil {
+			server.Raise(err)
+		}
+		if lifetimeReady.Val() == 0 || lifetimeCount.Val() == 0 {
+			census, err := r.SMembers(ctx, keys.census).Result()
+			server.Raise(err)
+			claimed, err := r.SMembers(ctx, keys.priority).Result()
+			server.Raise(err)
+			claimedMembers := map[string]bool{}
+			for _, member := range claimed {
+				claimedMembers[member] = true
+			}
+			// how surely rotation keeps each census member outside the set
+			memberRanks := map[string]int{}
+			candidates := []string{}
+			for start := 0; start < len(census); start += 512 {
+				batch := census[start:min(start+512, len(census))]
+				args := make([]any, len(batch))
+				for i, member := range batch {
+					args[i] = member
+				}
+				var inLifetime, inEpoch, inPrevious, inEligible *redis.BoolSliceCmd
+				_, err := r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+					inLifetime = pipe.SMIsMember(ctx, keys.lifetime, args...)
+					inEpoch = pipe.SMIsMember(ctx, keys.epoch, args...)
+					inPrevious = pipe.SMIsMember(ctx, previous.epoch, args...)
+					inEligible = pipe.SMIsMember(ctx, verifyEligibleKey, args...)
+					return nil
+				})
+				server.Raise(err)
+				for i, member := range batch {
+					switch {
+					case inLifetime.Val()[i]:
+						continue
+					case claimedMembers[member]:
+						memberRanks[member] = 0
+					case inEpoch.Val()[i] || inPrevious.Val()[i]:
+						memberRanks[member] = 1
+					case inEligible.Val()[i]:
+						memberRanks[member] = 2
+					default:
+						memberRanks[member] = 3
+					}
+					candidates = append(candidates, member)
+				}
+			}
+			slices.SortFunc(candidates, func(a string, b string) int {
+				if memberRanks[a] != memberRanks[b] {
+					return memberRanks[a] - memberRanks[b]
+				}
+				return strings.Compare(b, a)
+			})
+			for start := 0; start < len(candidates); start += 512 {
+				args := []any{settings.CohortLifetimeLimit}
+				for _, member := range candidates[start:min(start+512, len(candidates))] {
+					args = append(args, member)
+				}
+				added, err := r.Eval(ctx, verifyCohortRebuildScript, []string{keys.lifetime, keys.census}, args...).Int()
+				server.Raise(err)
+				result.Rebuilt += added
+			}
+			server.Raise(r.Set(ctx, keys.lifetimeReady, "1", 0).Err())
+		}
+
 		var active, censusCount *redis.IntCmd
 		var priority *redis.StringSliceCmd
 		_, err := r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
@@ -317,3 +401,24 @@ func RotateVerifyCohort(ctx context.Context, settings *VerifySettings) *VerifyCo
 	verifyCohortCensusSize.Set(float64(result.Census))
 	return result
 }
+
+// Adds ARGV[2..] to the lifetime set in order until it holds the lifetime
+// limit, skipping any that left the census, so however admissions interleave
+// the set stays within the census and never passes its limit. Returns how
+// many it added.
+//
+//	KEYS[1] lifetime (active) set, KEYS[2] census set
+//	ARGV[1] lifetime limit, ARGV[2..] census members in the order to keep
+const verifyCohortRebuildScript = `
+local size = redis.call('SCARD', KEYS[1])
+local limit = tonumber(ARGV[1])
+local added = 0
+for i = 2, #ARGV do
+  if size >= limit then break end
+  if redis.call('SISMEMBER', KEYS[2], ARGV[i]) == 1 and redis.call('SADD', KEYS[1], ARGV[i]) == 1 then
+    size = size + 1
+    added = added + 1
+  end
+end
+return added
+`

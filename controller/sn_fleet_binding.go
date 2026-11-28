@@ -375,8 +375,8 @@ func refreshSnClaimedFleetsNow(ctx context.Context) {
 		case readable:
 			// rotate stale members out for the claimed members still waiting
 			// for room
-			if rotation := model.RotateVerifyCohort(ctx, settings); rotation != nil && (0 < rotation.Rotated || rotation.Restored) {
-				glog.Infof("[sn]verify cohort rotation: %d stale members out for %d waiting (census %d, active %d of %d before rotation and %d after, restored %t)\n", rotation.Rotated, rotation.Demand, rotation.Census, rotation.Active+rotation.Rotated, settings.CohortLifetimeLimit, rotation.Active, rotation.Restored)
+			if rotation := model.RotateVerifyCohort(ctx, settings); rotation != nil && (0 < rotation.Rotated || rotation.Restored || 0 < rotation.Rebuilt) {
+				glog.Infof("[sn]verify cohort rotation: %d stale members out for %d waiting (census %d, active %d of %d before rotation and %d after, restored %t, %d census members put back in the active set)\n", rotation.Rotated, rotation.Demand, rotation.Census, rotation.Active+rotation.Rotated, settings.CohortLifetimeLimit, rotation.Active, rotation.Restored, rotation.Rebuilt)
 			}
 		}
 	}, func(err error) {
@@ -410,11 +410,13 @@ func snRefreshVerifyCohortState(ctx context.Context, settings *model.VerifySetti
 // The claimed members of fleets whose bindings start at the next settlement
 // epoch, at most perFleet of each: the room the rolling census holds for them
 // before their bindings go live (sn VERIFY-COHORT-V2.md §2.6, headroom H). A
-// fleet's UID can't be tested before its epoch, so each counts.
+// fleet's UID can't be tested before its epoch, so each counts. A binding in
+// the epoch 8 late-binding window counts from epoch 8, so it is no upcoming
+// member of epoch 9.
 func snUpcomingClaimedMembers(versions []*model.SnFleetBindingVersion, epoch uint64, perFleet int) int {
 	members := map[model.SnFleetKey]int{}
 	for _, version := range model.SnFleetBindingsAt(versions, epoch+1) {
-		if version.ValidFromEpoch != epoch+1 {
+		if version.FirstEpoch() != epoch+1 {
 			continue
 		}
 		members[model.SnFleetKey{FleetId: version.FleetId, Hotkey: version.Hotkey, Generation: version.Generation, Uid: version.Uid}] += 1

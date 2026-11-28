@@ -924,12 +924,24 @@ from old-style HTTP/1.1 Go clients, from a few devices retrying.
 **Owner decision (2026-11-17):** "Accept the exact old request."
 
 **The rule.** `POST /network/auth-client` with a client token, no `client_id`,
-no `source_client_id`, no other field set, and a `device_spec` equal to the
+no `source_client_id`, no other field set, and a `device_spec` that is the
 caller's own device's is a child of the caller's own client: exactly as if it
 had sent `source_client_id` as the caller's client id
 (`model/network_client_legacy_window_mint.go`). Every other client-token mint
 without a source is refused with the same message as before, "A client token
 cannot create a top-level client."
+
+The spec is the caller's device's when it equals the device row's, or when
+both are the old Android form, `<os version> <Build.FINGERPRINT>`, of one
+device: the same brand, product, device, type and tags on another os build.
+An os update changes the old Android spec (the version, the release, the
+build id and the incremental), and the row keeps the spec of the device's last
+accepted mint, which for an old build is a window's, checked before the row
+is refreshed. So an exact comparison refused every old Android build whose os
+had updated since its row was written, for good: of the 21 callers refused on
+2026-11-26, 18 had sent window specs of their own device on a newer os build
+(`fix/legacy-window-mint-os-update-8183`). The accepted mint refreshes the
+row, as every child mint does.
 
 **Why AUTHZ1's guarantees hold.**
 - **No top-level client.** The request is given the caller as its source
@@ -947,7 +959,9 @@ cannot create a top-level client."
   `provide_intent`, time zone, locales, `client_id`, or a field added to the
   request later; the check reflects over the request) keeps the refusal. So
   does a `device_spec` other than the caller's device's, read inside the mint's
-  transaction before any write. Only the plain mint of a signed client token
+  transaction before any write: another Android device, another build type,
+  or a spec in any other form that is not the row's. Only the plain mint of a
+  signed client token
   qualifies: not a registration, the hosted parent mint, the internal probe or
   an unsigned OAuth/MCP identity.
 - **No new capability.** A client token could already mint this exact child by
@@ -968,7 +982,13 @@ stays at zero, the old installs are gone and this path can be removed.
   reflection) making it another request; the old request becomes a child of
   the caller and nothing else does; another client's source is refused; the
   counters move; the log line is limited per client and interval and its
-  memory stays bounded.
+  memory stays bounded; an old Android spec is its device's on any os build,
+  and never another device's, another build type's or a malformed one's.
+- DB, the os update: an old window's request whose spec is its device's on a
+  newer os build than the row holds is a child of the caller on the caller's
+  device, and refreshes the row; another device's spec is still refused,
+  writes nothing and counts
+  (`TestAuthNetworkClientOldWindowRequestAfterAnOsUpdateIsAChildOfTheCallersOwnClient`).
 - DB: the old request is minted as a child of the caller on the caller's
   device, with no new device, removable by the token, and retired with its
   parent; each other shape (another device's spec, no spec, roles, principal,
