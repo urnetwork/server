@@ -154,16 +154,6 @@ func stWalletsToDisconnectInTx(ctx context.Context, tx server.PgTx, networkId se
 	return
 }
 
-// The user must administer the network, checked in the caller's transaction.
-func stWalletDisconnectOwnerInTx(ctx context.Context, tx server.PgTx, userId server.Id, networkId server.Id) bool {
-	owner := false
-	result, err := tx.Query(ctx, `SELECT 1 FROM network WHERE network_id = $1 AND admin_user_id = $2`, networkId, userId)
-	server.WithPgResult(result, err, func() {
-		owner = result.Next()
-	})
-	return owner
-}
-
 // Makes and stores the disconnect's code for the network owner and returns it
 // with the sign-in addresses to send it to. Spends one code of the account's
 // budget. A new code replaces the one waiting.
@@ -172,7 +162,7 @@ func SendStWalletDisconnectCode(ctx context.Context, settings *StWalletDisconnec
 	server.Tx(ctx, func(tx server.PgTx) {
 		recipients = nil
 		returnErr = nil
-		if !stWalletDisconnectOwnerInTx(ctx, tx, userId, networkId) {
+		if !networkAdminInTx(ctx, tx, userId, networkId) {
 			returnErr = ErrStWalletDisconnectOwnerOnly
 			return
 		}
@@ -243,7 +233,7 @@ func DisconnectStWallets(ctx context.Context, settings *StWalletDisconnectSettin
 	server.Tx(ctx, func(tx server.PgTx) {
 		disconnected = nil
 		returnErr = nil
-		if !stWalletDisconnectOwnerInTx(ctx, tx, userId, networkId) {
+		if !networkAdminInTx(ctx, tx, userId, networkId) {
 			returnErr = ErrStWalletDisconnectOwnerOnly
 			return
 		}

@@ -88,22 +88,6 @@ const (
 	snWalletDisconnectCodeExpiredMessage    = "That code expired or was already used. Ask for a new one."
 )
 
-// The session that may administer the account itself: a network token of a
-// person (not a client token, an API key, an OAuth/MCP identity or a guest).
-// The model checks in its own transaction that the user still administers the
-// network.
-func accountOwnerSession(clientSession *session.ClientSession) bool {
-	if clientSession == nil || clientSession.ByJwt == nil {
-		return false
-	}
-	byJwt := clientSession.ByJwt
-	return !clientSession.ApiKeyAuthenticated &&
-		!clientSession.UnsignedIdentity &&
-		byJwt.ClientId == nil &&
-		!byJwt.GuestMode &&
-		!byJwt.LagGuest
-}
-
 // Whether a signed network payout consent or hotkey delegation is in force:
 // its last epoch is at or after the current one. With the current epoch
 // unknown, any such consent counts as in force. A retained consent that no
